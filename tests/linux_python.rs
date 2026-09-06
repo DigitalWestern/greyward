@@ -79,7 +79,9 @@ fn linux_python_sync_run_and_uv_round_trip() {
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proj-a"),
         &project,
     );
-    let store_path = temp.0.join("store");
+    let store_path = std::env::var_os("BLANKET_STORE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temp.0.join("store"));
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_blanket"));
 
     assert_ok(
@@ -124,4 +126,16 @@ fn linux_python_sync_run_and_uv_round_trip() {
     let uv_version = Command::new(uv.join("uv")).arg("--version").output().unwrap();
     let uv_version = assert_ok(uv_version, "uv --version");
     assert!(uv_version.contains("0.12.7"), "{uv_version}");
+
+    let plan_path = project.join(".blanket/plan.json");
+    let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
+    assert_ok(
+        blanket(&binary, &project, &store_path, &["sync"]),
+        "warm sync",
+    );
+    assert_eq!(
+        std::fs::metadata(&plan_path).unwrap().modified().unwrap(),
+        plan_mtime,
+        "proj-a warm sync replanned"
+    );
 }

@@ -174,7 +174,7 @@ fn hash_identified(path: &Path, algo: Algo) -> io::Result<(String, fs::Metadata)
 
 /// The name a cache entry that failed verification is moved aside under,
 /// in the store's `tmp/`. GC sweeps a crash leftover of it like any other
-/// temporary (`gc::read::TMP_LEFTOVERS`), so a tog killed between the move
+/// temporary (`gc::read::TMP_LEFTOVERS`), so a ward killed between the move
 /// and the delete never leaves a name the cache directory refuses.
 pub(crate) const POISONED_PREFIX: &str = "poisoned-";
 
@@ -257,7 +257,7 @@ fn put_back(aside: &Aside) {
 fn status_cause(code: u16) -> String {
     match code {
         401 | 403 => "the server refused the request (401/403); a private mirror needs \
-                      credentials tog does not carry"
+                      credentials ward does not carry"
             .to_string(),
         404 | 410 => format!(
             "the server does not have this artifact ({code}); the index may have yanked it, or \
@@ -317,12 +317,12 @@ fn transport_cause_with(kind: ureq::ErrorKind, source: &str) -> Option<String> {
     let text = match kind {
         ureq::ErrorKind::Dns => {
             return Some(detail(
-                "the host name did not resolve; tog appears to be offline, or DNS is unreachable",
+                "the host name did not resolve; ward appears to be offline, or DNS is unreachable",
             ))
         }
         ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Io => {
             return Some(detail(if looks_offline(source) {
-                "the connection failed; tog appears to be offline (a cached artifact would have \
+                "the connection failed; ward appears to be offline (a cached artifact would have \
                  been used instead)"
             } else {
                 "the connection failed"
@@ -335,11 +335,11 @@ fn transport_cause_with(kind: ureq::ErrorKind, source: &str) -> Option<String> {
             "the proxy rejected the credentials; check https_proxy"
         }
         ureq::ErrorKind::InsecureRequestHttpsOnly | ureq::ErrorKind::UnknownScheme => {
-            "tog fetches over https only; an http:// mirror is refused rather than downgraded"
+            "ward fetches over https only; an http:// mirror is refused rather than downgraded"
         }
         ureq::ErrorKind::InvalidUrl => "the url could not be parsed",
         ureq::ErrorKind::TooManyRedirects => "the server redirected too many times",
-        // BadStatus, BadHeader, HTTP: a malformed reply tog cannot explain
+        // BadStatus, BadHeader, HTTP: a malformed reply ward cannot explain
         // better than the library can.
         _ => return None,
     };
@@ -349,7 +349,7 @@ fn transport_cause_with(kind: ureq::ErrorKind, source: &str) -> Option<String> {
 /// What a `ureq::Transport` says beyond its URL and its kind.
 ///
 /// ureq renders a transport failure as `{url}: {kind}: {message}: {source}`
-/// with everything but the kind optional. tog names the URL itself and
+/// with everything but the kind optional. ward names the URL itself and
 /// translates the kind, so both are dropped; the rest is the only part that
 /// distinguishes a rejected certificate from a reset connection, and it is
 /// kept whole — splitting on the last `": "` would reduce
@@ -508,9 +508,9 @@ fn artifact_name(url: &str) -> &str {
     }
 }
 
-/// What tog calls itself in a request, for the registries that ask callers
+/// What ward calls itself in a request, for the registries that ask callers
 /// to identify themselves (crates.io refuses an anonymous client).
-const USER_AGENT: &str = "tog (https://github.com/DigitalWestern/tog)";
+const USER_AGENT: &str = "ward (https://github.com/DigitalWestern/greyward)";
 
 /// Open `url` for reading: a `file://` path (mirrors, tests) or an https
 /// request. `https_only` holds across redirects too, so nothing ever
@@ -670,7 +670,7 @@ pub(crate) fn request_url(url: &str) -> Option<url::Url> {
 }
 
 /// Download `url` to `dest`, verifying its sha256 as it streams, without
-/// the store: for the one artifact that is not a store object, tog's own
+/// the store: for the one artifact that is not a store object, ward's own
 /// release binary. `dest` is written whole or not at all (a mismatch or a
 /// short read removes it), and the stream is capped so a hostile server
 /// cannot fill the disk before the hash check fails.
@@ -680,11 +680,11 @@ pub fn download_file(url: &str, dest: &Path, sha256: &str) -> io::Result<()> {
     stream_to_file(url, dest, &digest, reader, declared, MAX_RELEASE_FILE)
 }
 
-/// The most `download_file` streams: tog's release binary is far smaller.
+/// The most `download_file` streams: ward's release binary is far smaller.
 const MAX_RELEASE_FILE: u64 = 256 << 20;
 
 /// The most one verified download streams into the cache. 8 GiB covers
-/// every real artifact class tog handles.
+/// every real artifact class ward handles.
 const MAX_ARTIFACT: u64 = 8 << 30;
 
 /// A stream cap as a refusal names it: whole GiB or MiB when it is one.
@@ -724,7 +724,7 @@ fn stream_to_file(
         progress.advance(n as u64);
         if total > max {
             break Err(io::Error::other(format!(
-                "{}: exceeds the {} cap for a tog release; refusing",
+                "{}: exceeds the {} cap for a ward release; refusing",
                 shown_url(url),
                 cap_text(max)
             )));
@@ -768,7 +768,7 @@ pub(crate) fn download_verified_held(
 
 /// Insert a local file into the verified artifact cache by its computed
 /// sha256 (for artifacts obtained through delegated tools and then verified
-/// by tog — e.g. Go module zips h1-checked by dirhash). Returns
+/// by ward — e.g. Go module zips h1-checked by dirhash). Returns
 /// (sha256 hex, cache path). Publication mirrors download_verified_held.
 pub fn cache_insert(
     store: &Store,
@@ -876,8 +876,8 @@ pub fn download_verified_digest(
 /// byte string: a hit yields exactly the bytes a download would have had
 /// to match, so the cache grants nothing the digest's source did not
 /// already grant. The trust decision is therefore the caller's, in where
-/// its digest comes from: a toolchain row (tog's catalog or the project's
-/// toolchain lock), a table compiled into tog, the publisher's listing read
+/// its digest comes from: a toolchain row (ward's catalog or the project's
+/// toolchain lock), a table compiled into ward, the publisher's listing read
 /// over TLS, or the project's own pin (its committed lock or a declared
 /// artifact), or the registry's claim for an artifact read through the
 /// resolution proxy (`resolve::mirror`). The same rule covers the
@@ -1421,7 +1421,7 @@ mod tests {
         );
         assert_eq!(http_status(&status_failure(503)), Some(503));
         assert_eq!(http_status(&io::Error::other("offline")), None);
-        let absent = fs::File::open("/nonexistent/tog-fetch-test").unwrap_err();
+        let absent = fs::File::open("/nonexistent/greyward-fetch-test").unwrap_err();
         assert_eq!(http_status(&absent), None);
     }
 
@@ -1445,7 +1445,7 @@ mod tests {
         assert!(https.contains("https only"), "{https}");
         let proxy = transport_cause(ureq::ErrorKind::ProxyUnauthorized).unwrap();
         assert!(proxy.contains("proxy"), "{proxy}");
-        // A reply tog cannot read stays the library's own words.
+        // A reply ward cannot read stays the library's own words.
         assert!(transport_cause(ureq::ErrorKind::BadHeader).is_none());
 
         assert!(status_cause(403).contains("credentials"));
@@ -1485,7 +1485,7 @@ mod tests {
         assert!(!looks_offline("invalid peer certificate"));
     }
 
-    /// ureq renders `{url}: {kind}: {message}: {source}`. tog names the URL
+    /// ureq renders `{url}: {kind}: {message}: {source}`. ward names the URL
     /// and translates the kind, so both come off; the remainder is kept
     /// whole, because it is often itself colon-separated and the tail alone
     /// ("UnknownIssuer") does not say what failed.
@@ -1507,7 +1507,7 @@ mod tests {
             "failed to lookup address information"
         );
         // No message and no source: the url and the kind are all there is,
-        // and tog already says both in its own words.
+        // and ward already says both in its own words.
         assert_eq!(
             source_after_kind(
                 "https://example.com/a.whl: Connection Failed",
@@ -1851,7 +1851,7 @@ mod tests {
         }
     }
 
-    /// A transport failure tog has no sentence for (a malformed reply)
+    /// A transport failure ward has no sentence for (a malformed reply)
     /// falls back to ureq's kind and detail, still without the URL ureq's
     /// own text leads with (#348).
     #[test]
@@ -2197,7 +2197,7 @@ mod integrity_tests {
         assert!(!cache.exists());
     }
 
-    /// A held lease takes `gc.lock` shared. Another tog process (here, a
+    /// A held lease takes `gc.lock` shared. Another ward process (here, a
     /// second open of the lock, which flock treats the same way) gets its own
     /// lease at once and downloads beside it, while GC's exclusive lock
     /// still has to wait for both.
@@ -2805,11 +2805,11 @@ mod integrity_tests {
     #[test]
     fn a_release_download_past_its_cap_is_refused_and_removed() {
         let scratch = TempDir::named("fetch-release-cap");
-        let dest = scratch.0.join("tog");
+        let dest = scratch.0.join("ward");
         let fetch = |body: Vec<u8>| {
             let digest = Digest::sha256(&sha256_hex(&body)).unwrap();
             stream_to_file(
-                "https://x/tog",
+                "https://x/ward",
                 &dest,
                 &digest,
                 Box::new(io::Cursor::new(body)),
@@ -2820,7 +2820,7 @@ mod integrity_tests {
         let error = fetch(vec![7; 2048]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "https://x/tog: exceeds the 1024-byte cap for a tog release; refusing"
+            "https://x/ward: exceeds the 1024-byte cap for a ward release; refusing"
         );
         assert!(!dest.exists());
         fetch(vec![7; 1024]).unwrap();
@@ -2912,7 +2912,7 @@ mod integrity_tests {
         let url = "http://127.0.0.1:9/artifact.tar.gz";
         let refused = |verb: &str| {
             format!(
-                "{verb} {url}: tog fetches over https only; \
+                "{verb} {url}: ward fetches over https only; \
                  an http:// mirror is refused rather than downgraded"
             )
         };
@@ -2920,7 +2920,7 @@ mod integrity_tests {
         assert_eq!(error.to_string(), refused("download"));
         // The same refusal reaches every caller, and no file is created.
         let scratch = TempDir::named("fetch-http");
-        let dest = scratch.0.join("tog");
+        let dest = scratch.0.join("ward");
         let error = download_file(url, &dest, &sha256_hex(b"hello"))
             .map(drop)
             .unwrap_err();
@@ -2987,12 +2987,12 @@ mod integrity_tests {
         assert!(moved_aside(&store).is_empty());
     }
 
-    /// A tog killed between moving a poisoned entry aside and deleting it
+    /// A ward killed between moving a poisoned entry aside and deleting it
     /// leaves it under `tmp/`, where GC sweeps it as a stale temporary,
     /// never in `cache/<algo>/`, where GC refuses any name that is not a
-    /// digest and every later `tog gc` would fail.
+    /// digest and every later `ward gc` would fail.
     #[test]
-    fn a_poisoned_entry_moved_aside_by_a_killed_tog_is_left_in_tmp() {
+    fn a_poisoned_entry_moved_aside_by_a_killed_ward_is_left_in_tmp() {
         let (_scratch, store) = scratch_store("fetch-poisoned-crash");
         let entry = store.cache_path("sha256", &sha256_hex(b"good"));
         fs::write(&entry, b"poisoned").unwrap();
@@ -3033,7 +3033,7 @@ mod integrity_tests {
     /// Set in the child `an_inserted_entry_is_read_only_under_umask_0077`
     /// runs: only there does this test set the umask, which is process-wide
     /// and would leak into every other test in this binary.
-    const UMASK_CHILD: &str = "TOG_TEST_FETCH_UMASK_CHILD";
+    const UMASK_CHILD: &str = "GREYWARD_TEST_FETCH_UMASK_CHILD";
 
     /// An inserted entry is 0444 even under `umask 0077`, which leaves the
     /// mode it is created with at 0400: the explicit chmod is what makes it

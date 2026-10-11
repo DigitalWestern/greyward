@@ -1,5 +1,5 @@
 schema_version = 1
-tog_version = "0.1.0"
+ward_version = "0.1.0"
 
 [toolchain.node]
 runtime = "node"

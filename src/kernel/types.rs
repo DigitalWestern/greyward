@@ -104,7 +104,7 @@ mod object_id_tests {
         .object_id()
     }
 
-    /// Every id tog publishes must pass `is_object_id`, or `tog gc
+    /// Every id ward publishes must pass `is_object_id`, or `ward gc
     /// --drop-object` refuses it and the store's sweep wedges on it.
     #[test]
     fn names_and_versions_with_dot_runs_still_give_droppable_ids() {

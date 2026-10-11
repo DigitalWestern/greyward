@@ -26,7 +26,7 @@
 //! Each changed path is then classified. A declared output must still be a
 //! regular file reached through real directories. Declared scratch is
 //! discarded. Anything else, and always a new `.git`, a change under
-//! `.git/hooks`, or a change under `.tog`, fails the door naming the paths.
+//! `.git/hooks`, or a change under `.greyward`, fails the door naming the paths.
 
 use super::confine::FileId;
 use crate::kernel::activity::StoreActivity;
@@ -249,7 +249,7 @@ impl Snapshot {
         Ok(snapshot)
     }
 
-    /// The stage directory (tog-owned, 0700).
+    /// The stage directory (greyward-owned, 0700).
     pub fn stage(&self) -> &Path {
         &self.stage
     }
@@ -490,8 +490,8 @@ fn protected(relative: &Path, change: &Change) -> Option<&'static str> {
             _ => None,
         })
         .collect();
-    if names.first() == Some(&&b".tog"[..]) {
-        return Some("tog's own state");
+    if names.first() == Some(&&b".greyward"[..]) {
+        return Some("ward's own state");
     }
     if let Some(at) = names.iter().position(|name| *name == b".git") {
         if names.get(at + 1) == Some(&&b"hooks"[..]) {
@@ -854,7 +854,7 @@ impl Walk<'_> {
             let state = match stat.st_mode & libc::S_IFMT {
                 libc::S_IFDIR => {
                     // A directory the tool made unreadable is opened up:
-                    // the tree is quiescent and the stage is tog's.
+                    // the tree is quiescent and the stage is ward's.
                     if mode & 0o500 != 0o500 {
                         let _ = chmod_at(dir.as_raw_fd(), name, mode | 0o500);
                     }
@@ -971,7 +971,7 @@ fn copy_file(
             format!(
                 "{} is the signing key (the same file, by device and inode), so it is not \
                  copied where the tool could read it; move the key out of the project and \
-                 point TOG_SIGNING_KEY at it",
+                 point GREYWARD_SIGNING_KEY at it",
                 shown.display()
             ),
         ));
@@ -1100,7 +1100,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
         // A short symlink to `.git` keeps the bind path under SUN_LEN
         // whatever the temp dir, and the socket lands in place.
-        let short = PathBuf::from(format!("/tmp/tog-snapsock-{}", std::process::id()));
+        let short = PathBuf::from(format!("/tmp/greyward-snapsock-{}", std::process::id()));
         let _ = fs::remove_file(&short);
         symlink(dir.join(".git"), &short).unwrap();
         let _listener =
@@ -1281,9 +1281,9 @@ mod tests {
         let dir = project(&temp);
         let snapshot = build(&store, &dir, &[]);
         fs::write(staged(&snapshot, ".git/hooks/pre-commit"), b"curl evil").unwrap();
-        fs::write(staged(&snapshot, ".tog/x"), b"x").unwrap_or_else(|_| {
-            fs::create_dir_all(staged(&snapshot, ".tog")).unwrap();
-            fs::write(staged(&snapshot, ".tog/x"), b"x").unwrap();
+        fs::write(staged(&snapshot, ".greyward/x"), b"x").unwrap_or_else(|_| {
+            fs::create_dir_all(staged(&snapshot, ".greyward")).unwrap();
+            fs::write(staged(&snapshot, ".greyward/x"), b"x").unwrap();
         });
         let changes = snapshot.diff().unwrap();
         let scratch = [PathGlob::new("**").unwrap()];
@@ -1292,7 +1292,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(message.contains("a git hook"), "{message}");
-        assert!(message.contains("tog's own state"), "{message}");
+        assert!(message.contains("ward's own state"), "{message}");
         assert_eq!(
             fs::read(dir.join(".git/hooks/pre-commit")).unwrap(),
             b"#!/bin/sh\n"

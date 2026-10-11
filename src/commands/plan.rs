@@ -1,4 +1,4 @@
-//! `tog plan`: print each detected ecosystem's plan as JSON without
+//! `ward plan`: print each detected ecosystem's plan as JSON without
 //! realizing anything, through the tailor registry.
 
 use crate::comforter::toolchain::{self as project_toolchain, Mode};

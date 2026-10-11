@@ -228,7 +228,7 @@ impl Tailor for Elixir {
 
     /// A lone script runs with `elixir`, not `mix run`, which needs a
     /// project: no deps, OTP on PATH beside it, and the same scrubbed
-    /// environment and private home as `tog run` gives a project.
+    /// environment and private home as `ward run` gives a project.
     fn lone_file(
         &self,
         ctx: &Context,
@@ -276,7 +276,7 @@ impl Tailor for Elixir {
                 "elixir/bin/mix",
             )?;
             // The deps projection is a writable clone OUTSIDE the store; verify
-            // it lives under the tog home and matches the recorded deps id.
+            // it lives under the ward home and matches the recorded deps id.
             let deps_obj = comforter::closure_object(store, activity, &closure, "deps_object", "")?;
             // Never trust the recorded projection path: reconstruct the ONE
             // expected forest path from canonical project + deps id and require
@@ -290,7 +290,7 @@ impl Tailor for Elixir {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "elixir closure projection is not the expected forest path; \
-                     run `tog` first",
+                     run `ward` first",
                 ));
             }
             prefix.push(beam.join("elixir/bin").to_string_lossy().into_owned());
@@ -298,7 +298,7 @@ impl Tailor for Elixir {
             // A private per-project home inside the store: a HOME under
             // the shared temp root lets another user plant `.erlang` or
             // `.iex.exs` that Erlang and Elixir run at startup as this
-            // user, and a per-process one would make `tog env` print
+            // user, and a per-process one would make `ward env` print
             // different bytes on every call.
             let scratch = ctx.store.run_home(dir, "elixir")?;
             elixir::prepare_run_home(&scratch)?;
@@ -307,7 +307,7 @@ impl Tailor for Elixir {
             let fingerprint = closure["beam_fingerprint"].as_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "elixir closure records no toolchain fingerprint; run `tog`",
+                    "elixir closure records no toolchain fingerprint; run `ward`",
                 )
             })?;
             let (prefixes, remove, set) = elixir::run_env(
@@ -376,7 +376,7 @@ impl Tailor for Elixir {
             push_hash(&mut c, "SHA-256", &required(eco, &p, "outer_sha256")?);
             push_property(
                 &mut c,
-                "tog:hex:inner-checksum",
+                "greyward:hex:inner-checksum",
                 &required(eco, &p, "inner_sha256")?,
             );
             out.push(c);

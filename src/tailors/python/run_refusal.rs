@@ -1,9 +1,9 @@
-//! The Python tailor's `tog run` refusals (`Tailor::refused_command`):
+//! The Python tailor's `ward run` refusals (`Tailor::refused_command`):
 //! `pip install` and its relatives cannot write into a projected `.venv`.
 
 /// The pip subcommands that try to write into the environment. Reading
 /// commands (`pip list`, `pip freeze`, `pip show`, `pip check`) work
-/// against a projected .venv and are none of tog's business.
+/// against a projected .venv and are none of ward's business.
 const PIP_MUTATING_VERBS: &[&str] = &["install", "uninstall", "wheel"];
 
 /// Every pip subcommand, so an option's *value* is never mistaken for one.
@@ -48,7 +48,7 @@ const PYTHON_VALUE_OPTIONS: &[&str] = &["-X", "-W", "-Q", "--check-hash-based-py
 ///
 /// `-m` is only python's while it is still an option: in
 /// `python script.py -m pip install x` the `-m` belongs to the script, and
-/// refusing that would refuse a program tog knows nothing about.
+/// refusing that would refuse a program ward knows nothing about.
 fn python_module_pip_verb(cmd: &[String]) -> Option<&str> {
     let program = cmd.first()?.rsplit('/').next()?;
     if !program.starts_with("python") {
@@ -78,10 +78,10 @@ fn python_module_pip_verb(cmd: &[String]) -> Option<&str> {
 
 fn pip_refusal(program: &str, verb: &str) -> String {
     format!(
-        "'{program} {verb}' cannot change a tog environment: .venv is a projection of an \
+        "'{program} {verb}' cannot change a ward environment: .venv is a projection of an \
          immutable store object, so nothing can be installed into or removed from it. Add the \
-         dependency instead ('tog add <package>', 'tog remove <package>'), then \
-         'tog run python ...'"
+         dependency instead ('ward add <package>', 'ward remove <package>'), then \
+         'ward run python ...'"
     )
 }
 

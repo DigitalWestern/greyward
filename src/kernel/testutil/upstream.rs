@@ -35,7 +35,7 @@ impl FixtureCa {
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         params
             .distinguished_name
-            .push(rcgen::DnType::CommonName, "tog fixture upstream CA");
+            .push(rcgen::DnType::CommonName, "ward fixture upstream CA");
         params.key_usages = vec![
             rcgen::KeyUsagePurpose::KeyCertSign,
             rcgen::KeyUsagePurpose::DigitalSignature,

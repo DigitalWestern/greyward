@@ -4,9 +4,9 @@ Loaded by `spike.py` into one `mitmdump` listener that speaks both dialects
 of docs/agent/DESIGNS.md §6 "Per-ecosystem traffic":
 
 - Forward proxy with TLS interception: `CONNECT host:443` must carry
-  `Proxy-Authorization: Basic base64(tog:<token>)`, else 407. mitmproxy
+  `Proxy-Authorization: Basic base64(ward:<token>)`, else 407. mitmproxy
   terminates TLS with its own CA (the spike's stand-in for the per-process
-  tog CA) and every inner request is logged. A host in `spike_refuse` gets a
+  ward CA) and every inner request is logged. A host in `spike_refuse` gets a
   visible 403 refusal without interception.
 - Registry mirror: a plain-HTTP request whose path starts with
   `/<token>/<route>/` is rewritten to the route's upstream over real TLS.
@@ -73,7 +73,7 @@ def _proxy_auth(flow):
         user, _, password = base64.b64decode(value).decode().partition(":")
     except ValueError:
         return "bad-encoding"
-    if user == "tog" and password == ctx.options.spike_token:
+    if user == "ward" and password == ctx.options.spike_token:
         return "ok"
     return "bad-credentials"
 
@@ -113,13 +113,13 @@ class Spike:
         if auth != "ok":
             flow.response = http.Response.make(
                 407,
-                b"tog: proxy authentication required\n",
-                {"Proxy-Authenticate": 'Basic realm="tog"'},
+                b"ward: proxy authentication required\n",
+                {"Proxy-Authenticate": 'Basic realm="greyward"'},
             )
             entry["status"] = 407
         elif flow.request.host in _refused_hosts() or "*" in _refused_hosts():
             flow.response = http.Response.make(
-                403, f"tog: {flow.request.host} is not a permitted endpoint\n".encode()
+                403, f"ward: {flow.request.host} is not a permitted endpoint\n".encode()
             )
             entry["status"] = 403
         else:
@@ -163,7 +163,7 @@ class Spike:
             elif route == "rubygems" and RUBYGEMS_INDEX_PATHS.match(tail.split("?")[0]):
                 upstream = "index.rubygems.org"
             if upstream is None:
-                flow.response = http.Response.make(404, b"tog: unknown route\n")
+                flow.response = http.Response.make(404, b"ward: unknown route\n")
                 flow.metadata["spike_dialect"] = "mirror-unknown-route"
                 return
             flow.metadata["spike_dialect"] = "mirror:" + route
@@ -183,12 +183,12 @@ class Spike:
         flow.metadata["spike_auth"] = auth
         if auth != "ok":
             flow.response = http.Response.make(
-                407, b"tog: proxy authentication required\n",
-                {"Proxy-Authenticate": 'Basic realm="tog"'},
+                407, b"ward: proxy authentication required\n",
+                {"Proxy-Authenticate": 'Basic realm="greyward"'},
             )
         elif request.host in _refused_hosts() or "*" in _refused_hosts():
             flow.response = http.Response.make(
-                403, f"tog: {request.host} is not a permitted endpoint\n".encode()
+                403, f"ward: {request.host} is not a permitted endpoint\n".encode()
             )
 
     def response(self, flow: http.HTTPFlow):

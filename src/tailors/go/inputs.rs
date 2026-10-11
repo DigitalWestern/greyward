@@ -79,7 +79,7 @@ pub(super) fn basis_of(planned: &go::Planned) -> crate::comforter::join::Digests
 /// Whether this store can realize `plan`'s module cache from what it holds:
 /// the object itself, or every artifact the skeleton copies. A cached plan
 /// names the artifacts its planning run put in that run's store; another
-/// store (a different `TOG_STORE`), or a cache `gc` aged out, lacks them.
+/// store (a different `GREYWARD_STORE`), or a cache `gc` aged out, lacks them.
 pub(super) fn modcache_realizable(
     store: &store::Store,
     activity: &crate::kernel::activity::StoreActivity,

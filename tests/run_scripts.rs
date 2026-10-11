@@ -6,14 +6,14 @@
 
 mod common;
 
-use common::{assert_frozen_never_writes_the_lock, assert_ok, tog, TempDir};
+use common::{assert_frozen_never_writes_the_lock, assert_ok, ward, TempDir};
 
 #[test]
 #[ignore]
 fn package_json_script_runs_inside_projected_env() {
     let temp = TempDir::new("run-scripts");
-    // The project sits beside HOME, not at it: tog's default signing key
-    // path is $HOME/.tog/signing.key, and a resolution door refuses to
+    // The project sits beside HOME, not at it: ward's default signing key
+    // path is $HOME/.greyward/signing.key, and a resolution door refuses to
     // mount any root that path lies under.
     let project = &temp.0.join("project");
     std::fs::create_dir(project).unwrap();
@@ -29,18 +29,18 @@ fn package_json_script_runs_inside_projected_env() {
     .unwrap();
 
     let home = temp.path();
-    assert_ok(tog(project, home, &["sync"]), "sync");
+    assert_ok(ward(project, home, &["sync"]), "sync");
 
     let subdir = project.join("subdir");
     std::fs::create_dir(&subdir).unwrap();
     let init_cwd = subdir.canonicalize().unwrap();
-    assert_ok(tog(&subdir, home, &["run", "test"]), "run test");
+    assert_ok(ward(&subdir, home, &["run", "test"]), "run test");
     assert_eq!(
         std::fs::read_to_string(project.join("out.txt")).unwrap(),
         format!("pretest\ntest\n{}\nfx\nposttest\n", init_cwd.display())
     );
 
-    let second = tog(&subdir, home, &["run", "test", "fail"]);
+    let second = ward(&subdir, home, &["run", "test", "fail"]);
     assert_eq!(second.status.code(), Some(3));
 
     // Without its lock the project is refused under --frozen and left

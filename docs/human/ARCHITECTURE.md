@@ -1,6 +1,6 @@
-# Tog architecture
+# Greyward architecture
 
-Tog is a universal realization and environment kernel with
+Greyward is a universal realization and environment kernel with
 ecosystem-native planners. One binary that (eventually) replaces per-language
 package managers by owning the outer loop every ecosystem shares: fetch a
 toolchain, lock a dependency graph, materialize it into an immutable store,
@@ -17,13 +17,13 @@ modules): Node ~11.7k, Python ~10.0k, Elixir ~2.7k, Go ~2.2k, Ruby ~2.0k,
 .NET ~1.9k, Cargo ~1.8k. The first estimates
 (~500-1000 lines each) were about 10x low for the two proven tailors:
 real projects needed lock importers, native builds and sandboxed scripts. pnpm v9/v6 and Yarn classic lockfile importers shipped
-2026-09-06 (`src/tailors/node/lock_import/`). Current version: tog 0.1.0.
+2026-09-06 (`src/tailors/node/lock_import/`). Current version: Greyward 0.1.0.
 
 ## The model
 
 Stolen from Nix, minus the interface.
 
-- **Store** (`~/.tog/store`, `TOG_STORE` overrides): input-addressed
+- **Store** (`~/.greyward/store`, `GREYWARD_STORE` overrides): input-addressed
   immutable objects at `objects/<hash16>-<name>-<version>/`. An object's id
   is a hash of its `Identity`: kind, name, version, and every input that
   determines the output (artifact sha256s, dependency object ids). Objects
@@ -32,7 +32,7 @@ Stolen from Nix, minus the interface.
   existing object's meaning is never reinterpreted in place.
 - **Artifact cache** (`cache/sha256/<hash>`): every downloaded file, stored
   by verified content hash. Never refetched; enables offline reconstruction.
-- **Store records** (`records/<kind>/<sha256 of key>.json`): small facts tog
+- **Store records** (`records/<kind>/<sha256 of key>.json`): small facts Greyward
   checked itself and would otherwise ask the network again, such as the
   digest rubygems.org serves for a gem coordinate or the inputs of the last
   passing `mix deps.get --check-locked` in a project. They are store data,
@@ -44,16 +44,16 @@ Stolen from Nix, minus the interface.
   locks coexist as different objects.
 - **Projection**: a project's `.venv` is one symlink into the store, swapped
   atomically. Rollback = swapping back (instant cache hit). Provenance lives
-  in `.tog/closures/<ecosystem>.json`, one file per ecosystem, and that file
-  is committed: `tog audit` reads it.
+  in `.greyward/closures/<ecosystem>.json`, one file per ecosystem, and that file
+  is committed: `ward audit` reads it.
 - **Node projection is a forest** (`node-forest/2`): the root `node_modules`
-  is a symlink into `<TOG_STORE>/forests/<project-key>/<projection-id>/`,
+  is a symlink into `<GREYWARD_STORE>/forests/<project-key>/<projection-id>/`,
   each workspace importer gets its own symlink, and the immutable env holds
   the same layout. The forest is a writable per-project directory that
   absorbs scratch writes (vite's `.vite` cache, prisma's `.prisma` client)
   while package contents stay read-only in the store. Forests live outside
   the project so test runners never crawl store packages' own test files.
-  Declared-mutable packages (`"tog": {"mutablePackages": [...]}`) switch
+  Declared-mutable packages (`"greyward": {"mutablePackages": [...]}`) switch
   to a whole-tree copy-on-write clone, recorded `unattested` in the closure.
   So does a registry package that depends on a workspace package (a plugin
   whose peer is the package the repository develops): Node resolves a
@@ -69,7 +69,7 @@ Per design review: **Plan → Realize → Project**. The tailor (adapter) turns
 manifests and lockfiles into a typed `Plan`. The kernel realizes it: verify
 downloads into the cache, provision pinned toolchains, commit objects
 atomically. Projection writes the symlink and the closure JSON. Plans are
-cached in `.tog/plan.json` (`.tog/go-plan.json` for Go) keyed by input hash,
+cached in `.greyward/plan.json` (`.greyward/go-plan.json` for Go) keyed by input hash,
 so unchanged locks never touch the network again. The plan cache is
 machine-local and is not committed; the closure JSON is.
 
@@ -84,12 +84,12 @@ read permission. Build outputs moved from another filesystem stream into a
 temporary file before atomic publication, preserving the destination if
 reading the source fails. Manifests and dependency locks the user authors are read with
 `read_input`, which resolves from the descriptor but follows a symlink the
-project contains. tog's own state is walked one component at a time with
-`O_NOFOLLOW`, so a `.tog`, `.venv` parent or `cargo-home` swapped for a
+project contains. Greyward's own state is walked one component at a time with
+`O_NOFOLLOW`, so a `.greyward`, `.venv` parent or `cargo-home` swapped for a
 symlink is refused rather than followed: closures (read for the exception
 summary and root registration, and written),
-`.tog/policy.toml`, the plan and setup.py caches, the Python manifest
-snapshots and lock stamp, `.tog/cargo-home` (`tog-config.toml` and the 0755
+`.greyward/policy.toml`, the plan and setup.py caches, the Python manifest
+snapshots and lock stamp, `.greyward/cargo-home` (`greyward-config.toml` and the 0755
 `cargo` shim), the `.venv` and `node_modules` links (`replace_symlink`,
 which publishes a new link with an exclusive rename so a real entry that
 appears meanwhile is refused, not replaced), and a real `.venv` or
@@ -99,7 +99,7 @@ Go source digest) open each subdirectory with the same no-follow rule
 GC root is recorded under the canonical path the project was opened at,
 used as it is and never resolved again: the per-project lock is keyed on
 it, root registration imports the project's existing closures through the
-descriptor and refuses a symlinked `.tog`, and `check_still_named` walks
+descriptor and refuses a symlinked `.greyward`, and `check_still_named` walks
 that recorded path from `/` with `O_NOFOLLOW` and compares it with the held
 directory before each tailor, before a root is registered, and again after
 the closure is renamed into place. What still goes by path: the ecosystem
@@ -109,7 +109,7 @@ Those windows are in `docs/human/LIMITATIONS.md`.
 
 ## Vocabulary
 
-The bedding theme (a tog is a duvet's warmth rating), used in docs and
+The bedding theme (a Greyward is a duvet's warmth rating), used in docs and
 conversation; code keeps boring identifiers, and the CLI never prints any of
 these words. The words it does print — store, realize, project, closure,
 exception, permissive — are defined in the README:
@@ -159,12 +159,12 @@ Rules the Linux port settled, which apply to any future platform:
   runtime's development files and leaves every other header, `-l` library,
   static archive and pkg-config file out of the compiler's and linker's
   default search paths and out of pkg-config. Other shared libraries the
-  host's tools load move to a `.tog-host-runtime` subdirectory that `ld`
+  host's tools load move to a `.greyward-host-runtime` subdirectory that `ld`
   never searches, named there by the sandbox's own loader cache
   (`kernel/ldcache.rs`: the host's `/etc/ld.so.cache`, rewritten), which
   the loader searches after a program's own RUNPATH. Library subdirectories
   holding development files are curated the same way. Each curated host
-  directory is bound once at `/.tog-host-files`, and the files the view
+  directory is bound once at `/.greyward-host-files`, and the files the view
   keeps are symlinks into it, so setting the view up costs a few hundred
   mounts rather than one per library file. Ruby gems with native
   extensions, Python sdists that compile Rust or native code, and npm
@@ -218,8 +218,8 @@ and sockets, following a symlink that stays inside the project and
 refusing one that leaves it, a loop, or a tree past a size limit), its
 digest is the package's integrity, and the environment extracts it like a
 registry tarball, with a `node_modules` of its own. In the SBOM it has no
-registry purl, since nothing on the registry is being named: a `tog:local`
-property carries its directory. `tog status` packs the directory again, so
+registry purl, since nothing on the registry is being named: a `greyward:local`
+property carries its directory. `ward status` packs the directory again, so
 an edit to it is a change (`src/tailors/node/local_package.rs`). Every other
 `file:`/`link:` dependency is a symlink into the user's source, so nothing
 is ever placed beneath one: a target that is itself an importer gets its
@@ -239,39 +239,39 @@ are read by `kernel/semver.rs`, node-semver's grammar and `satisfies`,
 checked case by case against node-semver itself
 (`kernel/semver_cases.tsv`). Lifecycle scripts run hermetically (below).
 Native addons compile against the pinned Node. Existing locks win over
-ranged manifests, so a bare machine needs nothing installed besides tog.
+ranged manifests, so a bare machine needs nothing installed besides Greyward.
 
 **cargo** (`tailors/cargo/`). Rust has no installed-environment analog, so the
 comforter is everything cargo needs to build fully offline: a pinned
 toolchain object (rustc + cargo + rust-std, TOFU-pinned sha256s) plus a
-`cargo-vendor` object of every registry crate, hash-verified, with tog
+`cargo-vendor` object of every registry crate, hash-verified, with Greyward
 generated `.cargo-checksum.json`. Vendor identity is the sorted crate
 checksums plus their count (`cargo-vendor/2`), so locks with the same crate
 set share one object.
-Enforcement is a cargo wrapper under `.tog/cargo-home/bin/` that execs
+Enforcement is a cargo wrapper under `.greyward/cargo-home/bin/` that execs
 the store cargo with `--frozen`; user-supplied `--config` is rejected and
-`RUSTC` is forced. `tog build` sandboxes the compile with a disposable
+`RUSTC` is forced. `ward build` sandboxes the compile with a disposable
 `CARGO_HOME` (a build script must never be able to rewrite the wrapper that
-later runs unsandboxed). Honest gap: `tog run cargo build` is
-offline-configured but not sandboxed; use `tog build`. `tog fmt`
+later runs unsandboxed). Honest gap: `ward run cargo build` is
+offline-configured but not sandboxed; use `ward build`. `ward fmt`
 realizes a separate pinned `rustfmt` object linked against the Rust object.
 It writes no closure: the release row pins the rustfmt archive by sha256, so
 the formatter that runs is the pinned one by construction, and a record of
 it would prove nothing the lock does not. Nothing roots the object, so gc
-can reclaim it between runs. A `.tog/closures/rustfmt.json` an older tog
+can reclaim it between runs. A `.greyward/closures/rustfmt.json` an older Greyward
 wrote is a retired name (`store::RETIRED_CLOSURES`): every closure reader
-but gc's live-set walk skips it, and a `tog fmt` without `--check` deletes it
+but gc's live-set walk skips it, and a `ward fmt` without `--check` deletes it
 once another closure sits beside it (a root over an empty closures
 directory stops every sweep, and forgetting it needs the exclusive lease),
 or once gc has forgotten the project's root. gc forgets a root whose only
 closures are retired records when it protects nothing they do not name.
 
-Every cargo run that resolves (`tog add`/`remove`/`update`, a missing
-`Cargo.lock`, `tog attest`, and the `Cargo.lock` of a Python sdist's Rust
+Every cargo run that resolves (`ward add`/`remove`/`update`, a missing
+`Cargo.lock`, `ward attest`, and the `Cargo.lock` of a Python sdist's Rust
 extension) goes through the resolution door, confined, at the workspace
 root (`kernel/provider/cargo_door.rs`). cargo reaches the network only
 through the proxy session, with TLS interception: the proxy terminates
-cargo's tunnels with a leaf from tog's per-process certificate authority,
+cargo's tunnels with a leaf from Greyward's per-process certificate authority,
 serves crates.io through the `crates_index` route (each index line's
 `cksum` is a claim the `.crate` download is verified against), forwards
 git fetches through the git row, and forwards any other host as
@@ -282,9 +282,9 @@ direct run. Cargo's resolution outputs are the root `Cargo.toml` and
 `Cargo.lock` plus every member manifest `[workspace] members` names; its
 inputs are `.cargo/config.toml` and `.cargo/config` at the root.
 
-Every Node run that resolves (`tog add`/`remove`/`update` with npm or the
-pinned pnpm, a missing `package-lock.json`, `tog x`'s npm resolution, and
-`tog attest`) goes through the same door, confined, at the lock root (the
+Every Node run that resolves (`ward add`/`remove`/`update` with npm or the
+pinned pnpm, a missing `package-lock.json`, `ward x`'s npm resolution, and
+`ward attest`) goes through the same door, confined, at the lock root (the
 project, or the pnpm workspace root), with the tool run in the member the
 edit was made in (`tailors/node/door.rs`). Both tools are pointed at the
 session on the command line, where their flags beat `.npmrc`; the proxy
@@ -298,11 +298,11 @@ so it is byte-identical to a direct run. Node's resolution outputs are
 from every place a member can be named; its inputs are `.npmrc`,
 `pnpm-workspace.yaml`, `.pnpmfile.cjs`, and each member's `.npmrc`
 (`tailors/node/resolve.rs`). The pinned pnpm runs as `node <script>` from
-the store environment object its `tog x` cache root links into.
+the store environment object its `ward x` cache root links into.
 
-Every uv run (`tog add`/`remove`/`update`, a missing
-`requirements.lock.txt`, an sdist's build requirements, `tog x`, and
-`tog attest`) goes through the same door, confined, at the lock root (the
+Every uv run (`ward add`/`remove`/`update`, a missing
+`requirements.lock.txt`, an sdist's build requirements, `ward x`, and
+`ward attest`) goes through the same door, confined, at the lock root (the
 project, or the uv workspace root that lists it as a member, with uv run
 in the member) (`tailors/python/door.rs`). The proxy serves `pypi.org/simple`
 and `files.pythonhosted.org` through the `pypi` route
@@ -318,7 +318,7 @@ built or its metadata prepared, `resolution-build` permission is required
 before any backend runs, including the project's own. The permission also
 covers dynamic and transitive build requirements. A denial stops the
 operation. An allowed rerun records the exception in its receipt. uv's cache is private to each attempt. An allowed retry starts with an
-empty cache, so its receipt records every contributing fetch and exception. A compiled lock is headed by `tog` in
+empty cache, so its receipt records every contributing fetch and exception. A compiled lock is headed by `ward` in
 place of uv's command line (`--custom-compile-command`), so the same
 resolution writes the same bytes on every machine. Python's resolution
 outputs are `pyproject.toml`, `uv.lock`, `requirements.in`,
@@ -333,7 +333,7 @@ lists sorted and deduplicated, each written only when present, so a lock
 for a project without them is unchanged. A file that does not parse is an
 error and a stale lock, never the "absent" row. A table with no channel
 (only components, targets or a profile) means rustup's default toolchain,
-which for tog is the catalog's explicit default: the lock records that
+which for Greyward is the catalog's explicit default: the lock records that
 release and provisions the listed components onto it. Sync provisions what
 the rows ask for from the official channel manifest
 `channel-rust-<version>.toml`, pinned by sha256 as the release's
@@ -342,7 +342,7 @@ store's content-addressed cache under that sha256, so a release seen once
 plans offline (`provider/rust_channel.rs` reads it, following its
 `renames`). `tools/catalog.py cargo` writes that row after verifying the
 manifest's signature with `gpgv` against the Rust release key in
-`tools/keys/`; tog checks the sha256 only. A named component or target the
+`tools/keys/`; Greyward checks the sha256 only. A named component or target the
 manifest does not publish for the host, or marks `available = false`, is a
 hard error naming it. A profile expands the way rustup expands it: through
 the host's own list, the aggregate `rust` package's `components` and
@@ -365,7 +365,7 @@ the components and the manifest through the assembled object's
 dependencies. The profile never enters an identity: it is expanded first,
 so `profile = "default"` and its components by name are one object.
 rustfmt as a component is the bundle's own `rustfmt` row, the
-same archive `tog fmt` realizes, and every bundle row is checked against the
+same archive `ward fmt` realizes, and every bundle row is checked against the
 manifest, so there is one pin.
 
 `[toolchain] path` names a toolchain directory on this machine, which
@@ -386,7 +386,7 @@ component by component against the tree on disk, through any links it
 passes, and refused if it would leave. A first pass checks the links
 before any file is read. Every realization re-probes and re-hashes the
 tree and refuses one that is no longer the locked tree, naming
-`tog update --toolchain rust`; the per-file sums are cached in the store
+`ward update --toolchain rust`; the per-file sums are cached in the store
 (`cache/rust-path-tree/`, keyed by the tree's path) under each file's
 device, inode, size and modification and change times, so an unchanged
 file is not read again, and a mismatch is confirmed by a full read before
@@ -400,17 +400,17 @@ closures and GC treat it like any other toolchain. Each use records the
 `external-toolchain` exception (a toolchain from no pinned release),
 which a policy can deny; the company template does. rustup refuses a path
 beside a channel, components, targets or a profile, and so does the lock's
-reader. `tog fmt` runs the tree's own `rustfmt`, so the import is also the
+reader. `ward fmt` runs the tree's own `rustfmt`, so the import is also the
 formatter object.
 
 **go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
-(`go mod tidy -diff`, then `go mod download -json all`), and tog
+(`go mod tidy -diff`, then `go mod download -json all`), and Greyward
 re-verifies every artifact (dirhash h1, byte-for-byte reproduced, plus raw
 sha256) before bytes enter the cache. The comforter is a `go-modcache`
 object. Enforcement is pure environment: `GOTOOLCHAIN=local` (the `auto`
 default silently swaps toolchains), `GOROOT`, `GOENV=off`, `GOPROXY=off`.
-`tog build` runs `go build -mod=readonly` with the project read-only.
+`ward build` runs `go build -mod=readonly` with the project read-only.
 cgo uses host clang, the standing accepted impurity.
 
 **ruby** (`tailors/ruby/`). Bundler-shaped: lock parsing and platform selection
@@ -429,7 +429,7 @@ store-commit rename; this bit once). On Linux each gem whose gemspec
 declares native extensions installs against the host C runtime alone
 (`HostView::RuntimeOnly`, recorded in the gem object's identity as
 `build_view`; pure-Ruby gems compile nothing and install against the full
-view). Those builds also get tog's pinned native library set
+view). Those builds also get Greyward's pinned native library set
 (`kernel/provider/nativelibs.rs`, the one Python sdists and npm addons
 use) through pkg-config, gcc's `CPATH`/`LIBRARY_PATH` and mkmf's
 `--with-cppflags`/`--with-ldflags`, which carry its rpath into the
@@ -451,16 +451,16 @@ fallback build and required to match), never under the runtime-only id,
 and a store record keyed by the runtime-only id and that fingerprint lets
 a later sync over the same store on a host in the same state reuse it
 (`ruby/native.rs`).
-Every tog invocation strips
+Every Greyward invocation strips
 `BUNDLE_*`/`RUBYOPT` and forces `BUNDLE_FROZEN`, `GEM_HOME`/`GEM_PATH`.
 Every Bundler run (a missing lock, an edit, the planner's helper checks,
-`tog attest`) is confined through the resolution door (`ruby/door.rs`),
+`ward attest`) is confined through the resolution door (`ruby/door.rs`),
 reaching rubygems.org only through the session's RubyGems mirror
 (`ruby/registry.rs`); the helper's checks get no route at all.
 v0 gaps: non-rubygems.org sources, PATH/GIT gems.
 
 **elixir** (`tailors/elixir/`). mix.lock is an Elixir term literal that Mix itself
-evaluates as code, so tog parses it under the pinned toolchain with a
+evaluates as code, so Greyward parses it under the pinned toolchain with a
 strict AST grammar: exact 8-field `{:hex, ...}` tuples of literals only;
 calls, variables, and legacy tuple shapes are rejected loudly. Hex tarballs
 are dual-checksum verified (outer tar sha256, inner content sha256). The
@@ -468,41 +468,41 @@ are dual-checksum verified (outer tar sha256, inner content sha256). The
 OTP-qualified Hex and rebar3 builds (the legacy `hex.ez` hangs on OTP 29;
 found live). Deps are source trees, realized as a `hex-deps` object and
 projected as a writable clonefile copy so native builds can write into their
-own sources. `tog build` sandboxes `mix compile`. The consistency gate,
+own sources. `ward build` sandboxes `mix compile`. The consistency gate,
 `mix deps.get --check-locked`, needs the Hex registry, so it runs only when
 its inputs (every `mix.exs`, mix.lock, the BEAM object, the project path)
-hash differently from its last pass in this project, which tog records in
+hash differently from its last pass in this project, which Greyward records in
 the store; an unchanged project re-syncs offline. Every mix run (the gate,
-a missing lock, `deps.update`, `tog attest`) is confined through the
+a missing lock, `deps.update`, `ward attest`) is confined through the
 resolution door (`elixir/door.rs`), reaching repo.hex.pm only through the
 session's Hex mirror (`elixir/registry.rs`); the lock parser gets no route.
 
 **dotnet** (`tailors/dotnet/`). NuGet's `packages.lock.json` is opt-in upstream;
-tog makes it mandatory. The lock's `contentHash` is a semantic hash, so
-tog never raw-compares: it fetches nupkgs into a local folder feed, then
+Greyward makes it mandatory. The lock's `contentHash` is a semantic hash, so
+Greyward never raw-compares: it fetches nupkgs into a local folder feed, then
 the pinned NuGet installs from that feed in locked mode, verifying every
 contentHash. The SDK is the extractor and part of the object identity. Builds
-are the strictest boundary: `tog run` refuses build-capable verbs
+are the strictest boundary: `ward run` refuses build-capable verbs
 (MSBuild executes arbitrary code and belongs only in the sandbox), and every
-`tog build` runs a fresh offline locked restore into scratch. `global.json`
+`ward build` runs a fresh offline locked restore into scratch. `global.json`
 must be an exact pin with `rollForward = "disable"`. A missing lock and
-`tog attest` run restore confined through the resolution door
+`ward attest` run restore confined through the resolution door
 (`dotnet/door.rs`), with a `nuget.config` whose one source is the
 session's NuGet mirror (`dotnet/registry.rs`).
 
 ## Resolution doors
 
-A resolution door is where tog runs an ecosystem's own tool to choose
+A resolution door is where Greyward runs an ecosystem's own tool to choose
 versions or check a lock: the one kind of child that may use the network
 and evaluate project code (a Gemfile, a `build.rs`, a csproj). Every one
 starts through `ResolutionDoor::run_confined` (`src/kernel/resolve/`):
-isolated on a snapshot of the project, its network fenced to tog's
+isolated on a snapshot of the project, its network fenced to Greyward's
 recording proxy, its declared outputs published all or nothing with a
 signed resolution record. There is no unsandboxed mode. Isolation is
 bubblewrap, or rootless podman where bubblewrap cannot make a user
 namespace (`resolve/container.rs`), and a host with neither refuses the
-door naming what is missing (`tog doctor --isolation`). Host-local
-helpers that only read what tog staged (an offline `go mod`, a Gem spec
+door naming what is missing (`ward doctor --isolation`). Host-local
+helpers that only read what Greyward staged (an offline `go mod`, a Gem spec
 read) go through `kernel::supervise`'s `local_*` functions, whose tripwire
 refuses a resolver outside its reviewed offline forms.
 
@@ -518,11 +518,11 @@ The census, by door kind:
 | Elixir (mix) | `update` confined, `add`/`remove` refused | confined | confined | confined |
 | .NET | refused | confined | none (reads the lock) | confined |
 
-`tog x` resolves a registry tool into `~/.tog/x` through a door of its
+`ward x` resolves a registry tool into `~/.greyward/x` through a door of its
 own kind, confined the same way.
 
-`tog build` and installation builds run project code in the build sandbox,
-which denies network access and records no resolution ledger. `tog run`
+`ward build` and installation builds run project code in the build sandbox,
+which denies network access and records no resolution ledger. `ward run`
 uses the projected runtime and dependencies but executes on the host,
 without a sandbox or network restriction. Run untrusted tests only in a
 separate disposable job that holds no signing key or other secrets.
@@ -532,7 +532,7 @@ separate disposable job that holds no signing key or other secrets.
 Every ecosystem has a pinned toolchain table with exact selection rules;
 the tables and the selectors realization uses live in the per-ecosystem
 modules, with the platform enumeration in `src/kernel/platform.rs`. A
-committed `tog-toolchain.toml` at the project root records the exact
+committed `greyward-toolchain.toml` at the project root records the exact
 toolchain per ecosystem: the release it was minted from, the components and
 their versions, and one artifact row per supported platform with a verified
 algorithm-qualified digest. Selection reads a catalog; honoring a lock does
@@ -541,7 +541,7 @@ bundle the catalog no longer has. `tests/toolchain_lock.rs`
 (`two_fresh_stores_realize_the_same_runtimes_from_a_retired_release`,
 network-gated) syncs a Python and npm lock whose releases no catalog has
 into two fresh stores and checks equal runtime objects, lock bytes and
-`tog status`. The two-machine half (a lock written on Linux synced unchanged
+`ward status`. The two-machine half (a lock written on Linux synced unchanged
 on an arm64 Mac, and the Mac writing the same bytes) ran by hand on
 2026-09-25.
 
@@ -555,33 +555,33 @@ publishes a pending lock through the descriptor-anchored rule in
 writer rechecks before publication. The modes are the grammar: ordinary sync
 creates a lock when there is none and never rewrites one, `--frozen`
 validates and never creates, `plan`/`build`/`fmt` honor a lock and fall back
-to the shipped selection, and `tog update --toolchain [<ecosystem>]` is the
+to the shipped selection, and `ward update --toolchain [<ecosystem>]` is the
 one writer allowed to replace a lock.
 
 Staleness is one rule everywhere — re-derive each consulted row and compare
 presence and value, never the file digest alone — so ordinary sync,
-`--frozen` and `tog status` reach the same verdict. `status` reports a
+`--frozen` and `ward status` reach the same verdict. `status` reports a
 missing or stale lock, a missing section, and a closure built from another
-bundle as `changed` naming `tog-toolchain.toml`, and a verdict that sync
-would refuse is answered ahead of the tailor's own comparison. `tog audit`
+bundle as `changed` naming `greyward-toolchain.toml`, and a verdict that sync
+would refuse is answered ahead of the tailor's own comparison. `ward audit`
 reuses the same combination (`inspect::locked_closure_state`), so each of
 those verdicts makes the record `stale` and fails the gate.
 
 A tailor whose builds run on another ecosystem's toolchain names it as a
 helper (`Tailor::helpers`): Node's node-gyp runs on `python`, Python's
 sdists compile with `rust`. `tailors::helper_selections` decides each one
-the same way for `sync`, `status` and `tog x`: the project's own selection
+the same way for `sync`, `status` and `ward x`: the project's own selection
 when the project has that ecosystem, the tailor's `default_helper`
 otherwise (the shipped 3.12 for node-gyp; none for Rust, where each sdist's
 toolchain file picks). What an sdist with no channel of its own falls back
 to is pinned in the Python lock section instead (`Tailor::helper_pins`,
 written as `[toolchain.python.helpers] rust = "<version>"` when the section
-is written, the catalog's default at that moment), so a newer tog with a
+is written, the catalog's default at that moment), so a newer Greyward with a
 newer default does not change a locked project's wheel ids. A section from
 before the pin keeps the Rust those builds used (1.96.1,
 `LEGACY_SDIST_RUST` in `tailors/python/build.rs`). A section may pin only
 the helpers its tailor declares (`Tailor::helpers`); any other name is
-refused on read, naming `tog update --toolchain <ecosystem>`. The section's
+refused on read, naming `ward update --toolchain <ecosystem>`. The section's
 `bundle_id` covers its pins (`Bundle::section_id`: the bundle's canonical
 bytes followed by one `helper` record per pin), so an edited pin is refused
 like an edited row and a closure built under other pins is `changed`; a
@@ -593,7 +593,7 @@ manifest so the default applies, is `changed` naming "the <helper>
 toolchain <ecosystem> builds with". A closure written before the record
 existed counts as `null`, which is what it was built on.
 
-Cached `tog x` environments key on `x/3`: store root, ecosystem, package
+Cached `ward x` environments key on `x/3`: store root, ecosystem, package
 request, platform, the primary runtime version, the selected `bundle_id`
 and the realized runtime object, so a changed bundle component gives a
 fresh environment. A registry tool
@@ -607,9 +607,9 @@ no default Rust, so a `py:` tool outside a project that locks Rust has no helper
 keeps its `x/3` name, and its sdists build on what their own toolchain
 file picks; inside one they build on the locked Rust. The key only names the
 directory. A run reuses it only when the request record it wrote there
-(`.tog/x.json`) says `ready`, so a directory left without one, as a tog
+(`.greyward/x.json`) says `ready`, so a directory left without one, as a Greyward
 before `x/4` left them, is realized again in place. Only the bare
-`tog x --clean` removes it, since nothing records what it was made for,
+`ward x --clean` removes it, since nothing records what it was made for,
 and it does so under the store its closure's objects live in, so that
 store's root record goes with it. One whose store cannot be recovered is
 skipped. The pnpm cache a dependency edit uses follows the same rule.
@@ -631,7 +631,7 @@ are separate facts: adding a newer release never moves the default. The
 files are written only by `python3 tools/catalog.py [eco ...]`, which reads
 each upstream's release listing (go.dev's JSON, Node's signed
 `SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby,
-erlef and `tog-toolchains` OTP builds with Hex and rebar3 from
+erlef and `greyward-toolchains` OTP builds with Hex and rebar3 from
 `builds.hex.pm`, .NET release metadata, and every stable Rust release from
 1.70.0 in static.rust-lang.org's channel manifests, each signature checked
 with `gpgv` before its rows are read), verifies every row against a
@@ -680,14 +680,14 @@ sent yet; the policy for them is decided (#72) and builds under #404 and #405. P
 closure written before the lock existed records no `toolchain`, so it
 plays no part in selection: the next sync selects from the catalog as it
 would for a new project, writes the lock, and re-realizes the closure,
-which `tog status` reports as needing a sync until then.
+which `ward status` reports as needing a sync until then.
 
 ## Permissive by default, strict as a switch
 
 Sync records recoverable verification gaps in each closure and continues;
-`.tog/policy.toml` denies named kinds (`install-script-failed`,
+`.greyward/policy.toml` denies named kinds (`install-script-failed`,
 `git-dependency`, ...). User and project policies are unioned; deny entries
-are only added. `TOG_STRICT=1` or `tog --strict` denies every
+are only added. `GREYWARD_STRICT=1` or `ward --strict` denies every
 exception. Each operation loads the chain and holds it as a
 `policy::PolicyScope` while it runs. A nested sync loads its own settings.
 Scopes belong to their creating thread and cannot be moved or shared with
@@ -700,13 +700,13 @@ dispatch can choose their own flag. This supports synchronous scopes.
 Interleaved tasks on one thread and automatic worker inheritance need
 explicit operation Context settings. Attribution still serializes owners
 through its process-global frame stack. Object-affecting exceptions are written into store metadata and
-rechecked on cache hits, so `--fresh` cannot bypass one. `tog audit`
+rechecked on cache hits, so `--fresh` cannot bypass one. `ward audit`
 (`src/commands/audit.rs`) is the CI admission gate: it re-judges the exceptions the
 closures already record against the policy chain plus an optional
 `--policy` file (merged, so it can only tighten), refuses to pass a stale or
 outdated closure, and touches neither the store nor the network.
 
-Closure records are signed. With `TOG_SIGNING_KEY` set, `sync`
+Closure records are signed. With `GREYWARD_SIGNING_KEY` set, `sync`
 and the other closure writers load an Ed25519 key once at preflight, held for that
 operation only (`comforter::SigningScope`), and the one closure writer
 (`comforter::write_closure_inner`) signs every envelope it publishes over the
@@ -724,7 +724,7 @@ refuses to run that way, and so does a plain audit under CI unless
 `bad-signature` either way. A detected ecosystem with no primary closure is
 `missing`. Store identity is
 untouched: the signature lives in the envelope, not in any object's inputs.
-`tog keygen` creates keys; the developer loop (`run`, `ls`, `status`, ...)
+`ward keygen` creates keys; the developer loop (`run`, `ls`, `status`, ...)
 accepts unsigned records.
 
 Each realization carries a `policy::Attribution` token from the command layer
@@ -744,7 +744,7 @@ leave with the dropped attribution frame and the error surfaces.
 npm lifecycle scripts (and npm's implicit `node-gyp rebuild`) run at realize
 time in a network-denied sandbox: writes confined to the package directory
 plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python a
-store CPython: the one the project's `tog-toolchain.toml` names when the
+store CPython: the one the project's `greyward-toolchain.toml` names when the
 project also locks Python, the shipped 3.12 otherwise. Its object id is the
 `gyp_python` input of `node-env/5`, so a different interpreter is a different
 environment. Likewise a Python sdist with a Rust extension compiles with the
@@ -755,9 +755,9 @@ to that Rust object id through its `rust` input and to the Rust flag policy
 through `rust_build_config`. Both helpers come from
 `kernel/provider/`. This is a cooperative network-denial build sandbox, not
 hostile-code containment. Packages that download binaries at install time
-get them via declared artifacts: the project pins `url` + `sha256`, tog
+get them via declared artifacts: the project pins `url` + `sha256`, Greyward
 prefetches through the verified cache and plants the file where the package's
-downloader looks. Electron's release zip is provisioned by tog itself, and
+downloader looks. Electron's release zip is provisioned by Greyward itself, and
 because the env identity names that zip, a failed provisioning fails the
 sync rather than publishing an env without it. Linux builds needing C libraries get one pinned
 `native-libs/libset/3` object, a fixed conda-forge closure (zlib, OpenSSL,
@@ -768,16 +768,16 @@ and fails closed.
 ## Store format
 
 A store says which format it is in: `<store>/format` holds one line,
-`tog-store 1` (`src/kernel/store/format.rs`). This tog reads format 1 and
+`greyward-store 1` (`src/kernel/store/format.rs`). This Greyward reads format 1 and
 nothing else. There is no migration code: a store it cannot read is
 refused, and the fix is to empty it.
 
 - No directory, or an empty one: a new store is created, marker first.
-- The marker says `tog-store 1`: the store opens.
+- The marker says `greyward-store 1`: the store opens.
 - Store directories but no marker: a store written before the marker
   existed, or one a reset did not finish. Refused.
-- A higher number: a newer tog wrote it. Refused, and the fix is to update
-  this tog.
+- A higher number: a newer Greyward wrote it. Refused, and the fix is to update
+  this Greyward.
 - Anything else in the marker, or a marker that cannot be read (its mode,
   an I/O error): refused.
 
@@ -785,7 +785,7 @@ The marker is read twice. `Store::open` reads it when a command starts, and
 every activity lease (`Store::activity`, `Store::try_activity_exclusive`)
 reads it again once the lease is held, before the operation reads any
 record. The second read is the one that counts: a command can open the
-store, wait for its lease behind a `tog gc --reset`, and get the lease on a
+store, wait for its lease behind a `ward gc --reset`, and get the lease on a
 store that has changed underneath it. Only a reset removes a marker, and a
 reset needs the exclusive lease, so a marker read under a lease stays true
 for as long as the lease is held. A `Store` made without the check
@@ -795,23 +795,23 @@ functions allowed to make one.
 
 Creating a store and emptying one both hold an exclusive `flock` on the
 store root directory. `Store::open` holds it while it reads the marker and
-creates what is missing, so two togs creating one store take turns, and
-neither creates namespaces inside a store a reset is emptying. A tog that
+creates what is missing, so two wards creating one store take turns, and
+neither creates namespaces inside a store a reset is emptying. A Greyward that
 finds the root held prints one line saying what it is waiting for, then
 waits. The store therefore has to be on a filesystem where a directory can
 be locked with `flock`, which local Linux and macOS filesystems allow.
 Where it cannot, opening or resetting the store fails before anything is
-deleted, and the error says to point `TOG_STORE` at a local disk. Not
+deleted, and the error says to point `GREYWARD_STORE` at a local disk. Not
 before anything is written: an open may already have created the root
 directory, and a reset may already have created its lock files and `tmp/`.
 There is no fallback lock.
 
-The one reader that takes no lock is `tog store path`, which only prints
+The one reader that takes no lock is `ward store path`, which only prints
 the path and reads the marker to say whether the store is refused. It reads
 the marker a second time before it calls namespaces without a marker an old
 store, because a store being created publishes the marker before its first
 namespace. During a reset it can report the store as having no marker. That
-is true at that moment, and it stops when the reset finishes. `tog doctor`
+is true at that moment, and it stops when the reset finishes. `ward doctor`
 is not such a reader: it opens the store (waiting for the root lock like
 any other command, and saying so) and then takes a shared lease without
 waiting. So behind a sweep or a sync it reports the store as in use, as a
@@ -819,21 +819,21 @@ warning, and still runs every check that needs no store. Behind a reset
 that holds the root lock it waits until the reset is done.
 
 A refusal is an error whose message says why and whose fix is a separate
-`tog:     fix:` line (a `"fix"` key under `--json`): `tog gc --reset`, or
-`tog update --self` for a store a newer tog wrote. Moving the directory
+`ward:     fix:` line (a `"fix"` key under `--json`): `ward gc --reset`, or
+`ward update --self` for a store a newer Greyward wrote. Moving the directory
 aside works too. A reset empties whichever store the command selects, so
 the fix acts on the store that was refused when it is pasted into the
-environment the refused command ran in (the same `HOME` and `TOG_STORE`,
+environment the refused command ran in (the same `HOME` and `GREYWARD_STORE`,
 and no store symlink moved in between). The bare command is
-printed only when it selects that store from any directory: `TOG_STORE` is
+printed only when it selects that store from any directory: `GREYWARD_STORE` is
 unset or absolute, and names it. Otherwise the line reads
-`TOG_STORE=<that store> tog gc --reset` with the absolute path. That
-covers `tog x --clean`, which meets other stores, and a relative
-`TOG_STORE`, which `tog -C <dir>` resolves from `<dir>` and the shell
+`GREYWARD_STORE=<that store> ward gc --reset` with the absolute path. That
+covers `ward x --clean`, which meets other stores, and a relative
+`GREYWARD_STORE`, which `ward -C <dir>` resolves from `<dir>` and the shell
 that pastes the fix resolves from wherever it is. The path is spelled
 exactly for a POSIX shell: bare, in single quotes, or, for a path that is
 not UTF-8 or holds control characters, as `"$(printf '...')"` with its
-bytes in octal. `tog gc --reset` (`src/kernel/gc/reset.rs`) locates the
+bytes in octal. `ward gc --reset` (`src/kernel/gc/reset.rs`) locates the
 root without reading the marker, takes the exclusive lease, and then:
 
 1. unlinks the marker and fsyncs the root directory, so the removal is on
@@ -863,17 +863,17 @@ the fresh namespaces are on disk before the new marker is published. What
 it never leaves is a marked store holding half of its old records. It keeps `cache/` (downloads are
 stored under their own digest and are checked again on every use, so no
 store format reads them wrong), `backups/` (the user's own moved-aside
-directories) and `run-homes/`. The next `tog` in a project finds its objects
+directories) and `run-homes/`. The next `ward` in a project finds its objects
 gone and syncs again, mostly from the kept cache.
 
 On a refused store, every command that would read or write the store stops
-with that error. Three still work: `tog store path` prints the path with a
-warning and the fix, `tog doctor` reports the store row as `fail` with the
-fix, and `tog gc --reset` empties it. `tog doctor` opens and leases the
+with that error. Three still work: `ward store path` prints the path with a
+warning and the fix, `ward doctor` reports the store row as `fail` with the
+fix, and `ward gc --reset` empties it. `ward doctor` opens and leases the
 store once and hands the pair to its checks, so the store rows are either
 all read under that lease or replaced by one row: failing for a store it
 could not open, a warning for one that is in use. Commands that never open a store
-(`--help`, `version`) are unaffected. `tog x --clean` is the one command
+(`--help`, `version`) are unaffected. `ward x --clean` is the one command
 that meets stores other than the configured one: an environment whose own
 store is refused is skipped and reported, and nothing in that store changes.
 
@@ -885,9 +885,9 @@ and typed projection references, so GC never opens the project's diagnostic
 path: a moved, unmounted, or deleted project keeps its tools protected.
 A pathname-only record, the form before `root/2`, holds a project path and
 nothing else, so it names no objects: GC reports it unusable and the whole
-sweep stops before any deletion, dry run included, until `tog gc --register`
-records the project again or `tog gc --forget` drops it.
-`tog store roots` prints each key beside its path. `tog gc --forget
+sweep stops before any deletion, dry run included, until `ward gc --register`
+records the project again or `ward gc --forget` drops it.
+`ward store roots` prints each key beside its path. `ward gc --forget
 <key>` is the explicit recovery valve: it removes only the registry file, and
 a root is never removed implicitly.
 
@@ -908,11 +908,11 @@ artifact and provisioned download the plan could use, but only the ones an
 install script was given are cache dependencies, because a commit refuses to
 claim a cache entry that is not present.
 A record is the whole of the evidence: the sweep reads it without knowing
-the object's kind, so an object of a kind or schema this tog no longer
+the object's kind, so an object of a kind or schema this Greyward no longer
 produces is kept or collected like any other. A record the sweep cannot read
 (no schema, another schema, any other evidence marker, an identity that does
 not hash to its id, a malformed dependency) blocks deletion: the sweep
-refuses, lists every such record, and names `tog gc --drop-object <id>` for
+refuses, lists every such record, and names `ward gc --drop-object <id>` for
 each.
 
 Every (kind, schema) pair a producer commits has a row (`ObjectKind`, in the
@@ -941,7 +941,7 @@ invariant.
 
 Status, 2026-09-10: implemented and independently reviewed on Linux; the
 macOS gate has not run since this work landed. The boundary:
-it covers cooperating tog processes on a local filesystem with working
+it covers cooperating Greyward processes on a local filesystem with working
 advisory locks and atomic rename; not old binaries, not programs launched
 directly from store paths, not malicious same-user changes, not network
 filesystems where `flock` is advisory in name only.
@@ -1005,7 +1005,7 @@ transaction, then cache, then publication. Each operation supervises its own awa
 store-consuming child (`src/kernel/supervise.rs`) and forwards TERM to it; any number run at
 once. The signal handlers are installed once per process and never removed: each supervision
 registers with them, keeps its own cursors into the signal counts, and with none registered
-the handler acts as the disposition tog inherited, including handler masks,
+the handler acts as the disposition Greyward inherited, including handler masks,
 syscall restart behavior and one-shot handlers. Cancellation caught by the
 reap boundary carries the child's exit status. A TERM caught after that
 boundary is re-raised when the last session leaves. New operations cannot
@@ -1085,12 +1085,12 @@ every tailor and the kernel):
     sync.rs  plan.rs  build.rs  run.rs  fmt.rs  gc.rs  store.rs  completions.rs
     doctor.rs  ls.rs  status.rs   thin verbs over inspect.rs
     inspect.rs      status / ls / doctor: read-only views over closures + store
-    audit.rs        tog audit: closure records judged against a policy, signatures checked under [signing]
-    keygen.rs       tog keygen: a closure-signing key and its policy table
+    audit.rs        ward audit: closure records judged against a policy, signatures checked under [signing]
+    keygen.rs       ward keygen: a closure-signing key and its policy table
     deps.rs         add / remove / update, delegated to each ecosystem's tool
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
-    selfupdate.rs   tog update --self, and doctor's version row (release lookup)
-    x/              tog x: run a registry tool without adding it to a project
+    selfupdate.rs   ward update --self, and doctor's version row (release lookup)
+    x/              ward x: run a registry tool without adding it to a project
                     (mod.rs; lock.rs the per-environment locks; cleanup.rs --clean)
 
 Kernel (`src/kernel/`, names no tailor; `provider/` holds the pinned toolchains
@@ -1103,7 +1103,7 @@ and build inputs tailors share, so no tailor reaches into another):
     store/          immutable store: mod.rs Store and locks, objects.rs
                     stage/commit/cache, roots.rs the root registry,
                     closure_import.rs closure references into a root
-                    record, projection.rs projection refs, env.rs TOG_STORE,
+                    record, projection.rs projection refs, env.rs GREYWARD_STORE,
                     fsops.rs descriptor-level filesystem helpers
     fetch.rs        verified downloads
     fsroot.rs       ProjectRoot: project files read and published through a
@@ -1155,7 +1155,7 @@ Comforter (`src/comforter/`): ecosystem-neutral closure records, projection
 symlinks, clone-tree and backup helpers (`mod.rs`), `records.rs`, the
 committed closure records read as they are (envelope, body, exceptions,
 any platform) for `ls`, `status`, `audit` and `sbom`, and `status.rs`, the
-projection-currency checks `tog status` is built from. Freshness asks the
+projection-currency checks `ward status` is built from. Freshness asks the
 tailors, so it stays in `commands/inspect.rs`. It names no tailor; Python environment realization lives in `tailors/python/env.rs`.
 
 Tailors (`src/tailors/<ecosystem>/`, leaves of the module graph). Every
@@ -1171,17 +1171,17 @@ literal in `src/commands/` that is a tailor id, lock ecosystem, or registry
 word (read from the registry), except the rows its debt table keeps for
 the open issues that remove them.
 
-`Tailor::registry_tool` is how `tog x` reaches an ecosystem. Its default
-answers "tog x does not support <id>"; Python and Node return a
+`Tailor::registry_tool` is how `ward x` reaches an ecosystem. Its default
+answers "ward x does not support <id>"; Python and Node return a
 `RegistryTool` (`registry_tool.rs` in each folder) that supplies the cache
 directory prefix (`py`, `npm`), the runtime object id in the cache key, the
 command-line word and message labels, the executable directory,
 resolve-realize-project for one package, the launch environment, and
 whether a cached projection still points at its environment.
-`commands/x/` keeps the `~/.tog/x` directory, the `x/3`/`x/4` key,
+`commands/x/` keeps the `~/.greyward/x` directory, the `x/3`/`x/4` key,
 the request record, gc root registration, and the policy checks on a
 cached hit (`mod.rs`), the lifecycle lock (`lock.rs`), and
-`tog x --clean` (`cleanup.rs`). It owns the one package-name and version
+`ward x --clean` (`cleanup.rs`). It owns the one package-name and version
 validator the parser also calls, and is ecosystem-neutral except for the
 Corepack `pnpm` delegate path, which is Node by definition. The grammar
 cannot ask the registry (the cli layer names no tailor), so
@@ -1200,8 +1200,8 @@ when the two differ.
     python/build.rs        sandboxed sdist-to-wheel builds
     python/sdist_view.rs   which host view an sdist build runs in, host fallback
     python/build_requires.rs  PEP 517 build requirements
-    python/registry_tool.rs  `tog x` from PyPI: uv resolve, env realize, .venv
-    python/run_refusal.rs  `tog run` refusals: pip install into a projected .venv
+    python/registry_tool.rs  `ward x` from PyPI: uv resolve, env realize, .venv
+    python/run_refusal.rs  `ward run` refusals: pip install into a projected .venv
     node/mod.rs            pins, plan types, scripts, path helpers
     node/plan.rs           package-lock.json planning
     node/freshness.rs      lock-vs-package.json checks for npm and pnpm locks
@@ -1213,9 +1213,9 @@ when the two differ.
                            resolution door (interception, the npm route)
     node/registry.rs       the npm registry as a resolution-proxy route
     node/resolve.rs        resolution outputs and inputs, the missing-lock
-                           door, `tog attest` for npm and pnpm
-    node/registry_tool.rs  `tog x` from npm: npm resolve, env realize, node_modules
-    node/run_refusal.rs    `tog run` refusals: npm-family installs over node_modules
+                           door, `ward attest` for npm and pnpm
+    node/registry_tool.rs  `ward x` from npm: npm resolve, env realize, node_modules
+    node/run_refusal.rs    `ward run` refusals: npm-family installs over node_modules
     node/lock_import/      pnpm.rs and yarn1.rs importers over yaml.rs;
                            pnpm/record.rs is what the lock says about the
                            manifests, read by node/freshness.rs;
@@ -1223,19 +1223,19 @@ when the two differ.
     cargo/mod.rs           project Cargo env + sandboxed build over
                            kernel/provider/{rust,crates}.rs
     cargo/inputs.rs        toolchain resolution, workspace root, missing-lock generation
-    cargo/edit.rs          `tog add`/`remove`/`update` through the edit door
+    cargo/edit.rs          `ward add`/`remove`/`update` through the edit door
     cargo/resolve.rs       resolution outputs and inputs, the missing-lock and
-                           `tog attest` doors at the workspace root
-    cargo/rustfmt.rs       pinned formatter component for `tog fmt`
+                           `ward attest` doors at the workspace root
+    cargo/rustfmt.rs       pinned formatter component for `ward fmt`
     go/mod.rs              module closure via the pinned Go toolchain
     go/inputs.rs           toolchain selection from go.mod, the GoPlan
-    ruby/mod.rs            Bundler-delegated planning, tog-verified gems
+    ruby/mod.rs            Bundler-delegated planning, greyward-verified gems
     ruby/native.rs         native gems: C-runtime-only first, host fallback identity
-    ruby/native_libs.rs    native gems build with tog's pinned native library set
+    ruby/native_libs.rs    native gems build with ward's pinned native library set
     ruby/gem_home.rs       what a failed gem build may leave before its retry
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     elixir/check_locked.rs whether mix deps.get --check-locked must run again
-    dotnet/mod.rs          NuGet packages.lock.json (tog-mandatory)
+    dotnet/mod.rs          NuGet packages.lock.json (greyward-mandatory)
 
 ## Where the rest lives
 

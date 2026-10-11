@@ -138,7 +138,7 @@ pub fn uv_pins() -> io::Result<&'static [PinnedUv]> {
 }
 
 /// The recipe ids this tailor knows how to lay out. A lock row naming
-/// anything else was written by a tog that extracts or relocates these
+/// anything else was written by a ward that extracts or relocates these
 /// artifacts differently, so the bytes it locked are not the bytes this
 /// code would produce.
 pub const CPYTHON_RECIPE: &str = "cpython/legacy";
@@ -219,7 +219,7 @@ fn artifact_sha256(spec: &ArtifactSpec) -> io::Result<&str> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{} {}: tog realizes this component from a sha256 digest, not {}",
+                "{} {}: ward realizes this component from a sha256 digest, not {}",
                 spec.component,
                 spec.version,
                 spec.digest.algo()
@@ -426,7 +426,7 @@ mod tests {
         let error = artifact_sha256(&spec).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "uv 0.1.0: tog realizes this component from a sha256 digest, not sha512"
+            "uv 0.1.0: ward realizes this component from a sha256 digest, not sha512"
         );
     }
 }

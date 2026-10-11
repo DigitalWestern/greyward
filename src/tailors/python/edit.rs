@@ -1,4 +1,4 @@
-//! `tog add` / `remove` / `update` for Python (`Tailor::edit_manifest`).
+//! `ward add` / `remove` / `update` for Python (`Tailor::edit_manifest`).
 //!
 //! uv edits a `[project]` pyproject and its uv.lock; a pip-compile pair or a
 //! plain requirements file is edited here as text and re-locked with the
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "py",
     name: "PyPI",
@@ -42,9 +42,9 @@ pub enum PyShape {
     Poetry,
     Pdm,
     /// `requirements.in` compiled into `requirements.txt` (pip-tools / uv
-    /// convention): tog edits the .in and recompiles.
+    /// convention): ward edits the .in and recompiles.
     PipCompile,
-    /// A plain requirements file tog re-locks into requirements.lock.txt.
+    /// A plain requirements file ward re-locks into requirements.lock.txt.
     Requirements(PathBuf),
     Setup,
     RequirementsDir,
@@ -110,19 +110,19 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
     match shape {
         PyShape::Poetry => Err(by_hand(match verb {
             EditVerb::Add => format!(
-                "this is a Poetry project and Poetry is not a pinned tool: add {} under [tool.poetry.dependencies] in pyproject.toml (or run 'poetry add {}'), then 'tog'",
+                "this is a Poetry project and Poetry is not a pinned tool: add {} under [tool.poetry.dependencies] in pyproject.toml (or run 'poetry add {}'), then 'ward'",
                 python_line(texts),
                 texts.join(" ")
             ),
             EditVerb::Remove => format!(
-                "this is a Poetry project: remove {} from [tool.poetry.dependencies] in pyproject.toml (or run 'poetry remove {}'), then 'tog'",
+                "this is a Poetry project: remove {} from [tool.poetry.dependencies] in pyproject.toml (or run 'poetry remove {}'), then 'ward'",
                 names.join(", "),
                 names.join(" ")
             ),
-            EditVerb::Update => "this is a Poetry project: run 'poetry update' (or 'poetry lock'), then 'tog'".to_string(),
+            EditVerb::Update => "this is a Poetry project: run 'poetry update' (or 'poetry lock'), then 'ward'".to_string(),
         })),
         PyShape::Pdm => Err(by_hand(format!(
-            "this is a PDM project (pdm.lock) and PDM is not a pinned tool: run 'pdm {} {}', then 'tog'",
+            "this is a PDM project (pdm.lock) and PDM is not a pinned tool: run 'pdm {} {}', then 'ward'",
             match verb {
                 EditVerb::Add => "add",
                 EditVerb::Remove => "remove",
@@ -132,17 +132,17 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
         ))),
         PyShape::Setup => Err(by_hand(match verb {
             EditVerb::Add => format!(
-                "dependencies live in install_requires here: add {} to setup.cfg [options] install_requires (or setup.py), then 'tog'",
+                "dependencies live in install_requires here: add {} to setup.cfg [options] install_requires (or setup.py), then 'ward'",
                 python_line(texts)
             ),
             EditVerb::Remove => format!(
-                "dependencies live in install_requires here: remove {} from setup.cfg / setup.py, then 'tog'",
+                "dependencies live in install_requires here: remove {} from setup.cfg / setup.py, then 'ward'",
                 names.join(", ")
             ),
-            EditVerb::Update => "install_requires projects re-lock on every sync (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'tog'".to_string(),
+            EditVerb::Update => "install_requires projects re-lock on every sync (there is no separate lock to update); loosen the constraint in setup.cfg / setup.py, then 'ward'".to_string(),
         })),
         PyShape::RequirementsDir => Err(by_hand(format!(
-            "dependencies live under requirements/ here: edit the file that applies (requirements/common.txt, base.txt, ...) to {} {}, then 'tog'",
+            "dependencies live under requirements/ here: edit the file that applies (requirements/common.txt, base.txt, ...) to {} {}, then 'ward'",
             match verb {
                 EditVerb::Add => "add",
                 EditVerb::Remove => "remove",
@@ -192,9 +192,9 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
                 // The ordinary sync re-locks when the source hash changes; a
                 // stale stamp from an unchanged source (update with no lock
                 // yet) is cleared so sync resolves afresh. Through the held
-                // project descriptor, so a symlinked `.tog` cannot redirect
+                // project descriptor, so a symlinked `.greyward` cannot redirect
                 // the unlink outside the project.
-                ProjectRoot::open(project)?.remove_file(Path::new(".tog/lock-source.hash"))?;
+                ProjectRoot::open(project)?.remove_file(Path::new(".greyward/lock-source.hash"))?;
                 if verb == EditVerb::Update {
                     files.push("(re-locks on sync)".to_string());
                 }
@@ -431,7 +431,7 @@ fn write_atomic_requirements(path: &Path, contents: &str) -> io::Result<()> {
     for _ in 0..100 {
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(
-            ".{file_name}.tog-edit-{stamp}-{}-{counter}",
+            ".{file_name}.greyward-edit-{stamp}-{}-{counter}",
             std::process::id()
         ));
         match OpenOptions::new()
@@ -553,7 +553,7 @@ fn uv_compile(
     if resolve::has_external_includes(&held)? {
         return Err(other(format!(
             "{} includes a requirements file outside the project, which the confined uv \
-             cannot read; move it into the project, or edit the requirements and run 'tog', \
+             cannot read; move it into the project, or edit the requirements and run 'ward', \
              which compiles the flattened text",
             input.display()
         )));
@@ -713,7 +713,7 @@ mod tests {
         let temp = scratch.0.clone();
         let file = temp.join("requirements.txt");
         let target = temp.join("outside");
-        let old_temp = file.with_extension(format!("tog-edit.{}", std::process::id()));
+        let old_temp = file.with_extension(format!("greyward-edit.{}", std::process::id()));
         fs::write(&file, "six\n").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&target, "must remain\n").unwrap();

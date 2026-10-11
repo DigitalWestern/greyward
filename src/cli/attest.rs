@@ -1,4 +1,4 @@
-//! `tog attest`'s grammar.
+//! `ward attest`'s grammar.
 
 use std::path::PathBuf;
 
@@ -217,7 +217,7 @@ mod tests {
         );
         let elsewhere = message(&["--resolution-record", "a.json", "status"]);
         assert!(
-            elsewhere.contains("belongs to the bare 'tog'"),
+            elsewhere.contains("belongs to the bare 'ward'"),
             "{elsewhere}"
         );
         assert!(

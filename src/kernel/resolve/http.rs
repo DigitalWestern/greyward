@@ -535,7 +535,7 @@ pub fn write_sized_head(
     out.write_all(framing.as_bytes())
 }
 
-/// Write the answer to a `HEAD` whose body tog never read: `length` is the
+/// Write the answer to a `HEAD` whose body ward never read: `length` is the
 /// upstream's `Content-Length`, sent when known and omitted otherwise.
 pub fn write_head_only(
     out: &mut impl Write,

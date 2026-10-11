@@ -1,6 +1,6 @@
-//! The toolchain lock as a user meets it: `tog` writing and honoring
-//! `tog-toolchain.toml`, `tog --frozen` validating one without touching
-//! anything, `tog update --toolchain` replacing one, and `tog status`
+//! The toolchain lock as a user meets it: `ward` writing and honoring
+//! `greyward-toolchain.toml`, `ward --frozen` validating one without touching
+//! anything, `ward update --toolchain` replacing one, and `ward status`
 //! reporting what the committed file says about the project.
 //!
 //! Every case here is offline. Nothing in this file downloads a toolchain:
@@ -19,14 +19,14 @@ use std::process::Output;
 
 mod common;
 
-use common::{snapshot, text, tog, tog_at, tog_env, TempDir};
+use common::{snapshot, text, ward, ward_at, ward_env, TempDir};
 
-use tog::comforter::toolchain as project_toolchain;
-use tog::kernel::fsroot::ProjectRoot;
-use tog::kernel::platform::Platform;
-use tog::kernel::toolchain::input::{self, InputRow};
-use tog::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
-use tog::kernel::toolchain::{select_for, Catalog, Source};
+use greyward::comforter::toolchain as project_toolchain;
+use greyward::kernel::fsroot::ProjectRoot;
+use greyward::kernel::platform::Platform;
+use greyward::kernel::toolchain::input::{self, InputRow};
+use greyward::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+use greyward::kernel::toolchain::{select_for, Catalog, Source};
 
 /// A project and the throwaway home its store, policy and `x` cache live
 /// in, so nothing here can read the developer's configuration.
@@ -39,7 +39,7 @@ impl Fixture {
     fn new(label: &str) -> Self {
         Self {
             // The home is its own project boundary; the project is not,
-            // because tests here watch for the `.tog` directory a sync
+            // because tests here watch for the `.greyward` directory a sync
             // creates, and one run in place (`home` as cwd) must not see a
             // checkout's manifests above it.
             home: TempDir::boundary(&format!("lock-{label}-home")),
@@ -67,11 +67,11 @@ impl Fixture {
         std::fs::read(self.project.0.join(LOCK_PATH)).ok()
     }
 
-    fn tog(&self, args: &[&str]) -> Output {
-        tog(&self.project.0, &self.home.0, args)
+    fn ward(&self, args: &[&str]) -> Output {
+        ward(&self.project.0, &self.home.0, args)
     }
 
-    /// Publish a `tog-toolchain.toml` describing the project exactly as it
+    /// Publish a `greyward-toolchain.toml` describing the project exactly as it
     /// is right now, for `ecosystem`. Tests then change one source file and
     /// watch what the lock says about the change.
     fn commit_lock(&self, ecosystem: &str) {
@@ -81,7 +81,7 @@ impl Fixture {
 }
 
 fn catalog_of(ecosystem: &str) -> Catalog {
-    let tailor = tog::tailors::registry()
+    let tailor = greyward::tailors::registry()
         .iter()
         .find(|tailor| tailor.lock_ecosystem() == ecosystem)
         .unwrap_or_else(|| panic!("no tailor for {ecosystem}"));
@@ -89,7 +89,7 @@ fn catalog_of(ecosystem: &str) -> Catalog {
 }
 
 fn rows_of(dir: &Path, ecosystem: &str) -> Vec<InputRow> {
-    tog::tailors::install_kernel_tables();
+    greyward::tailors::install_kernel_tables();
     let root = ProjectRoot::open(dir).unwrap();
     input::discover(&root, ecosystem).unwrap()
 }
@@ -163,11 +163,11 @@ fn no_pin_creation() {
     fixture.write("pyproject.toml", UNPLANNABLE_PYPROJECT);
     fixture.write(".python-version", &format!("{newest}\n"));
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("wrote tog-toolchain.toml; commit it"),
+        stderr.contains("wrote greyward-toolchain.toml; commit it"),
         "{stderr}"
     );
     assert!(
@@ -211,31 +211,31 @@ fn no_pin_creation_end_to_end() {
     fixture.write("pyproject.toml", PLAIN_PYPROJECT);
     fixture.write(".python-version", &format!("{newest}\n"));
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let bytes = fixture.lock_bytes().expect("the lock was published");
     assert!(fixture.dir().join(".venv").exists(), "{stderr}");
 
     // A second sync honors what the first wrote.
-    let again = fixture.tog(&["sync"]);
+    let again = fixture.ward(&["sync"]);
     assert_eq!(again.status.code(), Some(0), "{}", text(&again.stderr));
     assert!(
-        !text(&again.stderr).contains("wrote tog-toolchain.toml"),
+        !text(&again.stderr).contains("wrote greyward-toolchain.toml"),
         "{}",
         text(&again.stderr)
     );
     assert_eq!(fixture.lock_bytes().unwrap(), bytes);
 
     // And status agrees with both of them.
-    let status = fixture.tog(&["status"]);
+    let status = fixture.ward(&["status"]);
     assert_eq!(status.status.code(), Some(0), "{}", text(&status.stdout));
 }
 
 /// The fastuuid 0.14.0 sdist: a pyo3/maturin Rust extension with a
 /// Cargo.lock and no toolchain file of its own. Pinning only the sdist's
 /// hash is the `--no-binary` of a hash-pinned requirements file: the wheels
-/// PyPI also serves do not match, so tog must build this archive.
+/// PyPI also serves do not match, so ward must build this archive.
 const RUST_SDIST_REQUIREMENTS: &str = "fastuuid==0.14.0 \\\n    \
     --hash=sha256:178947fc2f995b38497a74172adee64fdeb8b7ec18f2a5934d037641ba265d26\n";
 
@@ -259,7 +259,7 @@ fn sdist_build_rust(store: &Path, name: &str) -> Vec<String> {
     found
 }
 
-/// A Python project syncs a Rust-extension sdist from source through tog.
+/// A Python project syncs a Rust-extension sdist from source through ward.
 /// The lock pins the Rust that sdist compiles with, the wheel is built with
 /// exactly that Rust object, and a lock written before the pin existed
 /// builds it with Rust 1.96.1 instead, as those locks always did. Needs
@@ -273,17 +273,18 @@ fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
         return;
     }
     let platform = Platform::host().unwrap();
-    let default =
-        tog::kernel::toolchain::shipped(&tog::kernel::provider::rust::toolchain_catalog().unwrap())
-            .unwrap()
-            .version("rustc")
-            .unwrap()
-            .to_string();
+    let default = greyward::kernel::toolchain::shipped(
+        &greyward::kernel::provider::rust::toolchain_catalog().unwrap(),
+    )
+    .unwrap()
+    .version("rustc")
+    .unwrap()
+    .to_string();
     let fixture = Fixture::new("rust-sdist");
     fixture.write("requirements.txt", RUST_SDIST_REQUIREMENTS);
     fixture.write(".python-version", "3.12.14\n");
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let lock = String::from_utf8(fixture.lock_bytes().unwrap()).unwrap();
@@ -291,13 +292,13 @@ fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
     assert!(lock.contains(&pin), "{lock}");
     assert!(!lock.contains("[toolchain.rust]"), "{lock}");
     // The wheel was compiled with the pinned release's Rust object.
-    let pinned_rust = tog::kernel::provider::rust::rust_object_id(platform, &default).unwrap();
+    let pinned_rust = greyward::kernel::provider::rust::rust_object_id(platform, &default).unwrap();
     assert_eq!(
         sdist_build_rust(&fixture.store(), "fastuuid"),
         std::slice::from_ref(&pinned_rust)
     );
     assert!(fixture.store().join("objects").join(&pinned_rust).is_dir());
-    let run = fixture.tog(&[
+    let run = fixture.ward(&[
         "run",
         "python",
         "-c",
@@ -306,7 +307,7 @@ fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
     assert_eq!(run.status.code(), Some(0), "{}", text(&run.stderr));
     assert_eq!(text(&run.stdout).trim(), "36");
 
-    // The same lock as a tog from before the pin wrote it: the sdist builds
+    // The same lock as a ward from before the pin wrote it: the sdist builds
     // on 1.96.1, the Rust those locks' wheels were built with.
     // Such a lock has no pin and the bundle's own id.
     let mut old = ToolchainLock::parse(lock.as_bytes()).unwrap();
@@ -315,13 +316,13 @@ fn a_rust_sdist_builds_with_the_rust_the_python_section_pins() {
         .unwrap()
         .contains("helpers"));
     std::fs::write(fixture.dir().join(LOCK_PATH), old.canonical_bytes()).unwrap();
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert!(!String::from_utf8(fixture.lock_bytes().unwrap())
         .unwrap()
         .contains("helpers"));
-    let legacy_rust = tog::kernel::provider::rust::rust_object_id(platform, "1.96.1").unwrap();
+    let legacy_rust = greyward::kernel::provider::rust::rust_object_id(platform, "1.96.1").unwrap();
     let mut both = vec![pinned_rust, legacy_rust];
     both.sort();
     assert_eq!(sdist_build_rust(&fixture.store(), "fastuuid"), both);
@@ -338,10 +339,13 @@ fn an_existing_lock_is_honored_and_never_rewritten() {
     fixture.commit_lock("python");
     let before = fixture.lock_bytes().unwrap();
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(!stderr.contains("wrote tog-toolchain.toml"), "{stderr}");
+    assert!(
+        !stderr.contains("wrote greyward-toolchain.toml"),
+        "{stderr}"
+    );
     assert_eq!(fixture.lock_bytes().unwrap(), before);
 }
 
@@ -361,18 +365,21 @@ fn stale_refusal_names_both_values() {
     let before = fixture.lock_bytes().unwrap();
     fixture.write(".python-version", &format!("{older}\n"));
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
-        stderr.contains("tog-toolchain.toml is stale for python"),
+        stderr.contains("greyward-toolchain.toml is stale for python"),
         "{stderr}"
     );
     assert!(
         stderr.contains(&newest) && stderr.contains(&older),
         "{stderr}"
     );
-    assert!(stderr.contains("tog update --toolchain python"), "{stderr}");
+    assert!(
+        stderr.contains("ward update --toolchain python"),
+        "{stderr}"
+    );
     assert_eq!(
         fixture.lock_bytes().unwrap(),
         before,
@@ -408,11 +415,11 @@ fn added_higher_precedence_source_is_stale() {
 
     // The same version, stated by a file the lock says is not there.
     fixture.write(".python-version", &format!("{newest}\n"));
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
-        stderr.contains("tog-toolchain.toml is stale for python"),
+        stderr.contains("greyward-toolchain.toml is stale for python"),
         "{stderr}"
     );
     assert!(stderr.contains(".python-version"), "{stderr}");
@@ -438,25 +445,25 @@ fn a_lock_with_no_section_for_a_new_ecosystem_is_stale() {
         "package-lock.json",
         "{\"name\":\"fixture\",\"lockfileVersion\":3,\"packages\":{}}\n",
     );
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(stderr.contains("no [toolchain.node] section"), "{stderr}");
-    assert!(stderr.contains("tog update --toolchain node"), "{stderr}");
+    assert!(stderr.contains("ward update --toolchain node"), "{stderr}");
 }
 
 // ---------------------------------------------------------------------------
 // --frozen
 
 /// `--frozen` never creates a lock, and the refusal lands before anything
-/// is written: no lock, no store tree, no projection, no `.tog` metadata.
+/// is written: no lock, no store tree, no projection, no `.greyward` metadata.
 #[test]
 fn frozen_validation_failure_precedes_all_writes() {
     let fixture = Fixture::new("frozen-nowrite");
     fixture.write("pyproject.toml", PLAIN_PYPROJECT);
     fixture.write(".python-version", "3.12.14\n");
 
-    let out = fixture.tog(&["sync", "--frozen"]);
+    let out = fixture.ward(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(stderr.contains("--frozen never creates it"), "{stderr}");
@@ -464,7 +471,7 @@ fn frozen_validation_failure_precedes_all_writes() {
     assert!(fixture.lock_bytes().is_none(), "--frozen wrote a lock");
     assert!(!fixture.store().exists(), "--frozen created the store");
     assert!(
-        !fixture.dir().join(".tog").exists(),
+        !fixture.dir().join(".greyward").exists(),
         "--frozen wrote project metadata"
     );
     assert!(!fixture.dir().join(".venv").exists(), "--frozen projected");
@@ -483,11 +490,11 @@ fn frozen_refuses_a_stale_lock_without_rewriting_it() {
     let before = fixture.lock_bytes().unwrap();
     fixture.write(".python-version", &format!("{older}\n"));
 
-    let out = fixture.tog(&["sync", "--frozen"]);
+    let out = fixture.ward(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
-        stderr.contains("tog-toolchain.toml is stale for python"),
+        stderr.contains("greyward-toolchain.toml is stale for python"),
         "{stderr}"
     );
     assert_eq!(fixture.lock_bytes().unwrap(), before);
@@ -535,7 +542,7 @@ fn frozen_never_evaluates_project_code() {
     );
     let before = snapshot(fixture.dir());
 
-    let out = tog_env(
+    let out = ward_env(
         fixture.dir(),
         &fixture.home.0,
         &["sync", "--frozen"],
@@ -582,7 +589,7 @@ fn frozen_refuses_a_missing_dependency_lock_before_any_download() {
     fixture.commit_lock("ruby");
     let before = snapshot(fixture.dir());
 
-    let out = fixture.tog(&["sync", "--frozen"]);
+    let out = fixture.ward(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
@@ -590,7 +597,7 @@ fn frozen_refuses_a_missing_dependency_lock_before_any_download() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("run `tog` once without --frozen"),
+        stderr.contains("run `ward` once without --frozen"),
         "{stderr}"
     );
     assert_eq!(
@@ -609,7 +616,7 @@ fn frozen_refuses_a_missing_dependency_lock_before_any_download() {
 }
 
 /// The same for Node, whose lock generation already lived in `prepare`: a
-/// package.json with no lock tog can import is a refusal under `--frozen`,
+/// package.json with no lock ward can import is a refusal under `--frozen`,
 /// not a silent "nothing to sync".
 #[test]
 fn frozen_refuses_a_node_project_without_a_lock() {
@@ -621,7 +628,7 @@ fn frozen_refuses_a_node_project_without_a_lock() {
     fixture.commit_lock("node");
     let before = snapshot(fixture.dir());
 
-    let out = fixture.tog(&["sync", "--frozen"]);
+    let out = fixture.ward(&["sync", "--frozen"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
@@ -652,9 +659,12 @@ fn update_toolchain_replaces_a_stale_lock() {
         std::fs::read(fixture.dir().join("requirements.lock.txt")).unwrap();
     fixture.write(".python-version", &format!("{older}\n"));
 
-    let out = fixture.tog(&["update", "--toolchain"]);
+    let out = fixture.ward(&["update", "--toolchain"]);
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("updated tog-toolchain.toml"), "{stderr}");
+    assert!(
+        stderr.contains("updated greyward-toolchain.toml"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains(&format!("selected cpython {older}")),
         "{stderr}"
@@ -702,15 +712,15 @@ fn update_toolchain_for_one_ecosystem_leaves_the_others_alone() {
     // python row still records the newest version even though the file
     // moved. The sync that follows is an ordinary sync, and it refuses
     // that stale python row instead of realizing from it.
-    let out = fixture.tog(&["update", "--toolchain", "node"]);
+    let out = fixture.ward(&["update", "--toolchain", "node"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
-        stderr.contains("tog-toolchain.toml is stale for python"),
+        stderr.contains("greyward-toolchain.toml is stale for python"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("run `tog update --toolchain python`"),
+        stderr.contains("run `ward update --toolchain python`"),
         "{stderr}"
     );
     let lock = ToolchainLock::parse(&fixture.lock_bytes().unwrap()).unwrap();
@@ -739,7 +749,7 @@ fn update_toolchain_takes_an_ecosystem_and_nothing_else() {
         vec!["update", "serde", "--toolchain"],
         vec!["update", "--toolchain", "python", "node"],
     ] {
-        let out = fixture.tog(&argv);
+        let out = fixture.ward(&argv);
         assert_eq!(out.status.code(), Some(2), "{argv:?}");
         let message = text(&out.stderr);
         assert!(
@@ -752,7 +762,7 @@ fn update_toolchain_takes_an_ecosystem_and_nothing_else() {
     // `cargo` is the name every other verb uses for the ecosystem the lock
     // calls `rust`, so it is accepted as a spelling of it; naming an
     // ecosystem the project does not have is a refusal, not a usage error.
-    let none = fixture.tog(&["update", "--toolchain", "cargo"]);
+    let none = fixture.ward(&["update", "--toolchain", "cargo"]);
     assert_eq!(none.status.code(), Some(1), "{}", text(&none.stderr));
     assert!(
         text(&none.stderr).contains("no rust project found here"),
@@ -774,10 +784,13 @@ fn unchanged_dependency_locks() {
     let dependency_lock = std::fs::read(fixture.dir().join("requirements.lock.txt")).unwrap();
     fixture.write(".python-version", &format!("{older}\n"));
 
-    let out = fixture.tog(&["update", "--toolchain", "--no-sync"]);
+    let out = fixture.ward(&["update", "--toolchain", "--no-sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains("updated tog-toolchain.toml"), "{stderr}");
+    assert!(
+        stderr.contains("updated greyward-toolchain.toml"),
+        "{stderr}"
+    );
     assert!(stderr.contains("--no-sync"), "{stderr}");
 
     let lock = ToolchainLock::parse(&fixture.lock_bytes().unwrap()).unwrap();
@@ -804,15 +817,17 @@ fn unchanged_dependency_locks() {
 #[test]
 fn the_help_screens_carry_the_frozen_flag_and_the_toolchain_update() {
     let fixture = Fixture::new("help");
-    let sync = text(&fixture.tog(&["help", "sync"]).stdout);
+    let sync = text(&fixture.ward(&["help", "sync"]).stdout);
     assert!(sync.contains("--frozen"), "{sync}");
     assert!(
-        sync.contains("--frozen never modifies project inputs, tog-toolchain.toml, or the catalog"),
+        sync.contains(
+            "--frozen never modifies project inputs, greyward-toolchain.toml, or the catalog"
+        ),
         "{sync}"
     );
-    let update = text(&fixture.tog(&["help", "update"]).stdout);
+    let update = text(&fixture.ward(&["help", "update"]).stdout);
     assert!(
-        update.contains("tog update --toolchain [<ecosystem>]"),
+        update.contains("ward update --toolchain [<ecosystem>]"),
         "{update}"
     );
     assert!(
@@ -824,7 +839,7 @@ fn the_help_screens_carry_the_frozen_flag_and_the_toolchain_update() {
 // ---------------------------------------------------------------------------
 // status
 
-/// The verdicts `tog status` reports about the committed lock, through the
+/// The verdicts `ward status` reports about the committed lock, through the
 /// binary: each one names its own next step, and each exits 1.
 #[test]
 fn exact_statuses() {
@@ -844,47 +859,50 @@ fn exact_statuses() {
     // A moved source: stale, with both values and the one verb that moves a
     // locked runtime.
     fixture.write(".python-version", &format!("{older}\n"));
-    let stale = fixture.tog(&["status", "--json"]);
+    let stale = fixture.ward(&["status", "--json"]);
     assert_eq!(stale.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_slice(&stale.stdout).unwrap();
     assert_eq!(value["synced"], serde_json::json!(false));
     assert_eq!(value["ecosystems"][0]["state"], "changed");
     let detail = value["ecosystems"][0]["detail"][0].as_str().unwrap();
-    assert!(detail.starts_with("tog-toolchain.toml stale: "), "{detail}");
+    assert!(
+        detail.starts_with("greyward-toolchain.toml stale: "),
+        "{detail}"
+    );
     assert!(
         detail.contains(&newest) && detail.contains(&older),
         "{detail}"
     );
     assert!(
-        detail.ends_with("run 'tog update --toolchain python'"),
+        detail.ends_with("run 'ward update --toolchain python'"),
         "{detail}"
     );
     fixture.write(".python-version", &format!("{newest}\n"));
 
     // A closure written before the lock existed cannot be compared.
     write_python_closure(fixture.dir(), None);
-    let unchecked = fixture.tog(&["status", "--json"]);
+    let unchecked = fixture.ward(&["status", "--json"]);
     assert_eq!(unchecked.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_slice(&unchecked.stdout).unwrap();
     assert_eq!(value["ecosystems"][0]["state"], "unchecked");
     assert_eq!(
         value["ecosystems"][0]["detail"],
-        "toolchain not recorded by this sync; run 'tog' once"
+        "toolchain not recorded by this sync; run 'ward' once"
     );
 
     // The lock this projection was synced against is gone.
     write_python_closure(fixture.dir(), Some(&bundle_id));
     std::fs::remove_file(fixture.dir().join(LOCK_PATH)).unwrap();
-    let missing = fixture.tog(&["status", "--json"]);
+    let missing = fixture.ward(&["status", "--json"]);
     assert_eq!(missing.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
     assert_eq!(
         value["ecosystems"][0]["detail"][0],
-        "tog-toolchain.toml (missing; run 'tog' to create it)"
+        "greyward-toolchain.toml (missing; run 'ward' to create it)"
     );
-    let prose = text(&fixture.tog(&["status"]).stdout);
+    let prose = text(&fixture.ward(&["status"]).stdout);
     assert!(
-        prose.contains("changed     tog-toolchain.toml (missing; run 'tog' to create it)"),
+        prose.contains("changed     greyward-toolchain.toml (missing; run 'ward' to create it)"),
         "{prose}"
     );
 }
@@ -901,7 +919,7 @@ fn a_pre_lock_closure_without_a_lock_reads_as_needing_a_sync() {
     fixture.write(".python-version", &format!("{newest}\n"));
     write_python_closure(fixture.dir(), None);
 
-    let status = fixture.tog(&["status", "--json"]);
+    let status = fixture.ward(&["status", "--json"]);
     assert_eq!(status.status.code(), Some(1), "{}", text(&status.stderr));
     assert!(status.stderr.is_empty(), "{}", text(&status.stderr));
     let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
@@ -909,18 +927,18 @@ fn a_pre_lock_closure_without_a_lock_reads_as_needing_a_sync() {
     assert_eq!(value["ecosystems"][0]["state"], "changed");
     assert_eq!(
         value["ecosystems"][0]["detail"][0],
-        "tog-toolchain.toml (missing; run 'tog' to create it)"
+        "greyward-toolchain.toml (missing; run 'ward' to create it)"
     );
 
     let manifest = format!(
         "file://{}",
         fixture.home.0.join("no-manifest.json").display()
     );
-    let doctor = tog_env(
+    let doctor = ward_env(
         fixture.dir(),
         &fixture.home.0,
         &["doctor", "--json"],
-        &[("TOG_RELEASE_MANIFEST", manifest.as_str())],
+        &[("GREYWARD_RELEASE_MANIFEST", manifest.as_str())],
     );
     let stderr = text(&doctor.stderr);
     assert!(!stderr.contains("error"), "{stderr}");
@@ -941,7 +959,7 @@ fn a_pre_lock_closure_without_a_lock_reads_as_needing_a_sync() {
 /// A python closure whose dependency side is current for this fixture, so
 /// the lock verdict is the only thing left to decide the row.
 fn write_python_closure(dir: &Path, bundle_id: Option<&str>) {
-    let closures = dir.join(".tog/closures");
+    let closures = dir.join(".greyward/closures");
     std::fs::create_dir_all(&closures).unwrap();
     let env = dir.join("env-object");
     std::fs::create_dir_all(env.join("bin")).unwrap();
@@ -1010,7 +1028,7 @@ fn two_store_replay() {
     let root = ProjectRoot::open(fixture.dir()).unwrap();
     let mut ids = Vec::new();
     for catalog in [full, without] {
-        tog::tailors::install_kernel_tables();
+        greyward::tailors::install_kernel_tables();
         let resolved = project_toolchain::resolve(
             &root,
             Platform::host().unwrap(),
@@ -1038,7 +1056,7 @@ fn two_store_replay() {
     fixture.write("pyproject.toml", UNPLANNABLE_PYPROJECT);
     let before = fixture.lock_bytes().unwrap();
     for store in ["store-a", "store-b"] {
-        let out = tog_at(
+        let out = ward_at(
             fixture.dir(),
             &fixture.home.0,
             &fixture.home.0.join(store),
@@ -1061,7 +1079,7 @@ fn two_store_replay() {
 /// to one no catalog carries leaves a valid lock whose every artifact is
 /// still real: the replay in each store has only the lock to go on.
 /// Environments are store-relative by design, so the comparison is on the
-/// runtime objects each store holds and the lock bytes; `tog status` reads
+/// runtime objects each store holds and the lock bytes; `ward status` reads
 /// only the project, and is compared because a user reads it.
 #[test]
 #[ignore]
@@ -1103,7 +1121,7 @@ fn two_fresh_stores_realize_the_same_runtimes_from_a_retired_release() {
             (&["sync", "--frozen"][..], "sync"),
             (&["status"][..], "status"),
         ] {
-            let out = tog_at(fixture.dir(), &fixture.home.0, &store_path, args);
+            let out = ward_at(fixture.dir(), &fixture.home.0, &store_path, args);
             assert!(
                 out.status.success(),
                 "{what} in {store}: {}",
@@ -1137,7 +1155,7 @@ fn runtime_ids(dir: &Path, store: &Path, retired: &[(&str, String)]) -> Vec<Stri
     retired
         .iter()
         .map(|(ecosystem, release)| {
-            let path = dir.join(format!(".tog/closures/{ecosystem}.json"));
+            let path = dir.join(format!(".greyward/closures/{ecosystem}.json"));
             let closure: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             let body = &closure["body"];
@@ -1180,7 +1198,7 @@ fn linux_lock_bytes_are_platform_independent() {
     let root = ProjectRoot::open(fixture.dir()).unwrap();
     let mut bytes: Vec<(Platform, Vec<u8>)> = Vec::new();
     for platform in Platform::ALL {
-        tog::tailors::install_kernel_tables();
+        greyward::tailors::install_kernel_tables();
         let resolved = project_toolchain::resolve(
             &root,
             *platform,
@@ -1249,11 +1267,14 @@ fn foreign_platform_lock_is_refused() {
         .unwrap();
     std::fs::write(fixture.dir().join(LOCK_PATH), lock.canonical_bytes()).unwrap();
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains(host.triple()), "{stderr}");
-    assert!(stderr.contains("tog update --toolchain python"), "{stderr}");
+    assert!(
+        stderr.contains("ward update --toolchain python"),
+        "{stderr}"
+    );
     assert!(!fixture.store().exists(), "a refusal created the store");
 
     // The same file with this host's table simply deleted is no longer
@@ -1272,7 +1293,7 @@ fn foreign_platform_lock_is_refused() {
     let trimmed = format!("{}{}", &intact[..start], &intact[end..]);
     assert_ne!(trimmed, text_form);
     std::fs::write(fixture.dir().join(LOCK_PATH), trimmed).unwrap();
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("does not match its rows"), "{stderr}");
@@ -1324,11 +1345,12 @@ const PLAIN_CARGO_LOCK: &str = "version = 3\n\n[[package]]\nname = \"p\"\nversio
 
 /// Whether the sandbox can run here, as the library's sandbox tests decide
 /// it: a host without a working bubblewrap skips (with the reason on
-/// stderr), unless `TOG_SANDBOX_TESTS` makes the skip a failure (#295).
+/// stderr), unless `GREYWARD_SANDBOX_TESTS` makes the skip a failure (#295).
 fn sandbox_ready(test_name: &str) -> bool {
     let required =
-        matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty());
-    let probe = tog::kernel::platform::Platform::host().and_then(tog::kernel::sandbox::probe);
+        matches!(std::env::var_os("GREYWARD_SANDBOX_TESTS"), Some(value) if !value.is_empty());
+    let probe =
+        greyward::kernel::platform::Platform::host().and_then(greyward::kernel::sandbox::probe);
     match probe {
         Ok(_) => true,
         Err(error) if required => {
@@ -1345,7 +1367,7 @@ fn sandbox_ready(test_name: &str) -> bool {
 /// records it by content: a row marked `source = "path"`, with the tree's
 /// URL, both version lines and the tree hash. A sync imports it and records
 /// the `external-toolchain` exception, a policy can deny that, and once the
-/// tree changes every sync refuses it until `tog update --toolchain` locks
+/// tree changes every sync refuses it until `ward update --toolchain` locks
 /// the new tree.
 #[test]
 fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
@@ -1364,7 +1386,7 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
         &format!("[toolchain]\npath = \"{}\"\n", tree.display()),
     );
 
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("exception external-toolchain"), "{stderr}");
@@ -1389,31 +1411,32 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
     let lock = ToolchainLock::parse(&bytes).unwrap();
     let bundle = lock.ecosystem("rust").unwrap().bundle().unwrap();
     assert_eq!(bundle.component("rustc").unwrap().version, "1.97.0");
-    let closure = std::fs::read_to_string(fixture.dir().join(".tog/closures/cargo.json")).unwrap();
+    let closure =
+        std::fs::read_to_string(fixture.dir().join(".greyward/closures/cargo.json")).unwrap();
     assert!(closure.contains("\"external-toolchain\""), "{closure}");
     assert!(closure.contains(&tree.display().to_string()), "{closure}");
 
     // A second sync honors the lock, re-checks the tree, uses the import,
     // and records the exception again.
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("exception external-toolchain"), "{stderr}");
     assert_eq!(fixture.lock_bytes().unwrap(), bytes);
 
     // A policy that denies the kind refuses the sync.
-    fixture.write(".tog/policy.toml", "deny = [\"external-toolchain\"]\n");
-    let out = fixture.tog(&["sync"]);
+    fixture.write(".greyward/policy.toml", "deny = [\"external-toolchain\"]\n");
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(
         stderr.contains("carries exception(s): external-toolchain"),
         "{stderr}"
     );
-    std::fs::remove_file(fixture.dir().join(".tog/policy.toml")).unwrap();
+    std::fs::remove_file(fixture.dir().join(".greyward/policy.toml")).unwrap();
 
-    // The tree is used as it is, so `tog fmt` needs the tree's own rustfmt.
-    let out = fixture.tog(&["fmt"]);
+    // The tree is used as it is, so `ward fmt` needs the tree's own rustfmt.
+    let out = fixture.ward(&["fmt"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("has no bin/rustfmt"), "{stderr}");
@@ -1431,14 +1454,14 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("changed since tog-toolchain.toml locked it"),
+        stderr.contains("changed since greyward-toolchain.toml locked it"),
         "{stderr}"
     );
-    assert!(stderr.contains("tog update --toolchain rust"), "{stderr}");
+    assert!(stderr.contains("ward update --toolchain rust"), "{stderr}");
     assert_eq!(
         fixture.lock_bytes().unwrap(),
         bytes,
@@ -1446,24 +1469,27 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
     );
 
     // Locking the tree as it is now is the way forward.
-    let out = fixture.tog(&["update", "--toolchain", "rust"]);
+    let out = fixture.ward(&["update", "--toolchain", "rust"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert_ne!(fixture.lock_bytes().unwrap(), bytes);
-    let out = fixture.tog(&["sync"]);
+    let out = fixture.ward(&["sync"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
-    // Now the tree's own formatter runs, and `tog fmt` writes no record
+    // Now the tree's own formatter runs, and `ward fmt` writes no record
     // of it: the lock already names the tree.
-    let out = fixture.tog(&["fmt", "--check"]);
+    let out = fixture.ward(&["fmt", "--check"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
         std::fs::read_to_string(fixture.dir().join("formatted.txt")).unwrap(),
         "--check\n"
     );
-    assert!(!fixture.dir().join(".tog/closures/rustfmt.json").exists());
+    assert!(!fixture
+        .dir()
+        .join(".greyward/closures/rustfmt.json")
+        .exists());
     // And status reads the cargo closure as current.
-    let out = fixture.tog(&["status"]);
+    let out = fixture.ward(&["status"]);
     let stdout = text(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}{}", text(&out.stderr));
     assert!(
@@ -1473,7 +1499,7 @@ fn a_local_toolchain_is_locked_by_content_and_fails_closed_when_it_changes() {
 }
 
 /// A toolchain table with components and no channel means rustup's default
-/// toolchain. tog's is the catalog's explicit default, which the lock
+/// toolchain. ward's is the catalog's explicit default, which the lock
 /// records as the selection, beside the components it will provision.
 #[test]
 fn a_components_only_toolchain_file_locks_the_catalog_default() {
@@ -1483,7 +1509,7 @@ fn a_components_only_toolchain_file_locks_the_catalog_default() {
         "rust-toolchain.toml",
         "[toolchain]\ncomponents = [\"clippy\", \"rust-src\"]\n",
     );
-    let out = fixture.tog(&["update", "--toolchain", "--no-sync"]);
+    let out = fixture.ward(&["update", "--toolchain", "--no-sync"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let lock = ToolchainLock::parse(&fixture.lock_bytes().unwrap()).unwrap();
     let section = lock.ecosystem("rust").unwrap();
@@ -1506,6 +1532,6 @@ fn a_components_only_toolchain_file_locks_the_catalog_default() {
         Some("clippy,rust-src")
     );
     // What realization provisions is read back from those rows.
-    let extras = tog::kernel::provider::rust_extras::Extras::from_rows(&inputs);
+    let extras = greyward::kernel::provider::rust_extras::Extras::from_rows(&inputs);
     assert_eq!(extras.components, ["clippy", "rust-src"]);
 }

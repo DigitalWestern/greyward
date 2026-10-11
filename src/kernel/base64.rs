@@ -68,7 +68,7 @@ pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Strict base64 for bytes tog wrote itself (stored path bytes): the input
+/// Strict base64 for bytes ward wrote itself (stored path bytes): the input
 /// must be padded to a multiple of four, with padding only at the end.
 pub(crate) fn decode_padded(value: &str) -> Option<Vec<u8>> {
     if !value.len().is_multiple_of(4) {

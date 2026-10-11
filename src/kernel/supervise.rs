@@ -7,7 +7,7 @@
 //! while terminal process-group delivery remains the mechanism that reaches
 //! the child for those signals.
 //!
-//! Any of those four arriving while a child runs is a request to stop tog,
+//! Any of those four arriving while a child runs is a request to stop ward,
 //! not a verdict on the child: once the child is reaped, `status`,
 //! `status_with_stderr` and `output` return an [`io::ErrorKind::Interrupted`]
 //! error carrying [`Interrupted`] instead of the child's status. A caller
@@ -19,8 +19,8 @@
 //! not own the dispositions: the first session in the process installs one
 //! handler per signal and it stays for the life of the process. The handler
 //! counts each signal, and with no session live it acts as the disposition
-//! tog inherited would have (`act_as_inherited`), so outside supervision a
-//! TERM still kills tog. Every live session sees every TERM and forwards it
+//! ward inherited would have (`act_as_inherited`), so outside supervision a
+//! TERM still kills ward. Every live session sees every TERM and forwards it
 //! to its own child. Correctness never depends on a wakeup: the counts live
 //! in atomics, a self-pipe only shortens the wait, and the wait is bounded
 //! by a short tick (`tick_ms`). Design: `docs/human/ARCHITECTURE.md` "Store
@@ -88,7 +88,7 @@ static NOTIFY_READ: AtomicI32 = AtomicI32::new(-1);
 static NOTIFY_WRITE: AtomicI32 = AtomicI32::new(-1);
 static SIGNAL_BYTE: u8 = 1;
 
-/// The disposition each of [`SIGNALS`] had before tog's handler replaced
+/// The disposition each of [`SIGNALS`] had before ward's handler replaced
 /// it. Slot `i` is written once, under [`REGISTRY`], before bit `i` of
 /// [`RECORDED`] is set and before the handler for it is installed; after
 /// that it is only read, by the handler and by `prepare_child`.
@@ -101,7 +101,7 @@ static INHERITED: InheritedActions =
     InheritedActions(UnsafeCell::new(unsafe { std::mem::zeroed() }));
 /// Bit `i` set: `INHERITED[i]` is recorded.
 static RECORDED: AtomicU32 = AtomicU32::new(0);
-/// Bit `i` set: tog's handler is installed for `SIGNALS[i]`, for good.
+/// Bit `i` set: ward's handler is installed for `SIGNALS[i]`, for good.
 static INSTALLED: AtomicU32 = AtomicU32::new(0);
 /// One-shot inherited handlers reset only when their inherited action runs.
 static RESET_HANDLED: AtomicU32 = AtomicU32::new(0);
@@ -118,7 +118,7 @@ static RERAISE_THREAD: AtomicUsize = AtomicUsize::new(0);
 struct Registry {
     /// A session left with TERMs it could not forward (its child was
     /// already reaped). The last session to leave re-raises one TERM for
-    /// them, so a TERM nobody delivered still stops tog.
+    /// them, so a TERM nobody delivered still stops ward.
     term_orphaned: Vec<Option<u64>>,
 }
 
@@ -177,9 +177,9 @@ fn signal_name(signal: libc::c_int) -> &'static str {
     }
 }
 
-/// Why a supervised call returned [`io::ErrorKind::Interrupted`]: tog itself
+/// Why a supervised call returned [`io::ErrorKind::Interrupted`]: ward itself
 /// received `signal` while the child ran. `status` is how the child ended,
-/// kept for callers whose own exit code is the child's (`tog run`), where the
+/// kept for callers whose own exit code is the child's (`ward run`), where the
 /// child decides what an interrupt means.
 #[derive(Debug)]
 pub struct Interrupted {
@@ -219,7 +219,7 @@ fn record_stop(received: u32) -> Option<libc::c_int> {
     found.inspect(|signal| STOPPED_BY.store(*signal, Ordering::SeqCst))
 }
 
-/// The signal that asked tog to stop, when `error` is how a supervised call
+/// The signal that asked ward to stop, when `error` is how a supervised call
 /// reported it: from the [`Interrupted`] record, or, once a caller wrapped
 /// the error and dropped the record, from the last interruption a session
 /// of this command saw. `main` exits `128 + signal`, the shell's convention.
@@ -238,8 +238,8 @@ pub fn stop_signal(error: &io::Error) -> Option<libc::c_int> {
     }
 }
 
-/// The child's status even when tog was interrupted while it ran, for
-/// commands whose exit code is the child's (`tog run`, `tog x`). The
+/// The child's status even when ward was interrupted while it ran, for
+/// commands whose exit code is the child's (`ward run`, `ward x`). The
 /// interrupt reached the child through the terminal or by forwarding, and
 /// how the child chose to end is then the answer. Every other error passes
 /// through unchanged.
@@ -315,9 +315,9 @@ extern "C" fn signal_handler(
     unsafe { *errno_location() = saved_errno };
 }
 
-/// With no session live, do what the disposition tog inherited would have
+/// With no session live, do what the disposition ward inherited would have
 /// done. `SIG_DFL` for TERM/INT/HUP/QUIT puts the default back and raises
-/// the signal again, so it is delivered with its default action (tog dies)
+/// the signal again, so it is delivered with its default action (ward dies)
 /// as soon as the handler returns. An inherited function is called, with
 /// `siginfo` when it asked for it. One-shot handlers become default after
 /// their first inherited invocation. The installed action preserves the
@@ -439,7 +439,7 @@ fn create_notify_pipe() -> io::Result<(RawFd, RawFd)> {
     Ok((fds[0], fds[1]))
 }
 
-/// Install tog's handler for every signal that does not have it yet. Runs
+/// Install ward's handler for every signal that does not have it yet. Runs
 /// under [`REGISTRY`]. Each signal's inherited disposition is recorded
 /// first, so from the moment the handler is installed it can act as that
 /// disposition; nothing is ever uninstalled, so there is no restore and no
@@ -473,11 +473,11 @@ fn install_handlers(_registry: &mut Registry) -> io::Result<()> {
         // SAFETY: published above or by an earlier install, never rewritten.
         let inherited = unsafe { (*INHERITED.0.get())[index] };
         // An inherited SIG_IGN is kept for TERM/INT/HUP/QUIT: whoever
-        // started tog asked for it not to be interrupted by them. SIGCHLD
+        // started ward asked for it not to be interrupted by them. SIGCHLD
         // is the exception. With SIGCHLD ignored (or SA_NOCLDWAIT set,
         // which the replacement below also clears) the kernel reaps the
         // child itself, `try_wait` fails with ECHILD, and the exit status
-        // tog exists to report is gone. `prepare_child` hands the child the
+        // ward exists to report is gone. `prepare_child` hands the child the
         // inherited SIG_IGN back. While the handler is installed, a child
         // of this process that exits without being waited for becomes a
         // zombie instead of being auto-reaped, exactly what the default
@@ -514,14 +514,14 @@ fn install_handlers(_registry: &mut Registry) -> io::Result<()> {
     Ok(())
 }
 
-/// Test-only knobs, read only in debug builds: `TOG_SUPERVISE_FAILPOINT`
+/// Test-only knobs, read only in debug builds: `GREYWARD_SUPERVISE_FAILPOINT`
 /// is `fail-sigaction-<k>` (the k-th handler install of the process fails,
 /// once) or `pause-after-sigaction-<k>` (after the k-th install, print
-/// `FAILPOINT PAUSED <k>` and block until `TOG_SUPERVISE_FAILPOINT_FIFO`
+/// `FAILPOINT PAUSED <k>` and block until `GREYWARD_SUPERVISE_FAILPOINT_FIFO`
 /// is written).
 #[cfg(debug_assertions)]
 fn failpoint(kind: &str) -> Option<usize> {
-    let value = std::env::var("TOG_SUPERVISE_FAILPOINT").ok()?;
+    let value = std::env::var("GREYWARD_SUPERVISE_FAILPOINT").ok()?;
     value.strip_prefix(kind)?.strip_prefix('-')?.parse().ok()
 }
 
@@ -547,7 +547,7 @@ fn failpoint_after_sigaction(_call: usize) {
         let _ = writeln!(out, "FAILPOINT PAUSED {_call}");
         let _ = out.flush();
         drop(out);
-        if let Some(fifo) = std::env::var_os("TOG_SUPERVISE_FAILPOINT_FIFO") {
+        if let Some(fifo) = std::env::var_os("GREYWARD_SUPERVISE_FAILPOINT_FIFO") {
             let _ = std::fs::read(fifo);
         }
     }
@@ -556,7 +556,7 @@ fn failpoint_after_sigaction(_call: usize) {
 /// Pause exactly at a registration, spawn or departure boundary, in integration tests.
 fn pause_boundary(_name: &str) {
     #[cfg(debug_assertions)]
-    if std::env::var("TOG_SUPERVISE_FAILPOINT").as_deref() == Ok(_name)
+    if std::env::var("GREYWARD_SUPERVISE_FAILPOINT").as_deref() == Ok(_name)
         && !FAILPOINT_SPENT.swap(true, Ordering::SeqCst)
     {
         if _name == "before-reraise" {
@@ -576,10 +576,10 @@ fn pause_boundary(_name: &str) {
         let _ = writeln!(out, "FAILPOINT PAUSED {_name}");
         let _ = out.flush();
         drop(out);
-        if let Some(fifo) = std::env::var_os("TOG_SUPERVISE_FAILPOINT_FIFO") {
+        if let Some(fifo) = std::env::var_os("GREYWARD_SUPERVISE_FAILPOINT_FIFO") {
             let _ = std::fs::read(fifo);
         }
-        if let Ok(name) = std::env::var("TOG_SUPERVISE_BOUNDARY_SIGNAL") {
+        if let Ok(name) = std::env::var("GREYWARD_SUPERVISE_BOUNDARY_SIGNAL") {
             let signal = match name.as_str() {
                 "INT" => libc::SIGINT,
                 "HUP" => libc::SIGHUP,
@@ -595,14 +595,14 @@ fn pause_boundary(_name: &str) {
 /// How long a wait may go without a wakeup. A lone session is woken by the
 /// signal itself; the tick only matters when concurrent sessions take each
 /// other's wake bytes, and it bounds the wait when SIGCHLD is blocked. It
-/// never decides correctness. Debug builds read `TOG_SUPERVISE_TICK_MS`.
+/// never decides correctness. Debug builds read `GREYWARD_SUPERVISE_TICK_MS`.
 fn tick_ms() -> libc::c_int {
     const DEFAULT: libc::c_int = 20;
     #[cfg(debug_assertions)]
     {
         static TICK: std::sync::OnceLock<libc::c_int> = std::sync::OnceLock::new();
         *TICK.get_or_init(|| {
-            std::env::var("TOG_SUPERVISE_TICK_MS")
+            std::env::var("GREYWARD_SUPERVISE_TICK_MS")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(DEFAULT)
@@ -643,7 +643,7 @@ struct Session {
     unconsumed_terms: Cell<u32>,
     /// Every terminating signal this session saw, one bit each
     /// (`signal_bit`). Forwarding never clears it, so it still says after
-    /// the reap that tog was asked to stop.
+    /// the reap that ward was asked to stop.
     received: Cell<u32>,
     /// The spawning thread's mask, which the child execs with.
     old_mask: libc::sigset_t,
@@ -661,7 +661,7 @@ impl Session {
             ));
         }
         #[cfg(debug_assertions)]
-        assert_term_handler_is_tog_s();
+        assert_term_handler_is_ward_s();
         // Each signal's registration and starting cursor are one atomic step,
         // just like TERM. Admission is serialized until all four are published.
         let int_cursor = term_count(SESSION_INT.fetch_add(ONE_SESSION, Ordering::SeqCst));
@@ -734,9 +734,9 @@ impl Session {
         Ok(())
     }
 
-    /// The child must never exec with tog's handlers or a caller's
+    /// The child must never exec with ward's handlers or a caller's
     /// accidentally inherited blocked signal mask. Every signal goes back
-    /// to what tog inherited: SIG_IGN stays ignored (including a SIGCHLD
+    /// to what ward inherited: SIG_IGN stays ignored (including a SIGCHLD
     /// the handler takes anyway), and anything else becomes SIG_DFL, which
     /// is what exec would make of an inherited handler. The post-fork hook
     /// is restricted to libc signal operations on copied values.
@@ -883,7 +883,7 @@ impl Session {
     /// last session to leave re-raises one TERM if any session left such a
     /// TERM, or if a TERM arrived after its own last look. That TERM then
     /// meets the handler with no session live and acts as inherited (by
-    /// default, tog dies of it). A TERM every session forwarded does not
+    /// default, ward dies of it). A TERM every session forwarded does not
     /// re-raise: the child decides what it means.
     fn finish(&mut self) -> u32 {
         self.finish_with_handled_cleanup(false)
@@ -891,7 +891,7 @@ impl Session {
 
     /// End the session for a reaped child: `value` when no terminating
     /// signal arrived, the interruption otherwise. A signal that arrives
-    /// after a clean exit still counts, since it asked tog to stop too.
+    /// after a clean exit still counts, since it asked ward to stop too.
     fn conclude<T>(mut self, status: ExitStatus, value: T) -> io::Result<T> {
         match record_stop(self.finish()) {
             Some(signal) => Err(io::Error::new(
@@ -909,11 +909,11 @@ impl Drop for Session {
     }
 }
 
-/// Supervision forwards TERM only while tog's handler holds it. Code that
-/// installs its own TERM handler after tog's first session silently ends
+/// Supervision forwards TERM only while ward's handler holds it. Code that
+/// installs its own TERM handler after ward's first session silently ends
 /// that, so debug builds check at each registration.
 #[cfg(debug_assertions)]
-fn assert_term_handler_is_tog_s() {
+fn assert_term_handler_is_ward_s() {
     let Some(index) = signal_index(libc::SIGTERM) else {
         return;
     };
@@ -926,7 +926,7 @@ fn assert_term_handler_is_tog_s() {
     if unsafe { libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut current) } == 0 {
         assert_eq!(
             current.sa_sigaction, signal_handler as *const () as usize,
-            "something replaced tog's SIGTERM handler after its first supervised child; \
+            "something replaced ward's SIGTERM handler after its first supervised child; \
              supervision would stop forwarding TERM"
         );
     }
@@ -1242,7 +1242,7 @@ fn spawn_relay<R: Read + AsRawFd + Send + 'static>(
 ) -> io::Result<RelayHandle> {
     let scrubber = confine::Scrubber::new(secrets.to_vec());
     std::thread::Builder::new()
-        .name("tog-relay".into())
+        .name("greyward-relay".into())
         .spawn(move || {
             let result = relay(pipe, &sink, scrubber, keep, &deadline);
             if result.is_ok() {
@@ -1471,7 +1471,7 @@ mod tests {
     #[test]
     #[ignore = "isolated signal ownership harness"]
     fn cleanup_orphan_harness() {
-        if std::env::var_os("TOG_CLEANUP_ORPHAN_HARNESS").is_none() {
+        if std::env::var_os("GREYWARD_CLEANUP_ORPHAN_HARNESS").is_none() {
             return;
         }
         let mut other = Session::new().unwrap();
@@ -1499,7 +1499,7 @@ mod tests {
                 "--ignored",
                 "--nocapture",
             ])
-            .env("TOG_CLEANUP_ORPHAN_HARNESS", "1");
+            .env("GREYWARD_CLEANUP_ORPHAN_HARNESS", "1");
         // SAFETY: reset one disposition between fork and exec.
         unsafe {
             command.pre_exec(|| {
@@ -1586,7 +1586,7 @@ mod tests {
         // The resolver named by a path that does not exist: had it been
         // spawned, the error would be NotFound, not the refusal.
         let resolver = || {
-            let mut command = Command::new("/nonexistent/tog-test/bin/npm");
+            let mut command = Command::new("/nonexistent/greyward-test/bin/npm");
             command.args(["install", "--package-lock-only"]);
             command
         };
@@ -1618,7 +1618,7 @@ mod tests {
             command
         };
         let host = local_output(
-            &mut lookup(Path::new("/nonexistent/tog-test/bin/cargo")),
+            &mut lookup(Path::new("/nonexistent/greyward-test/bin/cargo")),
             &activity,
         );
         assert_eq!(host.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
@@ -1731,7 +1731,7 @@ mod tests {
     }
 
     /// A command that leaves a process holding its output open (a compiler
-    /// server, an MSBuild node) does not hang tog: once the direct child is
+    /// server, an MSBuild node) does not hang ward: once the direct child is
     /// reaped, both supervisors read for `DRAIN_AFTER_EXIT` more, then stop
     /// and keep what they read.
     // Reviewed site (tests/architecture.rs): the supervisor's own tests of its primitives.
@@ -1855,10 +1855,16 @@ mod tests {
         for line in 0..2000 {
             expected.push_str(&format!("line {line}: sha 0123abcd 4567 | ok\n"));
         }
-        std::fs::write(std::env::temp_dir().join("tog-relay-intact.txt"), &expected).unwrap();
+        std::fs::write(
+            std::env::temp_dir().join("greyward-relay-intact.txt"),
+            &expected,
+        )
+        .unwrap();
         let script = format!(
             "cat {0}; cat {0} >&2; printf 'no newline 0123abc'",
-            std::env::temp_dir().join("tog-relay-intact.txt").display()
+            std::env::temp_dir()
+                .join("greyward-relay-intact.txt")
+                .display()
         );
         let (status, stdout, stderr) = relayed(&script, std::time::Duration::from_secs(60));
         assert!(status.success());

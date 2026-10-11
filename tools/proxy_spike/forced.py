@@ -419,7 +419,7 @@ def forced_by_design(s):
     config = os.path.join(spike_dir, "nuget.config")
     with open(config, "w") as handle:
         handle.write('<?xml version="1.0" encoding="utf-8"?>\n<configuration><packageSources><clear />'
-                     f'<add key="tog" value="{s.mirror("nuget")}v3/index.json" protocolVersion="3" '
+                     f'<add key="ward" value="{s.mirror("nuget")}v3/index.json" protocolVersion="3" '
                      'allowInsecureConnections="true" /></packageSources></configuration>\n')
     env = s.base_env(fx.dir, [sdk])
     env.update({"DOTNET_ROOT": sdk, "NUGET_PACKAGES": spike_dir + "/pkgs", "DOTNET_CLI_TELEMETRY_OPTOUT": "1",

@@ -1,6 +1,6 @@
-//! `tog <file>` where the project does not have the file's ecosystem, or
+//! `ward <file>` where the project does not have the file's ecosystem, or
 //! outside any project: the file runs on that ecosystem's runtime alone,
-//! the one `tog x` would use here (the project's lock when it pins one,
+//! the one `ward x` would use here (the project's lock when it pins one,
 //! the shipped runtime otherwise), realized into the store. It never runs
 //! on the host's interpreter, and it writes no closure and no lock.
 
@@ -31,7 +31,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
         .unwrap_or_default();
     // Realizing a runtime can record policy exceptions, and a record needs
     // an open frame. A denied kind is refused as it is recorded; a permitted
-    // one is printed then, and no closure carries it, as in `tog fmt`.
+    // one is printed then, and no closure carries it, as in `ward fmt`.
     let attribution = policy::Attribution::open(ecosystem)?;
     let lone = tailor
         .lone_file(ctx, &toolchain, &extension)
@@ -41,7 +41,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
                 io::ErrorKind::Unsupported,
                 format!(
                     "'{file}' is a {ecosystem} file, and a {ecosystem} file runs only inside a \
-                     {ecosystem} project: tog looks for {} ('tog help inputs')",
+                     {ecosystem} project: ward looks for {} ('ward help inputs')",
                     tailor.input_files()
                 ),
             )
@@ -56,7 +56,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
 
 /// The child that runs `file` with `args` as `lone` states it: the
 /// runtime's directories ahead of the host PATH, and the environment
-/// scrubbed before tog's variables are set, so the host's interpreter
+/// scrubbed before ward's variables are set, so the host's interpreter
 /// configuration (RUBYOPT, GEM_HOME, ERL_LIBS, ...) never reaches the
 /// program. `None`: `lone` names no program.
 fn command_for(lone: &LoneFile, file: &str, args: &[String]) -> Option<Command> {
@@ -74,10 +74,10 @@ fn command_for(lone: &LoneFile, file: &str, args: &[String]) -> Option<Command> 
     Some(command)
 }
 
-/// Run the user's file. It is the user's program, as `tog x`'s tool is,
-/// not a resolution tog starts, so neither the door nor the host-local
+/// Run the user's file. It is the user's program, as `ward x`'s tool is,
+/// not a resolution ward starts, so neither the door nor the host-local
 /// tripwire applies to it.
-// Reviewed site (tests/architecture.rs): the user's own program, run on a tog-realized runtime.
+// Reviewed site (tests/architecture.rs): the user's own program, run on a greyward-realized runtime.
 #[allow(clippy::disallowed_methods)]
 fn run_file(command: &mut Command, ctx: &Context) -> io::Result<std::process::ExitStatus> {
     crate::kernel::supervise::status(command, &ctx.activity)
@@ -103,8 +103,8 @@ mod tests {
     }
 
     /// The host's interpreter configuration never reaches a lone file:
-    /// each runtime's scrub removes what `tog run` removes for it, and
-    /// tog's own variables are set over it.
+    /// each runtime's scrub removes what `ward run` removes for it, and
+    /// ward's own variables are set over it.
     #[test]
     fn a_lone_file_does_not_inherit_the_hosts_interpreter_configuration() {
         for (key, value) in [
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(env.get("ERL_LIBS"), Some(&None), "{env:?}");
         assert_eq!(env["HEX_OFFLINE"].as_deref(), Some("1"));
         assert_eq!(env["HOME"].as_deref(), Some("/store/run-homes/k/eco"));
-        // Removed by prefix, then set to the scratch home: tog's value wins.
+        // Removed by prefix, then set to the scratch home: ward's value wins.
         assert_eq!(
             env["MIX_HOME"].as_deref(),
             Some("/store/run-homes/k/eco/mix")

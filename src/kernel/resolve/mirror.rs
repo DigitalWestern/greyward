@@ -152,7 +152,7 @@ impl Record {
     }
 }
 
-/// Record a refusal and answer it with a tog body naming the reason.
+/// Record a refusal and answer it with a ward body naming the reason.
 pub(crate) fn refuse(
     state: &State,
     out: &mut dyn Write,
@@ -199,7 +199,7 @@ fn answer_refusal(
 ) -> io::Result<()> {
     let mut headers = extra.clone();
     headers.set("Content-Type", TEXT);
-    let body = format!("tog: {}\n", state.clean(reason));
+    let body = format!("ward: {}\n", state.clean(reason));
     http::write_response(
         &mut Out(out),
         status,
@@ -339,7 +339,7 @@ impl Exchange<'_> {
         record.commit(self.state);
         let mut headers = Headers::new();
         headers.set("Content-Type", TEXT);
-        let body = format!("tog: {}\n", self.state.clean(&reason));
+        let body = format!("ward: {}\n", self.state.clean(&reason));
         self.reply(out, status, &headers, body.as_bytes())
     }
 
@@ -690,7 +690,7 @@ impl Exchange<'_> {
         record.commit(self.state);
         let mut headers = Headers::new();
         headers.set("Content-Type", TEXT);
-        self.reply(out, 504, &headers, format!("tog: {reason}\n").as_bytes())
+        self.reply(out, 504, &headers, format!("ward: {reason}\n").as_bytes())
     }
 
     /// Serve a metadata body: learn its claims, apply the protocol's
@@ -1885,7 +1885,7 @@ mod tests {
         );
         assert!(artifact.body.is_empty());
         // An unclaimed artifact is not fetched for a HEAD, and its length
-        // is the upstream's, not the zero of the body tog never read.
+        // is the upstream's, not the zero of the body ward never read.
         let unclaimed = head("/art/free-pkg-1.0.tgz");
         assert_eq!(unclaimed.status, 200);
         let length = fixture("art/free-pkg-1.0.tgz").len().to_string();

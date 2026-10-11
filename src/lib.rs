@@ -1,4 +1,4 @@
-//! tog: a universal package-manager kernel.
+//! ward: a universal package-manager kernel.
 //!
 //! Layers point one way, `commands → tailors → comforter → kernel`:
 //! `kernel/` is the ecosystem-agnostic core, `tailors/` holds one adapter
@@ -10,31 +10,31 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod cli;
-#[cfg(not(tog_dead_code))]
+#[cfg(not(ward_dead_code))]
 pub mod comforter;
-#[cfg(tog_dead_code)]
+#[cfg(ward_dead_code)]
 mod comforter;
-#[cfg(not(tog_dead_code))]
+#[cfg(not(ward_dead_code))]
 pub mod kernel;
-#[cfg(tog_dead_code)]
+#[cfg(ward_dead_code)]
 mod kernel;
-#[cfg(not(tog_dead_code))]
+#[cfg(not(ward_dead_code))]
 pub mod tailors;
-#[cfg(tog_dead_code)]
+#[cfg(ward_dead_code)]
 mod tailors;
 
 pub mod commands;
 
-/// Under `--cfg tog_dead_code` the internal modules are private, so rustc's
+/// Under `--cfg ward_dead_code` the internal modules are private, so rustc's
 /// dead-code lint reports what no command reaches. This list is what is
 /// reached from outside the library, where that lint cannot see: the
 /// binary (`src/main.rs`) and the integration tests (`tests/*.rs`). Each
 /// line names its caller. A new entry needs a caller outside `src/`; an
 /// item no one calls is deleted instead (#247). A method cannot be listed
 /// here, so the few the integration tests call carry
-/// `#[cfg_attr(tog_dead_code, allow(dead_code))]` and a comment naming
+/// `#[cfg_attr(ward_dead_code, allow(dead_code))]` and a comment naming
 /// the test.
-#[cfg(tog_dead_code)]
+#[cfg(ward_dead_code)]
 pub mod boundary {
     // src/main.rs
     pub use crate::kernel::error::class_of;

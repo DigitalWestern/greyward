@@ -982,7 +982,7 @@ pub fn extract(
 /// so on macOS it changes nothing.
 ///
 /// `platform_specific` marks a per-platform build (a toolchain, a conda
-/// package, tog's own release binary): an archive pinned for one platform
+/// package, ward's own release binary): an archive pinned for one platform
 /// and extracted only there. For those the case and normalization
 /// collision check runs only on a case-insensitive host (macOS), because
 /// on Linux both names are simply two files and no other platform ever
@@ -1697,7 +1697,7 @@ mod tests {
         let file = source.join("pkg/tool");
         fs::write(&file, b"tool").unwrap();
         let path = CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
-        let key = CString::new("user.tog").unwrap();
+        let key = CString::new("user.greyward").unwrap();
         // SAFETY: both strings are NUL-terminated and outlive the call; the
         // value pointer and length describe a live byte slice.
         let set =
@@ -1724,8 +1724,9 @@ mod tests {
             .unwrap()
             .success());
         let bytes = fs::read(&archive).unwrap();
+        let record = b"SCHILY.xattr.user.greyward";
         assert!(
-            bytes.windows(21).any(|w| w == b"SCHILY.xattr.user.tog"),
+            bytes.windows(record.len()).any(|w| w == record),
             "the fixture archive carries no xattr record"
         );
         let destination = temp.0.join("out");
@@ -1906,10 +1907,10 @@ mod tests {
             let record = pax_record_bytes(key, binary);
             let entries = list_members(
                 &format!("pax-binary-{}", key.to_lowercase().replace('.', "-")),
-                &[pax_raw(b'x', &record), ustar("pkg/tog", b'0', "", b"x")],
+                &[pax_raw(b'x', &record), ustar("pkg/ward", b'0', "", b"x")],
             )
             .unwrap();
-            assert_eq!(names(&entries), vec!["pkg/tog"], "{key}");
+            assert_eq!(names(&entries), vec!["pkg/ward"], "{key}");
         }
 
         for (key, value) in [
@@ -2138,7 +2139,7 @@ mod tests {
         .unwrap();
         assert_eq!(names(&entries), vec!["pkg/x"]);
         // A global header may carry the same metadata, bytes and all.
-        let mut global = pax_record_bytes("SCHILY.xattr.user.tog", b"\xff\x00");
+        let mut global = pax_record_bytes("SCHILY.xattr.user.greyward", b"\xff\x00");
         global.extend(pax_record("charset", "BINARY").into_bytes());
         let entries = list_members(
             "pax-global-bytes",

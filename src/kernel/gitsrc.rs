@@ -255,7 +255,7 @@ fn run_git_with_activity(
         .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
 }
 
-// Reviewed site (tests/architecture.rs): tog's own verified Git fetches and its fixed, scrubbed index-only query, built here rather than supplied by a dependency tool.
+// Reviewed site (tests/architecture.rs): ward's own verified Git fetches and its fixed, scrubbed index-only query, built here rather than supplied by a dependency tool.
 #[allow(clippy::disallowed_methods)]
 fn supervise_git(
     command: &mut Command,
@@ -1434,7 +1434,7 @@ pub fn pack_checkout(
         use std::os::unix::ffi::OsStrExt;
         a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes())
     });
-    let list = work.join(".tog-filelist");
+    let list = work.join(".greyward-filelist");
     {
         use std::io::Write;
         use std::os::unix::ffi::OsStrExt;

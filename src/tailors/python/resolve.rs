@@ -1,4 +1,4 @@
-//! Python's resolution files, uv workspaces, and `tog attest` (python
+//! Python's resolution files, uv workspaces, and `ward attest` (python
 //! tailor): what a uv door writes and reads in a project, and the lock
 //! check a signed record attests.
 
@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// The files a uv door writes at a lock root: the project manifest and
-/// uv's lock, and the pip-compile pair and the lock tog compiles from a
+/// uv's lock, and the pip-compile pair and the lock ward compiles from a
 /// requirements file.
 const OUTPUTS: [&str; 5] = [
     "pyproject.toml",
@@ -24,7 +24,7 @@ const OUTPUTS: [&str; 5] = [
 
 /// Project files uv reads when it resolves and never writes: the setuptools
 /// metadata a project without `[project]` declares its dependencies in.
-const INPUTS: [&str; 3] = ["setup.cfg", "setup.py", "tog.toml"];
+const INPUTS: [&str; 3] = ["setup.cfg", "setup.py", "greyward.toml"];
 
 /// The requirements files whose `-r`/`-c` includes a door's uv reads.
 const REQUIREMENTS: [&str; 2] = ["requirements.in", "requirements.txt"];
@@ -109,7 +109,7 @@ fn includes(root: &ProjectRoot) -> io::Result<Includes> {
 }
 
 /// Whether a requirements file includes a file outside the project. uv
-/// then compiles the flattened text tog read, and the door publishes its
+/// then compiles the flattened text ward read, and the door publishes its
 /// lock with no record: a record names files inside the project only.
 pub(crate) fn has_external_includes(root: &ProjectRoot) -> io::Result<bool> {
     Ok(!includes(root)?.outside.is_empty())
@@ -225,7 +225,7 @@ fn compile(pattern: &str) -> io::Result<glob::Pattern> {
 
 /// The directories under the project a members entry names: the literal
 /// path, or every directory a glob matches. The walk follows no symlink
-/// and skips environments and tog's own state.
+/// and skips environments and ward's own state.
 fn expand(root: &ProjectRoot, pattern: &str) -> io::Result<Vec<String>> {
     let trimmed = pattern.trim_start_matches("./").trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "." {
@@ -247,7 +247,7 @@ fn expand(root: &ProjectRoot, pattern: &str) -> io::Result<Vec<String>> {
             continue;
         };
         for name in entries {
-            if [".venv", ".git", ".tog", "node_modules", "__pycache__"]
+            if [".venv", ".git", ".greyward", "node_modules", "__pycache__"]
                 .iter()
                 .any(|skip| name == *skip)
             {
@@ -298,11 +298,11 @@ pub(crate) fn lock_root(project: &Path) -> io::Result<PathBuf> {
     Ok(project.to_path_buf())
 }
 
-/// `tog attest` for Python. A `uv.lock` project runs `uv lock --locked`; a
-/// project tog compiles a requirements lock for reruns that same `uv pip
+/// `ward attest` for Python. A `uv.lock` project runs `uv lock --locked`; a
+/// project ward compiles a requirements lock for reruns that same `uv pip
 /// compile` and requires the lock byte-unchanged. Each goes through
 /// `door`'s transaction with the record's producer, and publishes nothing:
-/// `tog attest` publishes every record only once every check passed.
+/// `ward attest` publishes every record only once every check passed.
 pub(crate) fn attest_project(
     door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
@@ -316,7 +316,7 @@ pub(crate) fn attest_project(
     } else if project.is_input_file(Path::new("requirements.lock.txt")) {
         refuse_foreign_header(project, "requirements.lock.txt")?;
         // The input planning compiles the lock from: a requirements file,
-        // or the text tog generates from a pyproject or setup.cfg.
+        // or the text ward generates from a pyproject or setup.cfg.
         let input = super::inputs::lock_compile_input(project, toolchain, door)?;
         (
             compile_args(
@@ -349,8 +349,8 @@ pub(crate) fn attest_project(
             format!(
                 "{} has no lock a tool resolved (no uv.lock, requirements.lock.txt, or \
                  requirements.in with its compiled requirements.txt), so there is no lock check \
-                 to attest; run `tog` for an unpinned source; for a hand-hashed \
-                 requirements.txt, copy it to requirements.in and run `tog update` to \
+                 to attest; run `ward` for an unpinned source; for a hand-hashed \
+                 requirements.txt, copy it to requirements.in and run `ward update` to \
                  compile the pair; commit the result, then attest",
                 dir.display()
             ),
@@ -398,7 +398,7 @@ pub(crate) fn attest_project(
     )?;
     if !report.status.success() {
         return Err(err(format!(
-            "{lock} in {} is not what the lock check accepts, so it is not attested; run `tog` \
+            "{lock} in {} is not what the lock check accepts, so it is not attested; run `ward` \
              to bring it up to date and commit the result\n{}",
             dir.display(),
             crate::kernel::resolve::confine::scrub_signing_key(
@@ -410,22 +410,22 @@ pub(crate) fn attest_project(
     signed.ok_or_else(|| err("the Python lock check published no record".into()))
 }
 
-/// Refuse to check a compiled lock whose header is not tog's: rerunning
+/// Refuse to check a compiled lock whose header is not ward's: rerunning
 /// the compile would rewrite that header, so the check could never pass.
 fn refuse_foreign_header(project: &ProjectRoot, output: &str) -> io::Result<()> {
     let text = project
         .read_input_string(Path::new(output))?
         .unwrap_or_default();
-    if compiled_by_tog(&text) {
+    if compiled_by_ward(&text) {
         return Ok(());
     }
     let recovery = if output == "requirements.txt" {
-        "run `tog update` to compile it again"
+        "run `ward update` to compile it again"
     } else {
-        "delete only requirements.lock.txt and run `tog` to compile it again"
+        "delete only requirements.lock.txt and run `ward` to compile it again"
     };
     Err(io::Error::other(format!(
-        "{output} in {} was not compiled by tog (its header names another command), so \
+        "{output} in {} was not compiled by ward (its header names another command), so \
          rerunning the compile would rewrite it and the check cannot pass; \
          {recovery}, commit the result, then attest",
         project.path().display()
@@ -434,7 +434,7 @@ fn refuse_foreign_header(project: &ProjectRoot, output: &str) -> io::Result<()> 
 
 /// The `uv pip compile` arguments that write `output` from `input`, the
 /// same for the missing-lock door, an edit, and attest, so a rerun writes
-/// the same bytes: hashes, the locked interpreter's version, tog's header
+/// the same bytes: hashes, the locked interpreter's version, ward's header
 /// line, and quiet (the probe captures, and a failure shows uv's words).
 pub(crate) fn compile_args(input: &str, output: &str, python_version: &str) -> Vec<OsString> {
     [
@@ -455,10 +455,10 @@ pub(crate) fn compile_args(input: &str, output: &str, python_version: &str) -> V
     .collect()
 }
 
-/// Whether a compiled lock's header names tog's compile command (the one
+/// Whether a compiled lock's header names ward's compile command (the one
 /// [`compile_args`] gives uv). uv writes the command after its
 /// "autogenerated" line, indented, on a line of its own.
-pub(crate) fn compiled_by_tog(lock: &str) -> bool {
+pub(crate) fn compiled_by_ward(lock: &str) -> bool {
     lock.lines()
         .take(4)
         .any(|line| line.trim_start_matches('#').trim() == door::COMPILE_COMMAND)
@@ -587,10 +587,14 @@ mod tests {
         let inputs = resolution_inputs(&held).unwrap();
         assert!(inputs.contains(&PathBuf::from("requirements/cpu.txt")));
         assert!(inputs.contains(&PathBuf::from("requirements/common.txt")));
-        assert!(inputs.contains(&PathBuf::from("tog.toml")));
+        assert!(inputs.contains(&PathBuf::from("greyward.toml")));
         assert!(!has_external_includes(&held).unwrap());
 
-        write(&root, "tog.toml", "[python]\nrequirements = 'custom.in'\n");
+        write(
+            &root,
+            "greyward.toml",
+            "[python]\nrequirements = 'custom.in'\n",
+        );
         write(&root, "custom.in", "-c pins.txt\nsix\n");
         write(&root, "pins.txt", "six<2\n");
         let inputs = resolution_inputs(&held).unwrap();
@@ -599,7 +603,7 @@ mod tests {
         write(&temp.0, "external.in", "six\n");
         write(
             &root,
-            "tog.toml",
+            "greyward.toml",
             "[python]\nrequirements = '../external.in'\n",
         );
         assert!(has_external_includes(&held).unwrap());
@@ -638,22 +642,22 @@ mod tests {
         let pair = refuse_foreign_header(&root, "requirements.txt")
             .unwrap_err()
             .to_string();
-        assert!(pair.contains("run `tog update`"));
+        assert!(pair.contains("run `ward update`"));
         assert!(!pair.contains("delete"));
         let generated = refuse_foreign_header(&root, "requirements.lock.txt")
             .unwrap_err()
             .to_string();
-        assert!(generated.contains("delete only requirements.lock.txt and run `tog`"));
+        assert!(generated.contains("delete only requirements.lock.txt and run `ward`"));
     }
 
-    /// The header uv writes for `--custom-compile-command tog`, and one a
+    /// The header uv writes for `--custom-compile-command ward`, and one a
     /// direct run wrote.
     #[test]
-    fn a_lock_compiled_by_tog_is_recognized_by_its_header() {
-        let ours = "# This file was autogenerated by uv via the following command:\n#    tog\nsix==1.16.0 \\\n";
-        assert!(compiled_by_tog(ours));
+    fn a_lock_compiled_by_ward_is_recognized_by_its_header() {
+        let ours = "# This file was autogenerated by uv via the following command:\n#    ward\nsix==1.16.0 \\\n";
+        assert!(compiled_by_ward(ours));
         let theirs = "# This file was autogenerated by uv via the following command:\n#    uv pip compile requirements.in -o requirements.txt\nsix==1.16.0\n";
-        assert!(!compiled_by_tog(theirs));
+        assert!(!compiled_by_ward(theirs));
         let args = compile_args("requirements.in", "requirements.txt", "3.12.8");
         assert!(args.iter().any(|arg| arg == "--custom-compile-command"));
         assert_eq!(args.last().unwrap(), "requirements.txt");

@@ -21,7 +21,7 @@ pub(crate) const OUTPUTS: [&str; 2] = ["mix.exs", "mix.lock"];
 /// Fetched dependency sources and build output in the project: never
 /// copied into the snapshot, never diffed. A confined mix fetches into the
 /// run's scratch (`MIX_DEPS_PATH`) and builds nothing.
-pub(super) const EXCLUDE: [&str; 4] = ["deps", "_build", ".git", ".tog"];
+pub(super) const EXCLUDE: [&str; 4] = ["deps", "_build", ".git", ".greyward"];
 
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there.
@@ -66,7 +66,7 @@ pub(crate) fn elixir_tool(selected: &Selected) -> io::Result<crate::kernel::reso
     })
 }
 
-/// The store tool `args[0]` with tog's forced environment, its output
+/// The store tool `args[0]` with ward's forced environment, its output
 /// captured. The homes and the deps path are the run's scratch, set by the
 /// wiring.
 fn spec(run: &MixRun<'_>) -> DelegateSpec {

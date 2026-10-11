@@ -1,4 +1,4 @@
-//! `tog gc --drop-object` (kernel gc): the one deletion that happens outside
+//! `ward gc --drop-object` (kernel gc): the one deletion that happens outside
 //! the sweep, and the only way out of a store the sweep cannot read.
 //!
 //! The sweep is fail-closed by design: a record it cannot parse, or cannot
@@ -78,7 +78,7 @@ pub fn drop_objects<W: Write>(
         for entry in &droppable {
             writeln!(
                 out,
-                "tog: would drop object {} ({})",
+                "ward: would drop object {} ({})",
                 entry.id, entry.reason
             )?;
             dropped += 1;
@@ -108,7 +108,7 @@ pub fn drop_objects<W: Write>(
     }
     for entry in &droppable {
         remove_object(store, &entry.id)?;
-        writeln!(out, "tog: dropped object {} ({})", entry.id, entry.reason)?;
+        writeln!(out, "ward: dropped object {} ({})", entry.id, entry.reason)?;
         dropped += 1;
     }
     write_resync(&resync, false, out)?;
@@ -172,7 +172,7 @@ fn write_resync<W: Write>(resync: &Resync, dry_run: bool, out: &mut W) -> io::Re
     for (project, ids) in &resync.projects {
         writeln!(
             out,
-            "tog: project {} {verb} {}; run `tog sync` there to rebuild",
+            "ward: project {} {verb} {}; run `ward sync` there to rebuild",
             project.display(),
             ids.join(", ")
         )?;
@@ -180,15 +180,15 @@ fn write_resync<W: Write>(resync: &Resync, dry_run: bool, out: &mut W) -> io::Re
     for (key, why) in &resync.unknown {
         writeln!(
             out,
-            "tog: could not tell whether root {key} needs a dropped object ({why}); if its \
-             project used one, run `tog sync` there"
+            "ward: could not tell whether root {key} needs a dropped object ({why}); if its \
+             project used one, run `ward sync` there"
         )?;
     }
     if let Some(why) = &resync.registry {
         writeln!(
             out,
-            "tog: could not tell which projects need a dropped object, because the root \
-             registry could not be read ({why}); run `tog sync` in any project that used one"
+            "ward: could not tell which projects need a dropped object, because the root \
+             registry could not be read ({why}); run `ward sync` in any project that used one"
         )?;
     }
     Ok(())
@@ -288,8 +288,8 @@ fn eligible(
             io::ErrorKind::InvalidInput,
             format!(
                 "object {id} has usable metadata; the sweep decides whether it is needed. \
-                 Forget the roots that protect it (`tog store roots`, `tog gc --forget \
-                 <key>`) and run `tog gc`"
+                 Forget the roots that protect it (`ward store roots`, `ward gc --forget \
+                 <key>`) and run `ward gc`"
             ),
         ));
     }
@@ -338,7 +338,7 @@ fn refuse_if_still_depended_on(
         io::ErrorKind::InvalidInput,
         format!(
             "object {id} is a proven dependency of {outside} other object(s); drop the whole \
-             set: `tog gc --drop-object {}`",
+             set: `ward gc --drop-object {}`",
             whole_set.into_iter().collect::<Vec<_>>().join(" ")
         ),
     ))
@@ -449,7 +449,7 @@ mod drop_tests {
         register_objects(&store, &temp.root.join("app"), &[rooted.as_str()]);
         let project = temp.root.join("app").canonicalize().unwrap();
         let resync = format!(
-            "tog: project {} {{}} {rooted}; run `tog sync` there to rebuild\n",
+            "ward: project {} {{}} {rooted}; run `ward sync` there to rebuild\n",
             project.display()
         );
         let ids = [rooted.clone(), loose.clone()];
@@ -486,7 +486,7 @@ mod drop_tests {
         let (count, text) = exclusive(&store, std::slice::from_ref(&id), false);
         assert_eq!(count.unwrap(), 1, "{text}");
         let could_not_tell =
-            |key: &str| format!("tog: could not tell whether root {key} needs a dropped object (");
+            |key: &str| format!("ward: could not tell whether root {key} needs a dropped object (");
         assert!(
             text.contains(&format!(
                 "{}its record is unusable: a pathname-only record",
@@ -508,9 +508,9 @@ mod drop_tests {
 
         fs::write(store.root.join("roots").join("notes.txt"), b"x").unwrap();
         let id = bare(&store, "after");
-        let line = "tog: could not tell which projects need a dropped object, because the \
+        let line = "ward: could not tell which projects need a dropped object, because the \
                     root registry could not be read (unexpected root registry entry \
-                    notes.txt; remove it manually before sweeping); run `tog sync` in any \
+                    notes.txt; remove it manually before sweeping); run `ward sync` in any \
                     project that used one\n";
         for dry_run in [true, false] {
             let (count, text) = exclusive(&store, std::slice::from_ref(&id), dry_run);
@@ -718,8 +718,8 @@ mod drop_tests {
         assert_eq!(
             text,
             format!(
-                "tog: would drop object {wedged} ({})\n\
-                 tog: would drop object {bare} (object without metadata)\n",
+                "ward: would drop object {wedged} ({})\n\
+                 ward: would drop object {bare} (object without metadata)\n",
                 mismatch(&wedged)
             )
         );
@@ -767,7 +767,7 @@ mod drop_tests {
             );
             assert!(
                 error.contains(&format!(
-                    "remove it with `{line}`, then drop the object it leaves behind with `tog \
+                    "remove it with `{line}`, then drop the object it leaves behind with `ward \
                      gc --drop-object {id}`, or restore the file from a backup"
                 )),
                 "{shape}: {error}"
@@ -815,7 +815,7 @@ mod drop_tests {
         assert_eq!(count.unwrap(), 1, "{text}");
         assert_eq!(
             text,
-            format!("tog: dropped object {id} ({})\n", mismatch(&id))
+            format!("ward: dropped object {id} ({})\n", mismatch(&id))
         );
         assert!(!store.object_path(&id).exists(), "{text}");
         assert!(!record_path(&store, &id).exists(), "{text}");

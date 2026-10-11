@@ -1,4 +1,4 @@
-# Runs the tog GitHub Action (action.yml at the repository root) the way an
+# Runs the ward GitHub Action (action.yml at the repository root) the way an
 # outside repository would, against .github/action-demo: install the
 # latest release, sync under the company policy, audit, SBOM. One leg
 # keeps the store in the cache, one runs the signed gate.
@@ -46,7 +46,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # A key made here, not with `tog keygen`: tog is not installed until
+      # A key made here, not with `ward keygen`: ward is not installed until
       # the action runs. The key file is `ed25519:<seed hex>`, the policy
       # names `ed25519:<public key hex>`, and openssl's DER forms end in
       # those 32 bytes.
@@ -62,13 +62,13 @@ jobs:
           rm -f "$der"
           # Not masked: GitHub drops a step output that holds a masked
           # value, and this key is made for this job and thrown away.
-          policy="$RUNNER_TEMP/tog-policy.toml"
+          policy="$RUNNER_TEMP/greyward-policy.toml"
           cp docs/human/policy-company.toml "$policy"
           printf '\n[signing]\ntrusted = ["ed25519:%s"]\n' "$public" >> "$policy"
           echo "key=ed25519:$seed" >> "$GITHUB_OUTPUT"
           echo "policy=$policy" >> "$GITHUB_OUTPUT"
       - uses: ./
-        id: tog
+        id: ward
         with:
           working-directory: .github/action-demo
           sbom-artifact: sbom-${{ matrix.os }}${{ matrix.signed && '-signed' || '' }}
@@ -79,21 +79,21 @@ jobs:
       - name: The environment runs, under the policy the action set
         working-directory: .github/action-demo
         env:
-          TOG_VERSION_LINE: ${{ steps.tog.outputs.version }}
-          TOG_SBOM: ${{ steps.tog.outputs.sbom }}
-          TOG_EXPECTED_POLICY: ${{ steps.key.outputs.policy || format('{0}/docs/human/policy-company.toml', github.workspace) }}
+          GREYWARD_VERSION_LINE: ${{ steps.ward.outputs.version }}
+          GREYWARD_SBOM: ${{ steps.ward.outputs.sbom }}
+          GREYWARD_EXPECTED_POLICY: ${{ steps.key.outputs.policy || format('{0}/docs/human/policy-company.toml', github.workspace) }}
         run: |
           set -euo pipefail
-          echo "$TOG_VERSION_LINE"
-          case "$TOG_VERSION_LINE" in "tog "*) ;; *) exit 1 ;; esac
-          test "$TOG_POLICY" = "$(realpath "$TOG_EXPECTED_POLICY")"
-          tog run python -c 'import six; print("six", six.__version__)'
-          jq -e '.bomFormat == "CycloneDX"' "$TOG_SBOM"
-          tog status
+          echo "$GREYWARD_VERSION_LINE"
+          case "$GREYWARD_VERSION_LINE" in "ward "*) ;; *) exit 1 ;; esac
+          test "$GREYWARD_POLICY" = "$(realpath "$GREYWARD_EXPECTED_POLICY")"
+          ward run python -c 'import six; print("six", six.__version__)'
+          jq -e '.bomFormat == "CycloneDX"' "$GREYWARD_SBOM"
+          ward status
       - name: Every closure is signed by the trusted key
         if: matrix.signed
         working-directory: .github/action-demo
         run: |
           set -euo pipefail
-          tog audit --signed --json | jq -e '.passed and (.closures | length > 0) and all(.closures[]; .signature.state == "trusted")'
-          test ! -e "$RUNNER_TEMP/tog-signing.key"
+          ward audit --signed --json | jq -e '.passed and (.closures | length > 0) and all(.closures[]; .signature.state == "trusted")'
+          test ! -e "$RUNNER_TEMP/greyward-signing.key"

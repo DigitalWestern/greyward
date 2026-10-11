@@ -68,14 +68,14 @@ struct Cache {
 }
 
 /// The host cache at `host_cache`, rewritten for `moved` (see the module
-/// documentation). A host without a cache, or with one tog cannot read or
+/// documentation). A host without a cache, or with one ward cannot read or
 /// parse, gets one of the moved libraries alone; the second is noted.
 pub(crate) fn for_view(host_cache: &Path, moved: &[MovedLibrary]) -> io::Result<Vec<u8>> {
     let (cache, unusable) = read_host(host_cache)?;
     if let Some(reason) = unusable {
         crate::kernel::ui::note(&format!(
             "the host's dynamic loader cache {} cannot be used ({reason}); the sandbox's \
-             cache names only the host libraries tog moved out of the linker's reach",
+             cache names only the host libraries ward moved out of the linker's reach",
             host_cache.display()
         ));
     }
@@ -213,7 +213,7 @@ fn libcmp(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
 }
 
 /// Whether the ELF file at `path` has the class, byte order and machine of
-/// the running tog, which is of the host's own ABI.
+/// the running ward, which is of the host's own ABI.
 fn native_abi(path: &Path) -> bool {
     let ident = |path: &Path| -> Option<[u8; 20]> {
         let mut header = [0u8; 20];
@@ -500,7 +500,7 @@ mod tests {
         };
         let moved = |name: &str| MovedLibrary {
             host: lib.join(name),
-            inside: Path::new("/usr/lib64/.tog-host-runtime").join(name),
+            inside: Path::new("/usr/lib64/.greyward-host-runtime").join(name),
         };
         let relocated = relocate(cache, &[moved("libnss3.so"), moved("libbfd.so")]);
         assert_eq!(
@@ -509,12 +509,12 @@ mod tests {
         );
         assert_eq!(
             relocated.entries[1].value,
-            b"/usr/lib64/.tog-host-runtime/libnss3.so"
+            b"/usr/lib64/.greyward-host-runtime/libnss3.so"
         );
         assert_eq!(relocated.entries[2].value, b"/elsewhere/libbfd.so");
         assert_eq!(
             relocated.entries[3].value,
-            b"/usr/lib64/.tog-host-runtime/libbfd.so"
+            b"/usr/lib64/.greyward-host-runtime/libbfd.so"
         );
         assert_eq!(relocated.entries[3].flags, 0x0a03);
     }
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(read_host(&host.0.join("absent")).unwrap().1, None);
     }
 
-    /// A host cache tog cannot parse or read is no reason to give up the
+    /// A host cache ward cannot parse or read is no reason to give up the
     /// view: the cache is built from the moved libraries alone, as for a
     /// host without one, and the reason is kept for the note.
     #[test]

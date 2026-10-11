@@ -218,7 +218,7 @@ pub fn preflight(platform: Platform) -> io::Result<()> {
 }
 
 /// The recipe id this tailor knows how to lay out. A lock row naming
-/// anything else was written by a tog that extracts or relocates the Node
+/// anything else was written by a ward that extracts or relocates the Node
 /// archive differently.
 const NODE_RECIPE: &str = "nodejs/legacy";
 
@@ -687,7 +687,7 @@ fn bin_link_target(path: &str, bin: &str) -> PathBuf {
     )
 }
 
-/// A project-declared build input: a URL + sha256 that tog prefetches
+/// A project-declared build input: a URL + sha256 that ward prefetches
 /// into the verified artifact cache and plants at `path` (relative to the
 /// sandbox HOME) before install scripts run. This is how packages that
 /// "download prebuilt binaries at install time" (old sharp, etc.) build
@@ -703,37 +703,37 @@ pub struct DeclaredArtifact {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct TogConfig {
+pub struct GreywardConfig {
     pub mutable_packages: Vec<String>,
     pub artifacts: Vec<DeclaredArtifact>,
 }
 
-/// Strictly parse the optional `"tog"` config field of package.json.
+/// Strictly parse the optional `"greyward"` config field of package.json.
 /// Unknown keys and malformed values are hard errors: this config weakens
 /// or extends the trust boundary, so typos must not be silently ignored.
-pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
+pub fn parse_greyward_config(pkg_json: &str) -> io::Result<GreywardConfig> {
     let v: serde_json::Value =
         serde_json::from_str(pkg_json).map_err(|e| err(format!("package.json: {e}")))?;
-    let cfg = match v.get("tog") {
-        None => return Ok(TogConfig::default()),
+    let cfg = match v.get("greyward") {
+        None => return Ok(GreywardConfig::default()),
         Some(c) => c
             .as_object()
-            .ok_or_else(|| err("package.json: \"tog\" must be an object"))?,
+            .ok_or_else(|| err("package.json: \"greyward\" must be an object"))?,
     };
     for key in cfg.keys() {
         if key != "mutablePackages" && key != "artifacts" {
-            return Err(err(format!("package.json: unknown tog key {key:?}")));
+            return Err(err(format!("package.json: unknown ward key {key:?}")));
         }
     }
-    let mut out = TogConfig::default();
+    let mut out = GreywardConfig::default();
     if let Some(list) = cfg.get("mutablePackages") {
         let arr = list
             .as_array()
-            .ok_or_else(|| err("tog.mutablePackages must be an array"))?;
+            .ok_or_else(|| err("greyward.mutablePackages must be an array"))?;
         for item in arr {
             let name = item
                 .as_str()
-                .ok_or_else(|| err("tog.mutablePackages entries must be strings"))?;
+                .ok_or_else(|| err("greyward.mutablePackages entries must be strings"))?;
             let bare = name.strip_prefix('@').unwrap_or(name);
             let ok = !name.is_empty()
                 && name.matches('/').count() == if name.starts_with('@') { 1 } else { 0 }
@@ -741,7 +741,7 @@ pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c));
             if !ok {
-                return Err(err(format!("tog.mutablePackages: bad name {name:?}")));
+                return Err(err(format!("greyward.mutablePackages: bad name {name:?}")));
             }
             out.mutable_packages.push(name.to_string());
         }
@@ -749,23 +749,27 @@ pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
     if let Some(list) = cfg.get("artifacts") {
         let arr = list
             .as_array()
-            .ok_or_else(|| err("tog.artifacts must be an array"))?;
+            .ok_or_else(|| err("greyward.artifacts must be an array"))?;
         for item in arr {
             let url = item["url"].as_str().unwrap_or_default();
             let sha256 = item["sha256"].as_str().unwrap_or_default();
             let path = item["path"].as_str().unwrap_or_default();
             if url_credentials(url) {
-                return Err(url_credentials_refusal("tog.artifacts", url));
+                return Err(url_credentials_refusal("greyward.artifacts", url));
             }
             if !url.starts_with("https://") {
-                return Err(err(format!("tog.artifacts: url must be https ({url:?})")));
+                return Err(err(format!(
+                    "greyward.artifacts: url must be https ({url:?})"
+                )));
             }
             if sha256.len() != 64
                 || !sha256
                     .chars()
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
             {
-                return Err(err("tog.artifacts: sha256 must be 64 lowercase hex chars"));
+                return Err(err(
+                    "greyward.artifacts: sha256 must be 64 lowercase hex chars",
+                ));
             }
             let path_ok = !path.is_empty()
                 && !path.starts_with('/')
@@ -773,7 +777,7 @@ pub fn parse_tog_config(pkg_json: &str) -> io::Result<TogConfig> {
                     .split('/')
                     .all(|c| !c.is_empty() && c != "." && c != "..");
             if !path_ok {
-                return Err(err(format!("tog.artifacts: unsafe path {path:?}")));
+                return Err(err(format!("greyward.artifacts: unsafe path {path:?}")));
             }
             out.artifacts.push(DeclaredArtifact {
                 url: url.into(),
@@ -1398,7 +1402,7 @@ mod tests {
 
     #[test]
     fn patch_identity_spelling_binds_pnpm_9_content_by_sha256() {
-        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
+        let store = Store::for_test(PathBuf::from("/nonexistent/greyward-test-store"));
         let node_obj = PathBuf::from("/nonexistent/nodejs");
         let identity_for = |patch: NpmPatch| {
             let plan = NpmPlan {
@@ -1458,7 +1462,7 @@ mod tests {
 
     #[test]
     fn darwin_binding_gyp_keeps_legacy_identity_inputs() {
-        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
+        let store = Store::for_test(PathBuf::from("/nonexistent/greyward-test-store"));
         assert_eq!(
             native_libs_identity_id(&store, Platform::Aarch64AppleDarwin, true).unwrap(),
             None
@@ -1949,7 +1953,7 @@ mod tests {
     /// access or download.
     #[test]
     fn realize_node_env_labels_a_runtime_failure_and_keeps_its_kind() {
-        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
+        let store = Store::for_test(PathBuf::from("/nonexistent/greyward-test-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let plan = NpmPlan {
             node_version: "24.20.0".into(),
@@ -2037,7 +2041,7 @@ mod tests {
 
     #[test]
     fn realize_node_env_rejects_foreign_platform_before_store_access() {
-        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
+        let store = Store::for_test(PathBuf::from("/nonexistent/greyward-test-store"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         let plan = NpmPlan {
@@ -2170,9 +2174,9 @@ mod tests {
     fn previous_workspace_set_drops_workspace_local_package_entries() {
         let scratch = TempDir::named("prev-ws");
         let dir = scratch.0.clone();
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         fs::write(
-            dir.join(".tog/closures/node.json"),
+            dir.join(".greyward/closures/node.json"),
             r#"{"body":{"workspaces":["packages/lib","packages/lib/node_modules/c","tools/node_modules-shim"]}}"#,
         )
         .unwrap();
@@ -2342,7 +2346,7 @@ mod tests {
             .is_symlink());
 
         let envelope: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+            &fs::read_to_string(project.join(".greyward/closures/node.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(envelope["schema"], "closure/1");
@@ -2430,7 +2434,7 @@ mod tests {
         attribution.finish(true).unwrap();
 
         let envelope: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+            &fs::read_to_string(project.join(".greyward/closures/node.json")).unwrap(),
         )
         .unwrap();
         let closure = &envelope["body"];
@@ -2898,7 +2902,7 @@ mod tests {
     #[test]
     fn darwin_restriction_lists_follow_npm_semantics_too() {
         // One filter for both hosts: npm's checkList does not depend on the
-        // platform it runs on, so neither does tog's.
+        // platform it runs on, so neither does ward's.
         let cases = [
             (r#"["darwin"]"#, true),
             (r#"["linux"]"#, false),
@@ -2926,7 +2930,7 @@ mod tests {
         assert!(plan_npm(Platform::Aarch64AppleDarwin, &l).is_ok());
     }
 
-    /// npm refuses a required package this host cannot run, so tog does, and
+    /// npm refuses a required package this host cannot run, so ward does, and
     /// the refusal says so: for a package-lock the fix is in the manifest.
     #[test]
     fn a_required_foreign_package_in_a_package_lock_is_refused_as_npm_refuses_it() {
@@ -3232,7 +3236,7 @@ mod tests {
     }
 
     fn project_workspace_peer(project: &Path, env: &Path, plan: &NpmPlan) -> io::Result<()> {
-        // An explicit permissive policy: TOG_STRICT=1 in the environment
+        // An explicit permissive policy: GREYWARD_STRICT=1 in the environment
         // would otherwise refuse the clone exception these tests expect.
         let mut attribution = crate::kernel::policy::Attribution::open("node")
             .unwrap()
@@ -3303,7 +3307,7 @@ mod tests {
         assert!(!env.join("node_modules/plugin/node_modules").exists());
 
         let envelope: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+            &fs::read_to_string(project.join(".greyward/closures/node.json")).unwrap(),
         )
         .unwrap();
         let closure = &envelope["body"];
@@ -3387,7 +3391,7 @@ mod tests {
                 "{manifest}"
             );
             let envelope: serde_json::Value = serde_json::from_str(
-                &fs::read_to_string(project.join(".tog/closures/node.json")).unwrap(),
+                &fs::read_to_string(project.join(".greyward/closures/node.json")).unwrap(),
             )
             .unwrap();
             let expected = if cloned {
@@ -3467,46 +3471,48 @@ mod tests {
     }
 
     #[test]
-    fn tog_config_parsing() {
-        let empty = parse_tog_config(r#"{"name":"x"}"#).unwrap();
+    fn ward_config_parsing() {
+        let empty = parse_greyward_config(r#"{"name":"x"}"#).unwrap();
         assert!(empty.mutable_packages.is_empty() && empty.artifacts.is_empty());
-        let ok =
-            parse_tog_config(r#"{"tog":{"mutablePackages":["b","@prisma/engines","b"]}}"#).unwrap();
+        let ok = parse_greyward_config(
+            r#"{"greyward":{"mutablePackages":["b","@prisma/engines","b"]}}"#,
+        )
+        .unwrap();
         assert_eq!(
             ok.mutable_packages,
             vec!["@prisma/engines".to_string(), "b".to_string()]
         );
         let refused = |config: &str, needle: &str| {
-            let error = parse_tog_config(config).expect_err(&format!("accepted {config}"));
+            let error = parse_greyward_config(config).expect_err(&format!("accepted {config}"));
             assert!(error.to_string().contains(needle), "{needle:?}: {error}");
         };
         // unknown key, bad names, wrong types: hard errors
         refused(
-            r#"{"tog":{"mutable":["a"]}}"#,
-            "unknown tog key \"mutable\"",
+            r#"{"greyward":{"mutable":["a"]}}"#,
+            "unknown ward key \"mutable\"",
         );
         refused(
-            r#"{"tog":{"mutablePackages":["../x"]}}"#,
+            r#"{"greyward":{"mutablePackages":["../x"]}}"#,
             "bad name \"../x\"",
         );
         refused(
-            r#"{"tog":{"mutablePackages":"a"}}"#,
-            "tog.mutablePackages must be an array",
+            r#"{"greyward":{"mutablePackages":"a"}}"#,
+            "greyward.mutablePackages must be an array",
         );
-        refused(r#"{"tog":{"mutablePackages":[""]}}"#, "bad name \"\"");
-        refused(r#"{"tog":[]}"#, "\"tog\" must be an object");
+        refused(r#"{"greyward":{"mutablePackages":[""]}}"#, "bad name \"\"");
+        refused(r#"{"greyward":[]}"#, "\"greyward\" must be an object");
         // artifacts: happy path + validation
-        let a = parse_tog_config(
-            r#"{"tog":{"artifacts":[{"url":"https://x/y.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":".npm/_libvips/y.tar"}]}}"#,
+        let a = parse_greyward_config(
+            r#"{"greyward":{"artifacts":[{"url":"https://x/y.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":".npm/_libvips/y.tar"}]}}"#,
         )
         .unwrap();
         assert_eq!(a.artifacts.len(), 1);
         refused(
-            r#"{"tog":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#,
+            r#"{"greyward":{"artifacts":[{"url":"http://x/y","sha256":"00","path":"p"}]}}"#,
             "url must be https",
         );
         refused(
-            r#"{"tog":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#,
+            r#"{"greyward":{"artifacts":[{"url":"https://x/y","sha256":"0000000000000000000000000000000000000000000000000000000000000000","path":"../evil"}]}}"#,
             "unsafe path \"../evil\"",
         );
         // A URL with credentials is refused without echoing them, whatever
@@ -3516,8 +3522,8 @@ mod tests {
             "http://user:secret@x/y",
             "https:user:secret@x/y",
         ] {
-            let error = parse_tog_config(&format!(
-                r#"{{"tog":{{"artifacts":[{{"url":"{url}","sha256":"00","path":"p"}}]}}}}"#
+            let error = parse_greyward_config(&format!(
+                r#"{{"greyward":{{"artifacts":[{{"url":"{url}","sha256":"00","path":"p"}}]}}}}"#
             ))
             .unwrap_err()
             .to_string();
@@ -3691,7 +3697,7 @@ mod git_url_tests {
 mod toolchain_tests {
     use super::*;
 
-    /// A selection whose Node row names a layout this tog does not
+    /// A selection whose Node row names a layout this ward does not
     /// implement: the bytes it locked are not the bytes this code would
     /// produce, so realization refuses instead of guessing.
     fn with_recipe(platform: Platform, recipe: &str) -> Selected {
@@ -3706,7 +3712,7 @@ mod toolchain_tests {
 
     #[test]
     fn realization_refuses_an_unknown_recipe_and_another_ecosystem() {
-        let store = Store::for_test(std::env::temp_dir().join("tog-node-recipe-refusal"));
+        let store = Store::for_test(std::env::temp_dir().join("greyward-node-recipe-refusal"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         // The row check is per platform; realization can only run for the
@@ -3716,7 +3722,7 @@ mod toolchain_tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("recipe nodejs/2"), "{error}");
-            assert!(error.contains("upgrade tog"), "{error}");
+            assert!(error.contains("upgrade ward"), "{error}");
         }
         let platform = Platform::host().unwrap();
         let error = realize_runtime(

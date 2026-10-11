@@ -108,9 +108,9 @@ pub fn ls(dir: &Path, filter: Option<&str>, json: bool, verbose: bool) -> io::Re
     if listings.is_empty() {
         let message = match filter {
             Some(name) if !closures(dir)?.is_empty() => {
-                format!("no {name} closure here; 'tog ls' lists what is synced")
+                format!("no {name} closure here; 'ward ls' lists what is synced")
             }
-            _ => "nothing synced here; run 'tog' first".to_string(),
+            _ => "nothing synced here; run 'ward' first".to_string(),
         };
         return Err(io::Error::new(io::ErrorKind::NotFound, message));
     }
@@ -216,7 +216,7 @@ impl EcosystemStatus {
     }
 }
 
-/// `tog status` for `dir`: the project is opened once and every read the
+/// `ward status` for `dir`: the project is opened once and every read the
 /// report makes goes through that descriptor.
 pub fn status(platform: Platform, dir: &Path) -> io::Result<Vec<EcosystemStatus>> {
     match open_project(dir)? {
@@ -288,15 +288,15 @@ pub fn status_in(platform: Platform, project: &ProjectRoot) -> io::Result<Vec<Ec
     Ok(rows)
 }
 
-/// The state of one closure file as `tog status` reports it and `tog audit`
+/// The state of one closure file as `ward status` reports it and `ward audit`
 /// judges it: the record's own `closure_state`, combined with what the
-/// committed `tog-toolchain.toml` says about the ecosystem that wrote it.
+/// committed `greyward-toolchain.toml` says about the ecosystem that wrote it.
 /// One function, so the gate can never pass a record that `status` calls
 /// out of step with the lock.
 ///
 /// A lock verdict that a writable sync would refuse (stale rows, no
 /// section) is reported first: the closure may also say a source changed,
-/// but "run 'tog'" would only reach the refusal, and the lock's line names
+/// but "run 'ward'" would only reach the refusal, and the lock's line names
 /// the verb that moves it. Otherwise the closure state decides, and only a
 /// `Synced` closure is downgraded to what the lock has to add.
 pub fn locked_closure_state(
@@ -341,7 +341,7 @@ pub fn resolution_state(project: &ProjectRoot, closure: &ClosureFile) -> Option<
         Ok(changed) if changed.is_empty() => None,
         Ok(changed) => Some(State::Changed(changed)),
         Err(why) => Some(State::Unchecked(format!(
-            "the resolution record cannot be compared with the lock: {why}; run 'tog'"
+            "the resolution record cannot be compared with the lock: {why}; run 'ward'"
         ))),
     }
 }
@@ -457,7 +457,7 @@ fn helper_state(project: &ProjectRoot, ecosystem: &str, body: &Value) -> io::Res
 
 /// Whether every entry of a `Changed` state is a toolchain-lock finding.
 /// Such a line already carries its own next step, and it is not always the
-/// bare `tog`, so `status` and `audit` print it as written rather than
+/// bare `ward`, so `status` and `audit` print it as written rather than
 /// wrapping it in the dependency-input sentence.
 pub fn only_lock_findings(files: &[String]) -> bool {
     !files.is_empty() && files.iter().all(|file| file.starts_with(LOCK_PATH))
@@ -466,7 +466,7 @@ pub fn only_lock_findings(files: &[String]) -> bool {
 /// What the toolchain lock adds to a status row, and whether a plain
 /// sync would stop at it: a missing lock is created by the next
 /// writable sync and a changed bundle is re-projected by it, but stale
-/// rows and a missing section are only moved by `tog update --toolchain`.
+/// rows and a missing section are only moved by `ward update --toolchain`.
 struct LockVerdict {
     state: State,
     refuses_sync: bool,
@@ -481,13 +481,13 @@ impl LockVerdict {
     }
 }
 
-/// What the committed `tog-toolchain.toml` says about one detected
+/// What the committed `greyward-toolchain.toml` says about one detected
 /// ecosystem, if anything: `None` means the lock agrees with both the
 /// project and the closure.
 ///
 /// The comparison is the same one a sync would refuse over — re-derive
 /// every consulted row and compare presence and value, never the source
-/// file's digest alone — so `tog status` predicts the next sync rather than
+/// file's digest alone — so `ward status` predicts the next sync rather than
 /// having a second opinion about staleness.
 fn toolchain_lock_state(
     project: &ProjectRoot,
@@ -500,7 +500,7 @@ fn toolchain_lock_state(
     let lock_ecosystem = tailor.lock_ecosystem();
     let Some(lock) = ToolchainLock::read_via(project)? else {
         return Ok(LockVerdict::changed(
-            vec![format!("{LOCK_PATH} (missing; run 'tog' to create it)")],
+            vec![format!("{LOCK_PATH} (missing; run 'ward' to create it)")],
             false,
         ));
     };
@@ -508,7 +508,7 @@ fn toolchain_lock_state(
         return Ok(LockVerdict::changed(
             vec![format!(
                 "{LOCK_PATH} (no [toolchain.{lock_ecosystem}] section; \
-                 run 'tog update --toolchain {lock_ecosystem}')"
+                 run 'ward update --toolchain {lock_ecosystem}')"
             )],
             true,
         ));
@@ -532,7 +532,7 @@ fn toolchain_lock_state(
                 .iter()
                 .map(|row| {
                     format!(
-                        "{LOCK_PATH} stale: {row}; run 'tog update --toolchain {lock_ecosystem}'"
+                        "{LOCK_PATH} stale: {row}; run 'ward update --toolchain {lock_ecosystem}'"
                     )
                 })
                 .collect(),
@@ -544,14 +544,14 @@ fn toolchain_lock_state(
     // answer every other unrecorded field gets.
     let Some(recorded) = body["toolchain"]["bundle_id"].as_str() else {
         return Ok(Some(LockVerdict {
-            state: State::Unchecked("toolchain not recorded by this sync; run 'tog' once".into()),
+            state: State::Unchecked("toolchain not recorded by this sync; run 'ward' once".into()),
             refuses_sync: false,
         }));
     };
     if recorded != section.bundle_id() {
         return Ok(LockVerdict::changed(
             vec![format!(
-                "{LOCK_PATH} (toolchain changed since the last sync; run 'tog')"
+                "{LOCK_PATH} (toolchain changed since the last sync; run 'ward')"
             )],
             false,
         ));
@@ -627,19 +627,19 @@ pub fn render_status(dir: &Path, rows: &[EcosystemStatus], json: bool) -> io::Re
     for row in rows {
         let line = match &row.state {
             State::Synced => format!("synced      ({})", row.summary),
-            State::NotSynced => "not synced  run 'tog'".to_string(),
+            State::NotSynced => "not synced  run 'ward'".to_string(),
             State::Changed(files) if only_lock_findings(files) => {
                 format!("changed     {}", files.join(", "))
             }
             State::Changed(files) => format!(
-                "changed     {} since the last sync; run 'tog'",
+                "changed     {} since the last sync; run 'ward'",
                 files.join(", ")
             ),
             State::ProjectionMissing(what) => {
-                format!("missing     {what} is not the synced projection; run 'tog'")
+                format!("missing     {what} is not the synced projection; run 'ward'")
             }
             State::ForeignPlatform(platform) => {
-                format!("elsewhere   last synced on {platform}, not on this host; run 'tog'")
+                format!("elsewhere   last synced on {platform}, not on this host; run 'ward'")
             }
             State::Unchecked(why) => format!("unchecked   {why}"),
         };
@@ -697,7 +697,7 @@ fn printable(text: &str) -> String {
         .collect()
 }
 
-/// The last line (or three) of `tog status`: what the rows add up to, and
+/// The last line (or three) of `ward status`: what the rows add up to, and
 /// what the words that are not `synced` mean. A reader who scrolled past
 /// the rows should not have to count them, and a state the binary could not
 /// check has to say so where the verdict is read.
@@ -726,7 +726,7 @@ fn verdict(rows: &[EcosystemStatus]) -> String {
     if rows.iter().any(|row| row.word() == "unchecked") {
         out.push_str(
             "unchecked: this closure could not be compared (the row says why), so it\n\
-             is not a pass; run 'tog' once to rewrite it.\n",
+             is not a pass; run 'ward' once to rewrite it.\n",
         );
     }
     if rows.iter().any(|row| row.word() == "foreign-platform") {
@@ -750,7 +750,7 @@ fn exceptions_line(rows: &[EcosystemStatus]) -> String {
     }
     format!(
         "{total} policy exception(s) recorded: what a sync allowed that it cannot vouch for;\n\
-         'tog audit' says whether your policy permits them.\n"
+         'ward audit' says whether your policy permits them.\n"
     )
 }
 
@@ -859,7 +859,7 @@ fn host_platform_check(checks: &mut Vec<Check>) -> Option<Platform> {
             checks.push(check(
                 "platform",
                 Level::Fail,
-                format!("{error}; tog supports macOS arm64 and Linux x86_64"),
+                format!("{error}; ward supports macOS arm64 and Linux x86_64"),
             ));
             None
         }
@@ -903,7 +903,7 @@ fn store_writable_check(store: &Store, checks: &mut Vec<Check>) {
             "store",
             Level::Fail,
             format!(
-                "{} is not writable: {error}; set TOG_STORE to a directory you own",
+                "{} is not writable: {error}; set GREYWARD_STORE to a directory you own",
                 store.root.display()
             ),
         )),
@@ -922,7 +922,7 @@ fn disk_check(store: &Store, checks: &mut Vec<Check>) {
                 Level::Ok
             };
             let hint = if level == Level::Warn {
-                "; toolchains and native library sets need several GiB, 'tog gc' frees space"
+                "; toolchains and native library sets need several GiB, 'ward gc' frees space"
             } else {
                 ""
             };
@@ -942,7 +942,7 @@ fn toolchains_check(store: &Store, checks: &mut Vec<Check>) {
         Ok(toolchains) if toolchains.is_empty() => checks.push(check(
             "toolchains",
             Level::Ok,
-            "none realized yet; the first 'tog' downloads what the project needs",
+            "none realized yet; the first 'ward' downloads what the project needs",
         )),
         Ok(toolchains) => checks.push(check("toolchains", Level::Ok, toolchains.join(", "))),
         Err(error) => checks.push(check("toolchains", Level::Warn, error.to_string())),
@@ -967,7 +967,7 @@ fn store_checks(store: DoctorStore, checks: &mut Vec<Check>) {
                 "store",
                 Level::Warn,
                 format!(
-                    "a Tog job is using the store at {}; its checks were skipped, run 'tog \
+                    "a Greyward job is using the store at {}; its checks were skipped, run 'ward \
                      doctor' again when the job finishes",
                     store.root.display()
                 ),
@@ -989,9 +989,9 @@ fn store_checks(store: DoctorStore, checks: &mut Vec<Check>) {
 }
 
 /// Why the store row fails when the store was not opened. A store written
-/// in a format this tog does not read, or whose marker cannot be read, is a
+/// in a format this ward does not read, or whose marker cannot be read, is a
 /// refusal: the row gives its reason and keeps the command that is the way
-/// out. Any other error names the path, the cause, and TOG_STORE already.
+/// out. Any other error names the path, the cause, and GREYWARD_STORE already.
 fn unopened_store_detail(error: &io::Error) -> String {
     match crate::kernel::store::refusal_fix(error) {
         Some(fix) => format!("{error}; run '{fix}'"),
@@ -1053,13 +1053,13 @@ fn platform_checks(platform: Platform, project: Option<&ProjectRoot>, checks: &m
         Err(error) => checks.push(check(
             "sandbox",
             Level::Fail,
-            format!("{error}; sdists, npm install scripts, and 'tog build' need it"),
+            format!("{error}; sdists, npm install scripts, and 'ward build' need it"),
         )),
     }
     c_toolchain_check(platform, checks);
 }
 
-/// `tog doctor --isolation`: the engines that can isolate a lock-changing
+/// `ward doctor --isolation`: the engines that can isolate a lock-changing
 /// tool, strongest first, and whether any can. The container engine is
 /// probed through the store lease, so a store that cannot be opened or is
 /// busy leaves that row unknown (a warning). An interrupt during a probe is
@@ -1135,36 +1135,36 @@ pub fn isolation_doctor(store: DoctorStore) -> io::Result<Vec<Check>> {
     checks.push(check(
         "isolation-helper",
         if any { Level::Ok } else { Level::Fail },
-        "tog-isolate is not part of this build of tog; bubblewrap or podman isolates instead",
+        "greyward-isolate is not part of this build of ward; bubblewrap or podman isolates instead",
     ));
     Ok(checks)
 }
 
 /// Which policy sources are in force, in the order they are consulted.
 fn policy_check(project: Option<&ProjectRoot>, checks: &mut Vec<Check>) {
-    let strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
-    let policy_file = std::env::var_os("TOG_POLICY")
+    let strict = std::env::var("GREYWARD_STRICT").as_deref() == Ok("1");
+    let policy_file = std::env::var_os("GREYWARD_POLICY")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME")
-                .map(|home| Path::new(&home).join(".tog/policy.toml"))
+                .map(|home| Path::new(&home).join(".greyward/policy.toml"))
                 .filter(|path| path.is_file())
         });
     let mut policy = Vec::new();
     if strict {
-        policy.push("TOG_STRICT=1".to_string());
+        policy.push("GREYWARD_STRICT=1".to_string());
     }
     if let Some(path) = policy_file {
         policy.push(path.display().to_string());
     }
-    if project.is_some_and(|project| project.is_input_file(Path::new(".tog/policy.toml"))) {
-        policy.push(".tog/policy.toml".to_string());
+    if project.is_some_and(|project| project.is_input_file(Path::new(".greyward/policy.toml"))) {
+        policy.push(".greyward/policy.toml".to_string());
     }
     checks.push(check(
         "policy",
         Level::Ok,
         if policy.is_empty() {
-            "permissive (no policy file, TOG_STRICT unset)".to_string()
+            "permissive (no policy file, GREYWARD_STRICT unset)".to_string()
         } else {
             policy.join(", ")
         },
@@ -1206,12 +1206,12 @@ fn project_check(dir: &Path, project: &io::Result<Option<ProjectRoot>>, checks: 
                 Level::Ok,
                 if unsynced.is_empty() {
                     format!(
-                        "{} (synced; 'tog status' checks the inputs)",
+                        "{} (synced; 'ward status' checks the inputs)",
                         found.join(", ")
                     )
                 } else {
                     format!(
-                        "{} found; not synced yet: {} (run 'tog')",
+                        "{} found; not synced yet: {} (run 'ward')",
                         found.join(", "),
                         unsynced.join(", ")
                     )
@@ -1283,7 +1283,7 @@ pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
     Ok(out)
 }
 
-/// Publish a `tog-toolchain.toml` section for this ecosystem and hand
+/// Publish a `greyward-toolchain.toml` section for this ecosystem and hand
 /// back the bundle id the closure has to record to count as synced
 /// against it. A lock-aware sync writes both together, and a fixture
 /// with only one of them is testing the lock verdict rather than
@@ -1414,7 +1414,7 @@ mod tests {
 
     fn write_closure(dir: &Path, ecosystem: &str, platform: &str, body: Value) {
         let body = with_toolchain_lock(dir, ecosystem, body);
-        let closures = dir.join(".tog/closures");
+        let closures = dir.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::write(
             closures.join(format!("{ecosystem}.json")),
@@ -1567,7 +1567,7 @@ mod tests {
         let empty = TempDir::named("ls-empty");
         let error = ls(&empty.0, None, false, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("run 'tog' first"));
+        assert!(error.to_string().contains("run 'ward' first"));
         assert_eq!(
             ls(&temp.0, Some("python"), false, false).unwrap(),
             "python  (cpython 3.12.14; 1 package)\n  six  1.17.0\n"
@@ -1587,7 +1587,7 @@ mod tests {
         assert!(missing.contains("no python closure here"), "{missing}");
     }
 
-    /// An older `tog fmt` left `.tog/closures/rustfmt.json` at a Cargo
+    /// An older `ward fmt` left `.greyward/closures/rustfmt.json` at a Cargo
     /// workspace root. It is not a closure any more: `status`, `ls`, and
     /// everything else that reads closures skip it, so the workspace reads
     /// exactly as it would without it.
@@ -1599,7 +1599,7 @@ mod tests {
         let dir = &temp.0;
         fs::write(dir.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
         fs::write(dir.join("Cargo.lock"), "version = 4\n").unwrap();
-        fs::create_dir_all(dir.join(".tog/cargo-home")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/cargo-home")).unwrap();
         write_closure(
             dir,
             "cargo",
@@ -1608,7 +1608,7 @@ mod tests {
                    "plan": {"rust_version": "1.96.1", "crates": []}}),
         );
         fs::write(
-            dir.join(".tog/closures/rustfmt.json"),
+            dir.join(".greyward/closures/rustfmt.json"),
             serde_json::to_vec_pretty(&json!({
                 "schema": "closure/1",
                 "ecosystem": "rustfmt",
@@ -1633,7 +1633,7 @@ mod tests {
         let listed = ls(dir, None, false, false).unwrap();
         assert!(!listed.contains("rustfmt"), "{listed}");
         // The leftover alone is nothing synced.
-        fs::remove_file(dir.join(".tog/closures/cargo.json")).unwrap();
+        fs::remove_file(dir.join(".greyward/closures/cargo.json")).unwrap();
         assert!(closures(dir).unwrap().is_empty());
         assert_eq!(
             rows_state(&status(platform, dir).unwrap()),
@@ -1646,7 +1646,7 @@ mod tests {
     }
 
     /// Re-lock `lock_ecosystem` on a bundle whose first artifact row names
-    /// other bytes: the lock-side change `tog update --toolchain` makes when
+    /// other bytes: the lock-side change `ward update --toolchain` makes when
     /// a helper ecosystem moves to another release.
     fn relock_elsewhere(dir: &Path, lock_ecosystem: &str) {
         let root = ProjectRoot::open(dir).unwrap();
@@ -1670,7 +1670,7 @@ mod tests {
 
     /// A closure records the helper toolchains its tailor built with, and
     /// `status` holds it to the decision a sync would make now, in both
-    /// directions tog has: node-gyp's Python for Node, an sdist's Rust for
+    /// directions ward has: node-gyp's Python for Node, an sdist's Rust for
     /// Python. Re-locking the helper ecosystem, or removing its manifest so
     /// the helper falls back to the tailor's default, puts the closure out
     /// of step even though its own inputs and lock section are unchanged.
@@ -1856,7 +1856,7 @@ mod tests {
         assert_eq!(rows[0].optional_groups_skipped[0].group, "docs");
         assert_eq!(
             rows[1].state,
-            State::ProjectionMissing(".tog/cargo-home".into())
+            State::ProjectionMissing(".greyward/cargo-home".into())
         );
         assert_eq!(rows[2].state, State::Synced);
         let text = render_status(dir, &rows, false).unwrap();
@@ -1872,7 +1872,7 @@ mod tests {
         );
         assert!(!text.contains("policy exception"), "{text}");
         assert!(
-            text.contains("cargo   missing     .tog/cargo-home"),
+            text.contains("cargo   missing     .greyward/cargo-home"),
             "{text}"
         );
 
@@ -1890,7 +1890,7 @@ mod tests {
         let rows = status(platform, dir).unwrap();
         assert_eq!(
             rows[1].state,
-            State::ProjectionMissing(".tog/cargo-home".into())
+            State::ProjectionMissing(".greyward/cargo-home".into())
         );
         let error = rows[1].optional_groups_skipped_error.clone().unwrap();
         assert!(
@@ -1930,7 +1930,7 @@ mod tests {
         assert_eq!(
             rows[2].state,
             State::Unchecked(
-                "recorded Go version is missing; run 'tog' once to record the selected toolchain"
+                "recorded Go version is missing; run 'ward' once to record the selected toolchain"
                     .into()
             )
         );
@@ -1950,7 +1950,7 @@ mod tests {
         assert_eq!(
             rows[2].state,
             State::Changed(vec![
-                "tog-toolchain.toml stale: go.mod go: recorded absent, now 1.28; run 'tog update --toolchain go'"
+                "greyward-toolchain.toml stale: go.mod go: recorded absent, now 1.28; run 'ward update --toolchain go'"
                     .into()
             ])
         );
@@ -1969,7 +1969,7 @@ mod tests {
         // Edit the manifest and the lock: both reported by name.
         fs::write(dir.join("requirements.txt"), "six==1.16.0\n").unwrap();
         fs::write(dir.join("go.sum"), "changed\n").unwrap();
-        fs::create_dir_all(dir.join(".tog/cargo-home")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/cargo-home")).unwrap();
         let rows = status(platform, dir).unwrap();
         assert_eq!(
             rows[0].state,
@@ -2056,7 +2056,7 @@ mod tests {
         };
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(
-            rows[0].starts_with("tog-toolchain.toml stale: "),
+            rows[0].starts_with("greyward-toolchain.toml stale: "),
             "{rows:?}"
         );
         assert!(rows[0].contains(".python-version version"), "{rows:?}");
@@ -2065,7 +2065,7 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            rows[0].ends_with("run 'tog update --toolchain python'"),
+            rows[0].ends_with("run 'ward update --toolchain python'"),
             "{rows:?}"
         );
         fs::write(dir.join(".python-version"), "3.12.14\n").unwrap();
@@ -2082,7 +2082,7 @@ mod tests {
             panic!("a malformed toolchain input did not report the lock: {verdict:?}");
         };
         assert!(
-            rows[0].starts_with("tog-toolchain.toml stale: pyproject.toml: "),
+            rows[0].starts_with("greyward-toolchain.toml stale: pyproject.toml: "),
             "{rows:?}"
         );
         fs::remove_file(dir.join("pyproject.toml")).unwrap();
@@ -2101,14 +2101,14 @@ mod tests {
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
             State::Changed(vec![
-                "tog-toolchain.toml (no [toolchain.python] section; run 'tog update --toolchain python')"
+                "greyward-toolchain.toml (no [toolchain.python] section; run 'ward update --toolchain python')"
                     .into()
             ])
         );
 
         // A projection built from a different bundle than the lock names.
         fs::write(dir.join(LOCK_PATH), &bytes).unwrap();
-        let closure = dir.join(".tog/closures/python.json");
+        let closure = dir.join(".greyward/closures/python.json");
         let mut record: Value = serde_json::from_slice(&fs::read(&closure).unwrap()).unwrap();
         let recorded = record["body"]["toolchain"]["bundle_id"].clone();
         record["body"]["toolchain"]["bundle_id"] = json!("sha256:".to_string() + &"0".repeat(64));
@@ -2116,7 +2116,8 @@ mod tests {
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
             State::Changed(vec![
-                "tog-toolchain.toml (toolchain changed since the last sync; run 'tog')".into()
+                "greyward-toolchain.toml (toolchain changed since the last sync; run 'ward')"
+                    .into()
             ])
         );
 
@@ -2127,7 +2128,7 @@ mod tests {
         fs::write(&closure, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
-            State::Unchecked("toolchain not recorded by this sync; run 'tog' once".into())
+            State::Unchecked("toolchain not recorded by this sync; run 'ward' once".into())
         );
         assert!(!status(platform, dir).unwrap()[0].is_synced());
 
@@ -2138,22 +2139,24 @@ mod tests {
         assert_eq!(
             status(platform, dir).unwrap()[0].state,
             State::Changed(vec![
-                "tog-toolchain.toml (missing; run 'tog' to create it)".into()
+                "greyward-toolchain.toml (missing; run 'ward' to create it)".into()
             ])
         );
         // The lock line is printed as written: its next step is not always
-        // the bare `tog`, so the dependency-input sentence is not appended.
+        // the bare `ward`, so the dependency-input sentence is not appended.
         let rows = status(platform, dir).unwrap();
         let line = render_status(dir, &rows, false).unwrap();
         assert!(
-            line.contains("changed     tog-toolchain.toml (missing; run 'tog' to create it)\n"),
+            line.contains(
+                "changed     greyward-toolchain.toml (missing; run 'ward' to create it)\n"
+            ),
             "{line}"
         );
         let value: Value = serde_json::from_str(&render_status(dir, &rows, true).unwrap()).unwrap();
         assert_eq!(value["ecosystems"][0]["state"], "changed");
         assert_eq!(
             value["ecosystems"][0]["detail"][0],
-            "tog-toolchain.toml (missing; run 'tog' to create it)"
+            "greyward-toolchain.toml (missing; run 'ward' to create it)"
         );
     }
 
@@ -2182,18 +2185,18 @@ mod tests {
         );
         assert_eq!(status(platform, dir).unwrap()[0].state, State::Synced);
         fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
-        // "run 'tog'" would only reach the stale-lock refusal, so the
+        // "run 'ward'" would only reach the stale-lock refusal, so the
         // lock's line, with the verb that moves it, is the one reported.
         let State::Changed(rows) = &status(platform, dir).unwrap()[0].state else {
             panic!("a moved toolchain source did not report the lock");
         };
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(
-            rows[0].starts_with("tog-toolchain.toml stale: "),
+            rows[0].starts_with("greyward-toolchain.toml stale: "),
             "{rows:?}"
         );
         assert!(
-            rows[0].ends_with("run 'tog update --toolchain python'"),
+            rows[0].ends_with("run 'ward update --toolchain python'"),
             "{rows:?}"
         );
         // With the lock removed, nothing refuses: a plain sync re-reads the
@@ -2285,7 +2288,7 @@ mod tests {
         assert!(detail.contains("a real directory"), "{detail}");
         assert!(detail.contains("install tool"), "{detail}");
         let line = render_status(project, &rows, false).unwrap();
-        assert!(line.contains("run 'tog'"), "{line}");
+        assert!(line.contains("run 'ward'"), "{line}");
     }
 
     #[test]
@@ -2336,7 +2339,7 @@ mod tests {
 
     /// In a bare directory with a fresh store, `doctor` leaves no write
     /// probe behind and reports that there is no project.
-    /// `doctor` the way `tog doctor` calls it: the configured store, opened
+    /// `doctor` the way `ward doctor` calls it: the configured store, opened
     /// and leased, or the error that stopped it.
     fn doctor_of_configured_store(dir: &Path) -> Vec<Check> {
         let opened = Store::open().and_then(|store| {
@@ -2366,7 +2369,7 @@ mod tests {
         let detail = &checks[0].detail;
         assert!(detail.contains("has no format marker"), "{detail}");
         let fix = crate::kernel::store::refusal_fix(&error).unwrap();
-        assert!(fix.starts_with("TOG_STORE="), "{fix}");
+        assert!(fix.starts_with("GREYWARD_STORE="), "{fix}");
         assert!(detail.ends_with(&format!("; run '{fix}'")), "{detail}");
 
         // Any other failure reads as before.
@@ -2410,7 +2413,9 @@ mod tests {
         assert_eq!(checks[0].name, "store");
         assert_eq!(checks[0].level, Level::Warn);
         assert!(
-            checks[0].detail.contains("a Tog job is using the store at"),
+            checks[0]
+                .detail
+                .contains("a Greyward job is using the store at"),
             "{}",
             checks[0].detail
         );
@@ -2424,19 +2429,19 @@ mod tests {
     fn doctor_cleans_up_its_probe_and_finds_no_project_in_a_bare_dir() {
         // Process-global test state follows env -> store -> attribution (see the comment on `commands::sync`'s
         // failed_tailor_sync test). `doctor`'s policy check reads
-        // TOG_POLICY and $HOME, so the env lock is taken first.
+        // GREYWARD_POLICY and $HOME, so the env lock is taken first.
         let _env = crate::kernel::policy::test_env_lock();
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::named("doctor");
         let store = temp.0.join("store");
-        let old_store = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", &store);
+        let old_store = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", &store);
         let checks = doctor_of_configured_store(&temp.0);
         match old_store {
-            Some(value) => std::env::set_var("TOG_STORE", value),
-            None => std::env::remove_var("TOG_STORE"),
+            Some(value) => std::env::set_var("GREYWARD_STORE", value),
+            None => std::env::remove_var("GREYWARD_STORE"),
         }
         assert!(fs::read_dir(store.join("tmp"))
             .unwrap()
@@ -2458,14 +2463,14 @@ mod tests {
         let temp = TempDir::named("doctor-order");
         let store = temp.0.join("store");
         fs::write(temp.0.join("go.mod"), "module example.com/m\n\ngo 1.27.0\n").unwrap();
-        fs::create_dir_all(temp.0.join(".tog")).unwrap();
-        fs::write(temp.0.join(".tog/policy.toml"), "").unwrap();
-        let old_store = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", &store);
+        fs::create_dir_all(temp.0.join(".greyward")).unwrap();
+        fs::write(temp.0.join(".greyward/policy.toml"), "").unwrap();
+        let old_store = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", &store);
         let checks = doctor_of_configured_store(&temp.0);
         match old_store {
-            Some(value) => std::env::set_var("TOG_STORE", value),
-            None => std::env::remove_var("TOG_STORE"),
+            Some(value) => std::env::set_var("GREYWARD_STORE", value),
+            None => std::env::remove_var("GREYWARD_STORE"),
         }
 
         let names: Vec<&str> = checks.iter().map(|check| check.name).collect();
@@ -2513,18 +2518,18 @@ mod tests {
         );
         assert_eq!(
             detail("toolchains").detail,
-            "none realized yet; the first 'tog' downloads what the project needs"
+            "none realized yet; the first 'ward' downloads what the project needs"
         );
         assert_eq!(detail("policy").level, Level::Ok);
         assert!(
-            detail("policy").detail.ends_with(".tog/policy.toml"),
+            detail("policy").detail.ends_with(".greyward/policy.toml"),
             "{}",
             detail("policy").detail
         );
         assert_eq!(detail("project").level, Level::Ok);
         assert_eq!(
             detail("project").detail,
-            "go found; not synced yet: go (run 'tog')"
+            "go found; not synced yet: go (run 'ward')"
         );
 
         let text = render_doctor(&checks, false).unwrap();

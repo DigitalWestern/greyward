@@ -1,13 +1,13 @@
-# Tog company policy — the deny list a security team enforces.
+# Greyward company policy — the deny list a security team enforces.
 #
-# Install as ~/.tog/policy.toml (or point TOG_POLICY at it) on build
-# machines, commit it as .tog/policy.toml at a repository root, or hand
-# it to the admission gate: `tog audit --policy policy-company.toml`.
-# Committing it means it has to be tracked: `.tog/` is half record and half
-# cache, so ignore `**/.tog/*` and un-ignore `**/.tog/policy.toml` and
-# `**/.tog/closures/` (the `**/` catches a monorepo's per-subproject
+# Install as ~/.greyward/policy.toml (or point GREYWARD_POLICY at it) on build
+# machines, commit it as .greyward/policy.toml at a repository root, or hand
+# it to the admission gate: `ward audit --policy policy-company.toml`.
+# Committing it means it has to be tracked: `.greyward/` is half record and half
+# cache, so ignore `**/.greyward/*` and un-ignore `**/.greyward/policy.toml` and
+# `**/.greyward/closures/` (the `**/` catches a monorepo's per-subproject
 # directories). The stanza and the reasoning are in the README, under
-# "What .tog/ holds, and what to commit".
+# "What .greyward/ holds, and what to commit".
 # Policies union: this file can only add denials to whatever the machine and
 # project already deny. Every kind named here is one of policy::KINDS; a typo
 # is refused at parse time, never ignored.
@@ -15,7 +15,7 @@
 # `strict` is deliberately not set. strict = true refuses every exception
 # kind, including the routine ones listed at the bottom, and would turn most
 # real projects red for reasons that are not security findings. Deny by
-# kind instead; use `tog --strict` or TOG_STRICT=1 for a
+# kind instead; use `ward --strict` or GREYWARD_STRICT=1 for a
 # one-off fully strict build.
 
 deny = [
@@ -25,26 +25,26 @@ deny = [
     # half-built. Denied: a failed build step must fail the build.
     "install-script-failed",
 
-    # A lockfile carried only a legacy SHA-1 integrity for a package; tog
+    # A lockfile carried only a legacy SHA-1 integrity for a package; ward
     # verified it, but SHA-1 collisions are practical, so the lock does not
     # pin the bytes it claims to. Denied: re-lock to get SHA-512 integrity.
     "weak-integrity",
 
     # node_modules was projected as a writable copy-on-write clone whose
-    # runtime contents tog cannot attest: a package was declared in
-    # "tog": {"mutablePackages": [...]}, or a registry package depends on
+    # runtime contents ward cannot attest: a package was declared in
+    # "greyward": {"mutablePackages": [...]}, or a registry package depends on
     # one of the project's own workspace packages and can only reach it
     # from a copy. Denied: what runs is not what the closure recorded.
     "unattested-mutable-state",
 
     # A manifest named a private index or an index-like option (a Poetry or
-    # uv source, --extra-index-url, --find-links). tog records the option
+    # uv source, --extra-index-url, --find-links). ward records the option
     # but does not follow it: every package still resolves from the public
     # registry. A package the project meant to take from its private index
     # was therefore taken from the public one instead, which is the
     # dependency-confusion shape. Denied until the private index is either
     # removed from the manifest or served through an approved mirror that
-    # tog resolves from.
+    # ward resolves from.
     "unattested-index",
 
     # A dependency was taken from a git repository rather than a registry:
@@ -61,34 +61,34 @@ deny = [
     # (puppeteer- and cypress-class packages, through their documented skip
     # switch): the package is present but the binary it wanted is not in
     # the closure. Denied: declare the artifact (url + sha256) so it is
-    # fetched through the verified cache, or drop the package. A download tog
+    # fetched through the verified cache, or drop the package. A download ward
     # provisions itself (electron) or a declared artifact that fails to
     # fetch records nothing: the sync fails instead.
     "artifact-not-provisioned",
 
     # The Rust toolchain is a directory on the building machine
     # (`[toolchain] path` in rust-toolchain.toml), locked by its content
-    # hash, not a release tog pins and verifies. The lock proves the tree did
+    # hash, not a release ward pins and verifies. The lock proves the tree did
     # not change since it was locked, not where it came from. Denied: name a
     # channel so the compiler is a pinned, verified release.
     "external-toolchain",
 
     # A lock (and its manifest) has no signed resolution record that a key in
     # the machine policy's [signing] list vouches for, or the record no longer
-    # matches the files: the lock did not come through a tog resolution door,
+    # matches the files: the lock did not come through a ward resolution door,
     # where the resolving tool runs confined and every fetch is checked and
     # written to a ledger. Denied: a lock must come through a door on a
     # machine whose key the gate trusts. Existing locks are converted with
-    # `tog attest` (on CI with the signing key, or on a laptop whose key is in
+    # `ward attest` (on CI with the signing key, or on a laptop whose key is in
     # the [signing] list), which is also what the refusal names.
     "unrecorded-resolution",
 
     # A resolution tool (npm, cargo, uv, ...) ran isolated but without its
-    # network fenced to tog's recording proxy, because this machine could
+    # network fenced to ward's recording proxy, because this machine could
     # not give it a network namespace. The resolution ledger may therefore
     # miss traffic the tool sent. Denied: only fully confined resolutions
     # pass; enable unprivileged user namespaces for bubblewrap, or install
-    # rootless podman (`tog doctor --isolation` shows which works).
+    # rootless podman (`ward doctor --isolation` shows which works).
     "unconfined-resolution",
 ]
 
@@ -116,7 +116,7 @@ deny = [
 #                                    was compiled from its (hash-verified)
 #                                    source in the network-denied sandbox;
 #                                    strictly more reproducible, not less.
-#   artifact-provisioned             tog itself fetched an install-time
+#   artifact-provisioned             ward itself fetched an install-time
 #                                    artifact and verified it against the
 #                                    package's own manifest (trust on first
 #                                    use). Teams that require a project-
@@ -147,7 +147,7 @@ deny = [
 #                                    preparation ran confined and its provenance
 #                                    is recorded. Add this kind to deny to refuse
 #                                    that preparation and its cached results.
-#   stale-resolution                 resolution metadata came from tog's
+#   stale-resolution                 resolution metadata came from ward's
 #                                    last-good cache because the registry was
 #                                    unreachable. That gives an older lock,
 #                                    not a less honest one: every artifact is
@@ -155,15 +155,15 @@ deny = [
 #                                    resolve against old metadata may add
 #                                    this kind to the list above.
 
-# Closure signing. With a [signing] table in the machine policy, `tog audit`
+# Closure signing. With a [signing] table in the machine policy, `ward audit`
 # accepts only records signed by a key it lists; a project or --policy copy
 # of this file can only remove keys from that table, never add one. Without
 # the table, audit judges records without checking signatures and says so;
-# a CI gate runs `tog audit --signed`, which exits 2 instead, and under CI
+# a CI gate runs `ward audit --signed`, which exits 2 instead, and under CI
 # (the CI variable) a plain audit exits 2 too unless --allow-unsigned is
 # passed. Generate a key
-# on the signing machine with `tog keygen <path>`, set
-# TOG_SIGNING_KEY=<path> where `tog` runs, and paste the table
+# on the signing machine with `ward keygen <path>`, set
+# GREYWARD_SIGNING_KEY=<path> where `ward` runs, and paste the table
 # it prints here:
 #
 # [signing]

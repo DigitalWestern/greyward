@@ -5,7 +5,7 @@
 //! (staging gone, host Erlang/Elixir off the effective PATH): OTP release
 //! 29 / 29.0.5, Elixir 1.20.4, `:code.root_dir()` inside the object,
 //! crypto (sha256 compared against Rust), ssl startup, the sandboxed
-//! `tog build`, a `mix run --no-compile` application probe, a rebuild
+//! `ward build`, a `mix run --no-compile` application probe, a rebuild
 //! after deleting the qualified build output, and object immutability.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
@@ -19,7 +19,7 @@ mod common;
 
 use common::{
     assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, copy_tree, fixture,
-    temp_entries, tog, tog_offline, TempDir,
+    temp_entries, ward, ward_offline, TempDir,
 };
 
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
@@ -46,12 +46,13 @@ fn run_store_bin(bin: &Path, beam: &Path, home: &Path, args: &[&str]) -> Output 
         .unwrap()
 }
 
-/// The tailor-owned `body` of the closure envelope tog wrote
-/// (`.tog/closures/elixir.json`, schema closure/1).
+/// The tailor-owned `body` of the closure envelope ward wrote
+/// (`.greyward/closures/elixir.json`, schema closure/1).
 fn closure_body(project: &Path) -> serde_json::Value {
-    let mut envelope: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/elixir.json")).unwrap())
-            .unwrap();
+    let mut envelope: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(".greyward/closures/elixir.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(envelope["schema"], "closure/1");
     assert_eq!(envelope["ecosystem"], "elixir");
     envelope["body"].take()
@@ -87,14 +88,15 @@ fn elixir_sync_sandboxed_build_and_run() {
     let store = temp.0.join("store");
     let home = temp.0.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let temp_before = temp_entries("tog-mix-run-");
+    let temp_before = temp_entries("greyward-mix-run-");
 
     // Realize the composite BEAM object; everything below uses only its
-    // committed path (read from the closure tog wrote).
-    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    // committed path (read from the closure ward wrote).
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
     // The child's HOME is the project's private run home, and every
     // directory the forced environment names exists before it starts.
-    let run_home = assert_private_run_home(&project, &temp.0, &store, "elixir", "tog-mix-run-");
+    let run_home =
+        assert_private_run_home(&project, &temp.0, &store, "elixir", "greyward-mix-run-");
     for sub in ["mix", "hex", "xdg", "xdg-cache"] {
         assert!(
             run_home.join(sub).is_dir(),
@@ -119,7 +121,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     // client configuration or cache survives for another project to inherit.
     assert!(!store.join("planner-hexhome").exists());
     assert_ok(
-        tog_offline(&project, &temp.0, &["sync"]),
+        ward_offline(&project, &temp.0, &["sync"]),
         "offline re-sync of the unchanged project",
     );
     let offline = closure_body(&project);
@@ -140,7 +142,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     // OTP-side probes from the committed object.
     let otp_version = std::fs::read_to_string(otp.join("releases/29/OTP_VERSION")).unwrap();
     assert_eq!(otp_version.trim(), "29.0.5");
-    let expected_hash = hex::encode(Sha256::digest(b"tog"));
+    let expected_hash = hex::encode(Sha256::digest(b"ward"));
     let erl = assert_ok(
         run_store_bin(
             &otp.join("bin/erl"),
@@ -152,7 +154,7 @@ fn elixir_sync_sandboxed_build_and_run() {
                 "ok = crypto:start(), \
                  io:format(\"release=~s~n\", [erlang:system_info(otp_release)]), \
                  io:format(\"root=~s~n\", [code:root_dir()]), \
-                 io:format(\"sha256=~s~n\", [string:lowercase(binary:encode_hex(crypto:hash(sha256, <<\"tog\">>)))]), \
+                 io:format(\"sha256=~s~n\", [string:lowercase(binary:encode_hex(crypto:hash(sha256, <<\"ward\">>)))]), \
                  {ok, _} = application:ensure_all_started(ssl), \
                  {supported, Supported} = lists:keyfind(supported, 1, ssl:versions()), \
                  true = length(Supported) > 0, \
@@ -170,9 +172,9 @@ fn elixir_sync_sandboxed_build_and_run() {
     assert!(erl.contains(&format!("sha256={expected_hash}\n")), "{erl}");
     assert!(erl.contains("ssl=["), "{erl}");
 
-    // Elixir side, through `tog run` (its PATH puts the object first).
+    // Elixir side, through `ward run` (its PATH puts the object first).
     let ex = assert_ok(
-        tog(&project, &temp.0,
+        ward(&project, &temp.0,
             &[
                 "run",
                 "elixir",
@@ -180,7 +182,7 @@ fn elixir_sync_sandboxed_build_and_run() {
                 "IO.puts(\"elixir=\" <> System.version()); \
                  IO.puts(\"otp=\" <> System.otp_release()); \
                  IO.puts(\"root=\" <> List.to_string(:code.root_dir())); \
-                 IO.puts(\"sha256=\" <> Base.encode16(:crypto.hash(:sha256, \"tog\"), case: :lower)); \
+                 IO.puts(\"sha256=\" <> Base.encode16(:crypto.hash(:sha256, \"ward\"), case: :lower)); \
                  {:ok, _} = Application.ensure_all_started(:ssl); \
                  IO.puts(\"ssl=\" <> inspect(:ssl.versions()[:supported]))",
             ],
@@ -200,8 +202,8 @@ fn elixir_sync_sandboxed_build_and_run() {
     // rebar3, jason via mix), network denied; then the app probe WITHOUT
     // compiling, so a failed sandboxed build cannot be repaired by this
     // unsandboxed run.
-    assert_ok(tog(&project, &temp.0, &["build"]), "build");
-    let build_dir = project.join(format!("_build/tog-{fingerprint}"));
+    assert_ok(ward(&project, &temp.0, &["build"]), "build");
+    let build_dir = project.join(format!("_build/greyward-{fingerprint}"));
     assert!(
         build_dir.join("dev/lib/ex_real/ebin").is_dir(),
         "{}",
@@ -218,7 +220,7 @@ fn elixir_sync_sandboxed_build_and_run() {
         "-e",
         "IO.puts(\"e2e: \" <> ExReal.hello())",
     ];
-    let out = assert_ok(tog(&project, &temp.0, &probe), "run");
+    let out = assert_ok(ward(&project, &temp.0, &probe), "run");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
 
     // Drop the qualified build output and refresh the projection (removes
@@ -226,7 +228,10 @@ fn elixir_sync_sandboxed_build_and_run() {
     // objects, rerun.
     remove_tree(&build_dir);
     assert!(!build_dir.exists());
-    assert_ok(tog(&project, &temp.0, &["sync", "--fresh"]), "sync --fresh");
+    assert_ok(
+        ward(&project, &temp.0, &["sync", "--fresh"]),
+        "sync --fresh",
+    );
     let closure_again = closure_body(&project);
     assert_eq!(
         closure_again["beam_object"]["path"],
@@ -236,11 +241,11 @@ fn elixir_sync_sandboxed_build_and_run() {
         closure_again["deps_object"]["path"],
         closure["deps_object"]["path"]
     );
-    assert_ok(tog(&project, &temp.0, &["build"]), "rebuild");
-    let out = assert_ok(tog(&project, &temp.0, &probe), "rerun");
+    assert_ok(ward(&project, &temp.0, &["build"]), "rebuild");
+    let out = assert_ok(ward(&project, &temp.0, &probe), "rerun");
     assert!(out.contains("e2e: {\"beam\":\"ok\"}"), "{out}");
     let vsn = assert_ok(
-        tog(&project, &temp.0, &["run", "elixir", "--version"]),
+        ward(&project, &temp.0, &["run", "elixir", "--version"]),
         "elixir version",
     );
     assert!(vsn.contains("1.20.4"), "{vsn}");
@@ -250,7 +255,7 @@ fn elixir_sync_sandboxed_build_and_run() {
         assert_ne!(fingerprint, DARWIN_FINGERPRINT);
         assert_ne!(
             build_dir,
-            project.join(format!("_build/tog-{DARWIN_FINGERPRINT}"))
+            project.join(format!("_build/greyward-{DARWIN_FINGERPRINT}"))
         );
     } else {
         assert_eq!(fingerprint, DARWIN_FINGERPRINT);
@@ -272,7 +277,7 @@ fn elixir_sync_sandboxed_build_and_run() {
     // Without its lock the project is refused under --frozen and left
     // alone; a plan regenerates the lock with the store mix.
     assert_frozen_never_writes_the_lock(&project, &temp.0, "mix.lock");
-    let left: Vec<_> = temp_entries("tog-mix-run-")
+    let left: Vec<_> = temp_entries("greyward-mix-run-")
         .difference(&temp_before)
         .cloned()
         .collect();

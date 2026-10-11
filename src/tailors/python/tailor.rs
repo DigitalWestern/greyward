@@ -102,7 +102,7 @@ impl Tailor for Python {
     /// An sdist with no toolchain file of its own (or one naming no
     /// channel, or `stable`) builds on the Rust the Python section pins: the
     /// catalog's default when the section is written. The wheel ids of a
-    /// locked project then stay put when a newer tog ships a newer default.
+    /// locked project then stay put when a newer ward ships a newer default.
     fn helper_pins(&self) -> io::Result<std::collections::BTreeMap<String, String>> {
         let rust = crate::kernel::toolchain::shipped(
             &crate::kernel::provider::rust::toolchain_catalog()?,

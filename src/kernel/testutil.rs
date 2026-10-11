@@ -72,7 +72,7 @@ pub(crate) fn bind_socket(path: &std::path::Path) -> std::os::unix::net::UnixLis
         }
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let short = PathBuf::from(format!(
-            "/tmp/tog-sock-{}-{}",
+            "/tmp/greyward-sock-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -83,7 +83,7 @@ pub(crate) fn bind_socket(path: &std::path::Path) -> std::os::unix::net::UnixLis
     }
 }
 
-/// A scratch directory named `tog-<label>-<pid>-<nanos>-<seq>`, gone on
+/// A scratch directory named `greyward-<label>-<pid>-<nanos>-<seq>`, gone on
 /// drop even when a store inside it has made its objects read-only: a plain
 /// `remove_dir_all` fails on those and leaves the tree behind, and enough
 /// leftovers fill the per-user /tmp quota.
@@ -102,7 +102,7 @@ impl TempDir {
     pub fn named(label: &str) -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         Self::create(std::env::temp_dir().join(format!(
-            "tog-{label}-{}-{}-{}",
+            "greyward-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -112,11 +112,11 @@ impl TempDir {
         )))
     }
 
-    /// A scratch directory at `tog-<name>` with no per-call suffix, for a
+    /// A scratch directory at `greyward-<name>` with no per-call suffix, for a
     /// fixture whose path enters the result under test and so must be the
     /// same on every call. Callers serialize their use of one name.
     pub fn fixed(name: &str) -> Self {
-        Self::create(std::env::temp_dir().join(format!("tog-{name}")))
+        Self::create(std::env::temp_dir().join(format!("greyward-{name}")))
     }
 
     fn create(path: PathBuf) -> Self {

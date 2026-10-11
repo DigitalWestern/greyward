@@ -5,11 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use tog::kernel::fetch::Digest;
-use tog::kernel::platform::Platform;
-use tog::kernel::store::{ObjectDeps, Store};
-use tog::kernel::types::Identity;
-use tog::tailors::node;
+use greyward::kernel::fetch::Digest;
+use greyward::kernel::platform::Platform;
+use greyward::kernel::store::{ObjectDeps, Store};
+use greyward::kernel::types::Identity;
+use greyward::tailors::node;
 
 /// The files `realize_runtime` requires of a Node object, and their stub
 /// contents.
@@ -53,12 +53,12 @@ pub fn tar(dir: &Path, top: &str) -> PathBuf {
 pub fn stub_node_selection(
     dir: &Path,
     store: &Store,
-    activity: &tog::kernel::activity::StoreActivity,
+    activity: &greyward::kernel::activity::StoreActivity,
     platform: Platform,
-) -> tog::kernel::toolchain::Selected {
+) -> greyward::kernel::toolchain::Selected {
     write_node_layout(&dir.join("node-stub"));
     let tarball = tar(dir, "node-stub");
-    let (sha256, _) = tog::kernel::fetch::cache_insert(store, activity, &tarball).unwrap();
+    let (sha256, _) = greyward::kernel::fetch::cache_insert(store, activity, &tarball).unwrap();
     let mut selected = node::shipped_selection().unwrap();
     let row = selected
         .bundle
@@ -98,8 +98,8 @@ pub fn seed_shipped_node(store: &Store, platform: Platform) {
 /// `ensure_gyp_python` looks up, so lifecycle setup finds it cached instead
 /// of downloading the real interpreter. No script that uses this calls it.
 pub fn seed_gyp_python(store: &Store, platform: Platform) {
-    tog::tailors::install_kinds();
-    let selected = tog::tailors::python::shipped_selection("3.12").unwrap();
+    greyward::tailors::install_kinds();
+    let selected = greyward::tailors::python::shipped_selection("3.12").unwrap();
     let spec = selected.artifact(platform, "cpython").unwrap();
     let identity = Identity {
         kind: "cpython".into(),
@@ -112,7 +112,7 @@ pub fn seed_gyp_python(store: &Store, platform: Platform) {
     };
     assert_eq!(
         identity.object_id(),
-        tog::tailors::python::runtime_object_id(platform, &selected).unwrap(),
+        greyward::tailors::python::runtime_object_id(platform, &selected).unwrap(),
         "the stub is published under the id the producer looks up"
     );
     publish(store, &identity, |staged| {
@@ -122,9 +122,9 @@ pub fn seed_gyp_python(store: &Store, platform: Platform) {
 
 fn publish(store: &Store, identity: &Identity, fill: impl FnOnce(&Path)) {
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    tog::tailors::install_kinds();
+    greyward::tailors::install_kinds();
     let staged = store.stage_with_activity(activity).unwrap();
     fill(&staged);
     store
@@ -132,14 +132,15 @@ fn publish(store: &Store, identity: &Identity, fill: impl FnOnce(&Path)) {
         .unwrap();
 }
 
-/// Whether the build sandbox can start here. `TOG_SANDBOX_TESTS=required`
+/// Whether the build sandbox can start here. `GREYWARD_SANDBOX_TESTS=required`
 /// (any non-empty value) turns a missing sandbox from a skip into a failure,
 /// as in tests/sandbox_deny.rs.
 pub fn sandbox_or_skip(test_name: &str, platform: Platform) -> bool {
-    match tog::kernel::sandbox::probe(platform) {
+    match greyward::kernel::sandbox::probe(platform) {
         Ok(_) => true,
         Err(error) => {
-            if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
+            if matches!(std::env::var_os("GREYWARD_SANDBOX_TESTS"), Some(value) if !value.is_empty())
+            {
                 panic!("required sandbox test {test_name} unavailable: {error}");
             }
             eprintln!("skip {test_name}: sandbox unavailable: {error}");

@@ -1,4 +1,4 @@
-//! The Node tailor's `tog run` refusals (`Tailor::refused_command`): an
+//! The Node tailor's `ward run` refusals (`Tailor::refused_command`): an
 //! npm-family install over a `node_modules` projection.
 
 /// One npm-family program's subcommands, split into the ones that write
@@ -438,7 +438,7 @@ const NOT_AN_INSTALL: &[&str] = &[
 ];
 
 /// The npm-family verbs that install the lockfile rather than change it.
-/// The advice differs: the bare `tog` replaces these, not `tog add`.
+/// The advice differs: the bare `ward` replaces these, not `ward add`.
 const NODE_REINSTALL_VERBS: &[&str] = &[
     "install",
     "i",
@@ -658,7 +658,7 @@ fn bare_install(manager: &Manager, cmd: &[String]) -> bool {
 }
 
 /// `npm install` succeeds, silently replaces the `node_modules` symlink
-/// with a real directory, and the next `tog status` says `missing`, so it
+/// with a real directory, and the next `ward status` says `missing`, so it
 /// is refused with the verb that replaces it. Only the installing verbs
 /// are refused: reading the environment with `npm ls` is fine.
 pub fn refused_command(cmd: &[String]) -> Option<String> {
@@ -695,13 +695,13 @@ pub fn refused_command(cmd: &[String]) -> Option<String> {
         format!("{program} {verb}")
     };
     // `install` and `ci` install what the lockfile already says, so what
-    // replaces them is the bare `tog`, not `tog add`.
+    // replaces them is the bare `ward`, not `ward add`.
     let advice = if verb.is_empty() || NODE_REINSTALL_VERBS.contains(&verb) {
-        "'tog' sets node_modules up from the lockfile ('tog --fresh' rebuilds it); to change what is in it, \
-         'tog add <package>', 'tog remove <package>', 'tog update'"
+        "'ward' sets node_modules up from the lockfile ('ward --fresh' rebuilds it); to change what is in it, \
+         'ward add <package>', 'ward remove <package>', 'ward update'"
     } else {
-        "edit dependencies through tog instead: 'tog add <package>', \
-         'tog remove <package>', 'tog update'; 'tog --fresh' rebuilds node_modules"
+        "edit dependencies through ward instead: 'ward add <package>', \
+         'ward remove <package>', 'ward update'; 'ward --fresh' rebuilds node_modules"
     };
     Some(format!(
         "'{invocation}' would replace the node_modules projection with a real directory \

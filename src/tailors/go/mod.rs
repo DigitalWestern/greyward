@@ -1,13 +1,13 @@
-//! The Go tailor: module closure via the pinned Go toolchain, tog-owned
+//! The Go tailor: module closure via the pinned Go toolchain, greyward-owned
 //! verification (dirhash h1 + raw sha256), immutable GOMODCACHE objects.
 //!
 //! go.sum is an authentication ledger, not a lock graph: the authoritative
 //! closure comes from `go mod download -json all` run by the
-//! STORE Go in a disposable copy. Tog then independently re-verifies
+//! STORE Go in a disposable copy. Greyward then independently re-verifies
 //! every artifact (dirhash::hash_zip / hash_gomod) before any byte enters
 //! the store — delegation computes, the kernel verifies.
 //!
-//! The finished plan is cached in `.tog/go-plan.json`, which is project
+//! The finished plan is cached in `.greyward/go-plan.json`, which is project
 //! state anyone who ships the repo can write. A hit is therefore held to
 //! the same go.sum ledger a fresh plan is: every cached module's zip and
 //! go.mod lines must be in the current go.sum, or the cache is refused.
@@ -113,7 +113,7 @@ fn go_pin(platform: Platform, version: &str) -> io::Result<GoPin> {
     }
     let pins = go_pins(platform)?;
     Err(err(format!(
-        "internal: resolved Go {version} for {} but this tog realizes only Go {}; set go.mod's `go` or `toolchain` directive to one of the pinned versions, or add a matching verified Go pin",
+        "internal: resolved Go {version} for {} but this ward realizes only Go {}; set go.mod's `go` or `toolchain` directive to one of the pinned versions, or add a matching verified Go pin",
         platform.triple(),
         pins.join(", ")
     )))
@@ -261,7 +261,7 @@ fn shipped_selection(platform: Platform, version: &str) -> io::Result<Selected> 
 
 #[cfg(test)]
 /// Ensure the shipped Go toolchain is realized in the store, for callers
-/// with no project selection to honor (`tog deps`, tests). A run inside a
+/// with no project selection to honor (`ward deps`, tests). A run inside a
 /// project realizes through [`realize_runtime`] with the toolchain its lock
 /// selected.
 pub fn ensure_go(store: &Store, activity: &StoreActivity, version: &str) -> io::Result<PathBuf> {
@@ -283,7 +283,7 @@ pub fn ensure_go_for(
     )
 }
 
-/// The forced environment for EVERY tog-controlled go invocation.
+/// The forced environment for EVERY greyward-controlled go invocation.
 /// Real process env, never a GOENV file: GOTOOLCHAIN=local stops silent
 /// toolchain swaps, GOROOT pins the stdlib, GOWORK/GOENV=off close the
 /// config side doors.
@@ -320,14 +320,14 @@ pub fn go_env(go_obj: &Path, modcache: &Path, offline: bool) -> Vec<(String, Str
 }
 
 /// The Go version this project uses, answered the way sync answers it:
-/// the `[toolchain.go]` section of `tog-toolchain.toml` when there is a
+/// the `[toolchain.go]` section of `greyward-toolchain.toml` when there is a
 /// lock, otherwise the newest complete catalog release satisfying go.mod's
 /// `go` and `toolchain` directives (what the next sync would lock). It
 /// writes nothing, and a lock sync would refuse (no Go section, or stale
 /// against go.mod) is refused here in the same words.
 ///
-/// `tog doctor` and the Go `tog status` row ask this. Sync, plan and build
-/// take the version from the [`Selected`] they are given, and `tog deps`
+/// `ward doctor` and the Go `ward status` row ask this. Sync, plan and build
+/// take the version from the [`Selected`] they are given, and `ward deps`
 /// from the same read-only resolution, so no command names a Go sync does
 /// not use. go's own rule (`go` as a minimum, the lowest toolchain that
 /// satisfies it) is deliberately not applied anywhere: with more than one
@@ -472,7 +472,7 @@ pub fn reject_local_replaces(gomod: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// A plan (fresh or loaded from the .tog cache) is untrusted input:
+/// A plan (fresh or loaded from the .greyward cache) is untrusted input:
 /// every field that becomes a cache address or identity input is validated.
 fn validate_plan(plan: &GoPlan) -> io::Result<()> {
     let hex_ok = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
@@ -524,7 +524,7 @@ pub fn module_path(gomod: &str) -> io::Result<String> {
 }
 
 /// Schema tag baked into the plan-cache key: a bump makes every existing
-/// `.tog/go-plan.json` miss instead of being read under new rules.
+/// `.greyward/go-plan.json` miss instead of being read under new rules.
 const PLANNER_SCHEMA: &str = "go-planner/2";
 
 /// The plan-cache key. The tidy gate's inputs are exactly go.mod + go.sum +
@@ -537,7 +537,7 @@ fn plan_cache_key(go_version: &str, gomod: &str, gosum: &str, src_digest: &str) 
     ))
 }
 
-const PLAN_CACHE: &str = ".tog/go-plan.json";
+const PLAN_CACHE: &str = ".greyward/go-plan.json";
 
 /// Read the cached plan when its key matches. The cache file is
 /// attacker-editable project state, so a hit is validated before it is used;
@@ -571,7 +571,7 @@ fn cached_plan(project: &ProjectRoot, input_hash: &str, gosum: &str) -> io::Resu
                         return Err(err(format!(
                             "{}@{}: {PLAN_CACHE} lists a module whose {missing} is not in \
                              the project's go.sum; refusing the cached plan (delete \
-                             {PLAN_CACHE} and run tog again)",
+                             {PLAN_CACHE} and run ward again)",
                             m.path, m.version
                         )));
                     }
@@ -591,7 +591,7 @@ fn untidy(project: &ProjectRoot) -> io::Error {
         io::ErrorKind::InvalidData,
         format!(
             "go.mod and go.sum in {} are not tidy and --frozen never updates them; run \
-         `tog` once without --frozen and commit the result",
+         `ward` once without --frozen and commit the result",
             project.path().display()
         ),
     )
@@ -685,7 +685,7 @@ impl std::fmt::Display for LedgerGap {
     }
 }
 
-/// Tog-owned verification of one download entry: recompute both
+/// Greyward-owned verification of one download entry: recompute both
 /// dirhashes, check the .info's claim, and insert the bytes into the cache.
 /// `Ok(None)` means "outside the closure" — the main module (no artifacts)
 /// or a build-GRAPH-only module whose zip sum the tidied go.sum omits.
@@ -731,12 +731,12 @@ fn verified_module(
         Err(LedgerGap::GoMod) => {
             return Err(err(format!(
                 "{}@{}: go.mod sum is not in the project's go.sum \
-                 ledger; refusing (run `tog run go mod tidy`)",
+                 ledger; refusing (run `ward run go mod tidy`)",
                 entry.path, entry.version
             )))
         }
     }
-    // Tog-owned verification: recompute both dirhashes.
+    // Greyward-owned verification: recompute both dirhashes.
     let got_h1 = dirhash::hash_zip(Path::new(zip), &entry.path, &entry.version)?;
     if got_h1 != *sum {
         return Err(err(format!(
@@ -784,8 +784,8 @@ fn verified_module(
 #[cfg(test)]
 /// Plan the module closure. Network-permitted delegation to the store Go in
 /// a DISPOSABLE copy (go mod download can rewrite go.mod/go.sum), followed
-/// by tog-owned verification of every artifact. Cached in
-/// .tog/go-plan.json keyed by go.mod+go.sum content.
+/// by greyward-owned verification of every artifact. Cached in
+/// .greyward/go-plan.json keyed by go.mod+go.sum content.
 ///
 /// `go_version` is the selected toolchain, which is also the Go that
 /// realized `go_obj`. The plan never re-reads go.mod's `go` or `toolchain`
@@ -887,7 +887,7 @@ pub fn plan_go_read(
         read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
     let now_sum = read_gosum(project)?;
     if now_mod != gomod || now_sum != gosum_read {
-        return Err(err("go.mod/go.sum changed while planning; re-run 'tog'"));
+        return Err(err("go.mod/go.sum changed while planning; re-run 'ward'"));
     }
     project.write_file(
         Path::new(PLAN_CACHE),
@@ -905,7 +905,7 @@ pub fn plan_go_read(
 
 /// Digest of the project's .go sources (the tidy gate's third input).
 /// Sorted (relpath, sha256) pairs; names starting with `.` or `_` (so
-/// `.tog` too) are skipped. The walk runs through the held descriptor, each
+/// `.greyward` too) are skipped. The walk runs through the held descriptor, each
 /// subdirectory held as its own root and opened with the strict no-follow
 /// walk; a symlink is neither followed nor hashed, and one swapped in after
 /// the entry was classified is refused rather than walked into.
@@ -986,7 +986,7 @@ pub fn escape_go_path(s: &str) -> io::Result<String> {
 }
 
 /// Stage the cache/download skeleton for a plan (zips, .mod, .info,
-/// tog-verified .ziphash) from the verified artifact cache.
+/// greyward-verified .ziphash) from the verified artifact cache.
 pub fn stage_modcache_skeleton(
     store: &Store,
     activity: &StoreActivity,
@@ -1098,7 +1098,7 @@ pub fn realize_modcache(
     // its full zip validation while materializing <module>@<version>/ dirs.
     if !plan.modules.is_empty() {
         let scratch = store.stage_with_activity(activity)?;
-        let mut gomod = format!("module tog.invalid/extract\n\ngo {}\n\nrequire (\n", {
+        let mut gomod = format!("module ward.invalid/extract\n\ngo {}\n\nrequire (\n", {
             // go directive: major.minor only
             let mut it = plan.go_version.split('.');
             format!("{}.{}", it.next().unwrap_or("1"), it.next().unwrap_or("0"))
@@ -1148,7 +1148,7 @@ pub fn realize_modcache(
 }
 
 /// Project provenance (closure envelope). Go needs no wrapper or config
-/// projection: enforcement is process env, set by tog run/build. `toolchain`
+/// projection: enforcement is process env, set by ward run/build. `toolchain`
 /// is the selection the run honored: the closure records it so the release
 /// this Go object came from is readable without re-deriving it from go.mod.
 pub fn project_go_env(
@@ -1166,7 +1166,7 @@ pub fn project_go_env(
     let go_obj = go_obj.canonicalize()?;
     let modcache_obj = modcache_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&go_obj)
-        .ok_or_else(|| err("Go object is not in a Tog store"))?;
+        .ok_or_else(|| err("Go object is not in a Greyward store"))?;
     let mut refs = crate::comforter::ClosureRefs::new();
     // The runtime object and `go_object` are the same object; the direct
     // reference is what keeps it alive across a GC.
@@ -1174,7 +1174,7 @@ pub fn project_go_env(
     refs.object_path(&store, activity, &modcache_obj)?;
     // The planner doors' ledgers: evidence of what planning fetched, kept
     // as long as this closure is. The body names them too, so a root
-    // rebuilt from the closure alone (`tog gc --register`) keeps them.
+    // rebuilt from the closure alone (`ward gc --register`) keeps them.
     let mut ledger_refs = Vec::new();
     for objects in ledgers {
         for id in [&objects.ledger, &objects.diagnostics] {
@@ -1220,7 +1220,7 @@ fn scratch_caches(scratch: &Path) -> io::Result<Vec<(String, String)>> {
     Ok(env)
 }
 
-/// Env for a lone file (`tog t.go` with no Go project): [`go_env`] offline,
+/// Env for a lone file (`ward t.go` with no Go project): [`go_env`] offline,
 /// every cache under `scratch`, and module mode off, so a go.mod above the
 /// file does not apply and nothing but the standard library resolves. The
 /// scratch module cache is empty and stays so with `GOPROXY=off`.
@@ -1234,7 +1234,7 @@ pub fn lone_env(go_obj: &Path, scratch: &Path) -> io::Result<Vec<(String, String
 }
 
 /// Sandboxed `go build`: network denied, project READ-ONLY — outputs are
-/// staged in scratch and moved into the project by tog afterwards.
+/// staged in scratch and moved into the project by ward afterwards.
 ///
 /// The project is the directory `project` holds, named by the canonical
 /// path it was opened at, which the sandbox resolves through the held
@@ -1268,7 +1268,7 @@ pub fn build_sandboxed(
             .any(|f| norm == *f || norm.starts_with(&format!("{f}=")))
         {
             return Err(err(format!(
-                "{arg}: this flag is managed by tog (module mode, output \
+                "{arg}: this flag is managed by ward (module mode, output \
                  staging, and tool execution are enforced)"
             )));
         }
@@ -1462,7 +1462,7 @@ mod tests {
     /// A selection built from another ecosystem's bundle, or one whose row
     /// names a layout this binary has never heard of, is refused before
     /// anything is fetched. A lock is an input like any other: it can name a
-    /// recipe a newer tog invented, and the honest answer is to say so.
+    /// recipe a newer ward invented, and the honest answer is to say so.
     #[test]
     fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
         use crate::kernel::toolchain::fixtures;
@@ -1514,7 +1514,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("recipe example/1"), "{error}");
-        assert!(error.contains("upgrade tog"), "{error}");
+        assert!(error.contains("upgrade ward"), "{error}");
 
         // A bundle with no row for this platform is refused by name.
         let elsewhere = Selected {
@@ -1983,9 +1983,9 @@ mod tests {
         )
         .unwrap();
         assert_ne!(fresh, "1.26.0");
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         fs::write(
-            dir.join(".tog/closures/go.json"),
+            dir.join(".greyward/closures/go.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "go",
@@ -2216,7 +2216,7 @@ mod tests {
             modules: vec![base.clone()],
         };
         assert!(validate_plan(&ok_plan).is_ok());
-        // Path-traversal "sha256" from a tampered .tog/go-plan.json.
+        // Path-traversal "sha256" from a tampered .greyward/go-plan.json.
         let mut evil = base.clone();
         evil.zip_sha256 = "../../objects/x".into();
         assert!(validate_plan(&GoPlan {
@@ -2261,7 +2261,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-            assert!(e.contains("managed by tog"), "{bad}: {e}");
+            assert!(e.contains("managed by ward"), "{bad}: {e}");
         }
     }
 
@@ -2339,12 +2339,12 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("TOG_STORE", temp.join("store"));
+        std::env::set_var("GREYWARD_STORE", temp.join("store"));
         let store = Store::open().unwrap();
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
-        std::env::remove_var("TOG_STORE");
+        std::env::remove_var("GREYWARD_STORE");
         let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
         let (zip_hash, zip_cache) =
             cache_insert(&store, activity, &fix.join("quote-v1.5.2.zip")).unwrap();
@@ -2395,12 +2395,12 @@ mod tests {
         let _lock = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("TOG_STORE", temp.join("store"));
+        std::env::set_var("GREYWARD_STORE", temp.join("store"));
         let store = Store::open().unwrap();
         let activity = &store
             .activity(crate::kernel::activity::ActivityMode::Shared)
             .unwrap();
-        std::env::remove_var("TOG_STORE");
+        std::env::remove_var("GREYWARD_STORE");
         // Real fixture artifacts through the verified cache.
         let fix = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/go-dirhash");
         let (zip_hash, _) = cache_insert(&store, activity, &fix.join("quote-v1.5.2.zip")).unwrap();
@@ -2483,9 +2483,9 @@ mod tests {
     }
 
     fn write_plan_cache(project: &Path, input_hash: &str, plan: &GoPlan) {
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         fs::write(
-            project.join(".tog/go-plan.json"),
+            project.join(".greyward/go-plan.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "input_hash": input_hash,
                 "plan": plan,
@@ -2675,7 +2675,7 @@ mod tests {
         let input_hash = expected_input_hash(&project, &gomod, &gosum);
         write_plan_cache(&project, &input_hash, &plan);
         use std::os::unix::fs::PermissionsExt;
-        let cache = project.join(".tog/go-plan.json");
+        let cache = project.join(".greyward/go-plan.json");
         fs::set_permissions(&cache, fs::Permissions::from_mode(0o200)).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         assert!(cached_plan(&root, &input_hash, &gosum).unwrap().is_none());
@@ -2729,9 +2729,9 @@ mod tests {
         let gosum = format!("example.com/a v1.0.0/go.mod h1:{}=\n", "B".repeat(43));
         let e = cached_plan_error(&gosum);
         assert!(e.contains("example.com/a@v1.0.0"), "{e}");
-        assert!(e.contains(".tog/go-plan.json"), "{e}");
+        assert!(e.contains(".greyward/go-plan.json"), "{e}");
         assert!(
-            e.contains("delete .tog/go-plan.json and run tog again"),
+            e.contains("delete .greyward/go-plan.json and run ward again"),
             "{e}"
         );
     }
@@ -2741,9 +2741,9 @@ mod tests {
         let gosum = format!("example.com/a v1.0.0 h1:{}=\n", "A".repeat(43));
         let e = cached_plan_error(&gosum);
         assert!(e.contains("example.com/a@v1.0.0"), "{e}");
-        assert!(e.contains(".tog/go-plan.json"), "{e}");
+        assert!(e.contains(".greyward/go-plan.json"), "{e}");
         assert!(
-            e.contains("delete .tog/go-plan.json and run tog again"),
+            e.contains("delete .greyward/go-plan.json and run ward again"),
             "{e}"
         );
     }
@@ -2788,7 +2788,7 @@ mod tests {
     }
 
     /// An unreadable go.sum is an error, not an empty ledger: a cache keyed
-    /// to an empty go.sum is never served for one tog cannot read.
+    /// to an empty go.sum is never served for one ward cannot read.
     #[test]
     fn unreadable_go_sum_fails_the_plan() {
         // SAFETY: geteuid has no preconditions.
@@ -2827,7 +2827,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_cache_behind_a_symlinked_tog_is_refused() {
+    fn plan_cache_behind_a_symlinked_ward_is_refused() {
         // The plan borrows the caller's lease; these cases never reach the
         // store, so a lease on a scratch store stands in for it.
         let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
@@ -2840,7 +2840,7 @@ mod tests {
             &expected_input_hash(&project, &gomod, &gosum),
             &plan,
         );
-        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(outside.join(".greyward"), project.join(".greyward")).unwrap();
         let store = Store::for_test(temp.0.join("absent-store"));
         let e = plan_go(
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -3150,7 +3150,7 @@ mod tests {
     }
 
     /// go.sum and the download agree on a sum the bytes do not hash to:
-    /// only Tog's own dirhash catches it.
+    /// only Greyward's own dirhash catches it.
     #[test]
     fn a_zip_that_does_not_hash_to_its_sum_is_refused() {
         let case = DownloadCase::new();

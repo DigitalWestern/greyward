@@ -1,8 +1,8 @@
-//! `tog update --self` and the `version` row of `tog doctor`, exercised
+//! `ward update --self` and the `version` row of `ward doctor`, exercised
 //! through the real binary against a release laid out the way GitHub
-//! serves one: a manifest naming the assets, a tarball holding `tog`, and
+//! serves one: a manifest naming the assets, a tarball holding `ward`, and
 //! the `.sha256` file beside it. Everything is served from `file://` URLs
-//! (`TOG_RELEASE_MANIFEST`), so nothing here touches the network, and the
+//! (`GREYWARD_RELEASE_MANIFEST`), so nothing here touches the network, and the
 //! binary being replaced is always a copy in a throwaway HOME, never the
 //! one cargo built.
 
@@ -24,13 +24,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn triple() -> &'static str {
-    tog::kernel::platform::Platform::host().unwrap().triple()
+    greyward::kernel::platform::Platform::host()
+        .unwrap()
+        .triple()
 }
 
-/// A shell script that answers `--version` the way a tog binary does, so
+/// A shell script that answers `--version` the way a ward binary does, so
 /// the update's smoke test accepts it and the test can tell the new file
 /// from the old one by what it prints.
-fn fake_tog(version_line: &str) -> String {
+fn fake_ward(version_line: &str) -> String {
     format!("#!/bin/sh\nprintf '%s\\n' '{version_line}'\n")
 }
 
@@ -38,7 +40,7 @@ fn fake_tog(version_line: &str) -> String {
 /// rule on purpose so the test can watch the refusal.
 struct Release<'a> {
     tag: &'a str,
-    /// The `tog` member of the tarball; `None` ships a tarball without one.
+    /// The `ward` member of the tarball; `None` ships a tarball without one.
     binary: Option<&'a str>,
     /// The digest the `.sha256` file claims; `None` uses the real one.
     claimed_sha256: Option<&'a str>,
@@ -50,7 +52,7 @@ impl Release<'_> {
     fn newer() -> Self {
         Release {
             tag: "v99.0.0",
-            binary: Some("tog 99.0.0 (test)"),
+            binary: Some("ward 99.0.0 (test)"),
             claimed_sha256: None,
             no_assets: false,
         }
@@ -63,12 +65,12 @@ fn publish(home: &Path, release: &Release<'_>) -> String {
     let stage = home.join("stage");
     fs::create_dir_all(&dir).unwrap();
     fs::create_dir_all(&stage).unwrap();
-    let asset = format!("tog-{}.tar.gz", triple());
+    let asset = format!("greyward-{}.tar.gz", triple());
     let member = match release.binary {
         Some(version_line) => {
-            fs::write(stage.join("tog"), fake_tog(version_line)).unwrap();
-            fs::set_permissions(stage.join("tog"), fs::Permissions::from_mode(0o755)).unwrap();
-            "tog"
+            fs::write(stage.join("ward"), fake_ward(version_line)).unwrap();
+            fs::set_permissions(stage.join("ward"), fs::Permissions::from_mode(0o755)).unwrap();
+            "ward"
         }
         None => {
             fs::write(stage.join("README"), "no binary here\n").unwrap();
@@ -120,19 +122,21 @@ fn publish(home: &Path, release: &Release<'_>) -> String {
     format!("file://{}", manifest.display())
 }
 
-/// A copy of the built binary at `home/bin/tog`: the one the test runs and
+/// A copy of the built binary at `home/bin/ward`: the one the test runs and
 /// the one the update is allowed to replace.
 fn install_copy(home: &Path) -> PathBuf {
     let bin = home.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let target = bin.join("tog");
-    fs::copy(env!("CARGO_BIN_EXE_tog"), &target).unwrap();
+    let target = bin.join("ward");
+    fs::copy(env!("CARGO_BIN_EXE_ward"), &target).unwrap();
     target
 }
 
 fn run(binary: &Path, home: &Path, manifest: &str, args: &[&str]) -> Output {
     let mut command = command_for(binary, home, home, &home.join("store"));
-    command.args(args).env("TOG_RELEASE_MANIFEST", manifest);
+    command
+        .args(args)
+        .env("GREYWARD_RELEASE_MANIFEST", manifest);
     output_of(&mut command)
 }
 
@@ -146,10 +150,10 @@ fn output_of(command: &mut Command) -> Output {
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
                 std::thread::sleep(std::time::Duration::from_millis(20))
             }
-            result => return result.expect("spawn tog"),
+            result => return result.expect("spawn ward"),
         }
     }
-    command.output().expect("spawn tog")
+    command.output().expect("spawn ward")
 }
 
 fn version_of(binary: &Path, home: &Path) -> String {
@@ -158,20 +162,20 @@ fn version_of(binary: &Path, home: &Path) -> String {
         .to_string()
 }
 
-/// Nothing named `.tog.update.*` may survive next to the binary, whatever
+/// Nothing named `.greyward.update.*` may survive next to the binary, whatever
 /// happened.
 fn no_leftovers(dir: &Path) {
     let stray: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".tog.update."))
+        .filter(|name| name.starts_with(".greyward.update."))
         .collect();
     assert!(stray.is_empty(), "{stray:?}");
 }
 
 fn running_line() -> String {
-    tog::cli::version_line()
+    greyward::cli::version_line()
 }
 
 #[test]
@@ -188,12 +192,12 @@ fn a_newer_release_replaces_the_binary_in_place() {
     assert!(stderr.contains("downloading v99.0.0"), "{stderr}");
     assert!(
         stderr.contains(&format!(
-            "updated {before} -> tog 99.0.0 (test) at {}",
+            "updated {before} -> ward 99.0.0 (test) at {}",
             binary.canonicalize().unwrap().display()
         )),
         "{stderr}"
     );
-    assert_eq!(version_of(&binary, &home.0), "tog 99.0.0 (test)");
+    assert_eq!(version_of(&binary, &home.0), "ward 99.0.0 (test)");
     assert_eq!(
         fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
         0o755
@@ -269,7 +273,7 @@ fn a_bad_download_never_touches_the_binary() {
                 binary: None,
                 ..Release::newer()
             },
-            "did not contain a 'tog' binary",
+            "did not contain a 'ward' binary",
         ),
         (
             Release {
@@ -280,7 +284,7 @@ fn a_bad_download_never_touches_the_binary() {
         ),
         (
             Release {
-                binary: Some("tog 1.0.0 (wrong asset)"),
+                binary: Some("ward 1.0.0 (wrong asset)"),
                 ..Release::newer()
             },
             "says it is 1.0.0, not 99.0.0",
@@ -290,14 +294,14 @@ fn a_bad_download_never_touches_the_binary() {
                 no_assets: true,
                 ..Release::newer()
             },
-            &format!("release v99.0.0 has no tog-{}.tar.gz", triple()),
+            &format!("release v99.0.0 has no greyward-{}.tar.gz", triple()),
         ),
     ] {
         let manifest = publish(&home.0, &release);
         let out = run(&binary, &home.0, &manifest, &["update", "--self"]);
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{stderr}");
-        assert!(stderr.contains("tog: error: "), "{stderr}");
+        assert!(stderr.contains("ward: error: "), "{stderr}");
         assert!(stderr.contains(expected), "{expected}: {stderr}");
         assert_eq!(fs::read(&binary).unwrap(), bytes, "{expected}");
         no_leftovers(binary.parent().unwrap());
@@ -313,7 +317,7 @@ fn a_bad_download_never_touches_the_binary() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(
         stderr.contains("cannot read the latest release (")
-            && stderr.contains("https://github.com/DigitalWestern/tog/releases"),
+            && stderr.contains("https://github.com/DigitalWestern/greyward/releases"),
         "{stderr}"
     );
     assert_eq!(fs::read(&binary).unwrap(), bytes);
@@ -354,7 +358,7 @@ fn a_symlinked_binary_updates_its_target_and_names_it() {
     let target = install_copy(&home.0);
     let link_dir = home.0.join("link");
     fs::create_dir_all(&link_dir).unwrap();
-    let link = link_dir.join("tog");
+    let link = link_dir.join("ward");
     std::os::unix::fs::symlink(&target, &link).unwrap();
     let manifest = publish(&home.0, &Release::newer());
 
@@ -370,8 +374,8 @@ fn a_symlinked_binary_updates_its_target_and_names_it() {
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_eq!(version_of(&target, &home.0), "tog 99.0.0 (test)");
-    assert_eq!(version_of(&link, &home.0), "tog 99.0.0 (test)");
+    assert_eq!(version_of(&target, &home.0), "ward 99.0.0 (test)");
+    assert_eq!(version_of(&link, &home.0), "ward 99.0.0 (test)");
     no_leftovers(target.parent().unwrap());
     no_leftovers(&link_dir);
 }
@@ -389,7 +393,7 @@ fn self_takes_nothing_else_and_needs_no_project_or_store() {
         let out = run(&binary, &home.0, &manifest, args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(
-            text(&out.stderr).contains("update --self replaces the tog binary"),
+            text(&out.stderr).contains("update --self replaces the ward binary"),
             "{}",
             text(&out.stderr)
         );
@@ -412,7 +416,7 @@ fn doctor_reports_the_build_and_whether_a_release_is_newer() {
     let first = stdout.lines().next().unwrap();
     assert_eq!(
         first,
-        format!("warn  version      {running}; v99.0.0 is out (run 'tog update --self')"),
+        format!("warn  version      {running}; v99.0.0 is out (run 'ward update --self')"),
         "{stdout}"
     );
     // A stale binary is a warning, not a failure. Other rows may fail on
@@ -429,7 +433,7 @@ fn doctor_reports_the_build_and_whether_a_release_is_newer() {
     assert!(value["checks"][0]["detail"]
         .as_str()
         .unwrap()
-        .contains("tog update --self"));
+        .contains("ward update --self"));
 
     // Issue #403. A newer release with no build for this machine is news,
     // not a warning: `update --self` would refuse it.

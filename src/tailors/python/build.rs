@@ -591,7 +591,7 @@ pub(super) fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathB
 }
 
 /// `cargo generate-lockfile` for an sdist that ships no `Cargo.lock`,
-/// confined through the door with the unpacked source as its tog-owned
+/// confined through the door with the unpacked source as its greyward-owned
 /// lock root (Detached): the lock is written back there, and the run's
 /// ledger is kept on `door` for the sync that opened it to root under its
 /// project. `manifest_rel` is the sdist's `Cargo.toml`, relative to
@@ -661,12 +661,12 @@ fn generate_cargo_lock(
 }
 
 /// The Rust an sdist with no toolchain file of its own built with before a
-/// project's lock pinned one: the newest release tog shipped then. A Python
+/// project's lock pinned one: the newest release ward shipped then. A Python
 /// section with no `helpers.rust` pin keeps it, so its wheels keep their ids.
 pub(crate) const LEGACY_SDIST_RUST: &str = "1.96.1";
 
 impl RustPlanInputs {
-    /// The `Cargo.lock` text tog generated for an sdist that shipped none.
+    /// The `Cargo.lock` text ward generated for an sdist that shipped none.
     fn generated_lock_text(&self) -> Option<&str> {
         self.generated_lock.then_some(self.lock_text.as_str())
     }
@@ -815,7 +815,7 @@ fn prepare_rust(
     // An sdist's vendored crates can themselves come from git sources.
     fs::write(
         cargo_home.join("config.toml"),
-        crate::kernel::provider::crates::tog_config_text_for(
+        crate::kernel::provider::crates::ward_config_text_for(
             &vendor_obj,
             &crate::kernel::provider::crates::plan_git_sources(&cargo_plan),
         )?,
@@ -1638,7 +1638,7 @@ mod tests {
         assert_ne!(legacy.object_id(), unlocked.object_id());
 
         // A lock written before pins pins nothing, and the wheel it builds
-        // keeps the id the tog before pins gave it, byte for byte. The
+        // keeps the id the ward before pins gave it, byte for byte. The
         // literal is what main (df5650e) computes for this fixture, where
         // every sdist built on 1.96.1, with the one store-dependent input
         // (the build environment's id covers the store root) fixed.

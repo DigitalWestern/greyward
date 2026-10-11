@@ -1,4 +1,4 @@
-//! `tog store roots` / `tog store path`: read-only store diagnostics.
+//! `ward store roots` / `ward store path`: read-only store diagnostics.
 //! Kernel only; work without a valid host platform.
 
 use crate::kernel::activity::ActivityMode;
@@ -11,7 +11,7 @@ pub fn roots() -> io::Result<()> {
     Ok(())
 }
 
-/// The lines `tog store roots` prints for `store`, read under a shared
+/// The lines `ward store roots` prints for `store`, read under a shared
 /// lease. The lease validates the format marker again once it is held: a
 /// store that was emptied, or left half emptied, between this command
 /// opening it and reading it is refused, not listed.
@@ -32,12 +32,12 @@ fn list_roots(store: &store::Store) -> io::Result<String> {
 
 pub fn path() -> io::Result<i32> {
     // Nothing is created: for a store not made yet the answer is where the
-    // first sync will make it. A store this tog refuses to open still has a
+    // first sync will make it. A store this ward refuses to open still has a
     // path, and the path is what someone moving it aside needs: print it,
     // and say on stderr why nothing else will use it.
     let Some((root, format)) = store::Store::probe()? else {
         // Absolute, as the answer for an existing store is: a relative
-        // `TOG_STORE` is read from the working directory, which `-C` has
+        // `GREYWARD_STORE` is read from the working directory, which `-C` has
         // already changed, so printed as typed it would point elsewhere.
         println!(
             "{}",
@@ -82,7 +82,7 @@ mod tests {
         );
         assert!(store::refusal_fix(&error)
             .unwrap()
-            .ends_with(" tog gc --reset"));
+            .ends_with(" ward gc --reset"));
 
         // Further along: the roots are gone too. Nothing is recreated.
         fs::remove_dir_all(opened.root.join("roots")).unwrap();

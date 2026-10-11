@@ -9,14 +9,14 @@ use std::process::Command;
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, snapshot, text, tog, tog_at, TempDir};
+use common::{assert_ok, copy_tree, fixture, snapshot, text, ward, ward_at, TempDir};
 
 /// The closure's `resolution_basis` names go.mod and go.sum (when present)
 /// by the digests of the files on disk: what the plan read.
 fn assert_basis_matches_disk(project: &std::path::Path, step: &str) {
     use sha2::{Digest, Sha256};
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".tog/closures/go.json")).unwrap(),
+        &std::fs::read_to_string(project.join(".greyward/closures/go.json")).unwrap(),
     )
     .unwrap();
     let mut expected = serde_json::Map::new();
@@ -44,12 +44,12 @@ fn go_sync_build_and_rebuild_offline() {
     copy_tree(&fixture("go-hello"), &project);
     let home = temp.path();
 
-    assert_ok(tog(&project, home, &["sync"]), "sync");
+    assert_ok(ward(&project, home, &["sync"]), "sync");
     // A fresh plan: the closure's basis is go.mod and go.sum as on disk.
     assert_basis_matches_disk(&project, "sync");
-    assert_ok(tog(&project, home, &["build"]), "build");
+    assert_ok(ward(&project, home, &["build"]), "build");
     // The build reuses the cached plan and writes the closure again.
-    assert!(project.join(".tog/go-plan.json").is_file());
+    assert!(project.join(".greyward/go-plan.json").is_file());
     assert_basis_matches_disk(&project, "build");
     let hello = project.join("hello");
     assert!(hello.is_file(), "staged binary moved into project");
@@ -60,10 +60,10 @@ fn go_sync_build_and_rebuild_offline() {
     assert!(out.status.success(), "hello executable failed: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello, world.");
 
-    // Clean rebuild: everything must come from the store (tog build is
+    // Clean rebuild: everything must come from the store (ward build is
     // itself the network-denied sandbox; sandboxes cannot nest on macOS).
     std::fs::remove_file(&hello).unwrap();
-    assert_ok(tog(&project, home, &["build", "go"]), "rebuild");
+    assert_ok(ward(&project, home, &["build", "go"]), "rebuild");
     assert!(hello.is_file());
     let out = Command::new(&hello)
         .env("LC_ALL", "en_US.UTF-8")
@@ -72,9 +72,9 @@ fn go_sync_build_and_rebuild_offline() {
     assert!(out.status.success(), "rebuilt hello failed: {out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Hello, world.");
 
-    // tog run uses the pinned toolchain + immutable modcache.
+    // ward run uses the pinned toolchain + immutable modcache.
     let version = assert_ok(
-        tog(&project, home, &["run", "go", "version"]),
+        ward(&project, home, &["run", "go", "version"]),
         "run go version",
     );
     assert!(version.contains("go1.27.0"), "{version}");
@@ -83,12 +83,12 @@ fn go_sync_build_and_rebuild_offline() {
     }
 
     let goroot = assert_ok(
-        tog(&project, home, &["run", "go", "env", "GOROOT"]),
+        ward(&project, home, &["run", "go", "env", "GOROOT"]),
         "run go env GOROOT",
     );
     let goroot = PathBuf::from(goroot.trim());
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".tog/closures/go.json")).unwrap(),
+        &std::fs::read_to_string(project.join(".greyward/closures/go.json")).unwrap(),
     )
     .unwrap();
     let committed_go = PathBuf::from(
@@ -107,9 +107,9 @@ fn go_sync_build_and_rebuild_offline() {
 
     // A planted plan cache: the key still matches the repo's own go.mod and
     // go.sum, but the plan lists a module go.sum never vouched for. A hit
-    // is held to the go.sum ledger, so tog refuses it and names the way
+    // is held to the go.sum ledger, so ward refuses it and names the way
     // out; deleting the cache lets the next run plan fresh.
-    let cache_path = project.join(".tog/go-plan.json");
+    let cache_path = project.join(".greyward/go-plan.json");
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
     cache["plan"]["modules"]
@@ -125,7 +125,7 @@ fn go_sync_build_and_rebuild_offline() {
             "info_sha256": "c".repeat(64),
         }));
     std::fs::write(&cache_path, serde_json::to_vec_pretty(&cache).unwrap()).unwrap();
-    let planted = tog(&project, home, &["sync"]);
+    let planted = ward(&project, home, &["sync"]);
     assert!(!planted.status.success(), "a planted plan cache was served");
     let stderr = text(&planted.stderr);
     assert!(
@@ -134,7 +134,7 @@ fn go_sync_build_and_rebuild_offline() {
     );
     std::fs::remove_file(&cache_path).unwrap();
     assert_ok(
-        tog(&project, home, &["sync"]),
+        ward(&project, home, &["sync"]),
         "sync after deleting the cache",
     );
 
@@ -146,8 +146,8 @@ fn go_sync_build_and_rebuild_offline() {
         use std::os::unix::fs::PermissionsExt;
         let gosum = project.join("go.sum");
         std::fs::set_permissions(&gosum, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let unreadable = tog(&project, home, &["sync"]);
-        let frozen = tog(&project, home, &["--frozen"]);
+        let unreadable = ward(&project, home, &["sync"]);
+        let frozen = ward(&project, home, &["--frozen"]);
         std::fs::set_permissions(&gosum, std::fs::Permissions::from_mode(0o644)).unwrap();
         for (label, out) in [("sync", &unreadable), ("--frozen", &frozen)] {
             assert!(
@@ -163,7 +163,7 @@ fn go_sync_build_and_rebuild_offline() {
         let stderr = text(&frozen.stderr);
         assert!(!stderr.contains("go mod tidy"), "{stderr}");
         assert_ok(
-            tog(&project, home, &["sync"]),
+            ward(&project, home, &["sync"]),
             "sync after restoring go.sum",
         );
     }
@@ -172,7 +172,7 @@ fn go_sync_build_and_rebuild_offline() {
     // touching the project, and a plan tidies it again with the store Go.
     std::fs::remove_file(project.join("go.sum")).unwrap();
     let before = snapshot(&project);
-    let frozen = tog(&project, home, &["--frozen"]);
+    let frozen = ward(&project, home, &["--frozen"]);
     assert!(!frozen.status.success(), "--frozen synced an untidy module");
     let stderr = text(&frozen.stderr);
     assert!(
@@ -180,7 +180,7 @@ fn go_sync_build_and_rebuild_offline() {
         "{stderr}"
     );
     assert_eq!(snapshot(&project), before, "--frozen changed the project");
-    assert_ok(tog(&project, home, &["plan"]), "plan tidies the module");
+    assert_ok(ward(&project, home, &["plan"]), "plan tidies the module");
     assert!(
         project.join("go.sum").is_file(),
         "plan did not restore go.sum"
@@ -196,7 +196,7 @@ fn go_sync_build_and_rebuild_offline() {
 
 /*
 #include <stdint.h>
-static int tog_answer(void) {
+static int ward_answer(void) {
     return 42;
 }
 */
@@ -205,14 +205,14 @@ import "C"
 import "fmt"
 
 func main() {
-    fmt.Println(C.tog_answer())
+    fmt.Println(C.ward_answer())
 }
 "#,
         )
         .unwrap();
-        assert_ok(tog(&cgo_project, home, &["sync"]), "Linux cgo sync");
+        assert_ok(ward(&cgo_project, home, &["sync"]), "Linux cgo sync");
         assert_ok(
-            tog(&cgo_project, home, &["build"]),
+            ward(&cgo_project, home, &["build"]),
             "Linux cgo build (requires gcc and glibc-devel)",
         );
         let cgo_binary = cgo_project.join("cgohello");
@@ -226,7 +226,7 @@ func main() {
     }
 }
 
-/// `.tog/go-plan.json` is project state and outlives the store it was
+/// `.greyward/go-plan.json` is project state and outlives the store it was
 /// planned against. Synced into a second, empty store, the cached plan names
 /// artifacts that store never downloaded, so the sync plans again and
 /// fetches them instead of failing on the first missing cache entry; the
@@ -241,7 +241,7 @@ fn go_sync_into_a_second_store_replans_a_cached_plan() {
 
     // `synced:` lines go to stderr.
     let sync = |store: &str| {
-        let out = tog_at(&project, home, &temp.0.join(store), &["sync"]);
+        let out = ward_at(&project, home, &temp.0.join(store), &["sync"]);
         assert!(
             out.status.success(),
             "sync into {store}: {}",
@@ -250,7 +250,7 @@ fn go_sync_into_a_second_store_replans_a_cached_plan() {
         text(&out.stderr)
     };
     let first = sync("store-1");
-    assert!(project.join(".tog/go-plan.json").is_file());
+    assert!(project.join(".greyward/go-plan.json").is_file());
     assert_basis_matches_disk(&project, "first store");
     let second = sync("store-2");
     assert_basis_matches_disk(&project, "second store");

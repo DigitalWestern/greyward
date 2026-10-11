@@ -1,12 +1,12 @@
 //! The store format marker (kernel store): `<root>/format`, one line naming
 //! the layout every record in this store is written in.
 //!
-//! The marker is what lets a tog tell a store it can read from one it
+//! The marker is what lets a ward tell a store it can read from one it
 //! cannot. It is written before the first namespace of a new store is
 //! created, so a store that has namespaces and no marker was written by a
-//! tog from before the marker existed. This tog has no reader for those
+//! ward from before the marker existed. This ward has no reader for those
 //! records, and neither that store nor one with a marker it does not know
-//! is opened: `tog gc --reset` empties it, or the directory is moved aside.
+//! is opened: `ward gc --reset` empties it, or the directory is moved aside.
 
 use super::*;
 use std::io::{Read as _, Write as _};
@@ -14,11 +14,11 @@ use std::io::{Read as _, Write as _};
 /// The marker's name under the store root.
 pub const FORMAT_FILE: &str = "format";
 
-/// The format this tog reads and writes.
+/// The format this ward reads and writes.
 pub const STORE_FORMAT: u32 = 1;
 
 /// The word before the number on the marker's one line.
-const FORMAT_WORD: &str = "tog-store";
+const FORMAT_WORD: &str = "greyward-store";
 
 /// Every namespace `Store::open` creates under the root. The first
 /// component of each is also how a store with no marker is told from a
@@ -38,16 +38,16 @@ pub(super) const NAMESPACES: &[&str] = &[
     "records",
 ];
 
-/// What `tog gc --reset` removes from the root: everything written in the
+/// What `ward gc --reset` removes from the root: everything written in the
 /// store's record formats, and everything that only means something next to
 /// those records. `tmp` is emptied rather than removed (it holds the
 /// publication lock), and the marker is rewritten.
 ///
 /// Whatever is not listed stays: `cache/` (verified downloads, each named
 /// by its own digest, which is what the store is rebuilt from), `backups/`
-/// (directories that were the user's before tog moved them aside),
+/// (directories that were the user's before ward moved them aside),
 /// `run-homes/`, the planners' download caches, the first-run notices, the
-/// lock files, and anything tog does not recognise.
+/// lock files, and anything ward does not recognise.
 pub(crate) const RESET_REMOVES: &[&str] = &[
     "objects",
     "meta",
@@ -56,7 +56,7 @@ pub(crate) const RESET_REMOVES: &[&str] = &[
     "resolve",
     "forests",
     "root-locks",
-    // What a tog from before the marker left when it could not finish its
+    // What a ward from before the marker left when it could not finish its
     // metadata maintenance. Nothing reads it now.
     "maintenance-deferred",
 ];
@@ -64,21 +64,21 @@ pub(crate) const RESET_REMOVES: &[&str] = &[
 /// What the marker says about a store directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreFormat {
-    /// The marker names the format this tog reads.
+    /// The marker names the format this ward reads.
     Current,
     /// No marker and no store namespace: nothing has been stored here, and
     /// `Store::open` creates the store with the marker.
     Uninitialized,
     /// Store namespaces with no marker: written before the marker existed.
     PreEpoch,
-    /// A well-formed marker naming a later format than this tog knows.
+    /// A well-formed marker naming a later format than this ward knows.
     Newer(u32),
-    /// A marker this tog cannot read as any format; the text says what is
+    /// A marker this ward cannot read as any format; the text says what is
     /// there instead.
     Unknown(String),
     /// A marker that is there and cannot be opened or read (its mode, an
     /// I/O error); the text is the system's reason. Nothing in the store is
-    /// trusted without it, and `tog gc --reset` replaces it without reading
+    /// trusted without it, and `ward gc --reset` replaces it without reading
     /// it.
     Unreadable(String),
 }
@@ -110,7 +110,7 @@ pub fn refusal_fix(error: &io::Error) -> Option<&str> {
         .or_else(|| crate::kernel::error::inner(error).and_then(refusal_fix))
 }
 
-/// `command` with `TOG_STORE` set to exactly `root`, as a POSIX shell
+/// `command` with `GREYWARD_STORE` set to exactly `root`, as a POSIX shell
 /// reads it. The command empties a store, so the path is never
 /// approximated: it is spelled from its bytes, in the plainest of three
 /// forms that is exact.
@@ -128,10 +128,10 @@ fn with_store(command: &str, root: &Path) -> String {
     let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"/._-+:@,".contains(&byte);
     match std::str::from_utf8(bytes) {
         Ok(text) if !text.is_empty() && bytes.iter().all(|&byte| plain(byte) || byte == b'%') => {
-            format!("TOG_STORE={text} {command}")
+            format!("GREYWARD_STORE={text} {command}")
         }
         Ok(text) if !text.chars().any(char::is_control) => {
-            format!("TOG_STORE='{}' {command}", text.replace('\'', "'\\''"))
+            format!("GREYWARD_STORE='{}' {command}", text.replace('\'', "'\\''"))
         }
         _ => {
             let mut format = String::new();
@@ -143,18 +143,18 @@ fn with_store(command: &str, root: &Path) -> String {
                 }
             }
             if bytes.last() == Some(&b'\n') {
-                format!("(p=\"$(printf '{format}.')\"; TOG_STORE=\"${{p%.}}\" {command})")
+                format!("(p=\"$(printf '{format}.')\"; GREYWARD_STORE=\"${{p%.}}\" {command})")
             } else {
-                format!("TOG_STORE=\"$(printf '{format}')\" {command}")
+                format!("GREYWARD_STORE=\"$(printf '{format}')\" {command}")
             }
         }
     }
 }
 
-/// `command`, made to act on the store at `root`. A bare `tog` acts on the
+/// `command`, made to act on the store at `root`. A bare `ward` acts on the
 /// store `selected`: for any other store the command carries its own
-/// `TOG_STORE=`, with `root` absolute, so pasting it never empties the
-/// wrong one. `selected` is `None` when what a bare `tog` selects cannot be
+/// `GREYWARD_STORE=`, with `root` absolute, so pasting it never empties the
+/// wrong one. `selected` is `None` when what a bare `ward` selects cannot be
 /// relied on: see `StoreFormat::fix_for`.
 fn command_on(command: &str, root: &Path, selected: Option<&Path>) -> String {
     let root = root
@@ -173,63 +173,63 @@ impl StoreFormat {
         format!("{FORMAT_WORD} {STORE_FORMAT}\n")
     }
 
-    /// Whether this tog may open the store.
+    /// Whether this ward may open the store.
     pub fn usable(&self) -> bool {
         matches!(self, StoreFormat::Current | StoreFormat::Uninitialized)
     }
 
     /// Why the store at `root` is not opened, or `None` for a store this
-    /// tog may open. A sentence with no leading capital and no final
-    /// period, so it reads after `tog: error: ` and inside a `doctor` row
+    /// ward may open. A sentence with no leading capital and no final
+    /// period, so it reads after `ward: error: ` and inside a `doctor` row
     /// alike. The command that is the way out is `fix`, printed on its own
     /// line, so the prose names what it does and not how it is spelled.
     pub fn refusal(&self, root: &Path) -> Option<String> {
         let root = root.display();
-        let reset = "Emptying it keeps its downloads, and the next `tog` in each project \
+        let reset = "Emptying it keeps its downloads, and the next `ward` in each project \
                      rebuilds what it needs (or move the directory aside)";
         match self {
             StoreFormat::Current | StoreFormat::Uninitialized => None,
             StoreFormat::PreEpoch => Some(format!(
-                "the store at {root} has no format marker: an older tog wrote it, and this tog \
+                "the store at {root} has no format marker: an older ward wrote it, and this ward \
                  does not read its records. {reset}"
             )),
             StoreFormat::Newer(format) => Some(format!(
-                "the store at {root} is format {FORMAT_WORD} {format} and this tog reads \
-                 {FORMAT_WORD} {STORE_FORMAT}: a newer tog wrote it. Update this tog, or point \
-                 TOG_STORE at another directory"
+                "the store at {root} is format {FORMAT_WORD} {format} and this ward reads \
+                 {FORMAT_WORD} {STORE_FORMAT}: a newer ward wrote it. Update this ward, or point \
+                 GREYWARD_STORE at another directory"
             )),
             StoreFormat::Unknown(found) => Some(format!(
-                "the store at {root} has a format marker this tog does not know ({found}; \
+                "the store at {root} has a format marker this ward does not know ({found}; \
                  expected \"{FORMAT_WORD} {STORE_FORMAT}\"): the marker is damaged, or the \
-                 directory is not a tog store. {reset}"
+                 directory is not a ward store. {reset}"
             )),
             StoreFormat::Unreadable(why) => Some(format!(
-                "the store at {root} has a format marker this tog cannot read ({why}), so \
+                "the store at {root} has a format marker this ward cannot read ({why}), so \
                  nothing in it is trusted. {reset}"
             )),
         }
     }
 
     /// The one command that is the way out of a refused store: update for
-    /// a store a newer tog wrote, reset for the rest. This is the command
-    /// for the store a bare `tog` selects; `fix_for` is the one to print.
+    /// a store a newer ward wrote, reset for the rest. This is the command
+    /// for the store a bare `ward` selects; `fix_for` is the one to print.
     pub fn fix(&self) -> &'static str {
         match self {
-            StoreFormat::Newer(_) => "tog update --self",
-            _ => "tog gc --reset",
+            StoreFormat::Newer(_) => "ward update --self",
+            _ => "ward gc --reset",
         }
     }
 
     /// `fix` as a `fix:` line prints it for the store at `root`. A reset
     /// empties whichever store the command selects, and the line is pasted
     /// into a shell, not into this process. So the bare command is printed
-    /// only when it selects `root` wherever it is typed: `TOG_STORE` is
+    /// only when it selects `root` wherever it is typed: `GREYWARD_STORE` is
     /// unset or absolute, and names `root`. In every other case the
     /// command names `root` itself, absolute:
-    /// `TOG_STORE=<root> tog gc --reset`. That covers a store other than
+    /// `GREYWARD_STORE=<root> ward gc --reset`. That covers a store other than
     /// the configured one (an x environment's own store), and a relative
-    /// `TOG_STORE`, which `tog -C <dir>` resolves from `<dir>` and the
-    /// shell that pastes the fix resolves from somewhere else. Updating tog
+    /// `GREYWARD_STORE`, which `ward -C <dir>` resolves from `<dir>` and the
+    /// shell that pastes the fix resolves from somewhere else. Updating ward
     /// is the same command for every store.
     pub fn fix_for(&self, root: &Path) -> String {
         match self {
@@ -268,7 +268,7 @@ impl StoreFormat {
 /// never initialises namespaces inside a store that is being emptied and
 /// never judges one that is half created.
 ///
-/// The wait is never silent: when another tog holds the root, one line
+/// The wait is never silent: when another ward holds the root, one line
 /// says so before this one blocks. A filesystem with no `flock` on a
 /// directory cannot hold a store, and the error says that.
 pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
@@ -277,9 +277,9 @@ pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
         io::Error::new(
             error.kind(),
             format!(
-                "lock the store directory {}: {error}. tog takes a file lock (flock) on \
+                "lock the store directory {}: {error}. ward takes a file lock (flock) on \
                  the store directory before it creates or empties a store, so the store has to \
-                 be on a filesystem that supports one; point TOG_STORE at a directory on a \
+                 be on a filesystem that supports one; point GREYWARD_STORE at a directory on a \
                  local disk",
                 root.display()
             ),
@@ -289,7 +289,7 @@ pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => {
             crate::kernel::ui::note(&format!(
-                "waiting for another tog that is creating or emptying the store at {}",
+                "waiting for another ward that is creating or emptying the store at {}",
                 root.display()
             ));
             directory.lock().map_err(unsupported)?;
@@ -308,7 +308,7 @@ pub fn probe(root: &Path) -> io::Result<StoreFormat> {
     if !has_namespace(root)? {
         return Ok(StoreFormat::Uninitialized);
     }
-    // A tog creating this store publishes the marker before its first
+    // A ward creating this store publishes the marker before its first
     // namespace. So namespaces seen after a missing marker may be a store
     // being created right now, whose marker has landed since: read it again
     // before calling the store unmarked.
@@ -405,7 +405,7 @@ fn has_namespace(root: &Path) -> io::Result<bool> {
 
 /// Write the current marker into `root`. The bytes go to a temporary beside
 /// the marker and are renamed into place, so a crash leaves either no
-/// marker or a whole one, and two togs creating the same store at once both
+/// marker or a whole one, and two wards creating the same store at once both
 /// rename the same line.
 pub(super) fn write_marker(root: &Path) -> io::Result<()> {
     let root_dir = open_real_directory(root, "store root")?;
@@ -440,13 +440,13 @@ mod tests {
 
     #[test]
     fn the_marker_is_one_line_naming_the_current_format() {
-        assert_eq!(StoreFormat::current_line(), "tog-store 1\n");
+        assert_eq!(StoreFormat::current_line(), "greyward-store 1\n");
         let temp = TempDir::new();
         assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Uninitialized);
         write_marker(&temp.0).unwrap();
         assert_eq!(
             fs::read(temp.0.join(FORMAT_FILE)).unwrap(),
-            b"tog-store 1\n"
+            b"greyward-store 1\n"
         );
         assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Current);
         // Nothing but the marker is left behind.
@@ -468,7 +468,7 @@ mod tests {
                 "{namespace}"
             );
         }
-        // A directory holding only files tog never names is not a store yet.
+        // A directory holding only files ward never names is not a store yet.
         let temp = TempDir::new();
         fs::write(temp.0.join("notes.txt"), b"x").unwrap();
         assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Uninitialized);
@@ -477,23 +477,26 @@ mod tests {
     #[test]
     fn a_newer_marker_and_an_unreadable_one_are_told_apart() {
         let temp = TempDir::new();
-        assert_eq!(marker(&temp, b"tog-store 1\n"), StoreFormat::Current);
-        assert_eq!(marker(&temp, b"tog-store 1"), StoreFormat::Current);
-        assert_eq!(marker(&temp, b"tog-store 2\n"), StoreFormat::Newer(2));
-        assert_eq!(marker(&temp, b"tog-store 17\n"), StoreFormat::Newer(17));
+        assert_eq!(marker(&temp, b"greyward-store 1\n"), StoreFormat::Current);
+        assert_eq!(marker(&temp, b"greyward-store 1"), StoreFormat::Current);
+        assert_eq!(marker(&temp, b"greyward-store 2\n"), StoreFormat::Newer(2));
+        assert_eq!(
+            marker(&temp, b"greyward-store 17\n"),
+            StoreFormat::Newer(17)
+        );
         for bytes in [
             &b""[..],
             b"\n",
-            b"tog-store\n",
-            b"tog-store 0\n",
-            b"tog-store 01\n",
-            b"tog-store +1\n",
-            b"tog-store 1 \n",
-            b"tog-store 1\n\n",
-            b" tog-store 1\n",
-            b"tog-store  1\n",
-            b"tog-store one\n",
-            b"tog-store 99999999999999999999\n",
+            b"greyward-store\n",
+            b"greyward-store 0\n",
+            b"greyward-store 01\n",
+            b"greyward-store +1\n",
+            b"greyward-store 1 \n",
+            b"greyward-store 1\n\n",
+            b" greyward-store 1\n",
+            b"greyward-store  1\n",
+            b"greyward-store one\n",
+            b"greyward-store 99999999999999999999\n",
             b"blanket-store 1\n",
             b"\xff\xfe",
         ] {
@@ -505,7 +508,7 @@ mod tests {
         }
         // A marker far longer than a marker is not read to its end.
         assert!(matches!(
-            marker(&temp, &b"tog-store 1".repeat(1000)),
+            marker(&temp, &b"greyward-store 1".repeat(1000)),
             StoreFormat::Unknown(_)
         ));
     }
@@ -538,25 +541,25 @@ mod tests {
             assert!(message.contains("move the directory aside"), "{message}");
             // The command is the fix line's, never spelled in the prose.
             assert!(!message.contains("--reset"), "{message}");
-            assert_eq!(format.fix(), "tog gc --reset");
+            assert_eq!(format.fix(), "ward gc --reset");
             let error = format.refuse(root).unwrap_err();
             assert_eq!(error.to_string(), message);
-            // `/somewhere/store` is not the store a bare `tog` selects.
+            // `/somewhere/store` is not the store a bare `ward` selects.
             assert_eq!(
                 refusal_fix(&error),
-                Some("TOG_STORE=/somewhere/store tog gc --reset")
+                Some("GREYWARD_STORE=/somewhere/store ward gc --reset")
             );
         }
         let newer = StoreFormat::Newer(2);
         assert!(!newer.usable());
-        assert_eq!(newer.fix(), "tog update --self");
-        // Updating tog is one command whatever store asked for it.
-        assert_eq!(newer.fix_for(root), "tog update --self");
+        assert_eq!(newer.fix(), "ward update --self");
+        // Updating ward is one command whatever store asked for it.
+        assert_eq!(newer.fix_for(root), "ward update --self");
         let newer = newer.refusal(root).unwrap();
-        assert!(newer.contains("a newer tog wrote it"), "{newer}");
-        assert!(newer.contains("tog-store 2"), "{newer}");
+        assert!(newer.contains("a newer ward wrote it"), "{newer}");
+        assert!(newer.contains("greyward-store 2"), "{newer}");
         let old = StoreFormat::PreEpoch.refusal(root).unwrap();
-        assert!(old.contains("an older tog wrote it"), "{old}");
+        assert!(old.contains("an older ward wrote it"), "{old}");
         let unreadable = StoreFormat::Unreadable("Permission denied".into())
             .refusal(root)
             .unwrap();
@@ -565,20 +568,20 @@ mod tests {
     }
 
     /// A fix acts on the store that was refused: bare for the store a bare
-    /// `tog` selects, and naming any other store in a form a shell reads
+    /// `ward` selects, and naming any other store in a form a shell reads
     /// back as exactly that path.
     #[test]
     fn a_fix_names_a_store_the_bare_command_would_not_select() {
-        let reset = "tog gc --reset";
-        let a = Path::new("/home/me/.tog/store");
+        let reset = "ward gc --reset";
+        let a = Path::new("/home/me/.greyward/store");
         assert_eq!(command_on(reset, a, Some(a)), reset);
         assert_eq!(
             command_on(reset, a, Some(Path::new("/elsewhere"))),
-            "TOG_STORE=/home/me/.tog/store tog gc --reset"
+            "GREYWARD_STORE=/home/me/.greyward/store ward gc --reset"
         );
         assert_eq!(
             command_on(reset, a, None),
-            "TOG_STORE=/home/me/.tog/store tog gc --reset"
+            "GREYWARD_STORE=/home/me/.greyward/store ward gc --reset"
         );
         // A selected store named through a symlink is the same store.
         let temp = TempDir::named("store-format-fix");
@@ -595,58 +598,61 @@ mod tests {
         let cases: [(&[u8], &str); 12] = [
             (
                 b"/plain/path-1.0_x+y:z@h%,",
-                "TOG_STORE=/plain/path-1.0_x+y:z@h%, env",
+                "GREYWARD_STORE=/plain/path-1.0_x+y:z@h%, env",
             ),
-            (b"/with space/store", "TOG_STORE='/with space/store' env"),
-            (b"/it's/store", "TOG_STORE='/it'\\''s/store' env"),
+            (
+                b"/with space/store",
+                "GREYWARD_STORE='/with space/store' env",
+            ),
+            (b"/it's/store", "GREYWARD_STORE='/it'\\''s/store' env"),
             (
                 b"/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q",
-                "TOG_STORE='/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q' env",
+                "GREYWARD_STORE='/a$b`c\"d\\e;f&g|h*i?j(k)l<m>n~o#p!q' env",
             ),
             (
                 "/caf\u{e9}/\u{fffd}".as_bytes(),
-                "TOG_STORE='/caf\u{e9}/\u{fffd}' env",
+                "GREYWARD_STORE='/caf\u{e9}/\u{fffd}' env",
             ),
-            (b"/-dash/~tilde", "TOG_STORE='/-dash/~tilde' env"),
+            (b"/-dash/~tilde", "GREYWARD_STORE='/-dash/~tilde' env"),
             // Not UTF-8: no `String` holds this path, so its bytes are
             // spelled out.
-            (b"/st\xff", "TOG_STORE=\"$(printf '/st\\377')\" env"),
+            (b"/st\xff", "GREYWARD_STORE=\"$(printf '/st\\377')\" env"),
             (
                 b"/a b\xfe'%\\c",
-                "TOG_STORE=\"$(printf '/a\\040b\\376\\047%%\\134c')\" env",
+                "GREYWARD_STORE=\"$(printf '/a\\040b\\376\\047%%\\134c')\" env",
             ),
             // Control characters, a newline inside among them.
             (
                 b"/new\nline\x1b[0m",
-                "TOG_STORE=\"$(printf '/new\\012line\\033\\1330m')\" env",
+                "GREYWARD_STORE=\"$(printf '/new\\012line\\033\\1330m')\" env",
             ),
             // Trailing newlines, which `$(...)` would drop.
             (
                 b"/ends\n\n",
-                "(p=\"$(printf '/ends\\012\\012.')\"; TOG_STORE=\"${p%.}\" env)",
+                "(p=\"$(printf '/ends\\012\\012.')\"; GREYWARD_STORE=\"${p%.}\" env)",
             ),
             (
                 b"/x\xff\n",
-                "(p=\"$(printf '/x\\377\\012.')\"; TOG_STORE=\"${p%.}\" env)",
+                "(p=\"$(printf '/x\\377\\012.')\"; GREYWARD_STORE=\"${p%.}\" env)",
             ),
-            (b"/9\x01", "TOG_STORE=\"$(printf '/9\\001')\" env"),
+            (b"/9\x01", "GREYWARD_STORE=\"$(printf '/9\\001')\" env"),
         ];
         let shells = posix_shells();
         for (bytes, expected) in cases {
             use std::os::unix::ffi::OsStrExt as _;
             let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
             assert_eq!(with_store("env", path), expected, "{path:?}");
-            // Every shell here that runs it hands the command a TOG_STORE
+            // Every shell here that runs it hands the command a GREYWARD_STORE
             // of exactly these bytes.
             for shell in &shells {
                 // The same shell reads the variable the prefix set.
-                let inner = format!("{} -c 'printf %s \"$TOG_STORE\"'", shell.join(" "));
+                let inner = format!("{} -c 'printf %s \"$GREYWARD_STORE\"'", shell.join(" "));
                 let command = with_store(&inner, path);
                 let out = std::process::Command::new(&shell[0])
                     .args(&shell[1..])
                     .arg("-c")
                     .arg(&command)
-                    .env_remove("TOG_STORE")
+                    .env_remove("GREYWARD_STORE")
                     .output()
                     .unwrap();
                 assert!(out.status.success(), "{shell:?}: {command}");
@@ -681,7 +687,7 @@ mod tests {
         shells
     }
 
-    /// The bare command is printed only for a store a bare `tog` selects
+    /// The bare command is printed only for a store a bare `ward` selects
     /// from any directory. A relative selection is not that: the fix names
     /// the refused store, absolute.
     #[test]
@@ -690,22 +696,22 @@ mod tests {
         let root = temp.0.join("store");
         fs::create_dir(&root).unwrap();
         let root = root.canonicalize().unwrap();
-        // What `fix_for` passes when TOG_STORE is relative: no selection.
+        // What `fix_for` passes when GREYWARD_STORE is relative: no selection.
         assert_eq!(
-            command_on("tog gc --reset", &root, None),
-            format!("TOG_STORE={} tog gc --reset", root.display())
+            command_on("ward gc --reset", &root, None),
+            format!("GREYWARD_STORE={} ward gc --reset", root.display())
         );
         // A root that reaches here relative is printed absolute.
         let relative = Path::new("no-such-store-here");
-        let command = command_on("tog gc --reset", relative, None);
+        let command = command_on("ward gc --reset", relative, None);
         let absolute = std::path::absolute(relative).unwrap();
         assert_eq!(
             command,
-            format!("TOG_STORE={} tog gc --reset", absolute.display())
+            format!("GREYWARD_STORE={} ward gc --reset", absolute.display())
         );
     }
 
-    /// Many togs creating one store at once: every one of them ends with
+    /// Many wards creating one store at once: every one of them ends with
     /// the store open, and none takes the other's namespaces for a store
     /// written before the marker existed.
     #[test]

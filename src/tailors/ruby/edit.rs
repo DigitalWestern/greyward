@@ -1,4 +1,4 @@
-//! `tog add` / `remove` / `update` for Ruby (`Tailor::edit_manifest`): the
+//! `ward add` / `remove` / `update` for Ruby (`Tailor::edit_manifest`): the
 //! store Bundler edits the Gemfile and Gemfile.lock, confined through the
 //! edit door, which publishes them with the signed resolution record.
 
@@ -8,7 +8,7 @@ use crate::kernel::resolve::{record, ResolutionDoor};
 use crate::tailors::edit::{registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry};
 use std::io;
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "gem",
     name: "RubyGems",
@@ -32,7 +32,7 @@ pub(crate) const REMOVE_GEMS: &str =
 /// writes the Gemfile and Gemfile.lock: `bundle add` and `bundle update`
 /// would also install every gem they resolve into the host's gem paths
 /// (#211), so `add` skips the install and an update is `bundle lock
-/// --update`. tog realizes the gems from the lock afterwards.
+/// --update`. ward realizes the gems from the lock afterwards.
 pub(super) fn bundler_runs(verb: EditVerb, texts: &[String], dev: bool) -> Vec<Vec<&str>> {
     match verb {
         EditVerb::Add => texts

@@ -1,4 +1,4 @@
-//! `tog gc`: store garbage collection and root-registry maintenance.
+//! `ward gc`: store garbage collection and root-registry maintenance.
 //! Kernel only; works without a valid host platform.
 
 use crate::cli;
@@ -33,12 +33,12 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
         // sweep skips quietly.
         if !args.forget.is_empty() || !args.drop_objects.is_empty() {
             return Err(io::Error::other(
-                "a Tog job is using this store; retry when it finishes",
+                "a Greyward job is using this store; retry when it finishes",
             ));
         }
         writeln!(
             narrate,
-            "tog: cleanup skipped: a Tog job is using this store"
+            "ward: cleanup skipped: a Greyward job is using this store"
         )?;
         return Ok(());
     };
@@ -89,23 +89,23 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     // `--dry-run` with `--register` was refused from argv.
     for project in &args.register {
         let entry = store.register_root_from_project_with_activity(&activity, project)?;
-        writeln!(narrate, "tog: registered root {}", entry.path.display())?;
+        writeln!(narrate, "ward: registered root {}", entry.path.display())?;
     }
     for key in &options.forgotten {
         if options.dry_run {
             let entry = store.lookup_root(key)?;
             writeln!(
                 narrate,
-                "tog: would forget root {key} ({})",
+                "ward: would forget root {key} ({})",
                 entry.describe()
             )?;
         } else {
             let entry = store.forget_root_with_activity(&activity, key)?;
-            writeln!(narrate, "tog: forgot root {key} ({})", entry.describe())?;
+            writeln!(narrate, "ward: forgot root {key} ({})", entry.describe())?;
         }
     }
     // Forgetting is the explicit recovery action, not an implicit sweep. A
-    // later `tog gc` may collect objects that are no longer protected;
+    // later `ward gc` may collect objects that are no longer protected;
     // this invocation must only change the requested registry records.
     if !options.dry_run && !args.forget.is_empty() {
         return Ok(());
@@ -115,7 +115,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     let verb = if dry_run { "would free" } else { "freed" };
     writeln!(
         narrate,
-        "tog: gc {verb} {} MB ({} objects, {} cached artifacts)",
+        "ward: gc {verb} {} MB ({} objects, {} cached artifacts)",
         report.freed_bytes / (1024 * 1024),
         report.objects,
         report.cached_artifacts
@@ -123,7 +123,7 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     Ok(())
 }
 
-/// `tog gc --reset`: empty the store and start it again.
+/// `ward gc --reset`: empty the store and start it again.
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
 fn reset(args: &cli::GcArgs) -> io::Result<()> {
@@ -135,7 +135,7 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
         if !args.dry_run {
             store::Store::open()?;
         }
-        writeln!(narrate, "tog: gc --reset: there is no store to empty yet")?;
+        writeln!(narrate, "ward: gc --reset: there is no store to empty yet")?;
         return Ok(());
     };
     // A handle on the root alone. The store may be one `open` refuses.
@@ -144,21 +144,21 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
     // when another job holds the store.
     let Some(activity) = store.try_activity_exclusive_unchecked()? else {
         return Err(io::Error::other(
-            "a Tog job is using this store; retry when it finishes",
+            "a Greyward job is using this store; retry when it finishes",
         ));
     };
     let report = gc::reset(&store, &activity, args.dry_run, &mut narrate)?;
     if args.dry_run {
         writeln!(
             narrate,
-            "tog: gc --reset would free {} MB ({} objects) and keep the download cache",
+            "ward: gc --reset would free {} MB ({} objects) and keep the download cache",
             report.freed_bytes / (1024 * 1024),
             report.objects
         )?;
     } else {
         writeln!(
             narrate,
-            "tog: gc --reset freed {} MB ({} objects) and kept the download cache; run 'tog' \
+            "ward: gc --reset freed {} MB ({} objects) and kept the download cache; run 'ward' \
              in each project to rebuild what it needs",
             report.freed_bytes / (1024 * 1024),
             report.objects

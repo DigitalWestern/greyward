@@ -1,5 +1,5 @@
-//! `tog update --toolchain [<ecosystem>]`: the one verb that replaces a
-//! committed `tog-toolchain.toml`.
+//! `ward update --toolchain [<ecosystem>]`: the one verb that replaces a
+//! committed `greyward-toolchain.toml`.
 //!
 //! It re-reads the project's declarative toolchain sources, selects from the
 //! shipped catalog again, writes one lock, and then syncs from it. Nothing

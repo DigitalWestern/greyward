@@ -1,4 +1,4 @@
-//! `tog keygen <path>`: create a closure-signing key and print the
+//! `ward keygen <path>`: create a closure-signing key and print the
 //! `[signing]` policy table that trusts it.
 //!
 //! The key file is created exclusively with mode 0600 and never overwrites
@@ -12,11 +12,11 @@ use std::path::Path;
 
 pub fn run(path: &Path) -> io::Result<i32> {
     // Every sandbox, resolution doors included, can read the system
-    // directories; a key there is readable by the code tog runs.
+    // directories; a key there is readable by the code ward runs.
     crate::kernel::resolve::confine::refuse_key_under_system_root(path)?;
     let public = signing::generate(path)?;
     ui::note(&format!(
-        "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set TOG_SIGNING_KEY={} where 'tog' runs",
+        "keygen: wrote {} (mode 0600). Keep it outside the checkout, the store, and any sandbox read root; set GREYWARD_SIGNING_KEY={} where 'ward' runs",
         path.display(),
         path.display()
     ));
@@ -37,9 +37,9 @@ mod tests {
 
     #[test]
     fn keygen_refuses_a_path_under_a_system_read_root() {
-        let error = run(Path::new("/etc/tog/signing.key")).unwrap_err();
+        let error = run(Path::new("/etc/greyward/signing.key")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(!Path::new("/etc/tog/signing.key").exists());
+        assert!(!Path::new("/etc/greyward/signing.key").exists());
     }
 
     #[test]

@@ -5,10 +5,10 @@
 //! project's pathname: a project directory renamed or replaced while a
 //! command runs cannot substitute another project's files.
 //!
-//! Two read disciplines share the descriptor. tog's own state (`.tog`,
+//! Two read disciplines share the descriptor. ward's own state (`.greyward`,
 //! closures, caches) and the toolchain inputs are walked one component at a
 //! time with O_NOFOLLOW (`read_file`, `write_file`, `entry`): no component is
-//! ever followed through a symlink, so a symlinked `.tog` cannot redirect a
+//! ever followed through a symlink, so a symlinked `.greyward` cannot redirect a
 //! cache write outside the project. Inputs the user authors (manifests,
 //! dependency locks) are read with `read_input`, which resolves from the
 //! descriptor but follows a symlink the project itself contains, as a
@@ -135,7 +135,7 @@ impl ProjectRoot {
 
     /// The directory an open root holds at `path` (`None` if none does), as
     /// a readable root with no cwd binding of its own: a confined door's lock
-    /// root is the tree tog opened, though renamed or replaced since (#498).
+    /// root is the tree ward opened, though renamed or replaced since (#498).
     ///
     /// The path it returns is canonical, as `open`'s is. A path that climbs
     /// (`..`), or that reaches below a held root through a symlink, is not
@@ -307,7 +307,7 @@ impl ProjectRoot {
         }
         let temp = made.ok_or_else(|| {
             refusal(format!(
-                "every temporary name for {label} {} is occupied; remove stale .tog-tmp \
+                "every temporary name for {label} {} is occupied; remove stale .greyward-tmp \
                  entries and retry",
                 display.display()
             ))
@@ -385,7 +385,7 @@ impl ProjectRoot {
         Ok(Some(PathBuf::from(std::ffi::OsString::from_vec(buffer))))
     }
 
-    /// Remove a project-relative symlink tog placed (a stale workspace
+    /// Remove a project-relative symlink ward placed (a stale workspace
     /// link). `Ok(())` when it is already absent. Anything that is not a
     /// symlink is refused, so a user's real file or directory that took the
     /// name is never removed.
@@ -417,7 +417,7 @@ impl ProjectRoot {
         Ok(())
     }
 
-    /// Remove a project-relative directory tree tog owns (`.tog/cargo-home`
+    /// Remove a project-relative directory tree ward owns (`.greyward/cargo-home`
     /// on `--fresh`) without following a symlink anywhere: a symlink at the
     /// name is unlinked, never followed, and nothing outside the tree is
     /// touched. `Ok(())` when it is already absent.
@@ -454,7 +454,7 @@ impl ProjectRoot {
         fsync_directory(dir.as_raw_fd())
     }
 
-    /// Move a real project directory (a pre-tog `.venv` or `node_modules`)
+    /// Move a real project directory (a pre-greyward `.venv` or `node_modules`)
     /// out of the project into `destination_dir` under `destination_name`,
     /// with one `renameat` from the held parent. Refuses unless the name is
     /// a real directory now; a symlink is never followed or moved.
@@ -549,7 +549,7 @@ impl ProjectRoot {
     /// Remove a project-relative regular file through the held descriptor.
     /// `Ok(())` when the file or any parent is already absent. A symlink, a
     /// directory, or anything else at the destination is refused rather than
-    /// unlinked, so a `.tog` or a cache entry swapped for a symlink cannot
+    /// unlinked, so a `.greyward` or a cache entry swapped for a symlink cannot
     /// make a caller delete something outside the project. The unlink
     /// carries the inode the check saw, so an entry replaced in between is
     /// left alone rather than removed blind.
@@ -689,7 +689,7 @@ impl ProjectRoot {
         let moved = |detail: String| {
             crate::kernel::error::refused(
                 io::ErrorKind::Other,
-                format!("{}: {detail}; run 'tog' again", self.path.display()),
+                format!("{}: {detail}; run 'ward' again", self.path.display()),
             )
         };
         // Only the identity is compared, so the directory is not opened
@@ -718,8 +718,8 @@ impl ProjectRoot {
     /// replaced mid-command cannot substitute another project's files. A
     /// symlink the project itself contains is followed, as a pathname read
     /// inside the project would follow it: that is the user's own layout,
-    /// not a race. The strict no-follow walk (`read_file`) stays for tog's
-    /// own state under `.tog` and for toolchain inputs. `relative` may climb
+    /// not a race. The strict no-follow walk (`read_file`) stays for ward's
+    /// own state under `.greyward` and for toolchain inputs. `relative` may climb
     /// with `..` (a requirements include beside the project); it may not be
     /// absolute, since an absolute path would ignore the descriptor.
     pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -805,7 +805,7 @@ impl ProjectRoot {
         Ok(Some(names))
     }
 
-    /// The names in a directory of tog's own state (`.tog/closures`),
+    /// The names in a directory of ward's own state (`.greyward/closures`),
     /// sorted, or `None` when it or a parent is absent. Walked like
     /// `read_file`: a symlink at any component, the listed directory
     /// included, is refused rather than listed through.
@@ -888,7 +888,7 @@ impl ProjectRoot {
     }
 
     /// The regular file at `path`, a path outside the project (an absolute
-    /// `tog.toml` requirements path, an include beside the project), as
+    /// `greyward.toml` requirements path, an include beside the project), as
     /// this root first read it; `None` when it is absent or not a regular
     /// file. Read once, so every stage of a command sees the same bytes.
     pub fn read_external(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -917,7 +917,7 @@ impl ProjectRoot {
         // The displayed name can become shallower than the actual directory
         // after a move. Only descriptor identity determines the end of a walk.
         let path = self.path.parent().unwrap_or(Path::new("/"));
-        // A parent tog may search but not list (0111) is held the way the
+        // A parent ward may search but not list (0111) is held the way the
         // walk to a project holds it: files below it open by name, and
         // nothing here lists it (#480).
         let dir = open_file_at(self.dir.as_raw_fd(), b"..", DIRECTORY_FLAGS, 0)
@@ -1449,14 +1449,14 @@ pub fn random_suffix() -> io::Result<String> {
     Ok(hex::encode(urandom_bytes(16)?))
 }
 
-/// `.tog-tmp.<32 hex>`: a fresh random name per attempt, so an occupied
+/// `.greyward-tmp.<32 hex>`: a fresh random name per attempt, so an occupied
 /// name (a crash leftover, or an entry planted at a guessable name) is
 /// stepped around, never unlinked and never written through. The name
 /// carries no process identity, so two runs in containers that reuse small
 /// pids never pick the same fixed point. The destination name is not part
 /// of it, so a destination of any valid length publishes.
 fn random_temp_name(_name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
-    Ok(format!(".tog-tmp.{}", random_suffix()?).into_bytes())
+    Ok(format!(".greyward-tmp.{}", random_suffix()?).into_bytes())
 }
 
 #[cfg(test)]
@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     /// A child started in a held project's path enters the held directory:
-    /// a project swapped for another between tog's open and the spawn does
+    /// a project swapped for another between ward's open and the spawn does
     /// not redirect it, nor does one in a held root's subdirectory. Once
     /// the root is dropped, the path is used again. Deleted held roots,
     /// missing held members and conflicting roots refuse execution.
@@ -1665,7 +1665,7 @@ mod tests {
     fn writes_read_back_and_create_parents() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        let path = Path::new(".tog/cache/plan.json");
+        let path = Path::new(".greyward/cache/plan.json");
         assert_eq!(root.read_file(path).unwrap(), None);
         root.write_file(path, b"{\"a\":1}").unwrap();
         assert_eq!(
@@ -1673,21 +1673,24 @@ mod tests {
             Some(&b"{\"a\":1}"[..])
         );
         assert_eq!(
-            fs::read(root.path().join(".tog/cache/plan.json")).unwrap(),
+            fs::read(root.path().join(".greyward/cache/plan.json")).unwrap(),
             b"{\"a\":1}"
         );
-        assert_eq!(entries(&root.path().join(".tog/cache")), vec!["plan.json"]);
+        assert_eq!(
+            entries(&root.path().join(".greyward/cache")),
+            vec!["plan.json"]
+        );
     }
 
     #[test]
     fn rewrite_replaces_the_file_and_leaves_no_temporary() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        let path = Path::new(".tog/plan.json");
+        let path = Path::new(".greyward/plan.json");
         root.write_file(path, b"one").unwrap();
         root.write_file(path, b"two").unwrap();
         assert_eq!(root.read_file(path).unwrap().unwrap(), b"two");
-        assert_eq!(entries(&root.path().join(".tog")), vec!["plan.json"]);
+        assert_eq!(entries(&root.path().join(".greyward")), vec!["plan.json"]);
     }
 
     #[test]
@@ -1716,12 +1719,12 @@ mod tests {
 
         let temp = TempDir::new();
         let dir = project(&temp);
-        fs::create_dir(dir.join(".tog")).unwrap();
+        fs::create_dir(dir.join(".greyward")).unwrap();
         let victim = temp.0.join("victim");
         fs::write(&victim, b"keep").unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         for name in ["regular", "link", "absent"] {
-            let destination = dir.join(".tog").join(name);
+            let destination = dir.join(".greyward").join(name);
             match name {
                 "regular" => {
                     fs::write(&destination, b"old").unwrap();
@@ -1730,12 +1733,12 @@ mod tests {
                 "link" => symlink(&victim, &destination).unwrap(),
                 _ => {}
             }
-            let temporary = dir.join(".tog").join(OsStr::from_bytes(
+            let temporary = dir.join(".greyward").join(OsStr::from_bytes(
                 &fixed_temp_name(name.as_bytes(), 0).unwrap(),
             ));
             let error = root
                 .publish_mode(
-                    &Path::new(".tog").join(name),
+                    &Path::new(".greyward").join(name),
                     &mut FailingReader {
                         temporary,
                         emitted: 0,
@@ -1757,9 +1760,9 @@ mod tests {
                 "link" => assert_eq!(fs::read_link(&destination).unwrap(), victim),
                 _ => assert!(!destination.exists()),
             }
-            assert!(!entries(&dir.join(".tog"))
+            assert!(!entries(&dir.join(".greyward"))
                 .iter()
-                .any(|name| name.contains(".tog-tmp")));
+                .any(|name| name.contains(".greyward-tmp")));
             assert_eq!(fs::read(&victim).unwrap(), b"keep");
         }
     }
@@ -1837,13 +1840,13 @@ mod tests {
     fn remove_file_deletes_a_regular_file_and_tolerates_an_absent_one() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        let path = Path::new(".tog/lock-source.hash");
+        let path = Path::new(".greyward/lock-source.hash");
         // Absent name, and absent parent, are both a no-op.
         root.remove_file(path).unwrap();
         root.write_file(path, b"abc").unwrap();
         root.remove_file(path).unwrap();
         assert_eq!(root.read_file(path).unwrap(), None);
-        assert!(entries(&root.path().join(".tog")).is_empty());
+        assert!(entries(&root.path().join(".greyward")).is_empty());
         root.remove_file(path).unwrap();
     }
 
@@ -1854,10 +1857,10 @@ mod tests {
         let outside = temp.0.join("outside");
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("lock-source.hash"), b"keep").unwrap();
-        symlink(&outside, dir.join(".tog")).unwrap();
+        symlink(&outside, dir.join(".greyward")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root
-            .remove_file(Path::new(".tog/lock-source.hash"))
+            .remove_file(Path::new(".greyward/lock-source.hash"))
             .unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
@@ -1867,15 +1870,15 @@ mod tests {
 
         // And a symlink at the destination name itself, under a real parent.
         let other = temp.0.join("other-proj");
-        fs::create_dir_all(other.join(".tog")).unwrap();
+        fs::create_dir_all(other.join(".greyward")).unwrap();
         symlink(
             outside.join("lock-source.hash"),
-            other.join(".tog/lock-source.hash"),
+            other.join(".greyward/lock-source.hash"),
         )
         .unwrap();
         let root = ProjectRoot::open(&other).unwrap();
         let error = root
-            .remove_file(Path::new(".tog/lock-source.hash"))
+            .remove_file(Path::new(".greyward/lock-source.hash"))
             .unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
         assert_eq!(fs::read(outside.join("lock-source.hash")).unwrap(), b"keep");
@@ -1885,10 +1888,13 @@ mod tests {
     fn remove_file_refuses_a_directory() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        root.create_dir_all(Path::new(".tog/closures")).unwrap();
-        let error = root.remove_file(Path::new(".tog/closures")).unwrap_err();
+        root.create_dir_all(Path::new(".greyward/closures"))
+            .unwrap();
+        let error = root
+            .remove_file(Path::new(".greyward/closures"))
+            .unwrap_err();
         assert!(error.to_string().contains("is a directory"), "{error}");
-        assert!(root.path().join(".tog/closures").is_dir());
+        assert!(root.path().join(".greyward/closures").is_dir());
     }
 
     #[test]
@@ -1897,28 +1903,33 @@ mod tests {
         let dir = project(&temp);
         let outside = temp.0.join("outside.json");
         fs::write(&outside, b"outside").unwrap();
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
-        symlink(&outside, dir.join(".tog/closures/python.json")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
+        symlink(&outside, dir.join(".greyward/closures/python.json")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
 
-        assert_eq!(root.entry(Path::new(".tog/absent")).unwrap(), Entry::Absent);
+        assert_eq!(
+            root.entry(Path::new(".greyward/absent")).unwrap(),
+            Entry::Absent
+        );
         assert_eq!(
             root.entry(Path::new("no-such-dir/name")).unwrap(),
             Entry::Absent
         );
         assert_eq!(
-            root.entry(Path::new(".tog/closures")).unwrap(),
+            root.entry(Path::new(".greyward/closures")).unwrap(),
             Entry::Directory
         );
         // The symlink is reported as a symlink, not as the regular file it
         // points at, so a caller refuses instead of writing through it.
         assert_eq!(
-            root.entry(Path::new(".tog/closures/python.json")).unwrap(),
+            root.entry(Path::new(".greyward/closures/python.json"))
+                .unwrap(),
             Entry::Symlink
         );
-        root.write_file(Path::new(".tog/plan.json"), b"{}").unwrap();
+        root.write_file(Path::new(".greyward/plan.json"), b"{}")
+            .unwrap();
         assert_eq!(
-            root.entry(Path::new(".tog/plan.json")).unwrap(),
+            root.entry(Path::new(".greyward/plan.json")).unwrap(),
             Entry::Regular
         );
     }
@@ -1929,9 +1940,9 @@ mod tests {
         let dir = project(&temp);
         let outside = temp.0.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, dir.join(".tog")).unwrap();
+        symlink(&outside, dir.join(".greyward")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        let error = root.entry(Path::new(".tog/plan.json")).unwrap_err();
+        let error = root.entry(Path::new(".greyward/plan.json")).unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -1942,10 +1953,12 @@ mod tests {
     fn create_dir_all_makes_the_chain_and_is_idempotent() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        root.create_dir_all(Path::new(".tog/closures")).unwrap();
-        assert!(root.path().join(".tog/closures").is_dir());
-        root.create_dir_all(Path::new(".tog/closures")).unwrap();
-        assert_eq!(entries(&root.path().join(".tog")), vec!["closures"]);
+        root.create_dir_all(Path::new(".greyward/closures"))
+            .unwrap();
+        assert!(root.path().join(".greyward/closures").is_dir());
+        root.create_dir_all(Path::new(".greyward/closures"))
+            .unwrap();
+        assert_eq!(entries(&root.path().join(".greyward")), vec!["closures"]);
     }
 
     #[test]
@@ -1954,9 +1967,11 @@ mod tests {
         let dir = project(&temp);
         let outside = temp.0.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, dir.join(".tog")).unwrap();
+        symlink(&outside, dir.join(".greyward")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        let error = root.create_dir_all(Path::new(".tog/closures")).unwrap_err();
+        let error = root
+            .create_dir_all(Path::new(".greyward/closures"))
+            .unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -1970,17 +1985,19 @@ mod tests {
         let dir = project(&temp);
         let outside = temp.0.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, dir.join(".tog")).unwrap();
+        symlink(&outside, dir.join(".greyward")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root
-            .write_file(Path::new(".tog/plan.json"), b"x")
+            .write_file(Path::new(".greyward/plan.json"), b"x")
             .unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
         );
         assert!(entries(&outside).is_empty(), "wrote through the symlink");
-        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        let error = root
+            .read_file(Path::new(".greyward/plan.json"))
+            .unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -1999,9 +2016,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o111)).unwrap();
         let opened = ProjectRoot::open(&dir).and_then(|root| {
-            root.write_file(Path::new(".tog/plan.json"), b"x")?;
+            root.write_file(Path::new(".greyward/plan.json"), b"x")?;
             root.check_still_named()?;
-            root.read_file(Path::new(".tog/plan.json"))
+            root.read_file(Path::new(".greyward/plan.json"))
         });
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(opened.unwrap().as_deref(), Some(&b"x"[..]));
@@ -2091,27 +2108,29 @@ mod tests {
         let dir = project(&temp);
         let victim = temp.0.join("victim");
         fs::write(&victim, b"original").unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        symlink(&victim, dir.join(".tog/plan.json")).unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
+        symlink(&victim, dir.join(".greyward/plan.json")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root
-            .write_file(Path::new(".tog/plan.json"), b"x")
+            .write_file(Path::new(".greyward/plan.json"), b"x")
             .unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
         assert_eq!(fs::read(&victim).unwrap(), b"original");
-        assert!(fs::symlink_metadata(dir.join(".tog/plan.json"))
+        assert!(fs::symlink_metadata(dir.join(".greyward/plan.json"))
             .unwrap()
             .file_type()
             .is_symlink());
-        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
-        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        assert_eq!(entries(&dir.join(".greyward")), vec!["plan.json"]);
+        let error = root
+            .read_file(Path::new(".greyward/plan.json"))
+            .unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
     }
 
     fn fixed_temp_name(name: &[u8], attempt: usize) -> io::Result<Vec<u8>> {
         let mut temp = b".".to_vec();
         temp.extend_from_slice(name);
-        temp.extend_from_slice(format!(".tog-tmp.fixed.{attempt}").as_bytes());
+        temp.extend_from_slice(format!(".greyward-tmp.fixed.{attempt}").as_bytes());
         Ok(temp)
     }
 
@@ -2121,19 +2140,23 @@ mod tests {
         let dir = project(&temp);
         let victim = temp.0.join("victim");
         fs::write(&victim, b"original").unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
         for attempt in 0..TEMP_ATTEMPTS {
             let name = fixed_temp_name(b"plan.json", attempt).unwrap();
-            symlink(&victim, dir.join(".tog").join(OsStr::from_bytes(&name))).unwrap();
+            symlink(
+                &victim,
+                dir.join(".greyward").join(OsStr::from_bytes(&name)),
+            )
+            .unwrap();
         }
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root
-            .publish(Path::new(".tog/plan.json"), b"x", &mut fixed_temp_name)
+            .publish(Path::new(".greyward/plan.json"), b"x", &mut fixed_temp_name)
             .unwrap_err();
         assert!(error.to_string().contains("occupied"), "{error}");
         assert_eq!(fs::read(&victim).unwrap(), b"original");
-        assert_eq!(entries(&dir.join(".tog")).len(), TEMP_ATTEMPTS);
-        assert!(!dir.join(".tog/plan.json").exists());
+        assert_eq!(entries(&dir.join(".greyward")).len(), TEMP_ATTEMPTS);
+        assert!(!dir.join(".greyward/plan.json").exists());
     }
 
     #[test]
@@ -2142,15 +2165,19 @@ mod tests {
         let dir = project(&temp);
         let victim = temp.0.join("victim");
         fs::write(&victim, b"original").unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
         let occupied = fixed_temp_name(b"plan.json", 0).unwrap();
-        symlink(&victim, dir.join(".tog").join(OsStr::from_bytes(&occupied))).unwrap();
+        symlink(
+            &victim,
+            dir.join(".greyward").join(OsStr::from_bytes(&occupied)),
+        )
+        .unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        root.publish(Path::new(".tog/plan.json"), b"x", &mut fixed_temp_name)
+        root.publish(Path::new(".greyward/plan.json"), b"x", &mut fixed_temp_name)
             .unwrap();
-        assert_eq!(fs::read(dir.join(".tog/plan.json")).unwrap(), b"x");
+        assert_eq!(fs::read(dir.join(".greyward/plan.json")).unwrap(), b"x");
         assert_eq!(fs::read(&victim).unwrap(), b"original");
-        assert_eq!(entries(&dir.join(".tog")).len(), 2);
+        assert_eq!(entries(&dir.join(".greyward")).len(), 2);
     }
 
     #[test]
@@ -2184,14 +2211,16 @@ mod tests {
     fn refuses_a_directory_destination() {
         let temp = TempDir::new();
         let dir = project(&temp);
-        fs::create_dir_all(dir.join(".tog/plan.json")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/plan.json")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root
-            .write_file(Path::new(".tog/plan.json"), b"x")
+            .write_file(Path::new(".greyward/plan.json"), b"x")
             .unwrap_err();
         assert!(error.to_string().contains("is a directory"), "{error}");
-        assert!(dir.join(".tog/plan.json").is_dir());
-        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        assert!(dir.join(".greyward/plan.json").is_dir());
+        let error = root
+            .read_file(Path::new(".greyward/plan.json"))
+            .unwrap_err();
         assert!(error.to_string().contains("not a regular file"), "{error}");
     }
 
@@ -2199,12 +2228,14 @@ mod tests {
     fn refuses_to_read_a_fifo() {
         let temp = TempDir::new();
         let dir = project(&temp);
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        let fifo = CString::new(dir.join(".tog/plan.json").as_os_str().as_bytes()).unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
+        let fifo = CString::new(dir.join(".greyward/plan.json").as_os_str().as_bytes()).unwrap();
         // SAFETY: fifo is a valid NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
         let root = ProjectRoot::open(&dir).unwrap();
-        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        let error = root
+            .read_file(Path::new(".greyward/plan.json"))
+            .unwrap_err();
         assert!(error.to_string().contains("not a regular file"), "{error}");
     }
 
@@ -2212,38 +2243,42 @@ mod tests {
     fn refuses_a_socket_for_reading_and_as_a_destination() {
         let temp = TempDir::new();
         let dir = project(&temp);
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        let _listener = bind_socket(&dir.join(".tog/plan.json"));
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
+        let _listener = bind_socket(&dir.join(".greyward/plan.json"));
         let root = ProjectRoot::open(&dir).unwrap();
-        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        let error = root
+            .read_file(Path::new(".greyward/plan.json"))
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("not a regular file"), "{error}");
         let error = root
-            .write_file(Path::new(".tog/plan.json"), b"x")
+            .write_file(Path::new(".greyward/plan.json"), b"x")
             .unwrap_err();
         assert!(error.to_string().contains("not a regular file"), "{error}");
-        assert!(fs::symlink_metadata(dir.join(".tog/plan.json"))
+        assert!(fs::symlink_metadata(dir.join(".greyward/plan.json"))
             .unwrap()
             .file_type()
             .is_socket());
-        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
+        assert_eq!(entries(&dir.join(".greyward")), vec!["plan.json"]);
     }
 
     #[test]
     fn refuses_a_file_where_a_directory_is_expected() {
         let temp = TempDir::new();
         let dir = project(&temp);
-        fs::write(dir.join(".tog"), b"not a directory").unwrap();
+        fs::write(dir.join(".greyward"), b"not a directory").unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         let error = root
-            .write_file(Path::new(".tog/plan.json"), b"x")
+            .write_file(Path::new(".greyward/plan.json"), b"x")
             .unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
         );
-        assert_eq!(fs::read(dir.join(".tog")).unwrap(), b"not a directory");
-        let error = root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+        assert_eq!(fs::read(dir.join(".greyward")).unwrap(), b"not a directory");
+        let error = root
+            .read_file(Path::new(".greyward/plan.json"))
+            .unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
             "{error}"
@@ -2255,11 +2290,15 @@ mod tests {
     fn non_utf8_names_round_trip() {
         let temp = TempDir::new();
         let root = ProjectRoot::open(&project(&temp)).unwrap();
-        let path = PathBuf::from(OsStr::from_bytes(b".tog/caf\xe9.json"));
+        let path = PathBuf::from(OsStr::from_bytes(b".greyward/caf\xe9.json"));
         root.write_file(&path, b"x").unwrap();
         assert_eq!(root.read_file(&path).unwrap().unwrap(), b"x");
         assert_eq!(
-            fs::read(root.path().join(OsStr::from_bytes(b".tog/caf\xe9.json"))).unwrap(),
+            fs::read(
+                root.path()
+                    .join(OsStr::from_bytes(b".greyward/caf\xe9.json"))
+            )
+            .unwrap(),
             b"x"
         );
     }
@@ -2272,13 +2311,13 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let path = PathBuf::from(OsStr::from_bytes(b".tog/caf\xe9.json"));
+        let path = PathBuf::from(OsStr::from_bytes(b".greyward/caf\xe9.json"));
         let error = root.write_file(&path, b"x").unwrap_err();
         assert!(
             error.to_string().contains("Illegal byte sequence"),
             "{error}"
         );
-        assert_eq!(entries(&dir.join(".tog")), Vec::<String>::new());
+        assert_eq!(entries(&dir.join(".greyward")), Vec::<String>::new());
     }
 
     #[test]
@@ -2303,22 +2342,22 @@ mod tests {
         let dir = project(&temp);
         let victim = temp.0.join("victim");
         fs::write(&victim, b"original").unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        fs::write(dir.join(".tog/plan.json"), b"old").unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
+        fs::write(dir.join(".greyward/plan.json"), b"old").unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        let link = dir.join(".tog/plan.json");
+        let link = dir.join(".greyward/plan.json");
         let mut swap = |name: &[u8], attempt: usize| {
             fs::remove_file(&link).unwrap();
             symlink(&victim, &link).unwrap();
             fixed_temp_name(name, attempt)
         };
-        root.publish(Path::new(".tog/plan.json"), b"new", &mut swap)
+        root.publish(Path::new(".greyward/plan.json"), b"new", &mut swap)
             .unwrap();
         assert_eq!(fs::read(&victim).unwrap(), b"original");
         let published = fs::symlink_metadata(&link).unwrap();
         assert!(published.file_type().is_file());
         assert_eq!(fs::read(&link).unwrap(), b"new");
-        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
+        assert_eq!(entries(&dir.join(".greyward")), vec!["plan.json"]);
     }
 
     #[test]
@@ -2326,7 +2365,7 @@ mod tests {
         let temp = TempDir::new();
         let dir = project(&temp);
         let root = ProjectRoot::open(&dir).unwrap();
-        let relative = Path::new(".tog/toolchain-input.lock");
+        let relative = Path::new(".greyward/toolchain-input.lock");
         let file = root.open_lock_file(relative).unwrap();
         assert!(dir.join(relative).is_file());
         // The descriptor carries an advisory lock, and reopening the same
@@ -2334,7 +2373,10 @@ mod tests {
         file.lock_shared().unwrap();
         drop(file);
         drop(root.open_lock_file(relative).unwrap());
-        assert_eq!(entries(&dir.join(".tog")), vec!["toolchain-input.lock"]);
+        assert_eq!(
+            entries(&dir.join(".greyward")),
+            vec!["toolchain-input.lock"]
+        );
 
         // A symlink planted at the name fails closed instead of locking the
         // file it points at.
@@ -2348,10 +2390,10 @@ mod tests {
 
         // So does a symlinked ancestor directory.
         fs::remove_file(dir.join(relative)).unwrap();
-        fs::remove_dir(dir.join(".tog")).unwrap();
+        fs::remove_dir(dir.join(".greyward")).unwrap();
         let elsewhere = temp.0.join("elsewhere");
         fs::create_dir_all(&elsewhere).unwrap();
-        symlink(&elsewhere, dir.join(".tog")).unwrap();
+        symlink(&elsewhere, dir.join(".greyward")).unwrap();
         let error = root.open_lock_file(relative).unwrap_err();
         assert!(
             error.to_string().contains("not a real directory"),
@@ -2363,19 +2405,23 @@ mod tests {
     fn a_rename_failure_after_the_temporary_exists_cleans_it_up() {
         let temp = TempDir::new();
         let dir = project(&temp);
-        fs::create_dir_all(dir.join(".tog")).unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        let destination = dir.join(".tog/plan.json");
+        let destination = dir.join(".greyward/plan.json");
         let mut swap_in_directory = |name: &[u8], attempt: usize| {
             fs::create_dir(&destination).unwrap();
             fixed_temp_name(name, attempt)
         };
         let error = root
-            .publish(Path::new(".tog/plan.json"), b"new", &mut swap_in_directory)
+            .publish(
+                Path::new(".greyward/plan.json"),
+                b"new",
+                &mut swap_in_directory,
+            )
             .unwrap_err();
         assert!(error.to_string().contains("publish"), "{error}");
         assert!(destination.is_dir());
-        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
+        assert_eq!(entries(&dir.join(".greyward")), vec!["plan.json"]);
     }
 
     #[test]
@@ -2389,7 +2435,8 @@ mod tests {
                 std::thread::spawn(move || {
                     let body = vec![b'a' + worker; 4096];
                     for _ in 0..25 {
-                        root.write_file(Path::new(".tog/plan.json"), &body).unwrap();
+                        root.write_file(Path::new(".greyward/plan.json"), &body)
+                            .unwrap();
                     }
                 })
             })
@@ -2397,10 +2444,10 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        let bytes = fs::read(dir.join(".tog/plan.json")).unwrap();
+        let bytes = fs::read(dir.join(".greyward/plan.json")).unwrap();
         assert_eq!(bytes.len(), 4096);
         assert!(bytes.iter().all(|byte| *byte == bytes[0]), "torn write");
-        assert_eq!(entries(&dir.join(".tog")), vec!["plan.json"]);
+        assert_eq!(entries(&dir.join(".greyward")), vec!["plan.json"]);
     }
 
     #[cfg(target_os = "linux")]
@@ -2410,7 +2457,7 @@ mod tests {
         let dir = project(&temp);
         let outside = temp.0.join("outside");
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, dir.join(".tog")).unwrap();
+        symlink(&outside, dir.join(".greyward")).unwrap();
         fs::create_dir_all(dir.join("real/plan.json")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
         // Other test threads open files concurrently, so count only the
@@ -2428,9 +2475,10 @@ mod tests {
         let before = open_descriptors();
         assert_eq!(before, 1, "the held project root");
         for _ in 0..50 {
-            root.write_file(Path::new(".tog/plan.json"), b"x")
+            root.write_file(Path::new(".greyward/plan.json"), b"x")
                 .unwrap_err();
-            root.read_file(Path::new(".tog/plan.json")).unwrap_err();
+            root.read_file(Path::new(".greyward/plan.json"))
+                .unwrap_err();
             root.write_file(Path::new("real/plan.json"), b"x")
                 .unwrap_err();
             root.read_file(Path::new("real/plan.json")).unwrap_err();
@@ -2461,8 +2509,9 @@ mod tests {
         symlink(&dir, &alias).unwrap();
         let root = ProjectRoot::open(&alias).unwrap();
         assert_eq!(root.path(), dir.canonicalize().unwrap());
-        root.write_file(Path::new(".tog/plan.json"), b"x").unwrap();
-        assert_eq!(fs::read(dir.join(".tog/plan.json")).unwrap(), b"x");
+        root.write_file(Path::new(".greyward/plan.json"), b"x")
+            .unwrap();
+        assert_eq!(fs::read(dir.join(".greyward/plan.json")).unwrap(), b"x");
     }
 
     #[test]
@@ -2610,28 +2659,30 @@ mod tests {
         assert!(dir.join(".venv").symlink_metadata().is_err());
         assert!(!entries(&dir)
             .iter()
-            .any(|name| name.starts_with(".tog-tmp")));
+            .any(|name| name.starts_with(".greyward-tmp")));
 
-        // A tree tog owns is removed without following a symlink inside it.
+        // A tree ward owns is removed without following a symlink inside it.
         let outside = temp.0.join("outside");
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("keep"), b"x").unwrap();
         root.write_file_mode(
-            Path::new(".tog/cargo-home/bin/cargo"),
+            Path::new(".greyward/cargo-home/bin/cargo"),
             b"#!/bin/sh\n",
             0o755,
         )
         .unwrap();
-        let mode = fs::metadata(dir.join(".tog/cargo-home/bin/cargo"))
+        let mode = fs::metadata(dir.join(".greyward/cargo-home/bin/cargo"))
             .unwrap()
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o755);
-        symlink(&outside, dir.join(".tog/cargo-home/escape")).unwrap();
-        root.remove_dir_all(Path::new(".tog/cargo-home")).unwrap();
-        assert!(!dir.join(".tog/cargo-home").exists());
+        symlink(&outside, dir.join(".greyward/cargo-home/escape")).unwrap();
+        root.remove_dir_all(Path::new(".greyward/cargo-home"))
+            .unwrap();
+        assert!(!dir.join(".greyward/cargo-home").exists());
         assert!(outside.join("keep").is_file());
-        root.remove_dir_all(Path::new(".tog/cargo-home")).unwrap();
+        root.remove_dir_all(Path::new(".greyward/cargo-home"))
+            .unwrap();
 
         // Once the project is renamed away, every write lands in the held
         // directory, never at the old path.
@@ -2673,16 +2724,19 @@ mod tests {
         fs::create_dir_all(outside.join("closures")).unwrap();
         fs::write(outside.join("closures/python.json"), b"{}").unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
-        assert_eq!(root.read_dir(Path::new(".tog/closures")).unwrap(), None);
+        assert_eq!(
+            root.read_dir(Path::new(".greyward/closures")).unwrap(),
+            None
+        );
         assert!(root.subdir(Path::new("src")).unwrap().is_none());
 
-        symlink(&outside, dir.join(".tog")).unwrap();
-        let error = root.read_dir(Path::new(".tog/closures")).unwrap_err();
+        symlink(&outside, dir.join(".greyward")).unwrap();
+        let error = root.read_dir(Path::new(".greyward/closures")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
-        fs::remove_file(dir.join(".tog")).unwrap();
-        fs::create_dir_all(dir.join(".tog")).unwrap();
-        symlink(outside.join("closures"), dir.join(".tog/closures")).unwrap();
-        let error = root.read_dir(Path::new(".tog/closures")).unwrap_err();
+        fs::remove_file(dir.join(".greyward")).unwrap();
+        fs::create_dir_all(dir.join(".greyward")).unwrap();
+        symlink(outside.join("closures"), dir.join(".greyward/closures")).unwrap();
+        let error = root.read_dir(Path::new(".greyward/closures")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         symlink(&outside, dir.join("src")).unwrap();
         let error = root.subdir(Path::new("src")).unwrap_err();
@@ -2727,7 +2781,7 @@ mod tests {
     /// `rename_in` moves a file from outside the project into the held
     /// directory with its mode, replaces a regular file there, and leaves
     /// no temporary behind. A project renamed after it was opened receives
-    /// the file in the directory tog holds, not at the old path.
+    /// the file in the directory ward holds, not at the old path.
     #[test]
     fn rename_in_moves_a_file_into_the_held_directory() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2760,7 +2814,7 @@ mod tests {
         assert!(dir.join("app").symlink_metadata().is_err());
         assert!(!entries(&moved)
             .iter()
-            .any(|name| name.starts_with(".tog-tmp")));
+            .any(|name| name.starts_with(".greyward-tmp")));
     }
 
     /// A symlink at the destination is replaced by the file, never written
@@ -2841,7 +2895,10 @@ mod tests {
             eprintln!("skip {NAME}: /dev/shm shares the temp filesystem");
             return;
         }
-        let other = TempDir(shm.join(format!("tog-rename-in-xdev-{}", random_suffix().unwrap())));
+        let other = TempDir(shm.join(format!(
+            "greyward-rename-in-xdev-{}",
+            random_suffix().unwrap()
+        )));
         fs::create_dir(&other.0).unwrap();
         let built = other.0.join("app");
         // Larger than any copy buffer, so the stream is read in pieces.
@@ -2863,7 +2920,7 @@ mod tests {
         assert!(built.symlink_metadata().is_err());
         assert!(!entries(&dir)
             .iter()
-            .any(|name| name.starts_with(".tog-tmp")));
+            .any(|name| name.starts_with(".greyward-tmp")));
 
         // A directory there is refused across filesystems too, and the
         // source stays.

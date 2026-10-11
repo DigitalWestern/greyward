@@ -14,7 +14,7 @@
 //! and not scanned, and a socket created after the scan is not caught.
 //!
 //! A third network mode, `Proxy`, runs a resolution tool with its network
-//! fenced to tog's recording proxy. It lives in `kernel::resolve::confine`
+//! fenced to ward's recording proxy. It lives in `kernel::resolve::confine`
 //! and reuses the pieces here (the bubblewrap preflight and command, the
 //! system root mirror, the `/etc` entries). It differs from builds in
 //! three ways: every mounted root is scanned for sockets, system roots
@@ -85,7 +85,7 @@ pub struct BuildSpec {
 /// their settings with `/^npm_config_/i`, so `Npm_Config_registry` is as live
 /// as `npm_config_registry`, and removing more of the user's environment is
 /// the safe direction for every other prefix list too) or equals one of
-/// `remove` (exact), then apply `set` last so tog's values win.
+/// `remove` (exact), then apply `set` last so ward's values win.
 pub fn force_env(
     cmd: &mut Command,
     remove_prefixes: &[&str],
@@ -115,7 +115,7 @@ pub fn forced_env_edits(
         // `str::get` rather than `name[..len]`: the index is a byte offset
         // that need not be a char boundary, and `to_string_lossy` turns any
         // invalid byte into a three-byte replacement character, so slicing
-        // panics on env names tog does not control. Out-of-boundary and
+        // panics on env names ward does not control. Out-of-boundary and
         // too-short both yield `None`, which is "no match".
         let has_prefix = remove_prefixes.iter().any(|prefix| {
             name.get(..prefix.len())
@@ -546,7 +546,7 @@ impl Sandbox<'_> {
             OsString::from("--unshare-ipc"),
             OsString::from("--unshare-uts"),
             OsString::from("--hostname"),
-            OsString::from("tog"),
+            OsString::from("ward"),
             OsString::from("--unshare-cgroup-try"),
             OsString::from("--die-with-parent"),
             OsString::from("--new-session"),
@@ -782,14 +782,14 @@ fn bwrap_unavailable() -> String {
 }
 
 /// The binary the preflight probe execs. A failure to exec *this* is a
-/// property of the host, because tog chose it and it is in the ro-bound
+/// property of the host, because ward chose it and it is in the ro-bound
 /// `/usr`; a failure to exec anything else is a property of that command.
 const PROBE_TARGET: &str = "/usr/bin/true";
 
 /// A bubblewrap that starts but cannot exec. The probe target is in the
-/// ro-bound `/usr`, so failing to exec it means the system runtime tog
+/// ro-bound `/usr`, so failing to exec it means the system runtime ward
 /// mirrors into the sandbox (`system_root_args`) does not hold together on
-/// this host, e.g. an ELF interpreter reached through an entry tog does not
+/// this host, e.g. an ELF interpreter reached through an entry ward does not
 /// recreate. The raw `execvp /usr/bin/true: No such file or directory`
 /// would read like a missing file in the user's project instead.
 ///
@@ -803,7 +803,7 @@ pub(crate) fn explained_bwrap_stderr(stderr: &str) -> String {
     }
     if raw.contains(PROBE_TARGET) {
         return format!(
-            "the sandbox starts but cannot exec inside it ({raw}): tog's copy of this host's \
+            "the sandbox starts but cannot exec inside it ({raw}): ward's copy of this host's \
              system layout (/usr, /bin, /lib, /lib64) does not let {PROBE_TARGET} load; \
              please report it with the output of 'ls -ld /bin /lib /lib64 /usr/lib64'"
         );
@@ -1059,7 +1059,7 @@ fn scan_for_socket(path: &Path, is_root: bool) -> io::Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// `tog doctor`: is the build sandbox usable on this host? Runs the
+/// `ward doctor`: is the build sandbox usable on this host? Runs the
 /// same preflight the real sandbox runs, so a green answer here means a
 /// green sandboxed build.
 pub fn probe(platform: Platform) -> io::Result<String> {
@@ -1113,7 +1113,7 @@ fn cached_verdict(
 }
 
 /// An error from a probe child: a verdict (the sandbox is unavailable,
-/// for this reason), or the interrupt that stopped tog, passed through.
+/// for this reason), or the interrupt that stopped ward, passed through.
 fn probe_failure(error: io::Error) -> io::Result<String> {
     if crate::kernel::supervise::stop_signal(&error).is_some() {
         return Err(error);
@@ -1154,7 +1154,7 @@ fn run_preflight(activity: Option<&StoreActivity>) -> io::Result<Result<PathBuf,
         "--unshare-ipc",
         "--unshare-uts",
         "--hostname",
-        "tog",
+        "ward",
         "--unshare-cgroup-try",
         "--die-with-parent",
         "--new-session",
@@ -1515,15 +1515,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     const F_GETFD: std::ffi::c_int = 1;
 
-    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns every
+    /// `GREYWARD_SANDBOX_TESTS=required` (any non-empty value) turns every
     /// Linux skip into a panic so CI cannot report skipped checks as passed.
     fn required_sandbox_tests() -> bool {
-        matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
+        matches!(std::env::var_os("GREYWARD_SANDBOX_TESTS"), Some(value) if !value.is_empty())
     }
 
     /// Whether a test that runs the Linux sandbox can run here: skipped
     /// (with the reason on stderr) off Linux or without a working
-    /// bubblewrap, unless `TOG_SANDBOX_TESTS` makes the skip a failure.
+    /// bubblewrap, unless `GREYWARD_SANDBOX_TESTS` makes the skip a failure.
     pub(super) fn linux_ready(test_name: &str) -> bool {
         match Platform::host() {
             Ok(Platform::X86_64UnknownLinuxGnu) => {}
@@ -1717,7 +1717,7 @@ mod tests {
         let cache = home.join(".cache");
         fs::create_dir_all(&cache).unwrap();
         let scratch = cache.join(format!(
-            "tog-test-ssh-{}",
+            "greyward-test-ssh-{}",
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&scratch).unwrap();
@@ -1726,7 +1726,7 @@ mod tests {
         // directory, undeclared and so as hidden as `~/.ssh`, and a file in
         // the declared scratch directory, which must be seen.
         let hidden = cache.join(format!(
-            "tog-test-ssh-sentinel-{}",
+            "greyward-test-ssh-sentinel-{}",
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&hidden, b"secret").unwrap();
@@ -1765,7 +1765,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     /// A project an open root holds is bound from its held descriptor
     /// (#497): renamed away with another directory put at its path, the
-    /// sandbox still sees, and starts in, the tree tog opened. Renamed with
+    /// sandbox still sees, and starts in, the tree ward opened. Renamed with
     /// nothing put back, it still runs there. Neither the command nor the
     /// sandbox's pid 1 keeps the held descriptor, which would lead out of
     /// the sandbox through `..`.
@@ -2365,7 +2365,7 @@ mod tests {
         );
     }
 
-    /// The sandboxed command reads EOF even when tog's own stdin has input
+    /// The sandboxed command reads EOF even when ward's own stdin has input
     /// waiting. The probe runs in a re-executed copy of this test whose
     /// stdin is a pipe the parent holds open with a line in it, so an
     /// inherited stdin would read that line instead of EOF. Run directly,
@@ -2375,14 +2375,14 @@ mod tests {
         if !linux_ready("linux_stdin_is_null") {
             return;
         }
-        if std::env::var_os("TOG_SANDBOX_STDIN_CHILD").is_none() {
+        if std::env::var_os("GREYWARD_SANDBOX_STDIN_CHILD").is_none() {
             use std::io::Write as _;
             // libtest names a test by its path inside the crate.
             let (_, module) = module_path!().split_once("::").unwrap();
             let name = format!("{module}::linux_stdin_is_null");
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &name, "--nocapture"])
-                .env("TOG_SANDBOX_STDIN_CHILD", "1")
+                .env("GREYWARD_SANDBOX_STDIN_CHILD", "1")
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -3083,12 +3083,12 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
         fs::create_dir_all(scratch.join("own")).unwrap();
         fs::write(
             scratch.join("own.c"),
-            "int tog_own_copy(void) { return 7; }\n",
+            "int ward_own_copy(void) { return 7; }\n",
         )
         .unwrap();
         fs::write(
             scratch.join("main.c"),
-            "int tog_own_copy(void);\nint main(void) { return tog_own_copy() == 7 ? 0 : 1; }\n",
+            "int ward_own_copy(void);\nint main(void) { return ward_own_copy() == 7 ? 0 : 1; }\n",
         )
         .unwrap();
         fs::write(scratch.join("other.c"), "int main(void) { return 0; }\n").unwrap();
@@ -3198,7 +3198,7 @@ esac
         assert!(message.starts_with(BWRAP_UNAVAILABLE_PREFIX), "{message}");
         assert!(message.contains("max_user_namespaces"), "{message}");
         // An actual install command, not just the word "bubblewrap" from
-        // the prefix: this host's manager, or every one tog knows.
+        // the prefix: this host's manager, or every one ward knows.
         assert!(
             ["apt install", "dnf install", "pacman -S"]
                 .iter()
@@ -3449,20 +3449,20 @@ esac
     }
 
     /// npm and pnpm read `/^npm_config_/i`; the scrub must be as broad, and
-    /// tog's forced value must be the only survivor.
+    /// ward's forced value must be the only survivor.
     #[test]
     fn force_env_strips_prefixes_case_insensitively_and_forced_values_win() {
         // Names are test-private so a parallel test never sees a real
         // setting appear; only the prefix is what the scrub keys on.
         let names = [
-            "Npm_Config_tog_test_registry",
-            "NPM_config_tog_test_forced",
-            "npm_config_tog_test_forced",
-            "npm_config_tog_test_store_dir",
-            "NPM_CONFIG_TOG_TEST_STORE_DIR",
-            "PNPM_TOG_TEST_HOME",
-            "pnpm_tog_test_home",
-            "TOG_FORCE_ENV_KEEP",
+            "Npm_Config_ward_test_registry",
+            "NPM_config_ward_test_forced",
+            "npm_config_ward_test_forced",
+            "npm_config_ward_test_store_dir",
+            "NPM_CONFIG_GREYWARD_TEST_STORE_DIR",
+            "PNPM_GREYWARD_TEST_HOME",
+            "pnpm_ward_test_home",
+            "GREYWARD_FORCE_ENV_KEEP",
         ];
         // Writing the process environment while another test reads it is
         // a data race, so hold the crate's env lock for the whole test.
@@ -3475,7 +3475,7 @@ esac
             &mut cmd,
             &["npm_config_", "PNPM_"],
             &[],
-            &[("npm_config_tog_test_forced".into(), "true".into())],
+            &[("npm_config_ward_test_forced".into(), "true".into())],
         );
         let envs: std::collections::BTreeMap<String, Option<String>> = cmd
             .get_envs()
@@ -3490,12 +3490,12 @@ esac
             std::env::remove_var(name);
         }
         for removed in [
-            "Npm_Config_tog_test_registry",
-            "NPM_config_tog_test_forced",
-            "npm_config_tog_test_store_dir",
-            "NPM_CONFIG_TOG_TEST_STORE_DIR",
-            "PNPM_TOG_TEST_HOME",
-            "pnpm_tog_test_home",
+            "Npm_Config_ward_test_registry",
+            "NPM_config_ward_test_forced",
+            "npm_config_ward_test_store_dir",
+            "NPM_CONFIG_GREYWARD_TEST_STORE_DIR",
+            "PNPM_GREYWARD_TEST_HOME",
+            "pnpm_ward_test_home",
         ] {
             assert_eq!(
                 envs.get(removed),
@@ -3504,29 +3504,29 @@ esac
             );
         }
         assert_eq!(
-            envs.get("npm_config_tog_test_forced"),
+            envs.get("npm_config_ward_test_forced"),
             Some(&Some("true".to_string()))
         );
         assert!(
-            !envs.contains_key("TOG_FORCE_ENV_KEEP"),
+            !envs.contains_key("GREYWARD_FORCE_ENV_KEEP"),
             "an unrelated variable was touched: {envs:?}"
         );
     }
 
     /// The prefix comparison indexes by byte offset. Env names are not
-    /// tog's to choose, and `to_string_lossy` widens any invalid byte to
+    /// ward's to choose, and `to_string_lossy` widens any invalid byte to
     /// a three-byte replacement character, so a name can put a multi-byte
     /// character across the offset a prefix length lands on. Slicing there
-    /// panics and takes down every caller — `tog run` for Ruby, Elixir
+    /// panics and takes down every caller — `ward run` for Ruby, Elixir
     /// and .NET as much as a pnpm edit.
     #[test]
     fn force_env_survives_names_that_straddle_a_prefix_boundary() {
         // "abc" + U+FFFD: the replacement character occupies bytes 3..6, so
         // byte 5 (the length of "PNPM_") is inside it.
-        let straddles = "abc\u{fffd}_tog_test";
+        let straddles = "abc\u{fffd}_ward_test";
         assert!(!straddles.is_char_boundary(5));
         // A non-UTF-8 name reaches the same place through `to_string_lossy`.
-        let invalid = OsStr::from_bytes(b"abc\xff_tog_test");
+        let invalid = OsStr::from_bytes(b"abc\xff_ward_test");
         let _env = crate::kernel::policy::test_env_lock();
         std::env::set_var(straddles, "user");
         std::env::set_var(invalid, "user");
@@ -3542,7 +3542,7 @@ esac
             .collect();
         std::env::remove_var(straddles);
         std::env::remove_var(invalid);
-        for name in [straddles, "abc\u{fffd}_tog_test"] {
+        for name in [straddles, "abc\u{fffd}_ward_test"] {
             assert!(
                 !touched.iter().any(|seen| seen == name),
                 "a name matching no prefix was scrubbed: {touched:?}"
@@ -3849,7 +3849,7 @@ mod containment_tests {
     }
 
     /// `--new-session` keeps the child off the caller's terminal (no
-    /// TIOCSTI injection); `--die-with-parent` kills it when tog dies. Both
+    /// TIOCSTI injection); `--die-with-parent` kills it when ward dies. Both
     /// come before the command, among bubblewrap's own options.
     #[test]
     fn the_session_and_parent_death_flags_are_always_set() {

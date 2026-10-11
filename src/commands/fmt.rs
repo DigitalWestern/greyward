@@ -1,4 +1,4 @@
-//! `tog fmt`: the pinned formatter of the one ecosystem that has one
+//! `ward fmt`: the pinned formatter of the one ecosystem that has one
 //! (Rust today), or a delegated package.json `fmt` script. The formatter
 //! itself is a `tailors::Formatter`; this file only decides which of the
 //! two runs.
@@ -28,12 +28,12 @@ pub fn run(
     let cwd = project_dir();
     let _policy = policy::init(&cwd)?;
 
-    // `--eco` is tog's own ecosystem selector, not something a script can
+    // `--eco` is ward's own ecosystem selector, not something a script can
     // read: when it is given explicitly it dispatches to that ecosystem and
     // the package.json script is skipped, so `--eco rust` is a real escape
     // hatch in a polyglot root whose package.json also has a `fmt` script.
     // Without it, a script named fmt wins over the named command, matching
-    // `tog run fmt`. Preserve the command's user arguments for the script;
+    // `ward run fmt`. Preserve the command's user arguments for the script;
     // `--eco` is never appended to a delegated command line.
     let formats =
         |tailor: &&'static dyn Tailor| tailor.formatter().map(|formatter| (*tailor, formatter));
@@ -58,7 +58,7 @@ pub fn run(
                 ui::trace("'fmt' is a package.json script: running it");
                 // `run` syncs a package that has never been synced before
                 // it runs the script, so there is nothing to refuse here.
-                // `--frozen` governs that sync as it would `tog run fmt`,
+                // `--frozen` governs that sync as it would `ward run fmt`,
                 // and `--strict` already holds for the whole process.
                 let mut command = vec!["fmt".to_string()];
                 if check {
@@ -84,7 +84,7 @@ pub fn run(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "multiple ecosystems found ({}); specify `tog fmt --eco rust`",
+                "multiple ecosystems found ({}); specify `ward fmt --eco rust`",
                 detected.join(", ")
             ),
         ));
@@ -95,7 +95,7 @@ pub fn run(
     // The formatter rides in the same bundle as the toolchain, so it is
     // chosen by the same committed lock and never by a fresh selection.
     // A workspace is formatted as one, so the lock at its root decides,
-    // whichever member `tog fmt` runs from: start from the nearest project
+    // whichever member `ward fmt` runs from: start from the nearest project
     // at or above `cwd` (normally the root already), find the workspace
     // root with it, and resolve again there when the root holds a lock of
     // its own that was not the one read.
@@ -118,7 +118,7 @@ pub fn run(
     // toolchain's `external-toolchain`), and a record needs an open frame.
     // A kind the policy denies is refused as it is recorded, so the gate
     // holds here as in a sync. A permitted one is printed when recorded,
-    // and `tog fmt` publishes no closure to carry it (a synced project's
+    // and `ward fmt` publishes no closure to carry it (a synced project's
     // cargo closure records the same fact), so the frame is discarded.
     let attribution = policy::Attribution::open("fmt")?;
     let root = formatter.root(&ctx, &cwd, &first)?;

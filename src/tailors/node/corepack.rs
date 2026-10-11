@@ -1,6 +1,6 @@
 //! Corepack's `packageManager` pin for the pnpm a Node edit runs: the exact
 //! release it names, the optional `+<algo>.<hex>` hash suffix, and the
-//! check that the pnpm tarball tog realized has that hash. The realized
+//! check that the pnpm tarball ward realized has that hash. The realized
 //! tarball is whichever cached entry matched the lock's integrity, which
 //! may allow several hashes (#508), so each candidate's entry is a witness.
 
@@ -72,7 +72,7 @@ pub(crate) struct CorepackHash {
 }
 
 /// Realize the exact package-manager release `package@version` a Node
-/// edit runs, in the same registered `~/.tog/x/` environment `tog x`
+/// edit runs, in the same registered `~/.greyward/x/` environment `ward x`
 /// would use, so a delegate's second invocation is a normal cache hit.
 /// With a Corepack hash, the realized tarball must have it.
 pub(crate) fn realize_node_tool(
@@ -178,7 +178,7 @@ fn verify_corepack_hash(
         ))
     })?;
     // The integrity may allow several hashes of its strongest algorithm
-    // (#508), and the tarball tog realized matched one of them: that is the
+    // (#508), and the tarball ward realized matched one of them: that is the
     // cache entry the pnpm came from, so every candidate's entry is tried.
     let candidates = sri_candidates(integrity).map_err(|error| {
         other(format!(
@@ -241,7 +241,7 @@ mod tests {
         )
         .unwrap();
         let project = scratch.0.join("project");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         let envelope = serde_json::json!({
             "schema": "closure/1",
             "ecosystem": "node",
@@ -255,7 +255,7 @@ mod tests {
             },
         });
         fs::write(
-            project.join(".tog/closures/node.json"),
+            project.join(".greyward/closures/node.json"),
             serde_json::to_vec(&envelope).unwrap(),
         )
         .unwrap();

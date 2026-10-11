@@ -10,7 +10,7 @@
 //! zeroed owners and times), so its sha256 is a stable content address.
 //! That digest is the package's integrity. Sync puts the tarball in the
 //! store's cache under it, and the environment extracts it like any
-//! registry tarball. `tog status` packs the directory again and compares:
+//! registry tarball. `ward status` packs the directory again and compares:
 //! an edit to the source is a change, as an edit to package.json is.
 //!
 //! The directory is read through the held project descriptor, and each
@@ -132,7 +132,7 @@ pub(crate) fn stage(
         let packed = crate::kernel::digest::Digest::sha256(&hex)?;
         if !crate::kernel::digest::sri_candidates(&package.integrity)?.contains(&packed) {
             return Err(err(format!(
-                "{dir} changed while tog synced it; run 'tog' again to plan the new contents"
+                "{dir} changed while ward synced it; run 'ward' again to plan the new contents"
             )));
         }
     }
@@ -438,7 +438,7 @@ mod tests {
         fs::write(dir.join("lib").join(&long), "long\n").unwrap();
     }
 
-    /// tog's own archive reader lists what was packed: the `package/`
+    /// ward's own archive reader lists what was packed: the `package/`
     /// root, the long name through its PAX record, and no node_modules.
     #[test]
     fn a_packed_directory_reads_back_through_the_archive_reader() {
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(version(&project, "vendor/local").unwrap(), "2.1.0");
     }
 
-    /// The pack reads the tree tog holds, not whatever its path names now:
+    /// The pack reads the tree ward holds, not whatever its path names now:
     /// with the project moved away and another tree put at its path, the
     /// packed bytes are the held tree's (#612). Every file is opened from
     /// the descriptor of the directory it was listed in, and every symlink
@@ -552,7 +552,7 @@ mod tests {
         }
     }
 
-    /// A symlink in the package resolves in the tree tog holds: with the
+    /// A symlink in the package resolves in the tree ward holds: with the
     /// project moved away and an impostor at its path whose link of the
     /// same name points elsewhere, the member holds the held link's
     /// target, not the impostor's (#612).
@@ -822,7 +822,7 @@ mod tests {
         let error = stage(&store, &activity, &project, std::slice::from_ref(&package))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("changed while tog synced"), "{error}");
+        assert!(error.contains("changed while ward synced"), "{error}");
         let body = serde_json::json!({"local": "vendor/local", "integrity": package.integrity});
         assert_eq!(changed(&project, &[body]), vec!["vendor/local".to_string()]);
     }

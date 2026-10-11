@@ -1,4 +1,4 @@
-//! E2e for interpreter selection, warm lock/plan caches, and `tog run`'s
+//! E2e for interpreter selection, warm lock/plan caches, and `ward run`'s
 //! refusal of a runtime the synced environment lost (network tests are
 //! ignored; the preflight refusal runs offline).
 
@@ -8,11 +8,11 @@
 use std::os::unix::fs::PermissionsExt;
 use std::process::Output;
 
-use tog::kernel::platform::Platform;
+use greyward::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, text, tog, tog_at, warm_store, TempDir};
+use common::{assert_ok, command, copy_tree, fixture, text, ward, ward_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -33,17 +33,17 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     // The sync signs its closure with a key made here, and a machine policy
     // in a scratch HOME trusts it: the gate then passes the real record.
     let key = temp.0.join("signing.key");
-    let public = tog::kernel::signing::generate(&key).unwrap();
+    let public = greyward::kernel::signing::generate(&key).unwrap();
     let home = temp.0.join("home");
-    std::fs::create_dir_all(home.join(".tog")).unwrap();
+    std::fs::create_dir_all(home.join(".greyward")).unwrap();
     std::fs::write(
-        home.join(".tog/policy.toml"),
+        home.join(".greyward/policy.toml"),
         format!("[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
     let signed = |args: &[&str]| -> Output {
         command(&project, &home, &store)
-            .env("TOG_SIGNING_KEY", &key)
+            .env("GREYWARD_SIGNING_KEY", &key)
             .args(args)
             .output()
             .unwrap()
@@ -61,14 +61,14 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         "a signed sync must not warn about unsigned closures: {first_stderr}"
     );
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(project.join(".tog/closures/python.json")).unwrap(),
+        &std::fs::read_to_string(project.join(".greyward/closures/python.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(closure["signature"]["alg"], "ed25519");
     assert_eq!(closure["signature"]["key"], public.hex());
     assert_eq!(
-        tog::kernel::signing::verify(&closure),
-        tog::kernel::signing::Verification::Valid(public)
+        greyward::kernel::signing::verify(&closure),
+        greyward::kernel::signing::Verification::Valid(public)
     );
     let audit = signed(&["audit", "--json"]);
     let report: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap_or_default();
@@ -84,7 +84,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     // Editing the committed record is caught: no exception is judged. The
     // edit adds an exception the sync did not record, so the value changes
     // whatever the real sync recorded.
-    let path = project.join(".tog/closures/python.json");
+    let path = project.join(".greyward/closures/python.json");
     let mut edited = closure.clone();
     edited["body"]["exceptions"] = serde_json::json!([
         {"kind": "git-dependency", "subject": "left-pad", "detail": "hand-added"}
@@ -96,7 +96,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     assert_eq!(report["closures"][0]["verdict"], "bad-signature");
     std::fs::write(&path, serde_json::to_vec_pretty(&closure).unwrap()).unwrap();
     // An unsigned sync says so and its record is outdated.
-    let unsigned = tog_at(&project, &home, &store, &["sync", "--fresh"]);
+    let unsigned = ward_at(&project, &home, &store, &["sync", "--fresh"]);
     assert!(
         unsigned.status.success(),
         "{}",
@@ -134,7 +134,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     );
 
     let run = assert_ok(
-        tog_at(
+        ward_at(
             &project,
             &home,
             &store,
@@ -145,13 +145,13 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
                 "import sys,six; print(sys.version_info[:2])",
             ],
         ),
-        "tog run python",
+        "ward run python",
     );
     assert_eq!(run.trim(), "(3, 11)");
 
-    let plan_path = project.join(".tog/plan.json");
+    let plan_path = project.join(".greyward/plan.json");
     let lock_path = project.join("requirements.lock.txt");
-    let stamp_path = project.join(".tog/lock-source.hash");
+    let stamp_path = project.join(".greyward/lock-source.hash");
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
     let lock_mtime = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
     let stamp_mtime = std::fs::metadata(&stamp_path).unwrap().modified().unwrap();
@@ -188,7 +188,7 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     std::fs::write(project.join("requirements.txt"), "").unwrap();
     let store = temp.0.join("store");
 
-    let output = tog(&project, &temp.0, &["sync"]);
+    let output = ward(&project, &temp.0, &["sync"]);
     assert_eq!(
         output.status.code(),
         Some(5),
@@ -206,11 +206,11 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     assert!(!store.exists(), "store was opened: {store:?}");
 }
 
-/// `tog run` itself refuses a runtime its project's environment does not
+/// `ward run` itself refuses a runtime its project's environment does not
 /// provide, rather than letting the host's PATH supply one (#564, #581):
 /// the unit tests of `unprovided_runtime` do not show that `run` calls it.
 /// Ignored: the sync downloads CPython. The environment is then broken in
-/// this case's own store (never a shared `TOG_STORE`), by making the
+/// this case's own store (never a shared `GREYWARD_STORE`), by making the
 /// interpreter `.venv/bin` points at non-executable, so `python` and
 /// `python3` are named but not provided. A host python3 (every CI runner
 /// has one) would answer `--version` if `run` fell through.
@@ -224,7 +224,7 @@ fn run_refuses_a_runtime_its_synced_environment_lost() {
         "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-    let out = tog(&project.0, &home.0, &["run", "python3", "--version"]);
+    let out = ward(&project.0, &home.0, &["run", "python3", "--version"]);
     let stdout = text(&out.stdout);
     assert!(
         out.status.success() && stdout.starts_with("Python 3."),
@@ -240,7 +240,7 @@ fn run_refuses_a_runtime_its_synced_environment_lost() {
     let mode = std::fs::metadata(&interpreter).unwrap().permissions();
     std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o644)).unwrap();
     for program in ["python3", "python"] {
-        let out = tog(&project.0, &home.0, &["run", program, "--version"]);
+        let out = ward(&project.0, &home.0, &["run", program, "--version"]);
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{program}: {stderr}");
         assert!(

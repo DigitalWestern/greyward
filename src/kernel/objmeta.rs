@@ -235,7 +235,7 @@ fn read_opened_value(
 /// `object-meta/2` with explicit evidence is the only record there is. One
 /// with no schema, another schema or another evidence marker is refused,
 /// which is what keeps the sweep closed over it: a record whose
-/// dependencies this tog cannot read is never treated as having none.
+/// dependencies this ward cannot read is never treated as having none.
 pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Record> {
     let bad = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
     let identity_value = value
@@ -1466,8 +1466,8 @@ mod record_value_tests {
                 with(&id, |v| drop(v.as_object_mut().unwrap().remove("evidence"))),
                 format!("object {id} metadata has no evidence marker"),
             ),
-            // An older tog's migration wrote this marker. No store this
-            // tog opens holds one, so it is no more known than any other.
+            // An older ward's migration wrote this marker. No store this
+            // ward opens holds one, so it is no more known than any other.
             (
                 with(&id, |v| v["evidence"] = json!("adapted:test@1")),
                 format!("object {id} has unknown evidence marker adapted:test@1"),
@@ -1642,7 +1642,7 @@ mod record_value_tests {
         assert_eq!(read_record_at(&meta).unwrap().id, id);
     }
 
-    /// A platform input must name a platform tog knows; the live grammar
+    /// A platform input must name a platform ward knows; the live grammar
     /// check refuses a producer that writes anything else.
     #[test]
     fn a_junk_platform_input_is_refused() {

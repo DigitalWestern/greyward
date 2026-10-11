@@ -4,9 +4,9 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use greyward::kernel::platform::Platform;
+use greyward::kernel::store::Store;
 use std::path::{Path, PathBuf};
-use tog::kernel::platform::Platform;
-use tog::kernel::store::Store;
 
 mod common;
 
@@ -23,14 +23,14 @@ fn electron_is_provisioned_where_its_installer_looks() {
     let root = TempDir::new("electron");
     let store = store_at(&root.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let scratch = root.0.join("scratch");
     std::fs::create_dir_all(&scratch).unwrap();
 
     // A real, published release.
     let version = "39.0.0";
-    let provisioning = tog::kernel::provider::artifacts::provision(
+    let provisioning = greyward::kernel::provider::artifacts::provision(
         &store, activity, platform, "electron", version, &scratch,
     )
     .expect("provision")
@@ -43,9 +43,8 @@ fn electron_is_provisioned_where_its_installer_looks() {
         .map(|(_, value)| PathBuf::from(value))
         .expect("the installer's cache variable is set");
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
-    let dir = cache_root.join(tog::kernel::provider::artifacts::electron_cache_directory(
-        &release_url,
-    ));
+    let dir = cache_root
+        .join(greyward::kernel::provider::artifacts::electron_cache_directory(&release_url));
     let (os, arch) = match platform {
         Platform::Aarch64AppleDarwin => ("darwin", "arm64"),
         Platform::X86_64UnknownLinuxGnu => ("linux", "x64"),
@@ -65,7 +64,7 @@ fn electron_is_provisioned_where_its_installer_looks() {
         std::fs::metadata(&zip).unwrap().len() > 10 << 20,
         "the zip should be a real release artifact"
     );
-    // The zip tog stored is the one upstream's manifest names.
+    // The zip ward stored is the one upstream's manifest names.
     let listed = std::fs::read_to_string(&sums).unwrap();
     assert!(
         listed.contains(&format!("electron-v{version}-{os}-{arch}.zip")),

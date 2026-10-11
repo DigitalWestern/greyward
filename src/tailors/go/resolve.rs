@@ -1,6 +1,6 @@
 //! The Go resolution doors: the store go confined through the proxy
 //! session's Go mirror, for the planner's tidy gate and closure download,
-//! missing-lock `go mod tidy`, and `tog attest`'s lock check.
+//! missing-lock `go mod tidy`, and `ward attest`'s lock check.
 
 use super::tool::{run_go, run_go_checked, GoPublish, GoRun, OUTPUTS};
 use super::{err, read_gomod, read_gosum, reject_local_replaces, reject_workspaces, tailor};
@@ -102,13 +102,13 @@ pub fn tidy_project(
     Ok(())
 }
 
-/// `tog attest` for Go: the module closure downloads (`go mod download
+/// `ward attest` for Go: the module closure downloads (`go mod download
 /// -json all`, in a disposable copy, so a lock it would extend is caught by
 /// the next step rather than hidden), then `go mod tidy -diff` in the project
 /// through `door`'s transaction with the record's producer. The record
 /// carries the tidy check's ledger; the download's is rooted under the
 /// project beside it. The check publishes nothing, not even the receipt:
-/// `tog attest` publishes every record only once every check passed. A
+/// `ward attest` publishes every record only once every check passed. A
 /// pair go would change, or a check that fails, is an error.
 pub fn attest_project(
     door: &mut ResolutionDoor<'_>,
@@ -162,7 +162,7 @@ pub fn attest_project(
     if !report.status.success() {
         return Err(err(format!(
             "go.mod and go.sum in {} are not what go mod tidy would write, so they are not \
-             attested; run `tog` to bring them up to date and commit the result\n{}",
+             attested; run `ward` to bring them up to date and commit the result\n{}",
             project.path().display(),
             String::from_utf8_lossy(&report.stdout).trim()
         )));

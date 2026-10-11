@@ -87,7 +87,7 @@ impl Document {
             toml::from_str(text).map_err(|error| invalid(format!("catalog document: {error}")))?;
         if raw.schema != SCHEMA {
             return Err(invalid(format!(
-                "catalog document for {}: schema {} is not {SCHEMA}; upgrade tog",
+                "catalog document for {}: schema {} is not {SCHEMA}; upgrade ward",
                 raw.ecosystem, raw.schema
             )));
         }

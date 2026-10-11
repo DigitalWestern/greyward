@@ -128,7 +128,7 @@ pub fn recorded_inputs_state(project: &ProjectRoot, body: &Value) -> io::Result<
             })
         }
         _ => Ok(State::Unchecked(
-            "inputs were not recorded by this sync; run 'tog' once to enable checks".into(),
+            "inputs were not recorded by this sync; run 'ward' once to enable checks".into(),
         )),
     }
 }
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn missing_object_path_names_the_absent_object() {
         let present = std::env::temp_dir();
-        let absent = present.join("tog-status-no-such-object");
+        let absent = present.join("greyward-status-no-such-object");
         let body = json!({
             "env_object": {"path": present.display().to_string()},
             "cache_object": {"path": absent.display().to_string()},

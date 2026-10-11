@@ -70,7 +70,7 @@ pub fn check_lock_freshness(project: &ProjectRoot, plan: &NpmPlan) -> io::Result
             match lock_import::pnpm_workspace_members(project)? {
                 Some(members) => pnpm_members(&lock, &members)?,
                 None => crate::kernel::ui::note(
-                    "pnpm-workspace.yaml: packages is not a list tog can read; \
+                    "pnpm-workspace.yaml: packages is not a list ward can read; \
                      not checking pnpm-lock.yaml for members added since it was generated",
                 ),
             }

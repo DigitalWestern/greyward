@@ -6,13 +6,13 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use greyward::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
+use greyward::kernel::platform::Platform;
+use greyward::kernel::policy;
+use greyward::kernel::store::Store;
+use greyward::tailors::node::{self, NpmPackage};
 use std::path::Path;
 use std::process::Command;
-use tog::kernel::gitsrc::{ensure_git_source, normalize_url, GitSource};
-use tog::kernel::platform::Platform;
-use tog::kernel::policy;
-use tog::kernel::store::Store;
-use tog::tailors::node::{self, NpmPackage};
 
 mod common;
 
@@ -88,7 +88,7 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     let (url, commit) = fixture_repo(&root.0);
     let store = store_at(&root.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let attribution = policy::Attribution::open("node").expect("test attribution");
 
@@ -202,7 +202,7 @@ fn git_relative_submodule_is_pinned_and_raw() {
     let (url, commit) = relative_submodule_fixture(&root.0, false);
     let store = store_at(&root.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let source = GitSource {
         url: normalize_url(&url),
@@ -260,15 +260,15 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
     let (url, commit) = python_fixture_repo(&root.0);
     let store = store_at(&root.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let mut attribution = policy::Attribution::open("python").expect("test attribution");
 
     let requirement = format!("gitdep @ {url}@{commit}");
-    let reqs = tog::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
-    let packages = tog::tailors::python::pypi::lock_requirements(
+    let reqs = greyward::tailors::python::pypi::parse_requirements(&requirement).expect("parse");
+    let packages = greyward::tailors::python::pypi::lock_requirements(
         platform,
-        tog::tailors::python::pypi::Glibc(0, 0),
+        greyward::tailors::python::pypi::Glibc(0, 0),
         &reqs,
         "cp312",
     )
@@ -279,17 +279,17 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         "the package carries its git source"
     );
 
-    let plan = tog::kernel::types::Plan {
+    let plan = greyward::kernel::types::Plan {
         ecosystem: "python".into(),
         python_version: "3.12.14".into(),
         packages,
     };
-    let env = tog::tailors::python::env::realize_env(
-        &mut tog::kernel::resolve::ResolutionDoor::open(
+    let env = greyward::tailors::python::env::realize_env(
+        &mut greyward::kernel::resolve::ResolutionDoor::open(
             &store,
             activity,
             platform,
-            tog::kernel::resolve::DoorKind::Planner,
+            greyward::kernel::resolve::DoorKind::Planner,
             &mut attribution,
         )
         .unwrap(),
@@ -321,12 +321,12 @@ fn python_git_dependency_builds_a_wheel_from_its_commit() {
         use std::os::unix::fs::PermissionsExt;
         let readable = std::fs::metadata(&wheel).unwrap().permissions();
         std::fs::set_permissions(&wheel, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let again = tog::tailors::python::env::realize_env(
-            &mut tog::kernel::resolve::ResolutionDoor::open(
+        let again = greyward::tailors::python::env::realize_env(
+            &mut greyward::kernel::resolve::ResolutionDoor::open(
                 &store,
                 activity,
                 platform,
-                tog::kernel::resolve::DoorKind::Planner,
+                greyward::kernel::resolve::DoorKind::Planner,
                 &mut attribution,
             )
             .unwrap(),
@@ -363,7 +363,7 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     let (url, commit) = cargo_fixture_repo(&root.0);
     let store = store_at(&root.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let _attribution = policy::Attribution::open("cargo").expect("test attribution");
 
@@ -371,14 +371,14 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     let lock = format!(
         "version = 3\n\n[[package]]\nname = \"gitdep\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
     );
-    let plan = tog::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let plan = greyward::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
     assert_eq!(plan.crates.len(), 1);
     assert!(
         plan.crates[0].git.is_some(),
         "the crate carries its git source"
     );
 
-    let vendor = tog::tailors::cargo::realize_vendor(&store, activity, &plan).expect("vendor");
+    let vendor = greyward::tailors::cargo::realize_vendor(&store, activity, &plan).expect("vendor");
     let crate_dir = vendor.join("gitdep-1.0.0");
     assert_eq!(
         std::fs::read_to_string(crate_dir.join("src/lib.rs")).unwrap(),
@@ -397,7 +397,7 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     // Realizing again is a cache hit on the same object: answered without
     // staging a second vendor tree.
     let again = without_staging(&store, || {
-        tog::tailors::cargo::realize_vendor(&store, activity, &plan)
+        greyward::tailors::cargo::realize_vendor(&store, activity, &plan)
     })
     .expect("second vendor was not a cache hit");
     assert_eq!(vendor, again);

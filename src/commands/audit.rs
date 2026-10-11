@@ -1,14 +1,14 @@
-//! `tog audit` — the admission gate over closure records: the CI gate when
+//! `ward audit` — the admission gate over closure records: the CI gate when
 //! the machine policy trusts signing keys, and the solo user's "does my
 //! environment pass my policy?" when it does not.
 //!
 //! Every sync records the exceptions it waved through in the project's
-//! `.tog/closures/<ecosystem>.json` (`body.exceptions[]`, kinds in
-//! `policy::KINDS`) and, with `TOG_SIGNING_KEY` set, signs the envelope.
+//! `.greyward/closures/<ecosystem>.json` (`body.exceptions[]`, kinds in
+//! `policy::KINDS`) and, with `GREYWARD_SIGNING_KEY` set, signs the envelope.
 //! This module answers "would those closures pass policy P?" from the
 //! records alone: no rebuild, no store access, no network, no sandbox. It is
 //! read-only over the project directory (plus the same read-only
-//! object-liveness probes `tog status` makes).
+//! object-liveness probes `ward status` makes).
 //!
 //! What a pass proves: every detected ecosystem has its primary closure;
 //! each record is current for the inputs on disk and the committed
@@ -36,8 +36,8 @@
 //!   `bad-signature`: tampering is evidence, whoever the signer was.
 //! - A verdict is only computed over a record that still describes the
 //!   project. Freshness reuses `inspect::locked_closure_state`, the check
-//!   behind `tog status`, applied to every closure file from its own body
-//!   and to the committed `tog-toolchain.toml` beside it: a closure whose
+//!   behind `ward status`, applied to every closure file from its own body
+//!   and to the committed `greyward-toolchain.toml` beside it: a closure whose
 //!   inputs changed, whose projection is missing, that was synced on
 //!   another platform, or whose inputs are no longer found here is reported
 //!   `stale`, and so is one whose toolchain lock is missing, has no section
@@ -53,9 +53,9 @@
 //!   trusted-key set only narrows, so the supplied policy can never loosen
 //!   what the machine or project policy says.
 //! - An exception kind this binary does not know (a record written by a
-//!   newer tog, or by hand) is `unknown`, never permitted: no policy
+//!   newer ward, or by hand) is `unknown`, never permitted: no policy
 //!   file can name it, so no policy file can be said to have allowed it.
-//!   A kind tog retired (`policy::retired_kind`) is known, and old: the
+//!   A kind ward retired (`policy::retired_kind`) is known, and old: the
 //!   record predates the change that retired it, so the closure is
 //!   `outdated` with that reason and the fix, a fresh sync.
 //! - A closure that joined a resolution record carries it as
@@ -266,8 +266,8 @@ pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
 }
 
 /// The policy an audit judges against: the ordinary chain for `dir`
-/// (TOG_POLICY or ~/.tog/policy.toml, every ancestor's
-/// .tog/policy.toml, TOG_STRICT) merged with `extra`, the parsed
+/// (GREYWARD_POLICY or ~/.greyward/policy.toml, every ancestor's
+/// .greyward/policy.toml, GREYWARD_STRICT) merged with `extra`, the parsed
 /// `--policy` file and the path it came from. The file can add denials or
 /// strictness and drop trusted keys, never the reverse. Returns the
 /// contributing policies alongside the merged one, in merge order.
@@ -363,7 +363,7 @@ fn check_shape(closure: &ClosureFile) -> io::Result<()> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: {what}; the record is refused, not judged: run 'tog'",
+                "{:?}: {what}; the record is refused, not judged: run 'ward'",
                 closure.path.to_string_lossy()
             ),
         )
@@ -419,7 +419,7 @@ fn freshness(
         // Envelopes without a platform predate the Linux port; `status`
         // cannot tell whether such a record was made on this host.
         return Ok(Freshness::Outdated(format!(
-            "closure records no platform; run 'tog' once{key}, then commit"
+            "closure records no platform; run 'ward' once{key}, then commit"
         )));
     }
     let Some(project) = project else {
@@ -469,7 +469,7 @@ fn check_name(closure: &ClosureFile) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .tog/closures is refused, not judged: remove it or run 'tog'",
+                "{:?}: closure claims ecosystem {:?} but is named {stem:?}; a stray or renamed file under .greyward/closures is refused, not judged: remove it or run 'ward'",
                 closure.path.to_string_lossy(),
                 closure.ecosystem
             ),
@@ -574,7 +574,7 @@ fn evaluate_in(
             false => {
                 if !matches!(freshness, Freshness::Stale(_)) {
                     freshness = Freshness::Outdated(format!(
-                        "no exception record in this closure; run 'tog' once{key}, then commit"
+                        "no exception record in this closure; run 'ward' once{key}, then commit"
                     ));
                 }
             }
@@ -587,7 +587,7 @@ fn evaluate_in(
         {
             freshness = Freshness::Outdated(format!(
                 "no resolution record and no unrecorded-resolution exception (the closure predates \
-                 the resolution join); run 'tog' once{key}, then commit"
+                 the resolution join); run 'ward' once{key}, then commit"
             ));
         }
         // A retired kind is not judged against the policy: the record is
@@ -595,7 +595,7 @@ fn evaluate_in(
         if let Some((why, kind)) = retired {
             if !matches!(freshness, Freshness::Stale(_)) {
                 freshness = Freshness::Outdated(format!(
-                    "{why} (it records the retired {kind} exception); run 'tog' once{key}, then commit"
+                    "{why} (it records the retired {kind} exception); run 'ward' once{key}, then commit"
                 ));
             }
         }
@@ -653,7 +653,7 @@ fn audit_under_in(
     if closures.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("nothing synced in {}; run 'tog' first", dir.display()),
+            format!("nothing synced in {}; run 'ward' first", dir.display()),
         ));
     }
     let present = project.map_or(Ok(Vec::new()), tailors::detected_in)?;
@@ -878,7 +878,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     for verdict in &report.verdicts {
         let record = &verdict.record_sha256[..16];
         let word = verdict.word();
-        let refresh = "tog";
+        let refresh = "ward";
         let line = match &verdict.signature {
             Signature::Bad { reason, .. } => format!(
                 "{word:<13} closure {record}: {reason}; find out who changed it, then regenerate with '{refresh}'{key} and commit (not evaluated)"
@@ -921,7 +921,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
                 };
                 match &verdict.freshness {
                     // A toolchain-lock finding already names the verb that
-                    // moves the lock, which is not always the bare `tog`.
+                    // moves the lock, which is not always the bare `ward`.
                     Freshness::Stale(why) if why.starts_with(LOCK_PATH) => format!(
                         "{word:<13} closure {record}: {why}, then audit again ({judged})"
                     ),
@@ -960,7 +960,7 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
     }
     for ecosystem in &report.missing {
         out.push_str(&format!(
-            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'tog'{key}, then commit\n",
+            "{ecosystem:width$}  {:<13} no closure for the {ecosystem} inputs found here; run 'ward'{key}, then commit\n",
             "missing"
         ));
     }
@@ -989,7 +989,7 @@ fn preamble(report: &Report) -> String {
 /// not checked, and the one command that turns the check on.
 pub const SIGNATURES_NOT_CHECKED: &str =
     "signatures: not checked (no [signing] table in the machine policy; \
-'tog keygen <path>' prints one to paste into ~/.tog/policy.toml)";
+'ward keygen <path>' prints one to paste into ~/.greyward/policy.toml)";
 
 /// The gate is misconfigured: an unreadable `--policy` file, or `--signed`
 /// with no trusted set at machine scope. The command has already started
@@ -1008,8 +1008,8 @@ fn misconfigured(message: &str, json: bool) {
 /// The words `--signed` refuses with: the table to add, where, and the
 /// command that prints it.
 pub const NO_TRUSTED_KEYS: &str = "no trusted signing keys configured: add a [signing] table with \
-trusted = [\"ed25519:<64 hex>\"] to the machine policy (TOG_POLICY, or ~/.tog/policy.toml); a project \
-or --policy list can only narrow it. 'tog keygen <path>' prints the table to paste";
+trusted = [\"ed25519:<64 hex>\"] to the machine policy (GREYWARD_POLICY, or ~/.greyward/policy.toml); a project \
+or --policy list can only narrow it. 'ward keygen <path>' prints the table to paste";
 
 /// Whether `CI` names a CI environment, as GitHub Actions, GitLab and
 /// most other services set it: any non-empty value except `false` or `0`.
@@ -1193,8 +1193,8 @@ mod tests {
                 format!("[signing]\ntrusted = [{}]\n", entries.join(", ")),
             )
             .unwrap();
-            let previous = std::env::var_os("TOG_POLICY");
-            std::env::set_var("TOG_POLICY", &path);
+            let previous = std::env::var_os("GREYWARD_POLICY");
+            std::env::set_var("GREYWARD_POLICY", &path);
             Self {
                 previous,
                 _dir: dir,
@@ -1205,8 +1205,8 @@ mod tests {
     impl Drop for MachinePolicy {
         fn drop(&mut self) {
             match self.previous.take() {
-                Some(value) => std::env::set_var("TOG_POLICY", value),
-                None => std::env::remove_var("TOG_POLICY"),
+                Some(value) => std::env::set_var("GREYWARD_POLICY", value),
+                None => std::env::remove_var("GREYWARD_POLICY"),
             }
         }
     }
@@ -1248,7 +1248,7 @@ mod tests {
         })
     }
 
-    /// Write `.tog/closures/<name>.json`, signed with the test key, and
+    /// Write `.greyward/closures/<name>.json`, signed with the test key, and
     /// return it as `closures` would read it.
     fn write_closure(
         dir: &Path,
@@ -1271,7 +1271,7 @@ mod tests {
     /// `write_closure` with a chosen key (`None` writes unsigned) and an
     /// edit applied to the envelope after signing, for tampering tests.
     /// A primary closure is written the way a lock-aware sync writes it:
-    /// with the matching `tog-toolchain.toml` beside it and the bundle id
+    /// with the matching `greyward-toolchain.toml` beside it and the bundle id
     /// recorded in its body.
     fn write_closure_with(
         dir: &Path,
@@ -1285,7 +1285,7 @@ mod tests {
         if body.is_object() {
             body = inspect::with_toolchain_lock(dir, ecosystem, body);
         }
-        let closures = dir.join(".tog/closures");
+        let closures = dir.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         let mut envelope = json!({
             "schema": "closure/1",
@@ -1462,7 +1462,7 @@ mod tests {
         // Rendering does not need filesystem access, so this also covers
         // hosts whose filesystem cannot create a name containing 0xff.
         let project = PathBuf::from(std::ffi::OsString::from_vec(b"project-\xff".to_vec()));
-        let path = project.join(".tog/closures/python.json");
+        let path = project.join(".greyward/closures/python.json");
         let report = report(
             permissive(),
             vec![Verdict {
@@ -1484,7 +1484,7 @@ mod tests {
         );
         assert_eq!(
             value["closures"][0]["path"],
-            "project-\u{fffd}/.tog/closures/python.json"
+            "project-\u{fffd}/.greyward/closures/python.json"
         );
         assert_eq!(
             value["closures"][0]["path_bytes"],
@@ -1653,7 +1653,7 @@ mod tests {
         let closures = [with_exceptions(
             &temp.0,
             &[
-                exception("kind-from-a-newer-tog", "left-pad"),
+                exception("kind-from-a-newer-greyward", "left-pad"),
                 exception(REQUIREMENT_SKIPPED, "dev"),
             ],
         )];
@@ -1664,13 +1664,13 @@ mod tests {
             assert!(!verdicts[0].passes(), "{policy:?}");
             assert_eq!(
                 verdicts[0].unknown.as_deref().unwrap(),
-                vec![exception("kind-from-a-newer-tog", "left-pad")]
+                vec![exception("kind-from-a-newer-greyward", "left-pad")]
             );
             assert!(!verdicts[0]
                 .permitted
                 .as_ref()
                 .unwrap()
-                .contains_key("kind-from-a-newer-tog"));
+                .contains_key("kind-from-a-newer-greyward"));
         }
         let verdicts = judge(&temp.0, &permissive(), &closures);
         assert!(verdicts[0].denied.as_deref().unwrap().is_empty());
@@ -1690,19 +1690,21 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("    unknown  kind-from-a-newer-tog  left-pad  "),
+            text.contains("    unknown  kind-from-a-newer-greyward  left-pad  "),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(&temp.0, &report, true).unwrap()).unwrap();
         assert_eq!(value["passed"], false);
         assert_eq!(
             value["closures"][0]["unknown"][0]["kind"],
-            "kind-from-a-newer-tog"
+            "kind-from-a-newer-greyward"
         );
         // And a policy file cannot name it, so it cannot be "allowed" either.
-        assert!(
-            policy::parse_file(Path::new("p.toml"), "deny = [\"kind-from-a-newer-tog\"]").is_err()
-        );
+        assert!(policy::parse_file(
+            Path::new("p.toml"),
+            "deny = [\"kind-from-a-newer-greyward\"]"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1723,12 +1725,12 @@ mod tests {
                 matches!(
                     verdict.freshness,
                     Freshness::Outdated(ref why) if why.starts_with(
-                        "closure predates component provisioning (it records the retired toolchain-component-unavailable exception); run 'tog' once"
+                        "closure predates component provisioning (it records the retired toolchain-component-unavailable exception); run 'ward' once"
                     )
                 ),
                 "{verdict:?}"
             );
-            // Not unknown (it is no newer tog's kind), and not permitted.
+            // Not unknown (it is no newer ward's kind), and not permitted.
             assert!(verdict.unknown.as_deref().unwrap().is_empty());
             assert!(!verdict
                 .permitted
@@ -1794,7 +1796,7 @@ mod tests {
         let _env = policy::test_env_lock();
         let _machine = MachinePolicy::trusting("loosen-machine", &[test_key()]);
         fs::write(
-            std::env::var_os("TOG_POLICY").unwrap(),
+            std::env::var_os("GREYWARD_POLICY").unwrap(),
             format!(
                 "strict = true\ndeny = [\"git-dependency\"]\n[signing]\ntrusted = [\"{}\"]\n",
                 test_key().public_key()
@@ -1846,17 +1848,17 @@ mod tests {
 
     #[test]
     fn effective_policy_unions_the_project_chain_with_the_extra_file() {
-        // The chain also reads TOG_POLICY or $HOME, which other tests
+        // The chain also reads GREYWARD_POLICY or $HOME, which other tests
         // and the developer's machine own; assert only that this project's
         // ancestor policy and the extra file both land (superset), never
         // that nothing else did.
         let temp = python_project("chain");
         let root = temp.0.join("workspace");
         let member = root.join("member");
-        fs::create_dir_all(root.join(".tog")).unwrap();
+        fs::create_dir_all(root.join(".greyward")).unwrap();
         fs::create_dir_all(&member).unwrap();
         fs::write(
-            root.join(".tog/policy.toml"),
+            root.join(".greyward/policy.toml"),
             "deny = [\"weak-integrity\"]\n",
         )
         .unwrap();
@@ -1876,7 +1878,9 @@ mod tests {
         // --policy file for the other, and that source is merged last.
         let ancestor = sources
             .iter()
-            .find(|source| source.path.as_deref() == Some(root.join(".tog/policy.toml").as_path()))
+            .find(|source| {
+                source.path.as_deref() == Some(root.join(".greyward/policy.toml").as_path())
+            })
             .expect("the workspace-root policy is a source");
         assert_eq!(ancestor.origin, SourceOrigin::Project);
         assert!(ancestor.deny.contains(WEAK_INTEGRITY));
@@ -1892,7 +1896,7 @@ mod tests {
         // A file that does not exist is not a source: the member directory
         // has no policy of its own.
         assert!(!sources.iter().any(|source| {
-            source.path.as_deref() == Some(member.join(".tog/policy.toml").as_path())
+            source.path.as_deref() == Some(member.join(".greyward/policy.toml").as_path())
         }));
     }
 
@@ -1961,7 +1965,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("run 'tog', then audit again (permitted: no exceptions)"),
+            text.contains("run 'ward', then audit again (permitted: no exceptions)"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
@@ -2027,7 +2031,7 @@ mod tests {
         let verdicts = judge(dir, &permissive(), &closures);
         stale(
             &verdicts,
-            "tog-toolchain.toml (missing; run 'tog' to create it)",
+            "greyward-toolchain.toml (missing; run 'ward' to create it)",
         );
         // The lock line carries its own next step and is not wrapped in
         // the dependency-input sentence.
@@ -2036,32 +2040,32 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "python  stale         closure {record}: tog-toolchain.toml (missing; run 'tog' \
+                "python  stale         closure {record}: greyward-toolchain.toml (missing; run 'ward' \
                  to create it), then audit again (permitted: no exceptions)\n"
             )
         );
         fs::write(dir.join(LOCK_PATH), &lock).unwrap();
 
         // A toolchain source moved since the lock was written: only
-        // `tog update --toolchain` moves it, and the gate says so.
+        // `ward update --toolchain` moves it, and the gate says so.
         fs::write(dir.join(".python-version"), "3.13.15\n").unwrap();
         let verdicts = judge(dir, &permissive(), &closures);
         let Freshness::Stale(why) = &verdicts[0].freshness else {
             panic!("{verdicts:?}");
         };
-        assert!(why.starts_with("tog-toolchain.toml stale: "), "{why}");
+        assert!(why.starts_with("greyward-toolchain.toml stale: "), "{why}");
         assert!(why.contains("recorded absent, now 3.13.15"), "{why}");
         assert!(
-            why.ends_with("run 'tog update --toolchain python'"),
+            why.ends_with("run 'ward update --toolchain python'"),
             "{why}"
         );
         assert!(!verdicts[0].passes());
         let text = render(dir, &report(permissive(), verdicts), false).unwrap();
         assert!(
-            text.contains("run 'tog update --toolchain python', then audit again"),
+            text.contains("run 'ward update --toolchain python', then audit again"),
             "{text}"
         );
-        assert!(!text.contains("run 'tog', then audit again"), "{text}");
+        assert!(!text.contains("run 'ward', then audit again"), "{text}");
         fs::remove_file(dir.join(".python-version")).unwrap();
 
         // A lock that describes some other ecosystem but not this one.
@@ -2075,7 +2079,7 @@ mod tests {
         fs::write(dir.join(LOCK_PATH), other.canonical_bytes()).unwrap();
         stale(
             &judge(dir, &permissive(), &closures),
-            "tog-toolchain.toml (no [toolchain.python] section; run 'tog update --toolchain python')",
+            "greyward-toolchain.toml (no [toolchain.python] section; run 'ward update --toolchain python')",
         );
         fs::write(dir.join(LOCK_PATH), &lock).unwrap();
 
@@ -2101,7 +2105,7 @@ mod tests {
                          Some(id) if id.ends_with(&"0".repeat(64))));
         stale(
             &judge(dir, &permissive(), &foreign),
-            "tog-toolchain.toml (toolchain changed since the last sync; run 'tog')",
+            "greyward-toolchain.toml (toolchain changed since the last sync; run 'ward')",
         );
 
         // A record from before the bundle was recorded cannot be compared,
@@ -2112,7 +2116,7 @@ mod tests {
         let verdicts = judge(dir, &permissive(), &unrecorded);
         assert_eq!(
             verdicts[0].freshness,
-            Freshness::Outdated("toolchain not recorded by this sync; run 'tog' once".into()),
+            Freshness::Outdated("toolchain not recorded by this sync; run 'ward' once".into()),
             "{verdicts:?}"
         );
         assert!(!verdicts[0].passes());
@@ -2184,7 +2188,7 @@ mod tests {
         assert_eq!(
             inspect::closure_state(host(), &ProjectRoot::open(dir).unwrap(), &closures[0]).unwrap(),
             State::Unchecked(
-                "inputs were not recorded by this sync; run 'tog' once to enable checks".into()
+                "inputs were not recorded by this sync; run 'ward' once to enable checks".into()
             )
         );
         let verdicts = judge(dir, &permissive(), &closures);
@@ -2311,13 +2315,13 @@ mod tests {
         let empty = TempDir::named("empty");
         let error = audit(host(), &empty.0, None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("run 'tog' first"));
+        assert!(error.to_string().contains("run 'ward' first"));
         // No trusted set anywhere in the chain: the records are judged on
         // their contents, the report says signatures were not checked, and
         // the denial still fails it. The fix lines stop asking for a key.
         drop(_machine);
         let _home = MachinePolicy::trusting("audit-machine-none", &[]);
-        fs::write(std::env::var_os("TOG_POLICY").unwrap(), "deny = []\n").unwrap();
+        fs::write(std::env::var_os("GREYWARD_POLICY").unwrap(), "deny = []\n").unwrap();
         let report = audit(host(), dir, Some((flag.as_path(), &extra))).unwrap();
         assert!(!report.signatures_checked);
         assert_eq!(report.verdicts.len(), 1);
@@ -2547,7 +2551,7 @@ mod tests {
         };
         assert_eq!(
             why,
-            "closure records no platform; run 'tog' once, then commit"
+            "closure records no platform; run 'ward' once, then commit"
         );
         let report = Report {
             policy: Policy::default(),
@@ -2612,7 +2616,7 @@ mod tests {
             let text = render(dir, &report, false).unwrap();
             assert!(
                 text.contains(&format!(
-                    "python  outdated      closure {record}: no signature; run 'tog' once under a trusted key, then commit (not evaluated)\n"
+                    "python  outdated      closure {record}: no signature; run 'ward' once under a trusted key, then commit (not evaluated)\n"
                 )),
                 "{text}"
             );
@@ -2731,7 +2735,7 @@ mod tests {
             },
             PolicySource {
                 origin: SourceOrigin::Project,
-                path: Some(PathBuf::from("/p/.tog/policy.toml")),
+                path: Some(PathBuf::from("/p/.greyward/policy.toml")),
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: Some([other_key().public_key()].into_iter().collect()),
@@ -2757,7 +2761,7 @@ mod tests {
             Signature::Untrusted {
                 key: test_key().public_key(),
                 excluded_by: vec![
-                    "project \"/p/.tog/policy.toml\"".into(),
+                    "project \"/p/.greyward/policy.toml\"".into(),
                     "flag \"/f/company.toml\"".into()
                 ],
             }
@@ -2772,7 +2776,7 @@ mod tests {
         let text = render(dir, &report, false).unwrap();
         assert!(
             text.contains(
-                "(excluded by project \"/p/.tog/policy.toml\", flag \"/f/company.toml\")"
+                "(excluded by project \"/p/.greyward/policy.toml\", flag \"/f/company.toml\")"
             ),
             "{text}"
         );
@@ -2792,7 +2796,7 @@ mod tests {
         assert_eq!(
             value["closures"][0]["signature"]["detail"],
             json!([
-                "project \"/p/.tog/policy.toml\"",
+                "project \"/p/.greyward/policy.toml\"",
                 "flag \"/f/company.toml\""
             ])
         );
@@ -2890,7 +2894,7 @@ mod tests {
         assert!(!report.passes());
         let text = render(dir, &report, false).unwrap();
         assert!(
-            text.contains("cargo   missing       no closure for the cargo inputs found here; run 'tog' under a trusted key, then commit\n"),
+            text.contains("cargo   missing       no closure for the cargo inputs found here; run 'ward' under a trusted key, then commit\n"),
             "{text}"
         );
         let value: Value = serde_json::from_str(&render(dir, &report, true).unwrap()).unwrap();
@@ -2907,7 +2911,7 @@ mod tests {
         assert!(!report.passes());
     }
 
-    /// An older `tog fmt` left `.tog/closures/rustfmt.json` at a Cargo
+    /// An older `ward fmt` left `.greyward/closures/rustfmt.json` at a Cargo
     /// workspace root. It is not a closure any more: the audit neither
     /// judges it (no orphaned or unknown verdict) nor counts it as the
     /// cargo record, and with nothing else beside it nothing is synced.
@@ -2917,7 +2921,7 @@ mod tests {
         let dir = &temp.0;
         let _python = with_exceptions(dir, &[]);
         fs::write(
-            dir.join(".tog/closures/rustfmt.json"),
+            dir.join(".greyward/closures/rustfmt.json"),
             serde_json::to_vec_pretty(&json!({
                 "schema": "closure/1",
                 "ecosystem": "rustfmt",
@@ -2942,7 +2946,7 @@ mod tests {
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"m\"\n").unwrap();
         let report = audit(host(), dir, None).unwrap();
         assert_eq!(report.missing, vec!["cargo".to_string()]);
-        fs::remove_file(dir.join(".tog/closures/python.json")).unwrap();
+        fs::remove_file(dir.join(".greyward/closures/python.json")).unwrap();
         let error = audit(host(), dir, None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
     }
@@ -3001,7 +3005,7 @@ mod tests {
             if sign_after {
                 test_key().sign(&mut envelope).unwrap();
             }
-            let closures = dir.join(".tog/closures");
+            let closures = dir.join(".greyward/closures");
             fs::create_dir_all(&closures).unwrap();
             let path = closures.join("python.json");
             fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
@@ -3064,7 +3068,7 @@ mod tests {
         let closure = write(|_| {}, true);
         assert!(judge(dir, &permissive(), &[closure])[0].passes());
         // A file that is valid JSON but not an object at all.
-        let path = dir.join(".tog/closures/python.json");
+        let path = dir.join(".greyward/closures/python.json");
         fs::write(&path, "[1, 2]").unwrap();
         let closure = read_closure(dir, &path);
         let error = evaluate(host(), dir, &permissive(), &[], &[closure], &present).unwrap_err();
@@ -3233,7 +3237,7 @@ mod tests {
             python_body(&temp.0),
         );
         let name = std::ffi::OsString::from_vec(b"bad-\xff.json".to_vec());
-        fs::write(temp.0.join(".tog/closures").join(name), "{}").unwrap();
+        fs::write(temp.0.join(".greyward/closures").join(name), "{}").unwrap();
         assert!(audit_under(host(), &temp.0, permissive(), Vec::new()).is_err());
     }
 
@@ -3367,8 +3371,8 @@ mod tests {
             text.contains("extra.lock changed since the last sync"),
             "{text}"
         );
-        assert!(text.contains("run 'tog', then audit again"), "{text}");
-        // `tog status` reads the same check and agrees.
+        assert!(text.contains("run 'ward', then audit again"), "{text}");
+        // `ward status` reads the same check and agrees.
         assert_eq!(
             inspect::locked_closure_state(host(), &ProjectRoot::open(dir).unwrap(), &closures[0])
                 .unwrap(),
@@ -3395,7 +3399,7 @@ mod tests {
             panic!("{:?}", verdicts[0].freshness);
         };
         assert!(why.contains("records no platform"), "{why}");
-        assert!(why.contains("run 'tog' once"), "{why}");
+        assert!(why.contains("run 'ward' once"), "{why}");
         body["resolution"]["outputs"] = json!({"extra.lock": "not a digest"});
         let closures = [write_closure(
             dir,
@@ -3418,13 +3422,13 @@ mod tests {
         let closures = [with_resolution(
             &temp.0,
             &[],
-            resolution(&temp.0, &[exception("kind-from-a-newer-tog", "uv")]),
+            resolution(&temp.0, &[exception("kind-from-a-newer-greyward", "uv")]),
         )];
         let verdicts = judge(&temp.0, &permissive(), &closures);
         assert!(!verdicts[0].passes());
         assert_eq!(
             verdicts[0].unknown.as_deref().unwrap(),
-            vec![exception("kind-from-a-newer-tog", "uv")]
+            vec![exception("kind-from-a-newer-greyward", "uv")]
         );
         for broken in [json!("not a record"), json!({"schema": "resolution/1"})] {
             let closures = [with_resolution(&temp.0, &[], broken)];

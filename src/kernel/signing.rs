@@ -1,6 +1,6 @@
 //! Closure signing (kernel layer): Ed25519 key files, the canonical bytes a
 //! signature covers, sign and verify, and the trusted-key set the policy
-//! chain accumulates for `tog audit`.
+//! chain accumulates for `ward audit`.
 //!
 //! A signature proves that a closure envelope was written by a sync holding
 //! a particular private key. It covers the envelope parsed as a JSON value

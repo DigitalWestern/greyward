@@ -1,4 +1,4 @@
-//! `tog x --clean`: find the cached environments a request selects, each
+//! `ward x --clean`: find the cached environments a request selects, each
 //! under the no-follow rules the runner created it with, and remove them
 //! with their registration in the store that owns them.
 
@@ -14,10 +14,10 @@ pub(super) struct CleanFilter {
 pub(super) struct XCandidate {
     pub(super) path: PathBuf,
     pub(super) name: OsString,
-    /// The shared `~/.tog/x` descriptor, not a per-candidate clone. It is
+    /// The shared `~/.greyward/x` descriptor, not a per-candidate clone. It is
     /// the same directory for every candidate and is only ever read from, so
     /// cloning it per entry cost one extra descriptor each and put a large
-    /// `~/.tog/x` against the process descriptor limit before cleanup had
+    /// `~/.greyward/x` against the process descriptor limit before cleanup had
     /// removed anything.
     pub(super) x_dir: Rc<fs::File>,
     pub(super) directory: fs::File,
@@ -50,7 +50,7 @@ pub(super) fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return None;
     }
-    let metadata_dir = root.join(".tog");
+    let metadata_dir = root.join(".greyward");
     let metadata = fs::symlink_metadata(&metadata_dir).ok()?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return None;
@@ -63,8 +63,8 @@ pub(super) fn safe_x_root(root: &Path, x_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve a user-controlled ancestor of the cleanup anchor. `$HOME` and
-/// `~/.tog` are routinely symlinks (the usual "move the cache off the
-/// root disk" setup) and `tog x` follows them when it creates and
+/// `~/.greyward` are routinely symlinks (the usual "move the cache off the
+/// root disk" setup) and `ward x` follows them when it creates and
 /// registers a root, so cleanup follows them too — otherwise it could never
 /// remove what the runner just made. Containment is carried by the no-follow
 /// component walk below the resolved anchor and by the descriptor identity
@@ -126,9 +126,9 @@ pub(super) struct ValidatedXDir {
 }
 
 /// Return the canonical cleanup anchor. The home chain (`$HOME` and
-/// `~/.tog`) is resolved the way the runner resolves it and the result
+/// `~/.greyward`) is resolved the way the runner resolves it and the result
 /// must be a real directory; the final `x` component is never followed.
-/// Missing `.tog` or `x` means there is nothing to clean; an existing
+/// Missing `.greyward` or `x` means there is nothing to clean; an existing
 /// unsafe component is an error.
 pub(super) fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>> {
     if !x_dir.is_absolute() {
@@ -137,21 +137,21 @@ pub(super) fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>>
             x_dir.display()
         )));
     }
-    let tog_dir = x_dir.parent().ok_or_else(|| {
+    let ward_dir = x_dir.parent().ok_or_else(|| {
         other(format!(
-            "x: cleanup directory {} has no .tog parent; refusing to clean",
+            "x: cleanup directory {} has no .greyward parent; refusing to clean",
             x_dir.display()
         ))
     })?;
-    let home_dir = tog_dir.parent().ok_or_else(|| {
+    let home_dir = ward_dir.parent().ok_or_else(|| {
         other(format!(
             "x: cleanup directory {} has no HOME parent; refusing to clean",
             x_dir.display()
         ))
     })?;
-    let tog_name = tog_dir.file_name().ok_or_else(|| {
+    let ward_name = ward_dir.file_name().ok_or_else(|| {
         other(format!(
-            "x: cleanup directory {} has no .tog parent; refusing to clean",
+            "x: cleanup directory {} has no .greyward parent; refusing to clean",
             x_dir.display()
         ))
     })?;
@@ -167,16 +167,16 @@ pub(super) fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>>
             home_dir.display()
         )));
     };
-    let Some(tog_canonical) =
-        canonical_real_directory(&home_canonical.join(tog_name), "$HOME/.tog")?
+    let Some(ward_canonical) =
+        canonical_real_directory(&home_canonical.join(ward_name), "$HOME/.greyward")?
     else {
         return Ok(None);
     };
     // Below the resolved home chain nothing is followed: the `x` component
     // must be a real directory and `open_directory_path` walks the canonical
     // path one no-follow component at a time.
-    let canonical = tog_canonical.join(x_name);
-    if !existing_real_directory(&canonical, "$HOME/.tog/x")? {
+    let canonical = ward_canonical.join(x_name);
+    if !existing_real_directory(&canonical, "$HOME/.greyward/x")? {
         return Ok(None);
     }
     let expected = fs::symlink_metadata(&canonical)?;
@@ -194,10 +194,10 @@ pub(super) fn validated_x_dir(x_dir: &Path) -> io::Result<Option<ValidatedXDir>>
     }))
 }
 
-/// Whether the held root has a real `.tog/closures` directory.
+/// Whether the held root has a real `.greyward/closures` directory.
 pub(super) fn has_safe_closures(root: &fs::File) -> bool {
-    store::open_directory_at(root.as_raw_fd(), b".tog")
-        .and_then(|tog| store::stat_at(tog.as_raw_fd(), b"closures"))
+    store::open_directory_at(root.as_raw_fd(), b".greyward")
+        .and_then(|ward| store::stat_at(ward.as_raw_fd(), b"closures"))
         .is_ok_and(|stat| store::is_directory(&stat))
 }
 
@@ -232,7 +232,7 @@ pub(super) fn x_candidates(x_dir: &Path) -> io::Result<Vec<XCandidate>> {
         if store::fd_identity(&directory)? != store::stat_identity(&metadata) {
             continue;
         }
-        let marker = match store::stat_at(directory.as_raw_fd(), b".tog") {
+        let marker = match store::stat_at(directory.as_raw_fd(), b".greyward") {
             Ok(marker) if store::is_directory(&marker) => true,
             Ok(_) => false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -306,7 +306,7 @@ pub(super) fn candidate_ecosystem(root: &fs::File, name: &OsStr) -> Option<&'sta
 /// Whether `filter` selects `candidate`. Only the request record says what
 /// a root was made for, so a root without one matches only a clean with no
 /// filter at all: a filtered clean leaves it alone, and the bare
-/// `tog x --clean` removes it.
+/// `ward x --clean` removes it.
 pub(super) fn candidate_matches(candidate: &XCandidate, filter: &CleanFilter) -> CandidateMatch {
     let matched = match read_x_request_in(&candidate.directory) {
         Some(record) => record_matches(&record, filter),
@@ -360,14 +360,14 @@ pub(super) enum Origin {
 /// pathname cannot make the ownership check read a different root.
 pub(super) fn originating_store_in(root: &fs::File, display: &Path) -> io::Result<Origin> {
     let marker = display.join(X_REQUEST_FILE);
-    let tog = match store::open_directory_at(root.as_raw_fd(), b".tog") {
-        Ok(tog) => Some(tog),
+    let ward = match store::open_directory_at(root.as_raw_fd(), b".greyward") {
+        Ok(ward) => Some(ward),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    let marker_present = match tog
+    let marker_present = match ward
         .as_ref()
-        .map(|tog| store::stat_at(tog.as_raw_fd(), X_REQUEST_NAME.as_bytes()))
+        .map(|ward| store::stat_at(ward.as_raw_fd(), X_REQUEST_NAME.as_bytes()))
     {
         Some(Ok(stat)) => {
             if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
@@ -415,7 +415,7 @@ pub(super) fn originating_store_in(root: &fs::File, display: &Path) -> io::Resul
         }
     }
     Ok(
-        read_closure_owner(tog.as_ref(), display).unwrap_or_else(|error| {
+        read_closure_owner(ward.as_ref(), display).unwrap_or_else(|error| {
             Origin::Unknown(format!("its closures could not be read: {error}"))
         }),
     )
@@ -427,13 +427,13 @@ pub(super) fn originating_store(root: &Path) -> io::Result<Origin> {
     originating_store_in(&open_directory_path(root)?, root)
 }
 
-/// The one store every closure under the held `.tog` directory references
+/// The one store every closure under the held `.greyward` directory references
 /// objects in, read with the same no-follow rules as the rest of the x
 /// root. A closure directory or file that cannot be read leaves the owner
 /// unknown, so cleanup skips that root and goes on with the rest.
-fn read_closure_owner(tog: Option<&fs::File>, display: &Path) -> io::Result<Origin> {
-    let closures_path = display.join(".tog/closures");
-    let closures = match tog.map(|tog| store::open_directory_at(tog.as_raw_fd(), b"closures")) {
+fn read_closure_owner(ward: Option<&fs::File>, display: &Path) -> io::Result<Origin> {
+    let closures_path = display.join(".greyward/closures");
+    let closures = match ward.map(|ward| store::open_directory_at(ward.as_raw_fd(), b"closures")) {
         Some(Ok(closures)) => closures,
         Some(Err(error)) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         Some(Err(_)) | None => return Ok(Origin::Empty),
@@ -556,7 +556,7 @@ pub(super) fn registration_for(root: &Path) -> io::Result<Registration> {
 #[allow(clippy::disallowed_methods)]
 /// The exclusive lease `clean` removes one environment under, or `None`
 /// with the skip already printed. The lease validates the store's format
-/// marker. A recorded store this tog does not read is not ours to change:
+/// marker. A recorded store this ward does not read is not ours to change:
 /// its registration stays, so the root that registration protects stays
 /// too. It is a skip rather than a failure because the store named may not
 /// be the configured one, and the fix belongs to that store.
@@ -568,7 +568,7 @@ pub(super) fn clean_lease(
         Ok(Some(activity)) => Ok(Some(activity)),
         Ok(None) => {
             println!(
-                "tog: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
+                "ward: skipped x environment {} (in use by a running tool; retry later; originating store is busy)",
                 environment.display()
             );
             Ok(None)
@@ -576,7 +576,7 @@ pub(super) fn clean_lease(
         Err(error) => match store::refusal_fix(&error) {
             Some(fix) => {
                 println!(
-                    "tog: skipped x environment {} (its originating store is not one this tog reads: {error}; fix: {fix})",
+                    "ward: skipped x environment {} (its originating store is not one this ward reads: {error}; fix: {fix})",
                     environment.display()
                 );
                 Ok(None)
@@ -660,7 +660,7 @@ pub(super) fn unregister_and_remove(
 /// script cannot read a partial clean as a full one.
 pub fn clean(request: CleanRequest) -> io::Result<i32> {
     let filter = clean_filter(request)?;
-    let x_dir = home()?.join(".tog/x");
+    let x_dir = home()?.join(".greyward/x");
     let candidates = x_candidates(&x_dir)?;
     let mut matched = 0usize;
     let mut removed = 0usize;
@@ -683,7 +683,7 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
         let origin = match originating_store_in(&candidate.directory, &candidate.path)? {
             Origin::Unknown(why) => {
                 println!(
-                    "tog: skipped x environment {} (its owning store could not be recovered: {why}; remove the directory yourself once you know nothing is using it)",
+                    "ward: skipped x environment {} (its owning store could not be recovered: {why}; remove the directory yourself once you know nothing is using it)",
                     candidate.path.display()
                 );
                 skipped += 1;
@@ -702,7 +702,7 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
         let Some(_lock) = lock_x_root_at(candidate.x_dir.as_raw_fd(), &candidate.name, true, true)?
         else {
             println!(
-                "tog: skipped x environment {} (in use by a running tool; retry later)",
+                "ward: skipped x environment {} (in use by a running tool; retry later)",
                 candidate.path.display()
             );
             skipped += 1;
@@ -720,7 +720,7 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
             (Origin::Store(_), Origin::Store(revalidated_store)) => {
                 if revalidated_store.root != origin_store.root {
                     println!(
-                        "tog: skipped x environment {} (originating store changed while it was being locked; retry later)",
+                        "ward: skipped x environment {} (originating store changed while it was being locked; retry later)",
                         candidate.path.display()
                     );
                     skipped += 1;
@@ -730,7 +730,7 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
             (Origin::Empty, Origin::Empty) => {}
             _ => {
                 println!(
-                    "tog: skipped x environment {} (origin changed while it was being locked; retry later)",
+                    "ward: skipped x environment {} (origin changed while it was being locked; retry later)",
                     candidate.path.display()
                 );
                 skipped += 1;
@@ -740,7 +740,7 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
         let registration = match registration_for_store(&candidate.path, origin_store.clone())? {
             Registration::Unusable { store, key, why } => {
                 println!(
-                    "tog: skipped x environment {} (its registry entry {key} in store {} is unusable: {why}; inspect it with `tog store roots`, drop it with `tog gc --forget {key}` under that store, then clean again)",
+                    "ward: skipped x environment {} (its registry entry {key} in store {} is unusable: {why}; inspect it with `ward store roots`, drop it with `ward gc --forget {key}` under that store, then clean again)",
                     candidate.path.display(),
                     store.root.display()
                 );
@@ -754,12 +754,12 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
             Removal::Changed { unregistered } => {
                 if unregistered {
                     println!(
-                        "tog: x environment {} was unregistered, then disappeared or changed before it was removed; delete what is left of it yourself",
+                        "ward: x environment {} was unregistered, then disappeared or changed before it was removed; delete what is left of it yourself",
                         candidate.path.display()
                     );
                 } else {
                     println!(
-                        "tog: skipped x environment {} (it disappeared or changed; retry later)",
+                        "ward: skipped x environment {} (it disappeared or changed; retry later)",
                         candidate.path.display()
                     );
                 }
@@ -776,7 +776,7 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
             }
         }
         println!(
-            "tog: removed x environment {}{removed_note}",
+            "ward: removed x environment {}{removed_note}",
             candidate.path.display()
         );
         // Only now has the environment stopped existing anywhere: the tree is
@@ -790,14 +790,14 @@ pub fn clean(request: CleanRequest) -> io::Result<i32> {
         removed += 1;
     }
     if matched == 0 {
-        println!("tog: x clean: nothing to clean");
+        println!("ward: x clean: nothing to clean");
     } else {
         // A removed node environment also orphans its
         // forests/<project-key>/<projection-id> node_modules forest in the
-        // originating store, which plain `tog gc` never visits.
+        // originating store, which plain `ward gc` never visits.
         let forests: String = notes.iter().map(|note| format!(", and {note}")).collect();
         println!(
-            "tog: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'tog gc'{forests}"
+            "ward: x clean removed {removed} environment(s), skipped {skipped}; store objects remain until the next 'ward gc'{forests}"
         );
     }
     Ok(i32::from(skipped > 0))

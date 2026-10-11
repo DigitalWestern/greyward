@@ -1,8 +1,8 @@
-//! End-to-end coverage for the Rust `tog fmt` contract.
+//! End-to-end coverage for the Rust `ward fmt` contract.
 //!
 //! Each test syncs into its own scratch store; a disk-backed TMPDIR keeps
 //! those off the small /tmp quota:
-//! TMPDIR=<disk-dir> TOG_SANDBOX_TESTS=required
+//! TMPDIR=<disk-dir> GREYWARD_SANDBOX_TESTS=required
 //! cargo test --test fmt_e2e -- --ignored --nocapture
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 mod common;
 
-use common::{copy_tree, fixture, tog, tog_at, TempDir};
+use common::{copy_tree, fixture, ward, ward_at, TempDir};
 
 fn object_ids(store: &Path) -> Vec<String> {
     let mut ids = fs::read_dir(store.join("objects"))
@@ -35,15 +35,17 @@ fn age(path: &Path) {
 /// The Rust a project with no toolchain file gets: the shipped catalog's
 /// explicit default.
 fn default_rust() -> String {
-    tog::kernel::toolchain::shipped(&tog::kernel::provider::rust::toolchain_catalog().unwrap())
-        .unwrap()
-        .version("rustc")
-        .unwrap()
-        .to_string()
+    greyward::kernel::toolchain::shipped(
+        &greyward::kernel::provider::rust::toolchain_catalog().unwrap(),
+    )
+    .unwrap()
+    .version("rustc")
+    .unwrap()
+    .to_string()
 }
 
 /// The store object of identity kind `kind`, read from the store's
-/// metadata: `tog fmt` writes no record naming the objects it ran.
+/// metadata: `ward fmt` writes no record naming the objects it ran.
 fn object_of_kind(store: &Path, kind: &str) -> String {
     let ids: Vec<String> = fs::read_dir(store.join("meta"))
         .unwrap()
@@ -57,9 +59,9 @@ fn object_of_kind(store: &Path, kind: &str) -> String {
     ids.into_iter().next().unwrap()
 }
 
-/// A `rustfmt` closure as an older `tog fmt` wrote it.
+/// A `rustfmt` closure as an older `ward fmt` wrote it.
 fn write_legacy_record(dir: &Path) -> PathBuf {
-    let closures = dir.join(".tog/closures");
+    let closures = dir.join(".greyward/closures");
     fs::create_dir_all(&closures).unwrap();
     let path = closures.join("rustfmt.json");
     fs::write(
@@ -73,9 +75,9 @@ fn write_legacy_record(dir: &Path) -> PathBuf {
     path
 }
 
-/// `tog fmt` needs no lock and no sync, caches its formatter, and writes
+/// `ward fmt` needs no lock and no sync, caches its formatter, and writes
 /// no closure: the lock pins the formatter, so there is nothing to record.
-/// A record an older tog left alone in a never-synced project is removed
+/// A record an older ward left alone in a never-synced project is removed
 /// when the store has no gc root for the project (#416). Nothing roots the
 /// formatter objects, so gc may reclaim them between runs and the next run
 /// fetches them again.
@@ -91,7 +93,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
     let home = temp.0.join("home");
     fs::create_dir_all(&home).unwrap();
 
-    let first = tog_at(&project, &home, &store, &["fmt", "--check"]);
+    let first = ward_at(&project, &home, &store, &["fmt", "--check"]);
     assert_eq!(
         first.status.code(),
         Some(1),
@@ -133,7 +135,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
         "rustfmt metadata does not retain the Rust object reference"
     );
 
-    let formatted = tog_at(&project, &home, &store, &["fmt"]);
+    let formatted = ward_at(&project, &home, &store, &["fmt"]);
     assert!(
         formatted.status.success(),
         "format run failed\nstdout:\n{}\nstderr:\n{}",
@@ -148,13 +150,13 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
     // The run wrote no closure of its own, and removed the lone legacy
     // record: this store has no gc root for the project, so nothing is
     // left pointing at an empty closures directory (#416).
-    let closures: Vec<_> = fs::read_dir(project.join(".tog/closures"))
+    let closures: Vec<_> = fs::read_dir(project.join(".greyward/closures"))
         .map(|dir| dir.map(|entry| entry.unwrap().file_name()).collect())
         .unwrap_or_default();
     assert!(closures.is_empty(), "{closures:?}");
 
     let before = object_ids(&store);
-    let warm = tog_at(&project, &home, &store, &["fmt", "--check"]);
+    let warm = ward_at(&project, &home, &store, &["fmt", "--check"]);
     assert!(
         warm.status.success(),
         "warm check failed: {:?}",
@@ -163,7 +165,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
     assert!(!String::from_utf8_lossy(&warm.stderr).contains("fetching rustfmt"));
     assert_eq!(object_ids(&store), before, "warm fmt created a new object");
 
-    let help = tog_at(&project, &home, &store, &["fmt", "--", "--help"]);
+    let help = ward_at(&project, &home, &store, &["fmt", "--", "--help"]);
     assert!(
         help.status.success(),
         "pass-through help failed\nstdout:\n{}\nstderr:\n{}",
@@ -171,10 +173,10 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
         String::from_utf8_lossy(&help.stderr)
     );
 
-    // This is cargo-fmt's own argument parser rejecting a malformed tog
+    // This is cargo-fmt's own argument parser rejecting a malformed ward
     // pass-through flag. Its status is 2, so status 1 would not prove
     // unchanged propagation from the formatter.
-    let bad_tool_flag = tog_at(&project, &home, &store, &["fmt", "--", "--version=bad"]);
+    let bad_tool_flag = ward_at(&project, &home, &store, &["fmt", "--", "--version=bad"]);
     let bad_tool_stderr = String::from_utf8_lossy(&bad_tool_flag.stderr).into_owned();
     assert_eq!(
         bad_tool_flag.status.code(),
@@ -182,16 +184,16 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
         "formatter status was not passed through unchanged\nstdout:\n{}\nstderr:\n{bad_tool_stderr}",
         String::from_utf8_lossy(&bad_tool_flag.stdout),
     );
-    // Status 2 is also tog's own usage exit, so the code alone cannot
-    // tell pass-through from a tog-side argument rejection: require
-    // cargo-fmt's own diagnostic and the absence of tog's usage line.
+    // Status 2 is also ward's own usage exit, so the code alone cannot
+    // tell pass-through from a greyward-side argument rejection: require
+    // cargo-fmt's own diagnostic and the absence of ward's usage line.
     assert!(
         bad_tool_stderr.contains("bad") && bad_tool_stderr.to_lowercase().contains("cargo fmt"),
         "status 2 did not come from cargo-fmt's own argument parser:\n{bad_tool_stderr}"
     );
     assert!(
-        !bad_tool_stderr.contains("tog: error:"),
-        "status 2 was tog's usage error, not the formatter's:\n{bad_tool_stderr}"
+        !bad_tool_stderr.contains("ward: error:"),
+        "status 2 was ward's usage error, not the formatter's:\n{bad_tool_stderr}"
     );
 
     // Nothing roots the formatter objects. A registered project keeps the
@@ -201,7 +203,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
     let other = temp.0.join("other");
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("requirements.txt"), "six==1.17.0\n").unwrap();
-    let synced = tog_at(&other, &home, &store, &["sync"]);
+    let synced = ward_at(&other, &home, &store, &["sync"]);
     assert!(
         synced.status.success(),
         "second project sync failed\nstdout:\n{}\nstderr:\n{}",
@@ -209,7 +211,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
         String::from_utf8_lossy(&synced.stderr)
     );
     let python_closure: serde_json::Value =
-        serde_json::from_slice(&fs::read(other.join(".tog/closures/python.json")).unwrap())
+        serde_json::from_slice(&fs::read(other.join(".greyward/closures/python.json")).unwrap())
             .unwrap();
     let python_env = PathBuf::from(python_closure["body"]["env_object"].as_str().unwrap());
     assert!(python_env.is_dir(), "{}", python_env.display());
@@ -223,7 +225,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
         .unwrap()
         .set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
         .unwrap();
-    let swept = tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
+    let swept = ward_at(&project, &home, &store, &["gc", "--keep-days", "0"]);
     assert!(
         swept.status.success(),
         "gc failed\nstdout:\n{}\nstderr:\n{}",
@@ -242,7 +244,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
 
     // The next run realizes the formatter again (from the download cache
     // when gc left the archive there) and formats as before.
-    let again = tog_at(&project, &home, &store, &["fmt", "--check"]);
+    let again = ward_at(&project, &home, &store, &["fmt", "--check"]);
     assert!(
         again.status.success(),
         "fmt after gc failed\nstdout:\n{}\nstderr:\n{}",
@@ -252,7 +254,7 @@ fn fmt_is_lockless_cached_writes_no_record_and_roots_nothing() {
     assert!(store.join("objects").join(&rustfmt_id).is_dir());
 }
 
-/// Run from a workspace member, `tog fmt` formats with the Rust the
+/// Run from a workspace member, `ward fmt` formats with the Rust the
 /// workspace root's lock pins. The root pins a release other than the
 /// catalog's default, which is what the member, having no lock or
 /// toolchain file of its own, would otherwise get. No record is written in
@@ -291,7 +293,7 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
     let home = temp.0.join("home");
     fs::create_dir_all(&home).unwrap();
 
-    let locked = tog_at(
+    let locked = ward_at(
         &root,
         &home,
         &store,
@@ -302,18 +304,18 @@ fn fmt_from_a_workspace_member_uses_the_root_lock() {
         "update failed\nstderr:\n{}",
         String::from_utf8_lossy(&locked.stderr)
     );
-    let lock = fs::read_to_string(root.join("tog-toolchain.toml")).unwrap();
+    let lock = fs::read_to_string(root.join("greyward-toolchain.toml")).unwrap();
     assert!(lock.contains(&format!("version = \"{pinned}\"")), "{lock}");
 
-    let formatted = tog_at(&member, &home, &store, &["fmt"]);
+    let formatted = ward_at(&member, &home, &store, &["fmt"]);
     assert!(
         formatted.status.success(),
         "fmt from the member failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&formatted.stdout),
         String::from_utf8_lossy(&formatted.stderr)
     );
-    assert!(!member.join("tog-toolchain.toml").exists());
-    assert!(!member.join(".tog/closures/rustfmt.json").exists());
+    assert!(!member.join("greyward-toolchain.toml").exists());
+    assert!(!member.join(".greyward/closures/rustfmt.json").exists());
     assert!(
         !legacy.exists(),
         "a lone legacy record with no gc root must be removed (#416)"
@@ -349,16 +351,16 @@ fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
     fs::write(project.join("Cargo.lock"), "version = 4\n").unwrap();
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
 
-    let synced = tog(&project, &temp.0, &["sync"]);
+    let synced = ward(&project, &temp.0, &["sync"]);
     assert!(
         synced.status.success(),
         "sync failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&synced.stdout),
         String::from_utf8_lossy(&synced.stderr)
     );
-    assert!(project.join(".tog/closures/node.json").is_file());
+    assert!(project.join(".greyward/closures/node.json").is_file());
 
-    let run = tog(&project.join("src"), &temp.0, &["fmt", "--check", "extra"]);
+    let run = ward(&project.join("src"), &temp.0, &["fmt", "--check", "extra"]);
     assert_eq!(
         run.status.code(),
         Some(7),
@@ -373,7 +375,7 @@ fn fmt_script_precedence_runs_script_from_a_project_subdirectory() {
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(
-        !project.join(".tog/closures/rustfmt.json").exists(),
+        !project.join(".greyward/closures/rustfmt.json").exists(),
         "script precedence unexpectedly realized rustfmt"
     );
 }

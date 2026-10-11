@@ -15,7 +15,9 @@ use std::process::Command;
 
 mod common;
 
-use common::{assert_frozen_never_writes_the_lock, assert_ok, fixture, tog, tog_offline, TempDir};
+use common::{
+    assert_frozen_never_writes_the_lock, assert_ok, fixture, ward, ward_offline, TempDir,
+};
 
 /// Linux project: only the SOURCE (`ruby` platform) variant of nokogiri, so
 /// the gate compiles its vendored libxml2/libxslt in the sandbox instead of
@@ -118,7 +120,7 @@ fn assert_no_forbidden_prefix(text: &str, staging: &Path, what: &str) {
     }
 }
 
-/// Run the realized interpreter directly (no tog, scrubbed env) so a
+/// Run the realized interpreter directly (no ward, scrubbed env) so a
 /// host Ruby can never answer for it.
 fn pinned_ruby(ruby: &Path, cwd: &Path, script: &str, label: &str) -> String {
     let output = Command::new(ruby.join("bin/ruby"))
@@ -179,7 +181,7 @@ fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) {
 /// the gem sandbox hides every other host library (`HostView::RuntimeOnly`),
 /// so nokogiri's vendored libxml2 finds neither the host's zlib nor its
 /// liblzma, on every host (issue #304); what it links beyond glibc comes from
-/// tog's native library set (#329).
+/// ward's native library set (#329).
 fn is_glibc_soname(soname: &str) -> bool {
     [
         "libc.so",
@@ -203,7 +205,7 @@ fn assert_elf_resolves_from_system(elf: &Path, staging: &Path) {
 }
 
 /// `assert_elf_resolves_from_system`, except that a NEEDED library `ldd`
-/// resolves inside `libset`, tog's pinned native library set, is allowed:
+/// resolves inside `libset`, ward's pinned native library set, is allowed:
 /// a native gem builds with the set mounted and links it through its
 /// RUNPATH (#329).
 fn assert_elf_resolves_from(elf: &Path, staging: &Path, libset: Option<&Path>) {
@@ -434,7 +436,7 @@ require "json"
 require "digest"
 require "openssl"
 require "zlib"
-input = "tog-linux-ruby"
+input = "greyward-linux-ruby"
 compressed = Zlib::Deflate.deflate(input)
 abort "zlib round-trip failed" unless Zlib::Inflate.inflate(compressed) == input
 digest = OpenSSL::Digest::SHA256.hexdigest(input)
@@ -490,7 +492,7 @@ fn ruby_sync_native_ext_and_run() {
     if linux {
         // `plan` publishes the Ruby object and prints the gem plan without
         // installing anything, so the toolchain can be gated on its own.
-        let plan = assert_ok(tog(&project, &temp.0, &["plan"]), "plan");
+        let plan = assert_ok(ward(&project, &temp.0, &["plan"]), "plan");
         let plan: serde_json::Value = serde_json::from_str(plan.trim())
             .unwrap_or_else(|e| panic!("plan output is not JSON ({e}): {plan}"));
         let gems = plan["gems"].as_array().unwrap();
@@ -532,7 +534,7 @@ fn ruby_sync_native_ext_and_run() {
 
     // Sandboxed gem realization: racc's C extension, and on Linux nokogiri's
     // vendored libxml2/libxslt, compile here (network denied).
-    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
 
     let (ruby_obj, _) = find_object(&store, "ruby").expect("Ruby object published");
     let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
@@ -581,12 +583,14 @@ fn ruby_sync_native_ext_and_run() {
     // first sync verified and recorded in the store, and the same objects
     // are projected again.
     let closure = |project: &Path| -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
-            .unwrap()
+        serde_json::from_slice(
+            &std::fs::read(project.join(".greyward/closures/ruby.json")).unwrap(),
+        )
+        .unwrap()
     };
     let before = closure(&project);
     assert_ok(
-        tog_offline(&project, &temp.0, &["sync"]),
+        ward_offline(&project, &temp.0, &["sync"]),
         "offline re-sync of the unchanged project",
     );
     let after = closure(&project);
@@ -602,9 +606,9 @@ fn ruby_sync_native_ext_and_run() {
     // the offline re-sync works again.
     let records = store.join("records/rubygems-sha256");
     assert!(records.is_dir(), "the sync recorded no rubygems.org digest");
-    tog::kernel::store::remove_tree(&records).unwrap();
+    greyward::kernel::store::remove_tree(&records).unwrap();
     assert_ok(
-        tog(&project, &temp.0, &["sync"]),
+        ward(&project, &temp.0, &["sync"]),
         "sync over the gem object",
     );
     assert!(
@@ -612,7 +616,7 @@ fn ruby_sync_native_ext_and_run() {
         "an object hit recorded no rubygems.org digest"
     );
     assert_ok(
-        tog_offline(&project, &temp.0, &["sync"]),
+        ward_offline(&project, &temp.0, &["sync"]),
         "offline re-sync after an object hit recorded the digests",
     );
 
@@ -621,7 +625,7 @@ fn ruby_sync_native_ext_and_run() {
     if let Ok(entries) = std::fs::read_dir(&staging) {
         for entry in entries {
             let path = entry.unwrap().path();
-            let _ = tog::kernel::store::remove_tree(&path);
+            let _ = greyward::kernel::store::remove_tree(&path);
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -634,7 +638,7 @@ fn ruby_sync_native_ext_and_run() {
 
     if linux {
         let stdlib = assert_ok(
-            tog(&project, &temp.0, &["run", "ruby", "-e", STDLIB_PROBE]),
+            ward(&project, &temp.0, &["run", "ruby", "-e", STDLIB_PROBE]),
             "committed Ruby stdlib probe",
         );
         assert_stdlib_probe(&stdlib, "Projected-env stdlib probe");
@@ -644,7 +648,7 @@ fn ruby_sync_native_ext_and_run() {
     // native extension (.bundle on Darwin, .so on Linux) stayed loadable and
     // the projected env works.
     let out = assert_ok(
-        tog(
+        ward(
             &project,
             &temp.0,
             &[
@@ -661,7 +665,7 @@ fn ruby_sync_native_ext_and_run() {
     // /usr/bin fallback: a symlink binstub that dangles after the commit
     // rename would otherwise let host rake answer and the check still pass.
     let which = assert_ok(
-        tog(&project, &temp.0, &["run", "sh", "-c", "command -v rake"]),
+        ward(&project, &temp.0, &["run", "sh", "-c", "command -v rake"]),
         "which rake",
     );
     let which = which.trim().to_string();
@@ -677,13 +681,13 @@ fn ruby_sync_native_ext_and_run() {
     // The wrapper itself must execute (relocatable, not a dangling link).
     // Pass the absolute store path as argv[0]; no shell that could quietly
     // fall back to /usr/bin/rake.
-    let direct = tog(&project, &temp.0, &["run", which.as_str(), "--version"]);
+    let direct = ward(&project, &temp.0, &["run", which.as_str(), "--version"]);
     let version = assert_ok(direct, "store binstub direct exec");
     assert!(version.contains("13."), "{version}");
 
     if linux {
         let nokogiri = assert_ok(
-            tog(
+            ward(
                 &project,
                 &temp.0,
                 &[
@@ -766,7 +770,7 @@ BUNDLED WITH
     .unwrap();
 }
 
-/// A gem that needs a library tog pins builds against tog's native library
+/// A gem that needs a library ward pins builds against ward's native library
 /// set, never the host's: the C-runtime-only view hides the host's zlib,
 /// the set's is mounted, and the extension's RUNPATH names the set, so it
 /// loads the store's libz at run time (issue #329). Nothing falls back to
@@ -785,7 +789,7 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
     zlib_project_files(&project);
     let store = temp.0.join("store");
 
-    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
     let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
     assert_immutable_tree(&gems_obj);
     let inputs = gems_meta["identity"]["inputs"].as_object().unwrap();
@@ -832,8 +836,10 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
     // And the loader resolves libz there, not from the host.
     assert_elf_resolves_from(&extensions[0], &store.join("tmp"), Some(&libset));
     let closure = |project: &Path| -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
-            .unwrap()
+        serde_json::from_slice(
+            &std::fs::read(project.join(".greyward/closures/ruby.json")).unwrap(),
+        )
+        .unwrap()
     };
     let before = closure(&project);
     assert_eq!(
@@ -844,11 +850,11 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
 
     let cached = store.join("cache/sha256").join(ZLIB_SHA256);
     assert!(cached.exists(), "the zlib gem is not in the artifact cache");
-    tog::kernel::store::remove_tree(&cached)
+    greyward::kernel::store::remove_tree(&cached)
         .or_else(|_| std::fs::remove_file(&cached))
         .unwrap();
     let second = assert_ok(
-        tog_offline(&project, &temp.0, &["sync"]),
+        ward_offline(&project, &temp.0, &["sync"]),
         "offline re-sync over the native-libs object",
     );
     eprintln!("second sync: {second}");
@@ -864,7 +870,7 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
 }
 
 /// Linux project whose only gem is the source `gdbm` gem. Its `extconf.rb`
-/// needs `gdbm.h` and `libgdbm`, which neither the C runtime nor tog's
+/// needs `gdbm.h` and `libgdbm`, which neither the C runtime nor ward's
 /// native library set has, so its build against the C runtime alone fails
 /// whatever the host has installed.
 fn gdbm_project_files(project: &Path) {
@@ -900,8 +906,8 @@ BUNDLED WITH
 /// `extconf.rb` probes (`gdbm_open` in `libgdbm`, `gdbm.h`) and what its
 /// `gdbm.c` compiles against. The functions are declared, never run.
 const STUB_GDBM_H: &str = r#"
-#ifndef TOG_STUB_GDBM_H
-#define TOG_STUB_GDBM_H
+#ifndef GREYWARD_STUB_GDBM_H
+#define GREYWARD_STUB_GDBM_H
 typedef struct { char *dptr; int dsize; } datum;
 typedef struct gdbm_file_info *GDBM_FILE;
 #define GDBM_READER 0
@@ -942,7 +948,7 @@ const char *gdbm_strerror(int);
 const STUB_LIBGDBM_C: &str = r#"
 #include <gdbm.h>
 int gdbm_errno;
-const char *gdbm_version = "tog stub";
+const char *gdbm_version = "ward stub";
 GDBM_FILE gdbm_open(const char *name, int block, int flags, int mode, void (*fatal)(const char *)) {
     (void)name; (void)block; (void)flags; (void)mode; (void)fatal;
     return 0;
@@ -950,7 +956,7 @@ GDBM_FILE gdbm_open(const char *name, int block, int flags, int mode, void (*fat
 "#;
 
 /// A directory laid out like a host root with the stub `gdbm-devel` in it,
-/// for `TOG_TEST_HOST_DEV_FILES` (`hostview::test_host_dev_files`): the
+/// for `GREYWARD_TEST_HOST_DEV_FILES` (`hostview::test_host_dev_files`): the
 /// header under `usr/include`, `libgdbm.so` under `usr/lib`, built with the
 /// host's gcc, with the real library's soname so the extension's NEEDED
 /// entry reads the same on a host that has `libgdbm-dev` installed.
@@ -973,7 +979,7 @@ fn stub_host_dev_files(dev: &Path) {
     assert_ok(output, "gcc builds the stub libgdbm");
 }
 
-/// A gem that needs a development package the C runtime and tog's native
+/// A gem that needs a development package the C runtime and ward's native
 /// library set lack still installs: its hermetic build fails, what that
 /// attempt left in the shared GEM_HOME is discarded, it is rebuilt against
 /// the whole host, and the object is committed under its own
@@ -982,7 +988,7 @@ fn stub_host_dev_files(dev: &Path) {
 /// object through the store record instead of building again.
 ///
 /// The development package is a stand-in a debug build reads from
-/// `TOG_TEST_HOST_DEV_FILES` (`stub_host_dev_files`): no rubygems.org gem
+/// `GREYWARD_TEST_HOST_DEV_FILES` (`stub_host_dev_files`): no rubygems.org gem
 /// needs a header every host has outside glibc and the set, and the Ruby
 /// tailor admits no other gem source (#559).
 #[test]
@@ -999,11 +1005,11 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
     let store = temp.0.join("store");
 
     assert_ok(
-        common::tog_env(
+        common::ward_env(
             &project,
             &temp.0,
             &["sync"],
-            &[("TOG_TEST_HOST_DEV_FILES", dev.as_os_str())],
+            &[("GREYWARD_TEST_HOST_DEV_FILES", dev.as_os_str())],
         ),
         "sync",
     );
@@ -1078,21 +1084,23 @@ fn ruby_gem_needing_host_headers_falls_back_once() {
     // development package stays as it was, and named: it is part of the
     // host's fingerprint, so the record is found only for the same host.
     let closure = |project: &Path| -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/ruby.json")).unwrap())
-            .unwrap()
+        serde_json::from_slice(
+            &std::fs::read(project.join(".greyward/closures/ruby.json")).unwrap(),
+        )
+        .unwrap()
     };
     let before = closure(&project);
     let cached = store.join("cache/sha256").join(GDBM_SHA256);
     assert!(cached.exists(), "the gdbm gem is not in the artifact cache");
-    tog::kernel::store::remove_tree(&cached)
+    greyward::kernel::store::remove_tree(&cached)
         .or_else(|_| std::fs::remove_file(&cached))
         .unwrap();
     let second = assert_ok(
         common::offline_command(&project, &temp.0, &store)
-            .env("TOG_TEST_HOST_DEV_FILES", &dev)
+            .env("GREYWARD_TEST_HOST_DEV_FILES", &dev)
             .arg("sync")
             .output()
-            .expect("spawn tog without network"),
+            .expect("spawn ward without network"),
         "offline re-sync over the fallback object",
     );
     eprintln!("second sync: {second}");

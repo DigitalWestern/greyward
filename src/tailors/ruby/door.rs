@@ -21,10 +21,10 @@ pub(crate) const OUTPUTS: [&str; 2] = ["Gemfile", "Gemfile.lock"];
 /// Installed gems and Bundler's own state in the project: never copied
 /// into the snapshot, never diffed. A lock-only Bundler reads neither
 /// (`BUNDLE_IGNORE_CONFIG=1`, gems in the run's scratch).
-pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".tog"];
+pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".greyward"];
 
 /// Stands for the run's scratch directory in an argument: the helper and
-/// any file the run is handed are written there, the one tog-written
+/// any file the run is handed are written there, the one greyward-written
 /// directory the sandbox sees.
 pub(crate) const SCRATCH: &str = "@SCRATCH@";
 
@@ -69,7 +69,7 @@ pub(crate) fn ruby_tool(selected: &Selected) -> io::Result<crate::kernel::resolv
     })
 }
 
-/// The store Ruby tool `args[0]` with tog's forced environment: the store
+/// The store Ruby tool `args[0]` with ward's forced environment: the store
 /// Ruby alone on `PATH` beside the system directories, its output
 /// captured. The gem paths are the run's scratch, set by the wiring.
 fn spec(run: &RubyRun<'_>) -> DelegateSpec {

@@ -21,7 +21,7 @@ struct State {
 
 fn changed(path: &Path) -> io::Error {
     io::Error::other(format!(
-        "{} changed while planning; nothing was published; run `tog` again",
+        "{} changed while planning; nothing was published; run `ward` again",
         path.display()
     ))
 }

@@ -113,3 +113,6 @@ None open.
 - **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
 
 - #653: detect ecosystem comparisons across Rust line boundaries with a bounded token scan and adversarial fixtures.
+
+- #661: the Action demo fails under v0.2.0, because the demo's `requirements.txt` has no resolution record and the company policy denies `unrecorded-resolution`.
+- #662: recapture `docs/human/GETTING-STARTED.md` with v0.2.0. Its blocks still say they are 0.1.0 output, but the rename changed the names in them.

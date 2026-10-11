@@ -6,7 +6,7 @@ below is the spec, generated from the command table in `src/cli/spec.rs`; if thi
 file and the binary differ, fix this file.*
 
 ```
-ward 0.1.0 — one command for every package manager
+ward 0.2.0 — one command for every package manager
 
 USAGE:
   ward                        set up this project

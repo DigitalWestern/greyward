@@ -109,10 +109,10 @@ Those windows are in `docs/human/LIMITATIONS.md`.
 
 ## Vocabulary
 
-The bedding theme (a Greyward is a duvet's warmth rating), used in docs and
-conversation; code keeps boring identifiers, and the CLI never prints any of
-these words. The words it does print — store, realize, project, closure,
-exception, permissive — are defined in the README:
+The bedding theme, used in docs and conversation; code keeps boring
+identifiers, and the CLI never prints any of these words. The words it
+does print — store, realize, project, closure, exception, permissive — are
+defined in the README:
 
 | word | meaning | in code |
 |---|---|---|

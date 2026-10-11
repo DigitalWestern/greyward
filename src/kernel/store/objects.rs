@@ -101,7 +101,7 @@ impl Store {
             ));
         }
         // The whole record check, the one a cache hit and the sweep make:
-        // a record whose identity, schema or evidence this tog cannot read
+        // a record whose identity, schema or evidence this ward cannot read
         // is not a complete object.
         crate::kernel::objmeta::read_store_record(self, id).map_err(|error| {
             io::Error::new(error.kind(), format!("object reference {id}: {error}"))
@@ -501,7 +501,7 @@ impl Store {
         let result = crate::kernel::policy::check_exception_set(id, &winner).and_then(|_| {
             if winner != candidate {
                 return Err(io::Error::other(format!(
-                    "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run 'tog'"
+                    "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run 'ward'"
                 )));
             }
             Ok((dest.to_path_buf(), winner))
@@ -789,7 +789,7 @@ pub(super) fn validate_cached_dependency_evidence(
                 .collect::<BTreeSet<_>>()
         };
         return Err(io::Error::other(format!(
-            "object {id} was published concurrently with different dependency evidence; winner objects: {:?}, staged objects: {:?}, winner cache: {:?}, staged cache: {:?}; re-run 'tog'",
+            "object {id} was published concurrently with different dependency evidence; winner objects: {:?}, staged objects: {:?}, winner cache: {:?}, staged cache: {:?}; re-run 'ward'",
             record.dependencies,
             candidate.objects,
             names(&record.cache),

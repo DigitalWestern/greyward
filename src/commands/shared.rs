@@ -15,7 +15,7 @@ pub(crate) use crate::tailors::{
     CachedTool, DepSpec, EditVerb, ManifestEdit, PackageRegistry, Tailor,
 };
 
-/// The ecosystems `tog add` can choose, in registry order, each with the
+/// The ecosystems `ward add` can choose, in registry order, each with the
 /// public registry it names (`Tailor::package_registry`).
 pub(crate) fn edit_tailors() -> Vec<(&'static dyn Tailor, PackageRegistry)> {
     crate::tailors::registry()
@@ -33,8 +33,8 @@ pub(crate) fn edit_tailors() -> Vec<(&'static dyn Tailor, PackageRegistry)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectLocation {
     pub root: PathBuf,
-    /// tog has marked `root` as a project: it holds a projection
-    /// (`.tog/closures`) or a toolchain lock entry. An unmarked root only
+    /// ward has marked `root` as a project: it holds a projection
+    /// (`.greyward/closures`) or a toolchain lock entry. An unmarked root only
     /// has manifests.
     pub marked: bool,
     /// The ecosystems whose inputs are at `root` (`inspect::detected`).
@@ -42,22 +42,22 @@ pub(crate) struct ProjectLocation {
 }
 
 /// Which project am I in? The one answer every command uses: `run`,
-/// `sync`, `tog <script>`, `fmt`, `add`, `x` and toolchain selection.
+/// `sync`, `ward <script>`, `fmt`, `add`, `x` and toolchain selection.
 ///
-/// 1. The nearest ancestor tog has marked: a projection (`.tog/closures`)
+/// 1. The nearest ancestor ward has marked: a projection (`.greyward/closures`)
 ///    or a toolchain lock entry, a dangling symlink included, so a lock
 ///    that cannot be read refuses instead of being skipped. A marked root
 ///    wins over a nearer manifest, so a nested `package.json` under a
 ///    synced root (a docs site) keeps belonging to that root, and an outer
-///    checkout never decides an inner project's runtime. A bare `.tog`
+///    checkout never decides an inner project's runtime. A bare `.greyward`
 ///    (a journal left by a first sync that failed) is not a mark: it would
-///    claim every unsynced project below it. `$HOME/.tog` is tog's own
+///    claim every unsynced project below it. `$HOME/.greyward` is ward's own
 ///    home, not a project.
 ///    A marked root that holds no project input of its own (a stray lock
 ///    above the real project) does not hide a manifest nearer to `cwd`:
 ///    rule 2 is tried first, and the marked root is the answer only when
 ///    rule 2 finds nothing.
-/// 2. Otherwise the nearest ancestor with any project input, so `tog run`
+/// 2. Otherwise the nearest ancestor with any project input, so `ward run`
 ///    from `src/` of a never-synced project finds the project.
 /// 3. Otherwise none.
 pub(crate) fn project_for(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
@@ -72,7 +72,7 @@ pub(crate) fn project_for(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
 fn project_for_in(cwd: &Path, home: Option<&Path>) -> io::Result<Option<ProjectLocation>> {
     let marked = cwd.ancestors().find(|dir| {
         dir.join(lock::LOCK_PATH).symlink_metadata().is_ok()
-            || (dir.join(".tog/closures").is_dir() && home != Some(*dir))
+            || (dir.join(".greyward/closures").is_dir() && home != Some(*dir))
     });
     if let Some(root) = marked {
         let detected = crate::commands::inspect::detected(root)?;
@@ -121,8 +121,8 @@ pub(crate) fn project_root(cwd: &Path) -> io::Result<PathBuf> {
 
 /// The steps of the project script `name` at `root`, before any sync:
 /// the first tailor's `Tailor::project_script`, `None` when no ecosystem
-/// has such a script. `tog <script>` and `tog fmt` ask this to decide
-/// whether a word is a script; `tog run` reads the projected script once
+/// has such a script. `ward <script>` and `ward fmt` ask this to decide
+/// whether a word is a script; `ward run` reads the projected script once
 /// synced (`Tailor::projected_script`).
 pub(crate) fn package_script(
     root: &Path,
@@ -142,7 +142,7 @@ pub(crate) fn package_script(
 /// variables it sets and removes applied to `command`. `cwd` is where the
 /// user ran from and `cmd` the command line, which some ecosystems refuse.
 ///
-/// `tog run` spawns that command and `tog env` prints it. Both go through
+/// `ward run` spawns that command and `ward env` prints it. Both go through
 /// here so neither can drift from what a projection really is.
 pub(crate) fn projected_env(
     ctx: &crate::kernel::context::Context,
@@ -293,9 +293,9 @@ pub(crate) fn selected_helpers(
     Ok(helpers)
 }
 
-/// The tool `tog x` installs and launches for `ecosystem`
+/// The tool `ward x` installs and launches for `ecosystem`
 /// (`Tailor::registry_tool`). An ecosystem with no registry tool answers
-/// `tog x does not support <id>`.
+/// `ward x does not support <id>`.
 pub(crate) fn registry_tool(ecosystem: &str) -> io::Result<&'static dyn RegistryTool> {
     crate::tailors::by_id(ecosystem)
         .ok_or_else(|| {
@@ -307,7 +307,7 @@ pub(crate) fn registry_tool(ecosystem: &str) -> io::Result<&'static dyn Registry
         .registry_tool()
 }
 
-/// Every ecosystem `tog x` can run a tool from, as (tailor id, tool), in
+/// Every ecosystem `ward x` can run a tool from, as (tailor id, tool), in
 /// registry order.
 pub(crate) fn registry_tools() -> Vec<(&'static str, &'static dyn RegistryTool)> {
     crate::tailors::registry()
@@ -328,7 +328,7 @@ pub(crate) fn no_inputs() -> io::Error {
     io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "nothing to sync here: no manifest found (looked for {}; see 'tog help inputs')",
+            "nothing to sync here: no manifest found (looked for {}; see 'ward help inputs')",
             input_files()
         ),
     )
@@ -345,7 +345,7 @@ pub(crate) fn input_files() -> String {
 }
 
 /// What an edit or a lock check borrows from its command: toolchain
-/// selection outside a sync, and the `tog x` cache a pinned package
+/// selection outside a sync, and the `ward x` cache a pinned package
 /// manager lives in.
 pub(crate) struct CommandHost {
     pub platform: Platform,
@@ -510,13 +510,13 @@ mod tests {
         // A projection with no lock resolves the project's own sources,
         // exactly as the sync that creates its lock would.
         let project = t.0.join("project");
-        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         std::fs::write(project.join(".python-version"), format!("{other}\n")).unwrap();
         let selected = selected_toolchain(platform, &project.join("src"), "python").unwrap();
         assert_eq!(selected.version("cpython").unwrap(), other);
         assert_eq!(selected.source, crate::kernel::toolchain::Source::Shipped);
 
-        // A committed lock decides, even with no `.tog` beside it, and a
+        // A committed lock decides, even with no `.greyward` beside it, and a
         // lock its inputs have moved away from refuses as a sync would.
         let locked = t.0.join("locked");
         std::fs::create_dir_all(&locked).unwrap();
@@ -539,7 +539,7 @@ mod tests {
         std::fs::write(locked.join(".python-version"), format!("{default}\n")).unwrap();
         let error = selected_toolchain(platform, &locked, "python").unwrap_err();
         assert!(error.to_string().contains("is stale for python"), "{error}");
-        assert!(!locked.join(".tog").exists());
+        assert!(!locked.join(".greyward").exists());
 
         // A lock entry that is not a regular file refuses; it never falls
         // through to the default.
@@ -547,14 +547,17 @@ mod tests {
         std::fs::create_dir_all(&broken).unwrap();
         std::os::unix::fs::symlink("nowhere", broken.join(lock::LOCK_PATH)).unwrap();
         let error = selected_toolchain(platform, &broken, "python").unwrap_err();
-        assert!(error.to_string().contains("tog-toolchain.toml"), "{error}");
+        assert!(
+            error.to_string().contains("greyward-toolchain.toml"),
+            "{error}"
+        );
         let dir_lock = t.0.join("dir-lock");
         std::fs::create_dir_all(dir_lock.join(lock::LOCK_PATH)).unwrap();
         let error = selected_toolchain(platform, &dir_lock, "python").unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("tog-toolchain.toml is not a regular file"),
+                .contains("greyward-toolchain.toml is not a regular file"),
             "{error}"
         );
     }
@@ -564,7 +567,7 @@ mod tests {
         let t = TempDir::new();
         // Only answers inside the temporary directory count: with
         // `TMPDIR` under `$HOME`, the walk without a home goes on up to
-        // the developer's own `~/.tog`.
+        // the developer's own `~/.greyward`.
         let none = |dir: &Path| {
             project_for_in(dir, None)
                 .unwrap()
@@ -573,7 +576,7 @@ mod tests {
         // A synced root keeps a plain node_modules and a nested manifest
         // below it (a docs site).
         let root = t.0.join("proj");
-        std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         std::fs::write(root.join("package.json"), "{}").unwrap();
         let docs = root.join("docs");
         std::fs::create_dir_all(docs.join("node_modules")).unwrap();
@@ -593,9 +596,9 @@ mod tests {
         assert_eq!(location.root, fresh);
         assert!(!location.marked);
         assert_eq!(location.detected, ["node"]);
-        // A bare `.tog` above an unsynced project does not claim it.
+        // A bare `.greyward` above an unsynced project does not claim it.
         let stray = t.0.join("code");
-        std::fs::create_dir_all(stray.join(".tog/journal")).unwrap();
+        std::fs::create_dir_all(stray.join(".greyward/journal")).unwrap();
         std::fs::create_dir_all(stray.join("app")).unwrap();
         std::fs::write(stray.join("app/go.mod"), "module app\n").unwrap();
         assert_eq!(none(&stray.join("app")).unwrap().root, stray.join("app"));
@@ -623,12 +626,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tog_home_is_not_a_project() {
+    fn the_ward_home_is_not_a_project() {
         let t = TempDir::new();
         let home = t.0.join("home");
-        // tog's home holds `x` environments and the store, never a
+        // ward's home holds `x` environments and the store, never a
         // projection, but its shape must not matter either way.
-        std::fs::create_dir_all(home.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(home.join(".greyward/closures")).unwrap();
         let work = home.join("work");
         std::fs::create_dir_all(work.join("src")).unwrap();
         assert_eq!(
@@ -655,7 +658,7 @@ mod tests {
         );
     }
 
-    /// The "no manifest found" list and `tog help inputs` name the same
+    /// The "no manifest found" list and `ward help inputs` name the same
     /// files: every file a tailor detects by is in the help topic.
     #[test]
     fn every_detected_input_file_is_in_the_help() {
@@ -670,7 +673,7 @@ mod tests {
                 }
                 assert!(
                     help.contains(name),
-                    "{}: {name} is not in 'tog help inputs'",
+                    "{}: {name} is not in 'ward help inputs'",
                     tailor.id()
                 );
             }
@@ -678,7 +681,7 @@ mod tests {
         let error = no_inputs().to_string();
         assert!(error.contains("package.json, package-lock.json"), "{error}");
         assert!(error.contains("setup.cfg"), "{error}");
-        assert!(error.contains("see 'tog help inputs'"), "{error}");
+        assert!(error.contains("see 'ward help inputs'"), "{error}");
     }
 
     #[test]

@@ -2,9 +2,9 @@
 //!
 //! go.sum's `h1:` values are NOT hashes of the zip bytes — they hash the
 //! module's file *list*: one line per file, `<sha256 hex>  <name>\n`,
-//! sorted, then sha256 of the concatenation, base64-encoded. Tog
+//! sorted, then sha256 of the concatenation, base64-encoded. Greyward
 //! verifies these itself so Go module bytes enter the kernel's front door
-//! under tog's own check, not go's.
+//! under ward's own check, not go's.
 
 use sha2::{Digest, Sha256};
 use std::fs;

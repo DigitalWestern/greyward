@@ -13,7 +13,7 @@ pub(crate) mod file;
 pub(crate) mod fmt;
 pub(crate) mod gc;
 /// `pub` on purpose: the read-only closure/status views were public before
-/// the move and stay reachable as `tog::commands::inspect`.
+/// the move and stay reachable as `greyward::commands::inspect`.
 pub mod inspect;
 pub(crate) mod keygen;
 pub(crate) mod ls;
@@ -44,11 +44,11 @@ use std::path::Path;
 /// What argv asked for, once the grammar has had its say.
 pub enum Pending {
     Command(cli::Command),
-    /// Bare `tog`: sync inside a project (and then a short footer, printed
+    /// Bare `ward`: sync inside a project (and then a short footer, printed
     /// by `main` when the sync succeeded), the help outside one.
     Implicit,
     /// An unknown first word: a package.json script if one matches. The
-    /// sync flags reach `dispatch` beside it, so `tog --frozen <script>`
+    /// sync flags reach `dispatch` beside it, so `ward --frozen <script>`
     /// governs the sync `run` performs first.
     Script {
         name: String,
@@ -60,7 +60,7 @@ pub enum Pending {
 /// What `main` does with a [`Pending`] invocation.
 pub enum Resolved {
     Command(cli::Command),
-    /// A bare `tog` outside any project: the help on stdout, exit 0,
+    /// A bare `ward` outside any project: the help on stdout, exit 0,
     /// after `note` on stderr.
     Help {
         note: String,
@@ -69,11 +69,11 @@ pub enum Resolved {
     Usage(String),
 }
 
-/// A bare `tog` inside a project is `sync` (`main` prints a short footer
+/// A bare `ward` inside a project is `sync` (`main` prints a short footer
 /// after a sync that succeeded); an unknown first word that names a package.json
 /// script runs it. Anything else is the usage error the grammar already
 /// prepared (exit 2). Both look for the project from the current directory
-/// up, as `tog run` does ([`project_for`]).
+/// up, as `ward run` does ([`project_for`]).
 pub fn resolve(pending: Pending) -> io::Result<Resolved> {
     match pending {
         Pending::Command(command) => Ok(Resolved::Command(command)),
@@ -87,7 +87,7 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
                 }));
             }
             // Nothing to sync, so the whole invocation is the help: it goes
-            // to stdout and exits 0, because someone who typed `tog` alone
+            // to stdout and exits 0, because someone who typed `ward` alone
             // outside a project asked for orientation, not for an error.
             Ok(Resolved::Help {
                 note: format!(
@@ -122,9 +122,9 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
     }
 }
 
-/// `tog <file>`: a first word that names a source file runs it with its
-/// ecosystem's program inside the project's environment, so `tog app.py`
-/// is `tog run python app.py`. The extension picks the tailor
+/// `ward <file>`: a first word that names a source file runs it with its
+/// ecosystem's program inside the project's environment, so `ward app.py`
+/// is `ward run python app.py`. The extension picks the tailor
 /// ([`Tailor::source_files`]). When the project lacks that ecosystem, or
 /// there is no project, the file runs on the ecosystem's runtime alone
 /// ([`cli::Command::File`], `file.rs`): an npm-only project runs `app.py`
@@ -157,8 +157,8 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
             .map(|file| format!(".{}", file.extension))
             .collect();
         let message = format!(
-            "'{name}' is a file tog does not know how to run; it runs {} by extension, and \
-             'tog run <program> {name}' runs any file with a program from the environment",
+            "'{name}' is a file ward does not know how to run; it runs {} by extension, and \
+             'ward run <program> {name}' runs any file with a program from the environment",
             known.join(", ")
         );
         return Ok(Some(Resolved::Usage(cli::render_usage_error(

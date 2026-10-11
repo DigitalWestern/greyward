@@ -56,7 +56,7 @@ fn ruby_gems_contract(identity: &Identity) -> Result<(), String> {
 }
 
 /// A Linux gems object (one with a `build_view`) spells out whether its
-/// native gems built with tog's native library set (`native`), and names
+/// native gems built with ward's native library set (`native`), and names
 /// the set exactly when they did; a macOS one names neither. A plan with
 /// no gem has no native gem.
 fn native_contract(identity: &Identity) -> Result<(), String> {

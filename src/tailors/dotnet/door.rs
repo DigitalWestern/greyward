@@ -17,12 +17,12 @@ const WHY: &str = "evaluates the project's MSBuild files and fetches packages fr
 /// Restore and build output in the project: never copied into the
 /// snapshot, never diffed. A confined restore writes `obj/` in its stage,
 /// and it is discarded.
-pub(super) const EXCLUDE: [&str; 4] = ["obj", "bin", ".git", ".tog"];
+pub(super) const EXCLUDE: [&str; 4] = ["obj", "bin", ".git", ".greyward"];
 
 /// Stands for the run's scratch directory in an argument.
 const SCRATCH: &str = "@SCRATCH@";
 
-/// The tog-written config every run names: the mirror alone.
+/// The greyward-written config every run names: the mirror alone.
 const CONFIG_FILE: &str = "nuget.config";
 
 /// One confined restore. Its outputs (the csproj and packages.lock.json)
@@ -62,7 +62,7 @@ fn restore_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
     all
 }
 
-/// The store `dotnet` with tog's forced environment, its output captured.
+/// The store `dotnet` with ward's forced environment, its output captured.
 /// The package folder and the homes are the run's scratch, set by the
 /// wiring.
 fn spec(run: &DotnetRun<'_>) -> DelegateSpec {

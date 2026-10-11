@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
-/// The store mix or elixir with tog's forced environment, its output
+/// The store mix or elixir with ward's forced environment, its output
 /// captured.
 pub(super) fn mix_spec(
     beam_obj: &Path,
@@ -33,7 +33,7 @@ pub(super) fn mix_spec(
 }
 
 /// The helper's offline `hexmark` mode (`HEX_OFFLINE=1`): a host-local
-/// helper over a dependency tog already verified.
+/// helper over a dependency ward already verified.
 pub(super) fn run_hexmark(
     activity: &StoreActivity,
     beam_obj: &Path,

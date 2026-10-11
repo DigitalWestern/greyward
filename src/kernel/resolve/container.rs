@@ -5,7 +5,7 @@
 //! `newuidmap`.
 //!
 //! The container is built the way the native sandbox is, from the same
-//! parts. Its root is a directory tog writes into the run's stage: the
+//! parts. Its root is a directory ward writes into the run's stage: the
 //! host's loader links (`/lib64 -> usr/lib64` and the rest, mirrored by
 //! [`sandbox::system_root_args`]) and nothing else, mounted as an overlay
 //! (`--rootfs <dir>:O`) so podman never writes into it, and read-only
@@ -51,7 +51,7 @@ const PIDS_LIMIT: &str = "4096";
 const ROOTFS: &str = "rootfs";
 
 /// Directories the root needs before podman mounts onto it.
-const ROOT_DIRS: [&str; 8] = ["usr", "etc", "run", "run/tog", "tmp", "proc", "dev", "sys"];
+const ROOT_DIRS: [&str; 8] = ["usr", "etc", "run", "run/ward", "tmp", "proc", "dev", "sys"];
 
 /// The flags every container of a run gets, the preflight's included, so
 /// the probe cannot pass on a configuration the run never uses.
@@ -83,7 +83,7 @@ const FENCE: [&str; 33] = [
     "--pids-limit",
     PIDS_LIMIT,
     "--hostname",
-    "tog",
+    "ward",
     "--no-hosts",
     "--unsetenv-all",
     "--pull",
@@ -168,7 +168,7 @@ fn run_preflight(activity: &StoreActivity) -> io::Result<Result<PathBuf, String>
         return Ok(Err("podman not found".to_string()));
     };
     let scratch = std::env::temp_dir().join(format!(
-        "tog-podman-probe-{}-{}",
+        "greyward-podman-probe-{}-{}",
         std::process::id(),
         sequence()
     ));
@@ -213,15 +213,19 @@ fn probe_container(
     let executable = executable
         .parent()
         .and_then(Path::parent)
-        .map(|dir| dir.join("tog"))
+        .map(|dir| dir.join("ward"))
         .ok_or_else(|| io::Error::other("no probe relay binary"))?;
-    args.extend(mount(&executable, Path::new(relay::TOG_EXECUTABLE), true)?);
+    args.extend(mount(
+        &executable,
+        Path::new(relay::GREYWARD_EXECUTABLE),
+        true,
+    )?);
     args.extend(mount(&socket, Path::new(relay::PROXY_SOCKET), true)?);
     args.extend([OsString::from("--preserve-fds"), "2".into()]);
     args.extend(rootfs_args(&rootfs)?);
     args.extend(
         [
-            relay::TOG_EXECUTABLE,
+            relay::GREYWARD_EXECUTABLE,
             relay::VERB,
             "--exec-log-fd",
             "3",
@@ -233,7 +237,7 @@ fn probe_container(
             "--",
             "/bin/sh",
             "-c",
-            "test \"$TOG_ISOLATION_PROBE\" = scoped",
+            "test \"$GREYWARD_ISOLATION_PROBE\" = scoped",
         ]
         .map(OsString::from),
     );
@@ -242,7 +246,7 @@ fn probe_container(
     let env_path = scratch.join("probe.env");
     fs::write(
         &env_path,
-        relay::encode_env(&[("TOG_ISOLATION_PROBE".into(), "scoped".into())]),
+        relay::encode_env(&[("GREYWARD_ISOLATION_PROBE".into(), "scoped".into())]),
     )?;
     let env = fs::File::open(&env_path)?;
     let mut command = config.command(podman)?;
@@ -322,14 +326,18 @@ fn sequence() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// A container name no other run of any tog shares: the process, a
+/// A container name no other run of any ward shares: the process, a
 /// counter, and the clock.
 pub fn name() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    let name = format!("tog-resolve-{}-{}-{nanos}", std::process::id(), sequence());
+    let name = format!(
+        "greyward-resolve-{}-{}-{nanos}",
+        std::process::id(),
+        sequence()
+    );
     #[cfg(test)]
     NAME_FOR_TEST.with(|slot| {
         if let Some(path) = slot.borrow().as_ref() {
@@ -462,7 +470,7 @@ pub(super) fn podman_args(
     }
     args.extend(mount(
         &mounts.executable,
-        Path::new(relay::TOG_EXECUTABLE),
+        Path::new(relay::GREYWARD_EXECUTABLE),
         true,
     )?);
     // The relay's two descriptors, 3 and 4, pass into the container.
@@ -472,7 +480,7 @@ pub(super) fn podman_args(
     args.push(mounts.cwd.clone().into_os_string());
     args.extend(rootfs_args(&rootfs)?);
     for part in [
-        relay::TOG_EXECUTABLE,
+        relay::GREYWARD_EXECUTABLE,
         relay::VERB,
         "--exec-log-fd",
         "3",
@@ -697,13 +705,13 @@ mod tests {
 
     #[test]
     fn every_container_is_fenced() {
-        let args: Vec<String> = run_args("tog-resolve-x")
+        let args: Vec<String> = run_args("greyward-resolve-x")
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
             .collect();
         let joined = args.join(" ");
         for wanted in [
-            "run --rm --name tog-resolve-x",
+            "run --rm --name greyward-resolve-x",
             "--network none",
             "--userns keep-id",
             "--cap-drop all",
@@ -730,7 +738,7 @@ mod tests {
             }
             assert!(meta.is_dir(), "{}", entry.path().display());
             let mut inside = fs::read_dir(entry.path()).unwrap().map(|e| e.unwrap());
-            // Only `run/tog` and split-`/usr` mount points nest.
+            // Only `run/ward` and split-`/usr` mount points nest.
             assert!(
                 inside.all(|e| e.file_type().unwrap().is_dir()),
                 "{}",

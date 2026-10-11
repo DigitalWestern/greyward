@@ -1,6 +1,6 @@
-//! `tog sbom` — CycloneDX 1.5 JSON from the closure envelopes.
+//! `ward sbom` — CycloneDX 1.5 JSON from the closure envelopes.
 //!
-//! Pure format translation: reads every .tog/closures/<eco>.json the
+//! Pure format translation: reads every .greyward/closures/<eco>.json the
 //! project has and emits one SBOM document. No network, no new inputs —
 //! the closures already carry names, versions, and pinned hashes.
 
@@ -57,7 +57,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
     let mut closures = crate::commands::inspect::closures(project_dir)?;
     closures.sort_by(|a, b| a.ecosystem.cmp(&b.ecosystem));
     if closures.is_empty() {
-        return Err(err("no closures found; run `tog` first"));
+        return Err(err("no closures found; run `ward` first"));
     }
     let mut components = Vec::new();
     let mut exception_properties = Vec::new();
@@ -68,7 +68,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
             || closure.envelope["ecosystem"].as_str() != stem
         {
             return Err(err(format!(
-                "{}: unknown closure schema/ecosystem; re-run `tog`",
+                "{}: unknown closure schema/ecosystem; re-run `ward`",
                 closure.path.display()
             )));
         }
@@ -88,7 +88,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| err(format!("{eco} closure: exception missing 'detail'")))?;
                 exception_properties.push(json!({
-                    "name": format!("tog:exception:{kind}"),
+                    "name": format!("greyward:exception:{kind}"),
                     "value": format!("{subject}: {detail}"),
                 }));
             }
@@ -97,7 +97,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
         // exceptions so a reader never counts it as one (#71).
         for group in crate::comforter::records::optional_groups_skipped(closure)? {
             exception_properties.push(json!({
-                "name": "tog:optional-group-skipped",
+                "name": "greyward:optional-group-skipped",
                 "value": format!("{eco}: {}: {}", group.group, group.detail),
             }));
         }
@@ -110,8 +110,8 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
         "version": 1,
         "metadata": {
             "tools": [{
-                "vendor": "tog",
-                "name": "tog",
+                "vendor": "greyward",
+                "name": "greyward",
                 "version": env!("CARGO_PKG_VERSION"),
             }],
             "properties": exception_properties,
@@ -143,7 +143,7 @@ mod tests {
     fn sbom_from_synthetic_closures() {
         let scratch = TempDir::named("sbom-test");
         let dir = scratch.0.clone();
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         let write = |eco: &str, body: Value| {
             let envelope = json!({
                 "schema": "closure/1",
@@ -152,7 +152,7 @@ mod tests {
                 "body": body,
             });
             fs::write(
-                dir.join(format!(".tog/closures/{eco}.json")),
+                dir.join(format!(".greyward/closures/{eco}.json")),
                 serde_json::to_vec(&envelope).unwrap(),
             )
             .unwrap();
@@ -197,7 +197,7 @@ mod tests {
                 }],
             }),
         );
-        // The record an older `tog fmt` left: not a closure any more, so it
+        // The record an older `ward fmt` left: not a closure any more, so it
         // is skipped rather than failing the whole document.
         write(
             "rustfmt",
@@ -226,7 +226,7 @@ mod tests {
             .iter()
             .filter(|c| c["type"] == "application")
             .flat_map(|c| c["properties"].as_array().unwrap())
-            .filter(|p| p["name"] == "tog:store-id")
+            .filter(|p| p["name"] == "greyward:store-id")
             .filter_map(|p| p["value"].as_str())
             .collect();
         // Closures are processed in name order: node, then python.
@@ -239,15 +239,15 @@ mod tests {
         assert_eq!(env_names, ["node-env", "python-env"]);
         let properties = doc["metadata"]["properties"].as_array().unwrap();
         assert!(properties.iter().any(|p| {
-            p["name"] == "tog:exception:requirement-skipped"
+            p["name"] == "greyward:exception:requirement-skipped"
                 && p["value"] == ".: project-local requirement"
         }));
         assert!(properties.iter().any(|p| {
-            p["name"] == "tog:exception:install-script-failed"
+            p["name"] == "greyward:exception:install-script-failed"
                 && p["value"] == "node_modules/a: postinstall: network-denied"
         }));
         assert!(properties.iter().any(|p| {
-            p["name"] == "tog:optional-group-skipped"
+            p["name"] == "greyward:optional-group-skipped"
                 && p["value"] == "python: docs: extra, not requested"
         }));
     }

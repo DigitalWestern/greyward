@@ -1,12 +1,12 @@
-//! The Ruby tailor: Bundler-delegated planning, tog-verified gems,
+//! The Ruby tailor: Bundler-delegated planning, greyward-verified gems,
 //! immutable GEM_HOME objects, sandboxed native-extension installs.
 //!
 //! Platform selection and lock parsing are DELEGATED to the pinned Ruby's
 //! own Bundler/RubyGems (a helper script —
 //! Gem::Platform matching has wildcards and specificity scores no hand
 //! parser should reimplement), while every artifact byte is still pinned
-//! and verified by tog. Bundler's local .bundle/config outranks plain
-//! env vars, so every tog-controlled invocation scrubs BUNDLE_*/RUBY*
+//! and verified by ward. Bundler's local .bundle/config outranks plain
+//! env vars, so every greyward-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
 mod door;
@@ -90,7 +90,7 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
 }
 
 /// The recipe this tailor knows how to build a Ruby object from. A lock
-/// naming any other recipe was written by a tog that builds Ruby some other
+/// naming any other recipe was written by a ward that builds Ruby some other
 /// way, and this one must not guess.
 const RUBY_RECIPE: &str = "ruby-toolchain/1";
 
@@ -106,7 +106,7 @@ struct RubySpec {
     sha256: String,
 }
 
-/// The selected Ruby's row for `platform`, refused unless this tog knows
+/// The selected Ruby's row for `platform`, refused unless this ward knows
 /// the recipe that produced it.
 fn ruby_spec(platform: Platform, selected: &Selected) -> io::Result<RubySpec> {
     selected.require("ruby", "ruby")?;
@@ -162,7 +162,7 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan, native_libs_id: Option<&
     // instead, never under this id. Darwin builds see the whole SDK, and
     // their ids are pinned.
     //
-    // Linux native gems also build with tog's pinned native library set
+    // Linux native gems also build with ward's pinned native library set
     // mounted (`native_libs`, #329). `native` spells out that decision
     // either way, so a dropped `native_libs` input cannot pass for a plan
     // with no native gem.
@@ -325,13 +325,13 @@ pub fn realize_runtime(
         .map(|(path, _)| path)
 }
 
-/// The forced environment for EVERY tog-controlled ruby/bundler run.
+/// The forced environment for EVERY greyward-controlled ruby/bundler run.
 /// Removal lists close the .bundle/config and preload side doors; they live
 /// with the host-local tripwire, which checks the `spec` read by them.
 const ENV_REMOVE_PREFIXES: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE_PREFIXES;
 const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE;
 
-/// The Gemfile and its lock as tog's delegates name them: relative to the
+/// The Gemfile and its lock as ward's delegates name them: relative to the
 /// held project directory they start in.
 const GEMFILE: &str = "Gemfile";
 const GEMFILE_LOCK: &str = "Gemfile.lock";
@@ -349,7 +349,7 @@ fn gem_env(gem_home: &Path) -> Vec<(String, String)> {
 }
 
 /// The environment every store Ruby tool runs with. `gemfile` is what
-/// Bundler reads: tog's own delegates start inside the held project
+/// Bundler reads: ward's own delegates start inside the held project
 /// directory and name it relatively, so a directory swapped in at the
 /// project's path is never the one evaluated (#499).
 fn forced_env(gemfile: &str, gem_home: &Path) -> Vec<(String, String)> {
@@ -368,7 +368,7 @@ fn forced_env(gemfile: &str, gem_home: &Path) -> Vec<(String, String)> {
     env
 }
 
-/// Env for a lone script (`tog app.rb` with no Ruby project): the same
+/// Env for a lone script (`ward app.rb` with no Ruby project): the same
 /// scrub as [`run_env`], with an empty `gem_home` in place of a gems
 /// object, so the script sees the interpreter and its default gems only.
 pub fn lone_env(gem_home: &Path) -> crate::tailors::EnvScrub {
@@ -379,7 +379,7 @@ pub fn lone_env(gem_home: &Path) -> crate::tailors::EnvScrub {
     )
 }
 
-/// Env applied by `tog run` for a projected ruby environment. The user's
+/// Env applied by `ward run` for a projected ruby environment. The user's
 /// command may start in a subdirectory and still needs the root Gemfile,
 /// so here it is named by its full path.
 pub fn run_env(
@@ -393,7 +393,7 @@ pub fn run_env(
     )
 }
 
-/// The helper's `spec` mode over a `.gem` tog already verified: it reads
+/// The helper's `spec` mode over a `.gem` ward already verified: it reads
 /// the embedded gemspec and needs no network, so it runs as a host-local
 /// helper rather than through the door.
 fn read_gem_spec(
@@ -421,7 +421,7 @@ fn gem_spec_command(
     spec.command()
 }
 
-/// The store Ruby tool `args[0]` with tog's forced environment, its output
+/// The store Ruby tool `args[0]` with ward's forced environment, its output
 /// captured.
 fn ruby_tool_spec(
     ruby_obj: &Path,
@@ -459,7 +459,7 @@ if mode == "install"
   # after the store commit rename (Sol review, reproduced).
   require "rubygems/installer"
   gemfile, install_dir, native_libs = ARGV
-  # tog's native library set, when given: mkmf takes the flags its
+  # ward's native library set, when given: mkmf takes the flags its
   # Makefile uses from extconf's arguments, never from the environment, and
   # each one replaces Ruby's own default, so the default leads.
   build_args = []
@@ -488,7 +488,7 @@ end
 if mode == "check"
   # Gemfile/lock equivalence + ruby-version gate. This mode EVALS THE
   # GEMFILE (arbitrary ruby, delegated resolver trust): its stdout is
-  # never parsed by tog — only the exit status counts, so a hostile
+  # never parsed by ward — only the exit status counts, so a hostile
   # Gemfile cannot forge plan data through this process.
   require "bundler"
   gemfile, lockfile = ARGV
@@ -637,8 +637,8 @@ fn gem_digest_key(name: &str, version: &str, platform: &str) -> String {
 /// the API where a plan cache in the project may not. A file in the project
 /// ships with the repository, so a cache there says whatever the repo's
 /// author wrote, and its predictable key makes it forgeable authority over
-/// which bytes get installed. The store is written only by tog on this
-/// machine, and a record exists only because tog asked rubygems.org for
+/// which bytes get installed. The store is written only by ward on this
+/// machine, and a record exists only because ward asked rubygems.org for
 /// exactly this coordinate's digest, downloaded
 /// `rubygems.org/downloads/<full_name>.gem`, and found that the bytes hash
 /// to that digest and their embedded gemspec names this coordinate.
@@ -749,7 +749,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 }
 
 /// Plan the gem closure: Bundler-delegated lock parsing + platform
-/// selection, tog-pinned hashes (lock CHECKSUMS section when present, else
+/// selection, greyward-pinned hashes (lock CHECKSUMS section when present, else
 /// the digest an earlier sync verified and recorded in the store, else the
 /// rubygems.org v2 API). The plan itself is never cached: every sync
 /// re-derives it from the lock. The project is read through the held
@@ -866,14 +866,14 @@ pub fn plan_ruby(
     // digest provenance will record (Go precedent).
     let now = read_gemfile_lock(project)?;
     if now != lock {
-        return Err(err("Gemfile.lock changed while planning; re-run 'tog'"));
+        return Err(err("Gemfile.lock changed while planning; re-run 'ward'"));
     }
     // The resolution files this plan was built from, so the resolution
     // join binds a record to this generation of the Gemfile and its lock.
     project.verify_observed_inputs()?;
     if resolve::resolution_basis(project)? != basis {
         return Err(err(
-            "Ruby resolution inputs changed while planning; run `tog` again",
+            "Ruby resolution inputs changed while planning; run `ward` again",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
@@ -1296,7 +1296,7 @@ pub fn project_ruby_env(
     let ruby_obj = ruby_obj.canonicalize()?;
     let gems_obj = gems_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&ruby_obj)
-        .ok_or_else(|| err("Ruby object is not in a Tog store"))?;
+        .ok_or_else(|| err("Ruby object is not in a Greyward store"))?;
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, activity, &ruby_obj)?;
     refs.object_path(&store, activity, &gems_obj)?;
@@ -1911,7 +1911,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("ruby-toolchain/99"), "{error}");
-        assert!(error.contains("upgrade tog"), "{error}");
+        assert!(error.contains("upgrade ward"), "{error}");
 
         let mut foreign = shipped_selection().unwrap();
         foreign.ecosystem = "python".into();
@@ -1931,8 +1931,8 @@ mod tests {
     }
 
     /// Every closure this tailor writes carries which bundle realized it and
-    /// which store object that bundle became: `tog status` compares the one,
-    /// `tog run` resolves the other.
+    /// which store object that bundle became: `ward status` compares the one,
+    /// `ward run` resolves the other.
     #[test]
     fn the_closure_body_records_the_bundle_and_the_runtime_object() {
         let selected = shipped_selection().unwrap();
@@ -2099,8 +2099,8 @@ mod tests {
         assert!(json.get("digest_from_api").is_none(), "{json}");
     }
 
-    /// tog's own Bundler runs start inside the held project directory and
-    /// name the Gemfile relative to it (#499). `tog run` may start in a
+    /// ward's own Bundler runs start inside the held project directory and
+    /// name the Gemfile relative to it (#499). `ward run` may start in a
     /// subdirectory, so it keeps the root Gemfile's full path.
     #[test]
     fn delegates_name_the_gemfile_relative_to_the_held_project() {
@@ -2162,7 +2162,7 @@ mod rubygems_check_tests {
     const OTHER_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     /// A rubygems.org version reply for one coordinate, with the fields
-    /// tog reads and the ones it ignores, all consistent with each other.
+    /// ward reads and the ones it ignores, all consistent with each other.
     fn api_reply(name: &str, number: &str, platform: &str, sha: &str) -> String {
         let full_name = if platform == "ruby" {
             format!("{name}-{number}")

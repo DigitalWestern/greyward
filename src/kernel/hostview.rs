@@ -4,7 +4,7 @@
 //!
 //! The view is bubblewrap mounts applied on top of the full system root
 //! `sandbox::system_root_args` binds. Each curated directory is replaced by
-//! a skeleton directory tog builds on the host for the run. Every kept
+//! a skeleton directory ward builds on the host for the run. Every kept
 //! subdirectory is bound from the host onto its placeholder there, and
 //! every kept file is a symlink into `HOST_FILES`, where the whole host
 //! directory is bound once (#334): a file costs no mount, so the view's
@@ -19,7 +19,7 @@
 //! development file. One that holds headers, static or libtool archives,
 //! `pkgconfig` or `cmake` (`/usr/lib64/perl5/CORE`,
 //! `/usr/lib64/python3.14/site-packages/cffi`, `/usr/lib64/libnl`), or that
-//! tog cannot list, is curated in turn with the library rule
+//! ward cannot list, is curated in turn with the library rule
 //! (`Curation::Subtree`), so an explicit `-I` or `-L` into it finds no more
 //! than the default paths do (#331). The compiler's own directories (`gcc`,
 //! `clang`, and a versioned `llvm-<N>`'s `bin`) are bound whole; the rest of
@@ -48,7 +48,7 @@ pub(crate) const PKG_CONFIG_LIBDIR: &str = "/dev/null";
 /// never searches a subdirectory of its search path, so `-l` cannot find
 /// what is here; the dynamic loader finds it through the view's cache
 /// (`ldcache`), which it searches after a program's own `DT_RUNPATH`.
-pub(crate) const RUNTIME_SUBDIR: &str = ".tog-host-runtime";
+pub(crate) const RUNTIME_SUBDIR: &str = ".greyward-host-runtime";
 
 /// Where the view binds each whole curated host directory, for the
 /// skeleton's symlinks to reach the files it keeps: `/usr/lib64/libc.so.6`
@@ -57,7 +57,7 @@ pub(crate) const RUNTIME_SUBDIR: &str = ".tog-host-runtime";
 /// library path, pkg-config directory or `-L` a build would write names
 /// it. The view keeps builds from depending on host files by accident; a
 /// build that names this path on purpose is not what it guards against.
-pub(crate) const HOST_FILES: &str = "/.tog-host-files";
+pub(crate) const HOST_FILES: &str = "/.greyward-host-files";
 
 /// The view's loader cache, at the skeleton's root, where no curated
 /// directory's mirror is.
@@ -207,7 +207,7 @@ enum Curation {
     Empty,
     /// A library subdirectory with development files under it: drop what
     /// `Libraries` drops, keep plugins and extension modules where they are
-    /// (`library_entry_placement`). One tog cannot list is empty.
+    /// (`library_entry_placement`). One ward cannot list is empty.
     Subtree,
 }
 
@@ -596,7 +596,7 @@ fn marks_dev_dir(
 
 /// Whether anything under the host directory `host` marks it as holding
 /// development files (`marks_dev_dir`), stopping at the first. Symlinks
-/// are not followed. A directory tog cannot list may hold any of them, by
+/// are not followed. A directory ward cannot list may hold any of them, by
 /// a name the build can still open, so it counts as holding some: curated,
 /// it is an empty directory in the view (`classify_dir`).
 fn holds_dev_files(host: &Path, inside: &Path) -> bool {
@@ -615,7 +615,7 @@ fn holds_dev_files(host: &Path, inside: &Path) -> bool {
     })
 }
 
-/// A file tog cannot read is one the build cannot read either, so failing
+/// A file ward cannot read is one the build cannot read either, so failing
 /// to read it counts as "not ELF" and drops it.
 fn starts_with_elf_magic(path: &Path) -> bool {
     use std::io::Read as _;
@@ -637,8 +637,8 @@ pub(crate) struct ViewSkeleton {
     /// The exclusive `flock` on `SKELETON_LOCK` that marks this skeleton
     /// live for as long as it exists (`sweep_stale_skeletons`). It is
     /// close-on-exec, as std opens every file: the skeleton lives exactly
-    /// as long as this tog, whose `Drop` removes it, so a sandboxed child
-    /// (or a daemon it left behind) must not keep it marked live after tog
+    /// as long as this ward, whose `Drop` removes it, so a sandboxed child
+    /// (or a daemon it left behind) must not keep it marked live after ward
     /// is gone. `None` only where the filesystem has no `flock`.
     _lock: Option<fs::File>,
 }
@@ -725,28 +725,28 @@ fn lock_skeleton(root: &Path) -> io::Result<Option<fs::File>> {
     Ok(file.try_lock().is_ok().then_some(file))
 }
 
-/// Every skeleton's name: this prefix, the creating tog's pid, a dash, and a
+/// Every skeleton's name: this prefix, the creating ward's pid, a dash, and a
 /// 16-hex-digit nonce.
-const SKELETON_PREFIX: &str = "tog-host-view-";
+const SKELETON_PREFIX: &str = "greyward-host-view-";
 
-/// The file in a skeleton's root its tog holds an exclusive `flock` on for
+/// The file in a skeleton's root its ward holds an exclusive `flock` on for
 /// the skeleton's whole life. The view mounts only the curated directories
 /// under the root, so the build never sees it.
 const SKELETON_LOCK: &str = ".lock";
 
-/// How long a skeleton whose tog is gone is left alone before a later run
-/// removes it. The pid check alone would do on one machine, but a tog in
+/// How long a skeleton whose ward is gone is left alone before a later run
+/// removes it. The pid check alone would do on one machine, but a ward in
 /// another pid namespace sharing this TMPDIR (a container) has a pid that
 /// means nothing here. Its skeleton's lock (`SKELETON_LOCK`) is what keeps
-/// a long build's view in place; the age covers a skeleton an older tog
+/// a long build's view in place; the age covers a skeleton an older ward
 /// made without one, and the moment before a new one takes its lock.
 const STALE_SKELETON_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Remove the skeletons a killed tog left in `base` (issue #335): `Drop`
+/// Remove the skeletons a killed ward left in `base` (issue #335): `Drop`
 /// never ran for a SIGKILL. Only a real directory this user owns, named
-/// like a skeleton, whose tog is no longer running, which has not changed
+/// like a skeleton, whose ward is no longer running, which has not changed
 /// for `STALE_SKELETON_AGE`, and whose lock no one holds is removed; one
-/// with no lock file, made by an older tog, is judged by the rest alone.
+/// with no lock file, made by an older ward, is judged by the rest alone.
 /// Anything else, and any failure, is left as it is: a leftover is inert,
 /// so the sweep never stops a build.
 fn sweep_stale_skeletons(base: &Path) {
@@ -784,7 +784,7 @@ fn sweep_stale_skeletons(base: &Path) {
 }
 
 /// The skeleton's lock taken without waiting, `None` for a skeleton with
-/// no lock file, or an error while its tog still holds it (or it cannot be
+/// no lock file, or an error while its ward still holds it (or it cannot be
 /// read). The lock file is opened without following a symlink.
 fn skeleton_unlocked(root: &Path) -> io::Result<Option<fs::File>> {
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -982,7 +982,7 @@ type Classified = (OsString, fs::FileType, bool, Placement);
 /// rules are applied, so the view and `host_build_inputs` cannot disagree.
 fn classify_dir(host: &Path, inside: &Path, curation: Curation) -> io::Result<Vec<Classified>> {
     let listing = match fs::read_dir(host) {
-        // A subdirectory tog cannot list is curated because it may hold
+        // A subdirectory ward cannot list is curated because it may hold
         // development files (`holds_dev_files`): it keeps nothing.
         Err(error)
             if curation == Curation::Subtree && error.kind() == io::ErrorKind::PermissionDenied =>
@@ -1078,7 +1078,7 @@ fn host_build_inputs_at(host_root: &Path) -> io::Result<String> {
         digest: sha2::Sha256::new(),
         refuse_directory_links: false,
     };
-    digest.digest.update(b"tog-host-build-inputs/3");
+    digest.digest.update(b"greyward-host-build-inputs/3");
     for (inside, host, curation) in curated_roots(host_root)? {
         if curation == Curation::Empty {
             digest.tree(&host, inside)?;
@@ -1119,7 +1119,9 @@ impl Fingerprint<'_> {
             digest: sha2::Sha256::new(),
             refuse_directory_links: true,
         };
-        digest.digest.update(b"tog-host-build-inputs/3+dev-files");
+        digest
+            .digest
+            .update(b"greyward-host-build-inputs/3+dev-files");
         digest.field(host.as_bytes());
         digest
     }
@@ -1201,7 +1203,7 @@ impl Fingerprint<'_> {
                 return Err(crate::kernel::error::refused(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "{} in TOG_TEST_HOST_DEV_FILES is a symlink to a directory; \
+                        "{} in GREYWARD_TEST_HOST_DEV_FILES is a symlink to a directory; \
                          the fingerprint does not walk through one, so copy the directory in",
                         host.display()
                     ),
@@ -1284,7 +1286,7 @@ fn digest_field(digest: &mut sha2::Sha256, bytes: &[u8]) {
 
 /// Test-only, read in debug builds alone: a directory laid out like a host
 /// root (`usr/include`, `usr/lib`) standing in for development packages
-/// the host does not have, named by `TOG_TEST_HOST_DEV_FILES`. A build
+/// the host does not have, named by `GREYWARD_TEST_HOST_DEV_FILES`. A build
 /// against the whole host (`HostView::Full`) reads it and searches its
 /// headers and libraries after the host's own; the runtime-only attempt
 /// never sees it, as it never sees the host's. An e2e test of the
@@ -1294,7 +1296,7 @@ fn digest_field(digest: &mut sha2::Sha256, bytes: &[u8]) {
 pub(crate) fn test_host_dev_files() -> Option<PathBuf> {
     #[cfg(debug_assertions)]
     {
-        std::env::var_os("TOG_TEST_HOST_DEV_FILES").map(PathBuf::from)
+        std::env::var_os("GREYWARD_TEST_HOST_DEV_FILES").map(PathBuf::from)
     }
     #[cfg(not(debug_assertions))]
     None
@@ -1714,18 +1716,18 @@ mod tests {
         assert!(!bound("/usr/lib64/libnss3.so"), "{args:?}");
         assert!(!mirrored("/usr/lib64/libnss3.so"));
         assert!(linked(
-            "/usr/lib64/.tog-host-runtime/libnss3.so",
+            "/usr/lib64/.greyward-host-runtime/libnss3.so",
             "/usr/lib64/libnss3.so"
         ));
         assert_eq!(
             fs::read_link(skeleton.0.join("usr/lib64/libnss3.so.1")).unwrap(),
-            Path::new(".tog-host-runtime/libnss3.so")
+            Path::new(".greyward-host-runtime/libnss3.so")
         );
         assert_eq!(
             moved,
             [MovedLibrary {
                 host: host.0.canonicalize().unwrap().join("usr/lib64/libnss3.so"),
-                inside: PathBuf::from("/usr/lib64/.tog-host-runtime/libnss3.so"),
+                inside: PathBuf::from("/usr/lib64/.greyward-host-runtime/libnss3.so"),
             }]
         );
         assert_eq!(
@@ -1769,17 +1771,17 @@ mod tests {
                 .iter()
                 .map(|library| library.inside.as_path())
                 .collect::<Vec<_>>(),
-            [Path::new("/usr/lib64/.tog-host-runtime/libnss3.so")],
+            [Path::new("/usr/lib64/.greyward-host-runtime/libnss3.so")],
             "only /usr/lib64 has an unversioned runtime ELF"
         );
         assert!(binds.contains(&(skeleton.0.join("lib64"), PathBuf::from("/lib64"))));
         assert!(binds.contains(&(
             host.0.join("lib64"),
-            PathBuf::from("/.tog-host-files/lib64")
+            PathBuf::from("/.greyward-host-files/lib64")
         )));
         assert_eq!(
             fs::read_link(skeleton.0.join("lib64/libz.so.1")).unwrap(),
-            Path::new("/.tog-host-files/lib64/libz.so.1")
+            Path::new("/.greyward-host-files/lib64/libz.so.1")
         );
         assert!(!binds
             .iter()
@@ -2127,7 +2129,7 @@ mod tests {
         let plugins = host.0.join("usr/lib64/bfd-plugins");
         fs::create_dir_all(&plugins).unwrap();
         let source = host.0.join("plugin.c");
-        fs::write(&source, "int tog_plugin_probe(void) { return 42; }\n").unwrap();
+        fs::write(&source, "int ward_plugin_probe(void) { return 42; }\n").unwrap();
         let compiled = Command::new("/usr/bin/cc")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -2142,7 +2144,7 @@ mod tests {
         std::os::unix::fs::symlink("libprobe.so.1", plugins.join("libprobe.so")).unwrap();
         fs::write(
             plugins.join("plugin-api.h"),
-            "int tog_plugin_probe(void);\n",
+            "int ward_plugin_probe(void);\n",
         )
         .unwrap();
         let skeleton = temp_dir("plugin-load-skeleton");
@@ -2163,7 +2165,7 @@ mod tests {
             .arg(&mirror)
             .arg("/plugins")
             .args(["--proc", "/proc", "--dev", "/dev", "--", "/usr/bin/python3", "-c"])
-            .arg("import ctypes; assert ctypes.CDLL('/plugins/libprobe.so').tog_plugin_probe() == 42")
+            .arg("import ctypes; assert ctypes.CDLL('/plugins/libprobe.so').ward_plugin_probe() == 42")
             .output()
             .unwrap();
         assert!(loaded.status.success(), "{loaded:?}");
@@ -2233,7 +2235,7 @@ mod tests {
         assert_ne!(fingerprint(), before_link, "a lone link name did not count");
     }
 
-    /// A library subdirectory tog cannot list may hold development files
+    /// A library subdirectory ward cannot list may hold development files
     /// by names the build can open, so it is curated: an empty directory
     /// in the view, recorded in the fingerprint as unlistable.
     #[test]
@@ -2274,7 +2276,7 @@ mod tests {
     }
 
     /// A dangling symlink is recorded as such; a symlink loop and a
-    /// directory tog cannot read are errors naming the path, never a
+    /// directory ward cannot read are errors naming the path, never a
     /// quietly smaller fingerprint.
     #[test]
     fn host_build_inputs_refuse_what_they_cannot_read() {
@@ -2372,8 +2374,8 @@ mod tests {
         }
     }
 
-    /// A skeleton a killed tog left is removed by a later run once it is a
-    /// day old; one whose tog still runs, a fresh one, anything not named
+    /// A skeleton a killed ward left is removed by a later run once it is a
+    /// day old; one whose ward still runs, a fresh one, anything not named
     /// like a skeleton, and a symlink, all a day old, are left (#335).
     #[test]
     fn stale_skeletons_of_gone_runs_are_swept() {
@@ -2396,18 +2398,18 @@ mod tests {
             2 * 86_400,
         );
         // Another live process, which only `process_exists` can tell.
-        let other_tog = Running(
+        let other_ward = Running(
             std::process::Command::new("sleep")
                 .arg("600")
                 .spawn()
                 .unwrap(),
         );
         let other_running = make(
-            &format!("{SKELETON_PREFIX}{}-{nonce}", other_tog.0.id()),
+            &format!("{SKELETON_PREFIX}{}-{nonce}", other_ward.0.id()),
             2 * 86_400,
         );
         let other = make(&format!("{SKELETON_PREFIX}{dead}-short"), 2 * 86_400);
-        let unrelated = make("tog-something-else", 2 * 86_400);
+        let unrelated = make("greyward-something-else", 2 * 86_400);
         let target = make("target", 2 * 86_400);
         let link = base.join(format!("{SKELETON_PREFIX}{dead}-{}", "a".repeat(16)));
         std::os::unix::fs::symlink(&target, &link).unwrap();
@@ -2433,7 +2435,7 @@ mod tests {
             .is_symlink());
     }
 
-    /// A tog in another pid namespace looks dead from here, and a build can
+    /// A ward in another pid namespace looks dead from here, and a build can
     /// outlast a day: its skeleton is kept while its lock is held, and
     /// swept once it is released.
     #[test]
@@ -2475,15 +2477,18 @@ mod tests {
 
     #[test]
     fn skeleton_names_carry_a_pid() {
-        assert_eq!(skeleton_pid("tog-host-view-42-0123456789abcdef"), Some(42));
+        assert_eq!(
+            skeleton_pid("greyward-host-view-42-0123456789abcdef"),
+            Some(42)
+        );
         for name in [
-            "tog-host-view-0-0123456789abcdef",
-            "tog-host-view--1-0123456789abcdef",
-            "tog-host-view-4294967295-0123456789abcdef",
-            "tog-host-view-42-0123456789abcdeg",
-            "tog-host-view-42-0123",
-            "tog-host-view-42",
-            "tog-other-42-0123456789abcdef",
+            "greyward-host-view-0-0123456789abcdef",
+            "greyward-host-view--1-0123456789abcdef",
+            "greyward-host-view-4294967295-0123456789abcdef",
+            "greyward-host-view-42-0123456789abcdeg",
+            "greyward-host-view-42-0123",
+            "greyward-host-view-42",
+            "greyward-other-42-0123456789abcdef",
         ] {
             assert_eq!(skeleton_pid(name), None, "{name}");
         }
@@ -2501,7 +2506,7 @@ mod tests {
     /// Set in the child `the_skeleton_root_is_private_under_umask_0777`
     /// runs: only there does this test set the umask, which is process-wide
     /// and would leak into every other test in this binary.
-    const UMASK_CHILD: &str = "TOG_TEST_HOSTVIEW_UMASK_CHILD";
+    const UMASK_CHILD: &str = "GREYWARD_TEST_HOSTVIEW_UMASK_CHILD";
 
     /// The root is 0700 even under `umask 0777`, where the mode `create`
     /// asks for alone would leave it 000 and every `RuntimeOnly` build
@@ -2593,8 +2598,8 @@ mod skeleton_tests {
         let beside = TempDir::named("hostview-beside");
         let view = runtime_only_mounts(&[
             beside.0.clone(),
-            temp.join("tog-host-view"),
-            temp.join(format!("tog-host-view-{}", std::process::id())),
+            temp.join("greyward-host-view"),
+            temp.join(format!("greyward-host-view-{}", std::process::id())),
         ])
         .unwrap();
         assert!(view.skeleton.path().starts_with(&temp));

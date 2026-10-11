@@ -1,9 +1,9 @@
 //! npm semver: node-semver 7's version and range grammar, and its
-//! `satisfies` without `includePrerelease`. Every npm range tog reads (pnpm
+//! `satisfies` without `includePrerelease`. Every npm range ward reads (pnpm
 //! `patchedDependencies` keys, `engines.node`) goes through this one module.
 //!
 //! [`Range::parse`] accepts exactly what node-semver's `validRange` accepts
-//! and refuses the rest, so a range tog cannot read is refused, never
+//! and refuses the rest, so a range ward cannot read is refused, never
 //! guessed. The parsed [`Term`]s keep the partial versions as written, so a
 //! caller that lowers ranges into its own request grammar (the toolchain
 //! selector) can keep stricter rules of its own on top.

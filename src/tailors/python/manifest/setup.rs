@@ -294,7 +294,7 @@ pub(super) fn collect_setup_files(
         let name = name.to_string_lossy().into_owned();
         if matches!(
             name.as_str(),
-            ".git" | ".tog" | "__pycache__" | ".venv" | "node_modules"
+            ".git" | ".greyward" | "__pycache__" | ".venv" | "node_modules"
         ) || name.ends_with(".egg-info")
             || name == "requirements.lock.txt"
         {

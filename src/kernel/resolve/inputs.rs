@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn coverage_includes_nested_code_and_data_but_not_hidden_resolver_state() {
         let temp = TempDir::new();
-        for directory in ["apps/web", "config/nested", ".tog", ".git", "deps"] {
+        for directory in ["apps/web", "config/nested", ".greyward", ".git", "deps"] {
             fs::create_dir_all(temp.0.join(directory)).unwrap();
         }
         for file in [
@@ -74,15 +74,19 @@ mod tests {
             "mix.lock",
             "apps/web/mix.exs",
             "config/nested/data.json",
-            ".tog/closure.json",
+            ".greyward/closure.json",
             ".git/config",
             "deps/dep.exs",
         ] {
             fs::write(temp.0.join(file), "input").unwrap();
         }
         let held = ProjectRoot::open(&temp.0).unwrap();
-        let files =
-            project_files(&held, &[".tog", ".git", "deps"], &["mix.exs", "mix.lock"]).unwrap();
+        let files = project_files(
+            &held,
+            &[".greyward", ".git", "deps"],
+            &["mix.exs", "mix.lock"],
+        )
+        .unwrap();
         assert_eq!(
             files,
             vec![
@@ -91,6 +95,6 @@ mod tests {
             ]
         );
         symlink("apps", temp.0.join("linked-apps")).unwrap();
-        assert!(project_files(&held, &[".tog", ".git", "deps"], &[]).is_err());
+        assert!(project_files(&held, &[".greyward", ".git", "deps"], &[]).is_err());
     }
 }

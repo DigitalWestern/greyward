@@ -1,4 +1,4 @@
-//! Stamp the binary with the commit it was built from, so `tog --version`
+//! Stamp the binary with the commit it was built from, so `ward --version`
 //! can answer "how old is this?" and a bug report can name its build.
 //!
 //! Two values, both read from git at build time and both `unknown` outside
@@ -6,7 +6,7 @@
 //! the commit date. The commit date is used rather than the wall clock so
 //! the same commit always produces the same version line, and so the date
 //! says how old the *source* is, which is the question a stale binary
-//! raises. `TOG_BUILD_COMMIT` and `TOG_BUILD_DATE` in the environment
+//! raises. `GREYWARD_BUILD_COMMIT` and `GREYWARD_BUILD_DATE` in the environment
 //! override git for a build that has no checkout to ask.
 
 use std::fs;
@@ -77,23 +77,23 @@ fn watch_git_files() {
 }
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=TOG_BUILD_COMMIT");
-    println!("cargo:rerun-if-env-changed=TOG_BUILD_DATE");
+    println!("cargo:rerun-if-env-changed=GREYWARD_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=GREYWARD_BUILD_DATE");
     let checkout = in_own_checkout();
     if checkout {
         watch_git_files();
     }
     let from_git = |args: &[&str]| if checkout { git(args) } else { None };
-    let commit = std::env::var("TOG_BUILD_COMMIT")
+    let commit = std::env::var("GREYWARD_BUILD_COMMIT")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| from_git(&["rev-parse", "--short=7", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_string());
-    let date = std::env::var("TOG_BUILD_DATE")
+    let date = std::env::var("GREYWARD_BUILD_DATE")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| from_git(&["log", "-1", "--format=%cs", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo:rustc-env=TOG_BUILD_COMMIT={commit}");
-    println!("cargo:rustc-env=TOG_BUILD_DATE={date}");
+    println!("cargo:rustc-env=GREYWARD_BUILD_COMMIT={commit}");
+    println!("cargo:rustc-env=GREYWARD_BUILD_DATE={date}");
 }

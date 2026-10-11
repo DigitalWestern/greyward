@@ -1,4 +1,4 @@
-//! The command surface: one grammar for every `tog` invocation.
+//! The command surface: one grammar for every `ward` invocation.
 //!
 //! This module is pure — it never touches the store, the filesystem, or the
 //! host platform — so every shape of argv is unit-testable and `main` is a
@@ -6,11 +6,11 @@
 //!
 //! - every option is validated: an unknown flag or stray positional is a
 //!   usage error (exit 2) with a "did you mean" suggestion when one is close;
-//! - `tog help [<command>]`, `--help`/`-h`, `--version`/`-V` work at the
+//! - `ward help [<command>]`, `--help`/`-h`, `--version`/`-V` work at the
 //!   top level and `-h`/`--help` inside every command, first argument only
 //!   where the rest is passed through (`fmt`, `run`, `build`);
 //! - `run` and `build` pass their arguments through to the program untouched
-//!   (only a leading `-h`/`--help` is tog's; `--` forces pass-through);
+//!   (only a leading `-h`/`--help` is ward's; `--` forces pass-through);
 //! - `-C <dir>` runs the command as if started in `<dir>`; `-q`, `-v` and
 //!   `--no-color` set the output conventions (see `ui`). A global option is
 //!   accepted before or after the verb, except where the rest of argv
@@ -18,13 +18,13 @@
 //!   its own options);
 //! - `--frozen` and `--strict` (`SyncFlags`) govern a sync, so a verb that
 //!   never syncs refuses them instead of accepting and ignoring them;
-//! - a bare `tog` and an unknown first word are *not* decided here: the
-//!   dispatcher turns a bare `tog` into `sync` inside a project (and prints
+//! - a bare `ward` and an unknown first word are *not* decided here: the
+//!   dispatcher turns a bare `ward` into `sync` inside a project (and prints
 //!   `sync_footer()` after a sync that succeeded (`after_command`), so the first word a
 //!   newcomer types also shows them what comes next), into the help outside
 //!   one, and an unknown first word into a package.json script run when
 //!   one matches.
-//!   A bare `tog` with `--frozen`, `--fresh` or `--strict` is decided here:
+//!   A bare `ward` with `--frozen`, `--fresh` or `--strict` is decided here:
 //!   it is `sync` with those flags, and no footer follows it. `sync`,
 //!   `install` and `i` still parse as that command but are never listed,
 //!   completed, or suggested (`Group::Bare`).
@@ -49,10 +49,10 @@ use std::path::PathBuf;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The short commit id and the commit date the binary was built from,
 /// stamped by `build.rs`; `unknown` outside a git checkout.
-pub const BUILD_COMMIT: &str = env!("TOG_BUILD_COMMIT");
-pub const BUILD_DATE: &str = env!("TOG_BUILD_DATE");
+pub const BUILD_COMMIT: &str = env!("GREYWARD_BUILD_COMMIT");
+pub const BUILD_DATE: &str = env!("GREYWARD_BUILD_DATE");
 
-/// What `tog --version` prints, without the newline: `tog 0.1.0 (7688cfd
+/// What `ward --version` prints, without the newline: `ward 0.1.0 (7688cfd
 /// 2026-09-21)`. The crate version alone cannot say whether a binary is
 /// stale, because every local build of the same crate version prints the
 /// same number; the commit and its date can. `install.sh` prints this
@@ -61,8 +61,8 @@ pub const BUILD_DATE: &str = env!("TOG_BUILD_DATE");
 /// commit it was built from.
 pub fn version_line() -> String {
     match (BUILD_COMMIT, BUILD_DATE) {
-        ("unknown", "unknown") => format!("tog {VERSION} (unknown build)"),
-        (commit, date) => format!("tog {VERSION} ({commit} {date})"),
+        ("unknown", "unknown") => format!("ward {VERSION} (unknown build)"),
+        (commit, date) => format!("ward {VERSION} ({commit} {date})"),
     }
 }
 pub const EXIT_FAILURE: i32 = 1;
@@ -70,7 +70,7 @@ pub const EXIT_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// The bare `tog` (and its hidden names `sync`, `install`, `i`).
+    /// The bare `ward` (and its hidden names `sync`, `install`, `i`).
     /// `--frozen` and `--strict` travel beside it in `SyncFlags`.
     Sync {
         fresh: bool,
@@ -102,7 +102,7 @@ pub enum Command {
     Run {
         command: Vec<String>,
     },
-    /// `tog <file>` for a file of an ecosystem the project does not have,
+    /// `ward <file>` for a file of an ecosystem the project does not have,
     /// or outside any project: never parsed from argv, `commands::resolve`
     /// builds it. The file runs on the runtime `x` would use there.
     File(FileRun),
@@ -226,7 +226,7 @@ pub struct FileRun {
     pub args: Vec<String>,
 }
 
-/// `tog attest --ledger-export` and `--ledger-import`.
+/// `ward attest --ledger-export` and `--ledger-import`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerTransfer {
     /// Write the portable bytes of the ledger the committed `ecosystem`
@@ -259,7 +259,7 @@ pub struct GcArgs {
     pub keep_days: Option<u64>,
     pub project: bool,
     /// Empty the store and start it again in the current format. The way
-    /// out of a store this tog refuses to open; see `kernel::gc::reset`.
+    /// out of a store this ward refuses to open; see `kernel::gc::reset`.
     pub reset: bool,
     pub register: Vec<PathBuf>,
     pub forget: Vec<String>,
@@ -288,7 +288,7 @@ pub struct Options {
 }
 
 /// `--frozen` and `--strict`: the two flags that govern a sync wherever one
-/// happens (the bare `tog`, the implicit sync of `run`, `env`, `build`,
+/// happens (the bare `ward`, the implicit sync of `run`, `env`, `build`,
 /// `fmt` and a script, the sync after `add`/`remove`/`update`, `plan`'s
 /// lock generation, and the policy `x` judges under). Read once by the
 /// parser from either side of the verb and handed to the dispatcher, which
@@ -296,11 +296,11 @@ pub struct Options {
 /// load in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SyncFlags {
-    /// `--frozen`: validate the committed `tog-toolchain.toml` instead of
+    /// `--frozen`: validate the committed `greyward-toolchain.toml` instead of
     /// creating one, never generate a dependency lock, and refuse a missing
     /// or stale lock before anything is written.
     pub frozen: bool,
-    /// `--strict`: refuse every policy exception (same as `TOG_STRICT=1`).
+    /// `--strict`: refuse every policy exception (same as `GREYWARD_STRICT=1`).
     pub strict: bool,
 }
 
@@ -315,12 +315,12 @@ pub struct Invocation {
 pub enum Parsed {
     Run(Invocation),
     /// The hidden `__resolution-relay`: the first process inside the
-    /// resolution door's sandbox. tog starts it; nobody types it, so it is
+    /// resolution door's sandbox. ward starts it; nobody types it, so it is
     /// never listed, completed, or suggested, and it takes no global option.
     Relay(RelayInvocation),
     /// Print to stdout and exit 0 (help, version).
     Print(String),
-    /// `tog` with no command: `sync` inside a project, usage outside.
+    /// `ward` with no command: `sync` inside a project, usage outside.
     Implicit(Options),
     /// A first word that is not a command: a package.json script if one
     /// matches, otherwise the usage error in `message`.
@@ -367,11 +367,11 @@ impl UsageError {
 pub fn render_usage_error(message: &str, command: Option<&str>) -> String {
     let hint = match command {
         // The bare form's hidden name is not what its help is called.
-        Some("sync") => "Run 'tog help setup' for usage.".to_string(),
-        Some(name) => format!("Run 'tog help {name}' for usage."),
-        None => "Run 'tog --help' for usage.".to_string(),
+        Some("sync") => "Run 'ward help setup' for usage.".to_string(),
+        Some(name) => format!("Run 'ward help {name}' for usage."),
+        None => "Run 'ward --help' for usage.".to_string(),
     };
-    format!("tog: error: {message}\n{hint}\n")
+    format!("ward: error: {message}\n{hint}\n")
 }
 
 impl std::fmt::Display for UsageError {
@@ -387,7 +387,7 @@ pub enum Group {
     Everyday,
     Inspect,
     Maintain,
-    /// The bare `tog`. Its flags and help live under the hidden name
+    /// The bare `ward`. Its flags and help live under the hidden name
     /// `sync` (aliases `install`, `i`), which still parses so a pip or npm
     /// reflex and existing CI keep working, but is never listed,
     /// completed, or suggested.

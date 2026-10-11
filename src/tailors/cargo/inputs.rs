@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 /// Implicit detection for sync/plan: cargo joins the party only when the
 /// invocation dir is itself a Cargo package (workspace members included).
-/// Without this gate, running tog in any project nested under an
+/// Without this gate, running ward in any project nested under an
 /// unrelated Cargo workspace would silently project into that parent tree.
 /// The project is read through the held descriptor.
 pub fn is_cargo_here(project: &ProjectRoot) -> bool {
@@ -34,7 +34,7 @@ pub struct CargoInputs {
     pub resolution_basis: crate::comforter::join::Digests,
 }
 
-/// The workspace root cargo uses for `cwd`, found by tog's own walk of the
+/// The workspace root cargo uses for `cwd`, found by ward's own walk of the
 /// manifests, the way cargo finds it: the nearest `Cargo.toml` at or above
 /// `cwd`; the root its `package.workspace` names, if any; else itself when
 /// it holds `[workspace]`; else the nearest ancestor whose `Cargo.toml`
@@ -46,7 +46,7 @@ pub struct CargoInputs {
 /// manifests and configuration (and the files they include, and its own
 /// home's) and quotes the line it cannot parse, so a project file that is
 /// the signing key under another name (a symlink, a hard link, an include)
-/// would print the key. tog's own reads name a parse error's position only,
+/// would print the key. ward's own reads name a parse error's position only,
 /// and a manifest that is the signing key is refused by name.
 pub fn locate_cargo_root(cwd: &Path) -> io::Result<PathBuf> {
     let held = ProjectRoot::open(cwd)
@@ -168,7 +168,7 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// A manifest read by tog, never echoed: a file that is the signing key
+/// A manifest read by ward, never echoed: a file that is the signing key
 /// (by device and inode, so a hard link too) is refused by name, anything
 /// but a regular file is refused, and a parse error names its position.
 fn read_manifest(
@@ -191,7 +191,7 @@ fn read_manifest(
             io::ErrorKind::PermissionDenied,
             format!(
                 "{} is the signing key (the same file, by device and inode); move the key out \
-                 of the project and point TOG_SIGNING_KEY at it",
+                 of the project and point GREYWARD_SIGNING_KEY at it",
                 path.display()
             ),
         ));
@@ -283,7 +283,7 @@ fn locate_workspace(
     activity: &StoreActivity,
     toolchain: &Selected,
 ) -> io::Result<(PathBuf, PathBuf, ProjectRoot)> {
-    // Found before anything is realized, by tog's own walk: no cargo runs
+    // Found before anything is realized, by ward's own walk: no cargo runs
     // on the host.
     let (root, workspace) = locate_held_cargo_root(project)?;
     // Cargo is the one tailor whose registered root is not the directory
@@ -353,7 +353,7 @@ pub fn ensure_cargo_lock(
             e.kind(),
             format!(
                 "could not generate Cargo.lock: {e}; \
-                 run `tog` after fixing the project or network"
+                 run `ward` after fixing the project or network"
             ),
         )
     })
@@ -400,7 +400,7 @@ mod tests {
         assert!(is_cargo_here(&open(&nested)));
     }
 
-    /// tog's walk finds the root cargo would: a package's own directory, a
+    /// ward's walk finds the root cargo would: a package's own directory, a
     /// workspace above it, the root `package.workspace` names, and past a
     /// workspace that excludes it (unless it is also a listed member).
     #[test]
@@ -548,7 +548,7 @@ mod tests {
             Some("# original\nversion = 4\n")
         );
         assert!(inputs.workspace.check_still_named().is_err());
-        assert!(!workspace.join(".tog").exists());
+        assert!(!workspace.join(".greyward").exists());
         // Reopening would accept the replacement. Publication must use the
         // root retained with the input bytes, as both sync and build do.
         ProjectRoot::open(&workspace)

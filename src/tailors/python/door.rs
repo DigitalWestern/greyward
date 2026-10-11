@@ -3,9 +3,9 @@
 //! the [`registry`](super::registry) route, git dependencies through the
 //! git row, an extra index or a direct URL as `unattested-index`).
 //!
-//! Every Python resolution goes through here: `tog add`/`remove`/`update`,
-//! a missing `requirements.lock.txt`, an sdist's build requirements, `tog
-//! x`'s resolution, and `tog attest`'s lock checks. None runs uv directly.
+//! Every Python resolution goes through here: `ward add`/`remove`/`update`,
+//! a missing `requirements.lock.txt`, an sdist's build requirements, `ward
+//! x`'s resolution, and `ward attest`'s lock checks. None runs uv directly.
 //!
 //! How uv is pointed at the session: the proxy variables and
 //! `SSL_CERT_FILE` (the session CA, which uv takes as its whole root set)
@@ -15,7 +15,7 @@
 //! replaces PyPI; an extra index it names is still reached, through
 //! interception, and recorded as `unattested-index`. The forced row adds
 //! `--python <store python>`, `--no-config`, `--no-python-downloads`, and
-//! `--keyring-provider disabled`. uv's cache is a directory tog creates for
+//! `--keyring-provider disabled`. uv's cache is a directory ward creates for
 //! one attempt and removes after it. An allowed retry has a fresh cache,
 //! so its ledger covers the metadata and artifacts it actually consumed.
 //!
@@ -51,8 +51,8 @@ pub(crate) const WHY_UV: &str = "runs the build backends of source distributions
 /// The header line uv writes into a compiled lock in place of its own
 /// command line, which names the store interpreter's path (a different
 /// path on every machine) and the probe's `--no-build`. With it, the same
-/// resolution writes the same bytes everywhere, which `tog attest` checks.
-pub(crate) const COMPILE_COMMAND: &str = "tog";
+/// resolution writes the same bytes everywhere, which `ward attest` checks.
+pub(crate) const COMPILE_COMMAND: &str = "ward";
 
 /// The store uv and the interpreter it resolves and builds with.
 pub(crate) struct Uv {
@@ -143,7 +143,7 @@ pub(crate) enum UvTarget {
         record: Option<RecordSpec>,
         slot: RecordSlot,
     },
-    /// The lock root is tog's own (a `tog x` cache root, a scratch
+    /// The lock root is ward's own (a `ward x` cache root, a scratch
     /// directory): accepted outputs are written back into it.
     Detached,
 }
@@ -518,7 +518,7 @@ pub(crate) fn run_uv_checked(
     Ok(report)
 }
 
-/// The ledger of a Detached run, rooted under `root` (a `tog x` cache
+/// The ledger of a Detached run, rooted under `root` (a `ward x` cache
 /// root), the way a planner door's ledger is rooted under its project, so
 /// GC keeps it with the root.
 pub(crate) fn root_ledger(
@@ -826,7 +826,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
     /// A missing requirements lock, compiled by the store uv through
     /// interception: every request is a PyPI read the route claims, the
     /// probe needs no build, and the door publishes the lock (headed by
-    /// tog's compile command, so it is the same bytes everywhere) with its
+    /// ward's compile command, so it is the same bytes everywhere) with its
     /// resolution record.
     #[test]
     #[ignore = "realizes the store uv and CPython over the network"]
@@ -880,10 +880,10 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
         assert!(report.status.success(), "{}", stderr(&report));
         assert!(recorded.is_empty(), "{recorded:?}");
         let lock = fs::read_to_string(dir.join("requirements.lock.txt")).unwrap();
-        assert!(super::super::resolve::compiled_by_tog(&lock), "{lock}");
+        assert!(super::super::resolve::compiled_by_ward(&lock), "{lock}");
         assert!(lock.contains("six==1.16.0"), "{lock}");
         assert!(lock.contains("--hash=sha256:"), "{lock}");
-        assert!(dir.join(".tog/resolution/python.json").is_file());
+        assert!(dir.join(".greyward/resolution/python.json").is_file());
         let entries = ledger_entries(harness, &report);
         assert!(!entries.is_empty());
         for entry in &entries {

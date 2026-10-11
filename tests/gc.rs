@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, tog, tog_at, TempDir};
+use common::{assert_ok, command, copy_tree, fixture, ward, ward_at, TempDir};
 
 struct ChildGuard(Option<Child>);
 
@@ -39,7 +39,7 @@ impl Drop for ChildGuard {
 }
 
 /// Like `assert_ok`, for commands that narrate instead of printing a result.
-/// CLI.md: stdout is results, stderr is narration. `tog gc` writes its whole
+/// CLI.md: stdout is results, stderr is narration. `ward gc` writes its whole
 /// report to stderr, so assertions on gc narration read that stream.
 fn ok_narration(output: Output, label: &str) -> String {
     assert!(
@@ -51,7 +51,7 @@ fn ok_narration(output: Output, label: &str) -> String {
     String::from_utf8(output.stderr).unwrap()
 }
 
-/// Parse `tog store roots` output: one "<key>  <path>" line per root.
+/// Parse `ward store roots` output: one "<key>  <path>" line per root.
 fn roots_listing(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|line| {
@@ -74,8 +74,8 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     copy_tree(&fixture("proj-a"), &python);
     copy_tree(&fixture("proj-npm"), &node);
 
-    assert_ok(tog(&python, home, &["sync"]), "sync proj-a");
-    assert_ok(tog(&node, home, &["sync"]), "sync proj-npm");
+    assert_ok(ward(&python, home, &["sync"]), "sync proj-a");
+    assert_ok(ward(&node, home, &["sync"]), "sync proj-npm");
     let node_canonical = node.canonicalize().unwrap();
     fs::remove_dir_all(&node).unwrap();
 
@@ -103,7 +103,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     // longer blocks collection and its tools remain protected. A real
     // sweep, not a dry run: only a sweep that deletes can prove the record
     // kept the aged, now-unreachable node objects.
-    let retained = tog(&python, home, &["gc", "--keep-days", "0"]);
+    let retained = ward(&python, home, &["gc", "--keep-days", "0"]);
     assert!(
         retained.status.success(),
         "gc refused a self-sufficient root record: stdout={} stderr={}",
@@ -125,7 +125,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     );
 
     let keys = roots_listing(&assert_ok(
-        tog(&python, home, &["store", "roots"]),
+        ward(&python, home, &["store", "roots"]),
         "store roots",
     ));
     let node_key = keys
@@ -136,13 +136,13 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
 
     // Dry-run forget simulates only; the record survives.
     let dry = ok_narration(
-        tog(&python, home, &["gc", "--dry-run", "--forget", &node_key]),
+        ward(&python, home, &["gc", "--dry-run", "--forget", &node_key]),
         "gc dry-run forget",
     );
     assert!(dry.contains("would forget root"), "{dry}");
     assert!(
         roots_listing(&assert_ok(
-            tog(&python, home, &["store", "roots"]),
+            ward(&python, home, &["store", "roots"]),
             "store roots"
         ))
         .iter()
@@ -151,7 +151,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
     );
 
     assert_ok(
-        tog(
+        ward(
             &python,
             home,
             &["gc", "--forget", &node_key, "--keep-days", "0"],
@@ -176,7 +176,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
             .any(|meta| meta.contains(r#""kind": "node-env""#)),
         "forget unexpectedly swept store objects"
     );
-    assert_ok(tog(&python, home, &["gc"]), "gc");
+    assert_ok(ward(&python, home, &["gc"]), "gc");
     let objects = fs::read_dir(store.join("objects"))
         .unwrap()
         .map(|entry| {
@@ -196,7 +196,7 @@ fn gc_keeps_deleted_node_project_until_forgotten() {
         "node object survived GC after its record was forgotten"
     );
     assert_ok(
-        tog(&python, home, &["run", "python", "-c", "import six"]),
+        ward(&python, home, &["run", "python", "-c", "import six"]),
         "python after gc",
     );
 }
@@ -212,18 +212,18 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     fs::create_dir_all(&project).unwrap();
 
     assert_ok(
-        tog_at(&project, &home, &store, &["x", "py:ruff", "--version"]),
+        ward_at(&project, &home, &store, &["x", "py:ruff", "--version"]),
         "realize x ruff",
     );
-    let x_dir = home.join(".tog/x");
+    let x_dir = home.join(".greyward/x");
     let ruff_root = fs::read_dir(&x_dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.join(".tog/x.json").is_file())
+        .find(|path| path.join(".greyward/x.json").is_file())
         .expect("ruff x root");
     let ruff_canonical = ruff_root.canonicalize().unwrap();
     let closure: serde_json::Value = serde_json::from_reader(
-        fs::File::open(ruff_root.join(".tog/closures/python.json")).unwrap(),
+        fs::File::open(ruff_root.join(".greyward/closures/python.json")).unwrap(),
     )
     .unwrap();
     let env_object = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
@@ -233,13 +233,13 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     // projection must make the next run reproject the cached environment.
     fs::remove_file(ruff_root.join(".venv")).unwrap();
     assert_ok(
-        tog_at(&project, &home, &store, &["x", "py:ruff", "--version"]),
+        ward_at(&project, &home, &store, &["x", "py:ruff", "--version"]),
         "repair missing x projection",
     );
     assert!(ruff_root.join(".venv").is_symlink());
 
     let roots = assert_ok(
-        tog_at(&project, &home, &store, &["store", "roots"]),
+        ward_at(&project, &home, &store, &["store", "roots"]),
         "x root registration",
     );
     assert!(roots_listing(&roots)
@@ -247,7 +247,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         .any(|(_, path)| Path::new(path) == ruff_canonical));
 
     let cleaned = assert_ok(
-        tog_at(&project, &home, &store, &["x", "--clean", "py:ruff"]),
+        ward_at(&project, &home, &store, &["x", "--clean", "py:ruff"]),
         "clean x ruff",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
@@ -264,7 +264,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         ruff_lock.display()
     );
     let roots = assert_ok(
-        tog_at(&project, &home, &store, &["store", "roots"]),
+        ward_at(&project, &home, &store, &["store", "roots"]),
         "removed x root registration",
     );
     assert!(!roots_listing(&roots)
@@ -279,7 +279,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         .set_modified(SystemTime::now() - Duration::from_secs(11 * 60))
         .unwrap();
     assert_ok(
-        tog_at(&project, &home, &store, &["gc", "--keep-days", "0"]),
+        ward_at(&project, &home, &store, &["gc", "--keep-days", "0"]),
         "gc after x clean",
     );
     assert!(
@@ -290,7 +290,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     // Prewarm pytest so the busy process reaches the test body quickly and
     // the readiness handshake below tests lock inheritance, not PyPI latency.
     assert_ok(
-        tog_at(
+        ward_at(
             &project,
             &home,
             &store,
@@ -305,20 +305,20 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("py-pytest-"))
-                && path.join(".tog/x.json").is_file()
+                && path.join(".greyward/x.json").is_file()
         })
         .expect("prewarmed pytest x root");
     let ready = project.join("pytest-started");
     let release = project.join("pytest-release");
     fs::write(
         project.join("test_sleep.py"),
-        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"TOG_TEST_READY\"]).write_text(\"ready\")\n    release = Path(os.environ[\"TOG_TEST_RELEASE\"])\n    while not release.is_file():\n        time.sleep(0.1)\n",
+        "import os\nimport time\nfrom pathlib import Path\n\ndef test_sleep():\n    Path(os.environ[\"GREYWARD_TEST_READY\"]).write_text(\"ready\")\n    release = Path(os.environ[\"GREYWARD_TEST_RELEASE\"])\n    while not release.is_file():\n        time.sleep(0.1)\n",
     )
     .unwrap();
     let running = ChildGuard(Some(
         command(&project, &home, &store)
-            .env("TOG_TEST_READY", &ready)
-            .env("TOG_TEST_RELEASE", &release)
+            .env("GREYWARD_TEST_READY", &ready)
+            .env("GREYWARD_TEST_RELEASE", &release)
             .args(["x", "--py", "pytest", "-q", "test_sleep.py"])
             .spawn()
             .unwrap(),
@@ -331,7 +331,7 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
         ready.is_file(),
         "pytest did not reach the readiness handshake"
     );
-    let busy = tog_at(&project, &home, &store, &["x", "--clean", "pytest"]);
+    let busy = ward_at(&project, &home, &store, &["x", "--clean", "pytest"]);
     assert_eq!(busy.status.code(), Some(1), "a clean that skips exits 1");
     let busy_text = String::from_utf8_lossy(&busy.stdout);
     assert!(
@@ -349,14 +349,14 @@ fn x_clean_removes_registered_environment_and_running_x_is_busy() {
     );
 
     let cleaned = assert_ok(
-        tog_at(&project, &home, &store, &["x", "--clean", "pytest"]),
+        ward_at(&project, &home, &store, &["x", "--clean", "pytest"]),
         "clean pytest after exit",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
     assert!(!pytest_root.exists());
 }
 
-/// `tog x npm:<tool>` end to end: npm resolves through the store Node, the
+/// `ward x npm:<tool>` end to end: npm resolves through the store Node, the
 /// environment is projected as a `node_modules` forest link under an
 /// `npm-` cache directory, the tool runs on the store Node (never a `node`
 /// from the inherited PATH), a second run is a cache hit, a deleted projection is
@@ -371,7 +371,7 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&project).unwrap();
     // `semver` is a dependency-free package whose bin is a
-    // `#!/usr/bin/env node` script. tog itself needs the system PATH (tar
+    // `#!/usr/bin/env node` script. ward itself needs the system PATH (tar
     // shells out to gzip), so the inherited PATH leads with a decoy `node`
     // that fails loudly: the tool prints its answer only if `x` put the
     // store Node ahead of everything inherited, host Node included.
@@ -401,16 +401,16 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
     assert!(first_stderr.contains("resolving"), "{first_stderr}");
     assert_eq!(stdout.trim(), "1.2.3");
 
-    let x_dir = home.join(".tog/x");
+    let x_dir = home.join(".greyward/x");
     let root = fs::read_dir(&x_dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.join(".tog/x.json").is_file())
+        .find(|path| path.join(".greyward/x.json").is_file())
         .expect("semver x root");
     let name = root.file_name().unwrap().to_string_lossy().into_owned();
     assert!(name.starts_with("npm-semver-"), "{name}");
     assert!(root.join("node_modules").is_symlink());
-    assert!(root.join(".tog/closures/node.json").is_file());
+    assert!(root.join(".greyward/closures/node.json").is_file());
 
     // A cache hit resolves nothing.
     let second = run();
@@ -424,12 +424,12 @@ fn x_runs_an_npm_tool_on_the_store_node_and_cleans_it() {
     assert!(root.join("node_modules").is_symlink());
 
     let cleaned = assert_ok(
-        tog_at(&project, &home, &store, &["x", "--clean", "npm:semver"]),
+        ward_at(&project, &home, &store, &["x", "--clean", "npm:semver"]),
         "clean x semver",
     );
     assert!(cleaned.contains("removed x environment"), "{cleaned}");
     assert!(
-        cleaned.contains("'tog gc --project' also reclaims the node_modules forest"),
+        cleaned.contains("'ward gc --project' also reclaims the node_modules forest"),
         "{cleaned}"
     );
     assert!(!root.exists());

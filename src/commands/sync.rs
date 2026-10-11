@@ -1,4 +1,4 @@
-//! The bare `tog` (hidden alias `sync`): preflight every detected
+//! The bare `ward` (hidden alias `sync`): preflight every detected
 //! ecosystem, then plan, realize, and project each one through the tailor
 //! registry.
 
@@ -15,7 +15,7 @@ use crate::tailors::{self, SyncRequest, Tailor};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Which detected tailors a sync is about: every one (the bare `tog`,
+/// Which detected tailors a sync is about: every one (the bare `ward`,
 /// `add`, `update`) or the one named (the build's sync, which realizes the
 /// ecosystem it builds and nothing else).
 ///
@@ -70,9 +70,9 @@ pub fn preflight_sync(
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable_in(project)?;
     let present = tailors::detected_in(project)?;
-    // No project is the answer before any lock is: `tog --frozen` in the
+    // No project is the answer before any lock is: `ward --frozen` in the
     // wrong directory must say there is no manifest here, not that
-    // tog-toolchain.toml is missing.
+    // greyward-toolchain.toml is missing.
     if present.is_empty() {
         return Err(no_inputs());
     }
@@ -105,7 +105,7 @@ fn preflight_detected(
     project_toolchain::resolve(project, platform, inputs, mode, policy::strict())
 }
 
-/// The bare `tog` from the command line: load policy and preflight every
+/// The bare `ward` from the command line: load policy and preflight every
 /// ecosystem before the store is opened. A refused request (an unpinned
 /// patch, a path no root record can hold) must leave no trace: no store
 /// tree created, no maintenance sweep, no lease taken.
@@ -124,11 +124,11 @@ pub fn run_command(
     run_in_mode(platform, fresh, mode, false)
 }
 
-/// The directory `tog sync` run at `cwd` syncs. A directory with project
+/// The directory `ward sync` run at `cwd` syncs. A directory with project
 /// inputs of its own is synced itself, so a project nested under a synced
 /// root (a docs site with its own `package.json`) can be given its own
 /// environment by syncing it there. Otherwise the project above, as `run`
-/// and the bare `tog` find it, so a sync from `src/` syncs the project,
+/// and the bare `ward` find it, so a sync from `src/` syncs the project,
 /// not `src/`.
 fn sync_dir(cwd: &Path) -> io::Result<PathBuf> {
     if crate::commands::inspect::detected(cwd)?.is_empty() {
@@ -142,7 +142,7 @@ fn sync_dir(cwd: &Path) -> io::Result<PathBuf> {
 /// is opened, prove the project directory is still the one preflight
 /// checked, then publish the lock and run the tailors.
 ///
-/// `stop_after_lock` is `tog update --toolchain --no-sync`: the lock is the
+/// `stop_after_lock` is `ward update --toolchain --no-sync`: the lock is the
 /// deliverable, and the diff is meant to be read before anything is
 /// realized from it.
 pub(crate) fn run_in_mode(
@@ -176,7 +176,7 @@ pub(crate) fn run_in_mode(
         }
         let _input_lock = project_toolchain::commit(&project, &mut toolchain, &mode)?;
         crate::kernel::ui::note(
-            "--no-sync: read the tog-toolchain.toml diff, then run 'tog' to sync it",
+            "--no-sync: read the greyward-toolchain.toml diff, then run 'ward' to sync it",
         );
         return Ok(());
     }
@@ -231,10 +231,10 @@ pub(crate) fn run_in(ctx: &Context, dir: &Path, fresh: bool, frozen: bool) -> io
 /// Sync first when the environment for `cwd` is not the one its inputs
 /// describe, and return the root whose projection the caller should read.
 ///
-/// `tog run`, `tog env` and a delegated `tog fmt` script all want the
+/// `ward run`, `ward env` and a delegated `ward fmt` script all want the
 /// environment the project's inputs describe. Auto-syncing does that work
 /// instead of refusing and making the user type the sync themselves.
-/// The check is the one `tog status` prints: offline, reading the closure
+/// The check is the one `ward status` prints: offline, reading the closure
 /// records and hashing the inputs they name, and it is what decides, so
 /// `status` and this never disagree about staleness. A directory with no
 /// manifest is left alone and the caller's own message says what is
@@ -351,7 +351,7 @@ fn scope_to<'a>(present: &[&'a dyn Tailor], scope: Scope<'_>) -> Vec<&'a dyn Tai
         .collect()
 }
 
-/// Why one ecosystem is about to be synced, in the words `tog status`
+/// Why one ecosystem is about to be synced, in the words `ward status`
 /// uses: the ecosystem, its state, and the files or platform behind it.
 fn stale_reason(row: &crate::commands::inspect::EcosystemStatus) -> String {
     use crate::comforter::status::State;
@@ -407,7 +407,7 @@ pub(crate) fn sync_preflighted(
     mode: &Mode,
 ) -> io::Result<()> {
     // Nothing of this project is ours to lock: report the missing manifest
-    // before a `.tog` directory appears for it.
+    // before a `.greyward` directory appears for it.
     if present.is_empty() {
         return Err(no_inputs());
     }
@@ -465,15 +465,15 @@ fn print_habits_notice(store: &store::Store) {
 /// How a read-only environment is used, said once per store.
 ///
 /// A pip or npm user arrives with habits this projection cannot serve:
-/// there is nothing to activate and nothing to install into. `tog run`
+/// there is nothing to activate and nothing to install into. `ward run`
 /// refuses those commands by name when they are typed, but the first sync
 /// is the moment to say which verbs replace them, before anything is typed.
 fn habits_notice(first_for_this_store: impl FnOnce() -> bool) -> Option<&'static str> {
     first_for_this_store().then_some(
         "this environment is read-only: there is no activate script and no pip or npm \
-         install into it. Run things with 'tog run <command>' or 'tog <script>', change \
-         dependencies with 'tog add <package>' and 'tog remove <package>', and give a \
-         shell the environment with eval \"$(tog env)\". Said once per store",
+         install into it. Run things with 'ward run <command>' or 'ward <script>', change \
+         dependencies with 'ward add <package>' and 'ward remove <package>', and give a \
+         shell the environment with eval \"$(ward env)\". Said once per store",
     )
 }
 
@@ -518,7 +518,7 @@ fn print_signing_notice(store: &store::Store) {
 fn default_signing_key() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     home.unwrap_or_else(|| PathBuf::from("~"))
-        .join(".tog")
+        .join(".greyward")
         .join("signing.key")
 }
 
@@ -530,7 +530,7 @@ fn default_signing_key() -> PathBuf {
 /// signatures: there an unsigned closure is a finding, not a preference.
 ///
 /// The fix is the whole way out, not half of it: a key has to exist and
-/// `TOG_SIGNING_KEY` has to name it. `keygen` refuses to overwrite a key,
+/// `GREYWARD_SIGNING_KEY` has to name it. `keygen` refuses to overwrite a key,
 /// so when the default one is already there the fix is only the export.
 /// Under a policy that names trusted keys a fresh key would not be
 /// trusted, so that fix names the key file the policy trusts instead.
@@ -546,18 +546,18 @@ fn signing_notice(
     if signing_in_policy {
         return Some((
             "closures written unsigned while this policy declares [signing] trusted keys: \
-             'tog audit' will report them outdated until TOG_SIGNING_KEY names a key the \
+             'ward audit' will report them outdated until GREYWARD_SIGNING_KEY names a key the \
              policy trusts",
-            "export TOG_SIGNING_KEY=<key file this policy trusts>".to_string(),
+            "export GREYWARD_SIGNING_KEY=<key file this policy trusts>".to_string(),
         ));
     }
     let fix = if default_key_exists {
-        format!("export TOG_SIGNING_KEY={DEFAULT_KEY}")
+        format!("export GREYWARD_SIGNING_KEY={DEFAULT_KEY}")
     } else {
-        format!("tog keygen {DEFAULT_KEY} && export TOG_SIGNING_KEY={DEFAULT_KEY}")
+        format!("ward keygen {DEFAULT_KEY} && export GREYWARD_SIGNING_KEY={DEFAULT_KEY}")
     };
     first_for_this_store().then_some((
-        "closures are written unsigned, which is fine until you want 'tog audit' to vouch \
+        "closures are written unsigned, which is fine until you want 'ward audit' to vouch \
          for them; the fix sets a key for this shell, and a shell profile keeps it. Said \
          once per store",
         fix,
@@ -565,7 +565,7 @@ fn signing_notice(
 }
 
 /// How the fix line spells `default_signing_key()`: the shell expands `~`.
-const DEFAULT_KEY: &str = "~/.tog/signing.key";
+const DEFAULT_KEY: &str = "~/.greyward/signing.key";
 
 /// Claim the once-per-store signing notice. The marker's creation is the
 /// claim (`create_new`), so two concurrent syncs print it once between
@@ -586,12 +586,12 @@ fn first_signing_notice(store: &store::Store) -> bool {
 }
 
 /// The exceptions recorded across the project's closures, read through the
-/// held project with the strict no-follow walk: closures are tog's own
-/// state, so a symlinked `.tog` or closure file counts nothing rather than
+/// held project with the strict no-follow walk: closures are ward's own
+/// state, so a symlinked `.greyward` or closure file counts nothing rather than
 /// being read through. The summary is advisory, so an unreadable or
 /// malformed closure is skipped.
 fn exception_count(project: &ProjectRoot) -> usize {
-    let dir = Path::new(".tog/closures");
+    let dir = Path::new(".greyward/closures");
     let mut total = 0;
     if let Ok(Some(names)) = project.read_dir(dir) {
         for name in names {
@@ -625,10 +625,10 @@ fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
 }
 
 /// A count and the command that judges it. The line this replaces advised
-/// `tog --strict`, which does not refuse the recorded exceptions: it fails
+/// `ward --strict`, which does not refuse the recorded exceptions: it fails
 /// the sync that recorded them, undoing the work that just finished.
 ///
-/// `tog audit` is the `next:` line whether or not a `[signing]` table is
+/// `ward audit` is the `next:` line whether or not a `[signing]` table is
 /// configured: without one it judges the exceptions against the policy and
 /// says that signatures were not checked. Under CI with no table a plain
 /// audit exits 2 instead (`unsigned_refused`), so the line adds
@@ -638,11 +638,11 @@ fn print_exception_summary(project: &ProjectRoot) -> io::Result<()> {
 fn exception_summary(total: usize, unsigned_refused: bool) -> Option<(String, &'static str)> {
     (total > 0).then(|| {
         (
-            format!("{total} policy exception(s) recorded in .tog/closures/*.json"),
+            format!("{total} policy exception(s) recorded in .greyward/closures/*.json"),
             if unsigned_refused {
-                "tog audit --allow-unsigned"
+                "ward audit --allow-unsigned"
             } else {
-                "tog audit"
+                "ward audit"
             },
         )
     })
@@ -658,8 +658,8 @@ mod tests {
 
     impl StoreEnv {
         fn enter(path: &Path) -> Self {
-            let old = std::env::var_os("TOG_STORE");
-            std::env::set_var("TOG_STORE", path);
+            let old = std::env::var_os("GREYWARD_STORE");
+            std::env::set_var("GREYWARD_STORE", path);
             Self(old)
         }
     }
@@ -667,15 +667,15 @@ mod tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => std::env::set_var("TOG_STORE", value),
-                None => std::env::remove_var("TOG_STORE"),
+                Some(value) => std::env::set_var("GREYWARD_STORE", value),
+                None => std::env::remove_var("GREYWARD_STORE"),
             }
         }
     }
 
     /// Scrubs every variable `preflight` reads (policy chain, strictness,
     /// and the signing key) so a developer's environment cannot reach a
-    /// test: an exported TOG_SIGNING_KEY would otherwise fail preflight
+    /// test: an exported GREYWARD_SIGNING_KEY would otherwise fail preflight
     /// here, or pin a real key for the rest of the test binary.
     struct PolicyEnv {
         home: Option<OsString>,
@@ -688,14 +688,14 @@ mod tests {
         fn enter(home: &Path) -> Self {
             let old = Self {
                 home: std::env::var_os("HOME"),
-                policy: std::env::var_os("TOG_POLICY"),
-                strict: std::env::var_os("TOG_STRICT"),
-                signing_key: std::env::var_os("TOG_SIGNING_KEY"),
+                policy: std::env::var_os("GREYWARD_POLICY"),
+                strict: std::env::var_os("GREYWARD_STRICT"),
+                signing_key: std::env::var_os("GREYWARD_SIGNING_KEY"),
             };
             std::env::set_var("HOME", home);
-            std::env::remove_var("TOG_POLICY");
-            std::env::remove_var("TOG_STRICT");
-            std::env::remove_var("TOG_SIGNING_KEY");
+            std::env::remove_var("GREYWARD_POLICY");
+            std::env::remove_var("GREYWARD_STRICT");
+            std::env::remove_var("GREYWARD_SIGNING_KEY");
             old
         }
     }
@@ -707,16 +707,16 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
             match self.policy.take() {
-                Some(value) => std::env::set_var("TOG_POLICY", value),
-                None => std::env::remove_var("TOG_POLICY"),
+                Some(value) => std::env::set_var("GREYWARD_POLICY", value),
+                None => std::env::remove_var("GREYWARD_POLICY"),
             }
             match self.strict.take() {
-                Some(value) => std::env::set_var("TOG_STRICT", value),
-                None => std::env::remove_var("TOG_STRICT"),
+                Some(value) => std::env::set_var("GREYWARD_STRICT", value),
+                None => std::env::remove_var("GREYWARD_STRICT"),
             }
             match self.signing_key.take() {
-                Some(value) => std::env::set_var("TOG_SIGNING_KEY", value),
-                None => std::env::remove_var("TOG_SIGNING_KEY"),
+                Some(value) => std::env::set_var("GREYWARD_SIGNING_KEY", value),
+                None => std::env::remove_var("GREYWARD_SIGNING_KEY"),
             }
         }
     }
@@ -735,12 +735,12 @@ mod tests {
         assert!(unsigned.contains("once per store"), "{unsigned}");
         assert_eq!(
             fix,
-            "tog keygen ~/.tog/signing.key && export TOG_SIGNING_KEY=~/.tog/signing.key"
+            "ward keygen ~/.greyward/signing.key && export GREYWARD_SIGNING_KEY=~/.greyward/signing.key"
         );
         // A key that already exists must not be overwritten: the fix is
         // then only the export.
         let (_, fix) = signing_notice(false, false, || true, true).unwrap();
-        assert_eq!(fix, "export TOG_SIGNING_KEY=~/.tog/signing.key");
+        assert_eq!(fix, "export GREYWARD_SIGNING_KEY=~/.greyward/signing.key");
         assert!(signing_notice(false, false, || false, false).is_none());
 
         // A [signing] table means someone reads signatures: say it every
@@ -751,7 +751,7 @@ mod tests {
         assert!(policy_cares.contains("[signing]"), "{policy_cares}");
         assert_eq!(
             policy_fix,
-            "export TOG_SIGNING_KEY=<key file this policy trusts>"
+            "export GREYWARD_SIGNING_KEY=<key file this policy trusts>"
         );
 
         // The slot is a real once-per-store claim, not a coin flip.
@@ -769,9 +769,9 @@ mod tests {
         let said = habits_notice(|| true).expect("the first sync says it");
         assert!(said.contains("read-only"), "{said}");
         assert!(said.contains("no activate script"), "{said}");
-        assert!(said.contains("tog run <command>"), "{said}");
-        assert!(said.contains("tog add <package>"), "{said}");
-        assert!(said.contains("tog env"), "{said}");
+        assert!(said.contains("ward run <command>"), "{said}");
+        assert!(said.contains("ward add <package>"), "{said}");
+        assert!(said.contains("ward env"), "{said}");
         assert!(said.contains("Said once per store"), "{said}");
         assert!(habits_notice(|| false).is_none());
 
@@ -794,7 +794,7 @@ mod tests {
         assert!(!claim_habits_notice(&unwritable, false));
     }
 
-    /// `tog --strict` does not refuse recorded exceptions; it fails
+    /// `ward --strict` does not refuse recorded exceptions; it fails
     /// the sync that recorded them. The summary must not advise it.
     #[test]
     fn the_exception_summary_counts_and_points_at_a_read_command() {
@@ -802,29 +802,29 @@ mod tests {
         assert_eq!(exception_summary(0, true), None);
         let (line, next) = exception_summary(3, false).unwrap();
         assert!(line.starts_with("3 policy exception(s) recorded"), "{line}");
-        assert!(line.contains(".tog/closures/*.json"), "{line}");
-        // Outside CI `tog audit` runs with or without trusted keys, so the
+        assert!(line.contains(".greyward/closures/*.json"), "{line}");
+        // Outside CI `ward audit` runs with or without trusted keys, so the
         // count always has a command to type.
-        assert_eq!(next, "tog audit");
+        assert_eq!(next, "ward audit");
         assert!(!line.contains("--strict"), "{line}");
         assert!(!line.contains("[signing]"), "{line}");
         // Under CI with no [signing] table a plain audit exits 2, so the
         // command to type is the one that runs.
         let (ci_line, ci_next) = exception_summary(3, true).unwrap();
         assert_eq!(ci_line, line);
-        assert_eq!(ci_next, "tog audit --allow-unsigned");
+        assert_eq!(ci_next, "ward audit --allow-unsigned");
     }
 
-    /// Closures are tog's own state: sync's exception summary reads them
+    /// Closures are ward's own state: sync's exception summary reads them
     /// through the held project with the strict no-follow walk, so a
-    /// symlinked `.tog` or closure file counts nothing instead of being read
+    /// symlinked `.greyward` or closure file counts nothing instead of being read
     /// through to another directory.
     #[test]
     fn closures_are_read_without_following_a_symlink() {
         let temp = TempDir::new();
         let project = temp.0.join("project");
         let outside = temp.0.join("outside");
-        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         std::fs::create_dir_all(outside.join("closures")).unwrap();
         let closure = serde_json::json!({
             "schema": "closure/1",
@@ -832,23 +832,23 @@ mod tests {
             "body": {"exceptions": [{"kind": "a"}, {"kind": "b"}]},
         })
         .to_string();
-        std::fs::write(project.join(".tog/closures/python.json"), &closure).unwrap();
+        std::fs::write(project.join(".greyward/closures/python.json"), &closure).unwrap();
         std::fs::write(outside.join("closures/python.json"), &closure).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         assert_eq!(exception_count(&root), 2);
 
         // A symlinked closure file.
-        std::fs::remove_file(project.join(".tog/closures/python.json")).unwrap();
+        std::fs::remove_file(project.join(".greyward/closures/python.json")).unwrap();
         std::os::unix::fs::symlink(
             outside.join("closures/python.json"),
-            project.join(".tog/closures/python.json"),
+            project.join(".greyward/closures/python.json"),
         )
         .unwrap();
         assert_eq!(exception_count(&root), 0);
 
-        // A symlinked `.tog`.
-        std::fs::remove_dir_all(project.join(".tog")).unwrap();
-        std::os::unix::fs::symlink(&outside, project.join(".tog")).unwrap();
+        // A symlinked `.greyward`.
+        std::fs::remove_dir_all(project.join(".greyward")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".greyward")).unwrap();
         assert_eq!(exception_count(&root), 0);
     }
 
@@ -901,7 +901,7 @@ mod tests {
         )
         .unwrap();
         assert!(present.iter().any(|tailor| tailor.id() == "python"));
-        assert!(!project.join("tog-toolchain.toml").exists());
+        assert!(!project.join("greyward-toolchain.toml").exists());
         let selected = toolchain.get("python").unwrap();
         assert_eq!(selected.source, Source::Created);
         assert_eq!(selected.version("cpython").unwrap(), "3.12.14");
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(rows[0].value.as_deref(), Some("3.12.14"));
         let pending = toolchain.pending.as_ref().unwrap().canonical_bytes();
         let guard = project_toolchain::commit(&root, &mut toolchain, &Mode::Writable).unwrap();
-        let written = std::fs::read(project.join("tog-toolchain.toml")).unwrap();
+        let written = std::fs::read(project.join("greyward-toolchain.toml")).unwrap();
         assert_eq!(written, pending);
         assert_eq!(
             ToolchainLock::parse(&written).unwrap().canonical_bytes(),
@@ -986,7 +986,7 @@ mod tests {
 
     /// The reason line is the `status` vocabulary with the detail that
     /// names the file or platform behind it, so the sync a command starts
-    /// on its own says why in the same words `tog status` would.
+    /// on its own says why in the same words `ward status` would.
     #[test]
     fn stale_reasons_name_the_state_and_what_is_behind_it() {
         use crate::comforter::status::State;
@@ -1067,7 +1067,7 @@ mod tests {
         let root =
             ensure_current(&ctx, &bare, false).expect("a directory with no manifest is left alone");
         assert_eq!(root, bare);
-        assert!(!bare.join(".tog").exists());
+        assert!(!bare.join(".greyward").exists());
 
         let error = ensure_current(&ctx, &project, false).unwrap_err();
         assert!(error.to_string().contains("no pinned CPython"), "{error}");
@@ -1078,7 +1078,7 @@ mod tests {
         assert_eq!(project_root(&bare).unwrap(), bare);
     }
 
-    /// `tog sync` syncs the directory it is run in when that directory has
+    /// `ward sync` syncs the directory it is run in when that directory has
     /// inputs of its own, a project nested under a synced root included,
     /// and the project above from anywhere else.
     #[test]
@@ -1086,7 +1086,7 @@ mod tests {
         let temp = TempDir::new();
         let root = temp.0.join("repo");
         let docs = root.join("docs");
-        std::fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(docs.join("pages")).unwrap();
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
@@ -1219,7 +1219,7 @@ mod tests {
         .unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         drop(project_toolchain::commit(&root, &mut toolchain, &Mode::Writable).unwrap());
-        let lock = std::fs::read(project.join("tog-toolchain.toml")).unwrap();
+        let lock = std::fs::read(project.join("greyward-toolchain.toml")).unwrap();
         check_whole_project(platform, &project).unwrap();
 
         std::fs::write(project.join(".python-version"), "3.13\n").unwrap();
@@ -1227,7 +1227,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("tog-toolchain.toml is stale for python"),
+                .contains("greyward-toolchain.toml is stale for python"),
             "{error}"
         );
 
@@ -1245,7 +1245,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            std::fs::read(project.join("tog-toolchain.toml")).unwrap(),
+            std::fs::read(project.join("greyward-toolchain.toml")).unwrap(),
             lock
         );
     }
@@ -1529,8 +1529,8 @@ mod tests {
             error.to_string().contains("moved or replaced during sync"),
             "{error}"
         );
-        assert!(!project.join(".tog/closures/python.json").exists());
-        assert!(!moved.join(".tog/closures/python.json").exists());
+        assert!(!project.join(".greyward/closures/python.json").exists());
+        assert!(!moved.join(".greyward/closures/python.json").exists());
         assert!(
             ctx.store.roots().unwrap().is_empty(),
             "a refused publication registered a root"
@@ -1599,8 +1599,8 @@ mod tests {
             error.to_string().contains("moved or replaced during sync"),
             "{error}"
         );
-        assert!(!project.join(".tog/closures/python.json").exists());
-        assert!(!moved.join(".tog/closures/python.json").exists());
+        assert!(!project.join(".greyward/closures/python.json").exists());
+        assert!(!moved.join(".greyward/closures/python.json").exists());
         assert!(
             ctx.store.roots().unwrap().is_empty(),
             "a refused publication registered a root"

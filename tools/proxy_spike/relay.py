@@ -1,4 +1,4 @@
-"""In-sandbox relay for the PR 0 spike: the shape of `tog __resolution-relay`.
+"""In-sandbox relay for the PR 0 spike: the shape of `ward __resolution-relay`.
 
     python3 relay.py <unix socket> <port> -- <tool argv...>
 

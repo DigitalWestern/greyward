@@ -29,7 +29,7 @@ pub const UNATTESTED_MUTABLE_STATE: &str = "unattested-mutable-state";
 /// A future git dependency was accepted without registry provenance.
 pub const GIT_DEPENDENCY: &str = "git-dependency";
 /// Retired: an optional dependency group the user did not request. It is
-/// a choice, not something tog could not vouch for, so it is recorded as an
+/// a choice, not something ward could not vouch for, so it is recorded as an
 /// `OptionalGroupSkipped` in the closure's `optional_groups_skipped` list.
 pub const SKIPPED_OPTIONAL: &str = "skipped-optional";
 /// A manifest named a private index or an index-like option.
@@ -41,7 +41,7 @@ pub const LOCK_DISAGREEMENT: &str = "lock-disagreement";
 pub const UNATTESTED_CARGO_LOCK: &str = "unattested-cargo-lock";
 /// An install-time download was skipped; the artifact is not in the closure.
 pub const ARTIFACT_NOT_PROVISIONED: &str = "artifact-not-provisioned";
-/// tog downloaded and verified an install-time artifact itself; the
+/// ward downloaded and verified an install-time artifact itself; the
 /// checksum source is upstream's own manifest (trust-on-first-use).
 pub const ARTIFACT_PROVISIONED: &str = "artifact-provisioned";
 /// A package that ships prebuilt binaries was compiled from source instead.
@@ -57,11 +57,11 @@ pub const HOST_BUILD_INPUTS: &str = "host-build-inputs";
 /// because the registry was unreachable (a transport failure or offline
 /// mode). The subject is the endpoint; the detail counts the responses.
 pub const STALE_RESOLUTION: &str = "stale-resolution";
-/// A resolution tool ran without its network fenced to tog's proxy (the
+/// A resolution tool ran without its network fenced to ward's proxy (the
 /// `isolated` tier), so the ledger may be missing traffic the tool sent.
 pub const UNCONFINED_RESOLUTION: &str = "unconfined-resolution";
 /// A lock has no attesting resolution record at closure time: it did not
-/// come from a tog resolution door whose signed receipt a trusted key vouches
+/// come from a ward resolution door whose signed receipt a trusted key vouches
 /// for, or the receipt no longer matches the files on disk.
 pub const UNRECORDED_RESOLUTION: &str = "unrecorded-resolution";
 /// Resolution could not complete without building a third-party source
@@ -113,10 +113,10 @@ const LEGACY_KIND_SPELLINGS: &[(&str, &str)] = &[
 /// Kinds nothing records any more, each with what a record carrying it
 /// means now. A deny list may still name one: denying what cannot occur is
 /// satisfied by every record, so the entry is dropped rather than refused,
-/// and a policy file written for an older tog keeps loading. A closure that
-/// still records one is known to be old, not from a newer tog: `tog audit`
+/// and a policy file written for an older ward keeps loading. A closure that
+/// still records one is known to be old, not from a newer ward: `ward audit`
 /// reports it outdated with the reason here. `toolchain-component-unavailable`
-/// was a requested Rust component tog did not ship; tog now provisions
+/// was a requested Rust component ward did not ship; ward now provisions
 /// every component the pinned release publishes and refuses the rest.
 /// `skipped-optional` was an optional dependency group the user did not
 /// request; it is a choice, not an exception, and the closure now lists it
@@ -132,7 +132,7 @@ const RETIRED_KINDS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Why a record of `kind` is out of date, when `kind` is one tog retired.
+/// Why a record of `kind` is out of date, when `kind` is one ward retired.
 pub fn retired_kind(kind: &str) -> Option<&'static str> {
     RETIRED_KINDS
         .iter()
@@ -141,7 +141,7 @@ pub fn retired_kind(kind: &str) -> Option<&'static str> {
 }
 
 /// The one spelling of `kind` this binary judges, denies, and prints. An
-/// unknown kind is returned unchanged: a record from a newer tog must stay
+/// unknown kind is returned unchanged: a record from a newer ward must stay
 /// unknown rather than be folded into a kind this binary does know.
 pub fn canonical_kind(kind: &str) -> &str {
     LEGACY_KIND_SPELLINGS
@@ -159,7 +159,7 @@ pub struct Exception {
 
 /// An optional dependency group the user did not request, so the sync did
 /// not install it. Informational: it is what the user chose, not something
-/// tog allowed and cannot vouch for, so no policy judges it. The closure
+/// ward allowed and cannot vouch for, so no policy judges it. The closure
 /// lists these under `optional_groups_skipped`, where `status` and `sbom`
 /// read them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,7 +186,7 @@ pub struct Policy {
     /// declared; in a merged chain it is the effective trusted set, `None`
     /// while no machine-scope policy has introduced one. Absent and empty
     /// are different states: absent means "not configured" (an operator
-    /// mistake for `tog audit`), empty means "trust nobody".
+    /// mistake for `ward audit`), empty means "trust nobody".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<Signing>,
     /// What made this policy strict, and which file denied each kind. Not
@@ -207,7 +207,7 @@ pub struct Policy {
 pub enum StrictSource {
     /// `--strict` on this command line.
     Flag,
-    /// `TOG_STRICT=1` in the environment.
+    /// `GREYWARD_STRICT=1` in the environment.
     Env,
     /// `strict = true` in this policy file.
     File(PathBuf),
@@ -219,7 +219,7 @@ impl StrictSource {
     pub fn lift(&self) -> String {
         match self {
             StrictSource::Flag => "rerun without --strict".into(),
-            StrictSource::Env => "unset TOG_STRICT".into(),
+            StrictSource::Env => "unset GREYWARD_STRICT".into(),
             StrictSource::File(path) => {
                 format!("set 'strict = false' in {}", path.display())
             }
@@ -233,7 +233,7 @@ impl StrictSource {
                 "--strict refuses every exception kind; rerun without --strict".into()
             }
             StrictSource::Env => {
-                "TOG_STRICT=1 refuses every exception kind; unset TOG_STRICT".into()
+                "GREYWARD_STRICT=1 refuses every exception kind; unset GREYWARD_STRICT".into()
             }
             StrictSource::File(path) => format!(
                 "'strict = true' in {} refuses every exception kind; set \
@@ -245,7 +245,7 @@ impl StrictSource {
 }
 
 /// The `[signing]` policy table: the public keys whose closure signatures
-/// `tog audit` accepts. Every other command parses it and ignores it.
+/// `ward audit` accepts. Every other command parses it and ignores it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Signing {
@@ -416,7 +416,7 @@ pub fn union(policy: &mut Policy, other: &Policy) {
 /// with it, so a working tree can drop keys but never vouch for its own.
 /// A scope with no `[signing]` table leaves the set unchanged, and a
 /// project or flag list seen before any machine declaration cannot
-/// initialize it: trust stays unconfigured. Used by `tog audit
+/// initialize it: trust stays unconfigured. Used by `ward audit
 /// --policy` too, so the file handed to the gate can never loosen the
 /// machine or project policy.
 pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
@@ -438,18 +438,18 @@ pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
 
 /// Where one contributing policy came from. The serialized names
 /// (`machine`, `project`, `flag`, `env`) are the stable strings
-/// `tog audit --json` reports under `policy.sources`.
+/// `ward audit --json` reports under `policy.sources`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceOrigin {
-    /// `TOG_POLICY`, or `$HOME/.tog/policy.toml` when it is unset.
+    /// `GREYWARD_POLICY`, or `$HOME/.greyward/policy.toml` when it is unset.
     Machine,
-    /// An ancestor directory's `.tog/policy.toml`.
+    /// An ancestor directory's `.greyward/policy.toml`.
     Project,
-    /// A file named by `tog audit --policy`. Other commands may also use
+    /// A file named by `ward audit --policy`. Other commands may also use
     /// this origin for their `--strict` flag; audit uses it only for the file.
     Flag,
-    /// `TOG_STRICT=1`. Not a file: `path` is absent.
+    /// `GREYWARD_STRICT=1`. Not a file: `path` is absent.
     Env,
 }
 
@@ -492,7 +492,7 @@ pub struct PolicySource {
 
 impl PolicySource {
     /// The entry for a policy read from `path`, including one merged in
-    /// from outside the chain (`tog audit --policy`).
+    /// from outside the chain (`ward audit --policy`).
     pub fn from_file(origin: SourceOrigin, path: &Path, policy: &Policy) -> Self {
         Self {
             origin,
@@ -533,7 +533,7 @@ thread_local! {
 }
 
 /// `load_with_sources` with the project directory itself read through a
-/// descriptor the caller holds: its own `.tog/policy.toml` is the one of
+/// descriptor the caller holds: its own `.greyward/policy.toml` is the one of
 /// the directory being synced, whatever its path names by then, and its
 /// ancestors' are those of the directories that contain it. The machine
 /// policy is found by path and read through the one descriptor opened.
@@ -546,10 +546,11 @@ pub(crate) fn load_with_sources_from(
     let mut sources = Vec::new();
     // The machine policy is opened once: the bytes merged and the identity
     // deduplication compares come from the same file (#500).
-    let machine_file = if let Some(path) = std::env::var_os("TOG_POLICY") {
+    let machine_file = if let Some(path) = std::env::var_os("GREYWARD_POLICY") {
         Some((PathBuf::from(path), true))
     } else {
-        std::env::var_os("HOME").map(|home| (PathBuf::from(home).join(".tog/policy.toml"), false))
+        std::env::var_os("HOME")
+            .map(|home| (PathBuf::from(home).join(".greyward/policy.toml"), false))
     };
     // The open file is kept to the end of the load. While it is open its
     // device and inode cannot be given to another file, so a project
@@ -573,7 +574,7 @@ pub(crate) fn load_with_sources_from(
     }
     // Every ancestor's project policy applies (union only tightens), so a
     // workspace-root policy governs builds started in a member directory
-    // without tog having to know each ecosystem's rooting rule.
+    // without ward having to know each ecosystem's rooting rule.
     let is_machine = |identity: &PathIdentity| {
         #[cfg(test)]
         MACHINE_HELD_AT_COMPARE.with(|seen| {
@@ -585,7 +586,7 @@ pub(crate) fn load_with_sources_from(
     };
     let Some(project) = project else {
         for dir in project_dir.ancestors() {
-            let path = dir.join(".tog/policy.toml");
+            let path = dir.join(".greyward/policy.toml");
             let Some((file, identity)) = open_policy(&path, false)? else {
                 continue;
             };
@@ -612,8 +613,8 @@ pub(crate) fn load_with_sources_from(
         // name before its policy is used. Once opened, reads stay on that
         // descriptor even if the directory moves afterward.
         dir.check_still_named()?;
-        let path = dir.path().join(".tog/policy.toml");
-        let own = Path::new(".tog/policy.toml");
+        let path = dir.path().join(".greyward/policy.toml");
+        let own = Path::new(".greyward/policy.toml");
         // Own state remains strictly no-follow. Dedupe uses the identity
         // of that same opened file, never a stat of its replaceable path.
         let file = if depth == 0 {
@@ -647,7 +648,7 @@ pub(crate) fn load_with_sources_from(
     Ok((policy, sources))
 }
 
-/// Apply the strictness requested outside the policy files: `TOG_STRICT=1`
+/// Apply the strictness requested outside the policy files: `GREYWARD_STRICT=1`
 /// and `--strict` (`cli_strict`). Shared by every loader and by the
 /// fallback in `current`, so a policy is never built without them.
 fn apply_requested_strictness(
@@ -655,15 +656,15 @@ fn apply_requested_strictness(
     sources: &mut Vec<PolicySource>,
     cli_strict: bool,
 ) {
-    let env_strict = std::env::var("TOG_STRICT").as_deref() == Ok("1");
+    let env_strict = std::env::var("GREYWARD_STRICT").as_deref() == Ok("1");
     // A file that already set `strict = true` keeps the attribution: it is
     // the source that outlives the command, so dropping --strict or
-    // unsetting TOG_STRICT would not lift the refusal and a message that
+    // unsetting GREYWARD_STRICT would not lift the refusal and a message that
     // said so would be wrong. Only when no file asked for strictness is
     // the flag or the variable the thing to change, flag first because it
     // is the one on the line the reader just typed.
     // Between the two, the variable outlives the command as well: with
-    // both set, dropping --strict leaves TOG_STRICT=1 refusing, so the
+    // both set, dropping --strict leaves GREYWARD_STRICT=1 refusing, so the
     // flag is named only when it is the whole reason.
     if policy.strict_source.is_none() {
         if env_strict {
@@ -702,12 +703,12 @@ thread_local! {
 /// restore their enclosing flag, and workers receive explicit policies.
 ///
 /// ```compile_fail
-/// let guard = tog::kernel::policy::request_strict(true);
+/// let guard = greyward::kernel::policy::request_strict(true);
 /// std::thread::spawn(move || drop(guard));
 /// ```
 ///
 /// ```compile_fail
-/// let guard = tog::kernel::policy::request_strict(true);
+/// let guard = greyward::kernel::policy::request_strict(true);
 /// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
 /// ```
 #[must_use = "the strict flag is in force only while its dispatch guard is held"]
@@ -746,12 +747,12 @@ fn requested_strict() -> bool {
 /// policy snapshot instead of borrowing or moving the ambient scope.
 ///
 /// ```compile_fail
-/// let guard = tog::kernel::policy::PolicyScope::install(Default::default());
+/// let guard = greyward::kernel::policy::PolicyScope::install(Default::default());
 /// std::thread::spawn(move || drop(guard));
 /// ```
 ///
 /// ```compile_fail
-/// let guard = tog::kernel::policy::PolicyScope::install(Default::default());
+/// let guard = greyward::kernel::policy::PolicyScope::install(Default::default());
 /// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
 /// ```
 #[must_use = "the policy is in force only while its scope is held"]
@@ -806,7 +807,7 @@ fn strict_trace(policy: &Policy) -> Option<String> {
     }
     Some(match policy.strict_source.as_ref() {
         Some(StrictSource::Flag) => "policy: strict (--strict)".to_string(),
-        Some(StrictSource::Env) => "policy: strict (TOG_STRICT=1)".to_string(),
+        Some(StrictSource::Env) => "policy: strict (GREYWARD_STRICT=1)".to_string(),
         Some(StrictSource::File(path)) => format!("policy: strict ({})", path.display()),
         None => "policy: strict".to_string(),
     })
@@ -814,7 +815,7 @@ fn strict_trace(policy: &Policy) -> Option<String> {
 
 /// The policy in force: the innermost operation's. Outside every scope it
 /// is the default policy plus the requested strictness, built afresh on
-/// each read, so an early read cannot drop `--strict` or `TOG_STRICT=1`
+/// each read, so an early read cannot drop `--strict` or `GREYWARD_STRICT=1`
 /// and cannot pin a policy that misses the files for a later operation.
 fn current() -> Arc<Policy> {
     if let Some((_, policy)) = with_scopes(|scopes| scopes.last().cloned()) {
@@ -1057,7 +1058,7 @@ impl Attribution {
 
     /// This frame with `policy` in place of the policy in force for what
     /// is recorded through [`Attribution::record`]: a caller (a test) that
-    /// must not depend on `TOG_STRICT` in the environment. Test-only, so
+    /// must not depend on `GREYWARD_STRICT` in the environment. Test-only, so
     /// no production path can record under a policy other than the
     /// one in force.
     #[cfg(test)]
@@ -1121,7 +1122,7 @@ impl Attribution {
     /// them. For tests; publication goes through `claim`.
     // A method cannot sit on lib.rs's `boundary` list: tests/npm_scripts.rs
     // and tests/git_deps.rs call it.
-    #[cfg_attr(tog_dead_code, allow(dead_code))]
+    #[cfg_attr(ward_dead_code, allow(dead_code))]
     pub fn recorded(&self) -> Vec<Exception> {
         with_frames(|frames| {
             frames
@@ -1350,13 +1351,13 @@ pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Res
     Err(crate::kernel::error::refused(
         io::ErrorKind::PermissionDenied,
         format!(
-            "cached object {id} carries exception(s): {}; 'tog --fresh' will not help; rebuild the object under a permissive policy or fix the cause",
+            "cached object {id} carries exception(s): {}; 'ward --fresh' will not help; rebuild the object under a permissive policy or fix the cause",
             denied_kinds.join(", ")
         ),
     ))
 }
 
-/// Tests that read or set `HOME` / `TOG_POLICY` hold this lock: the
+/// Tests that read or set `HOME` / `GREYWARD_POLICY` hold this lock: the
 /// environment is process-global, so a test that mutates it would otherwise
 /// redirect a concurrent `load` (the same hazard as `store::STORE_ENV_LOCK`).
 /// "Read" includes reading them indirectly: `audit` through `policy::load`,
@@ -1624,13 +1625,13 @@ deny = ["git-dependency"]"#,
             UNRECORDED_RESOLUTION,
             "go.sum",
             "missing",
-            Some("run `tog attest go`"),
+            Some("run `ward attest go`"),
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
             error.to_string(),
-            "policy denies unrecorded-resolution: go.sum: missing; run `tog attest go`"
+            "policy denies unrecorded-resolution: go.sum: missing; run `ward attest go`"
         );
         assert!(attribution.recorded().is_empty());
         // A permitted kind records and ignores the fix.
@@ -1649,10 +1650,10 @@ deny = ["git-dependency"]"#,
     #[test]
     fn the_strict_lift_names_where_strict_came_from() {
         assert_eq!(StrictSource::Flag.lift(), "rerun without --strict");
-        assert_eq!(StrictSource::Env.lift(), "unset TOG_STRICT");
+        assert_eq!(StrictSource::Env.lift(), "unset GREYWARD_STRICT");
         assert_eq!(
-            StrictSource::File(PathBuf::from("/etc/tog/policy.toml")).lift(),
-            "set 'strict = false' in /etc/tog/policy.toml"
+            StrictSource::File(PathBuf::from("/etc/greyward/policy.toml")).lift(),
+            "set 'strict = false' in /etc/greyward/policy.toml"
         );
     }
 
@@ -1749,7 +1750,7 @@ deny = ["git-dependency"]"#,
             strict_source: Some(StrictSource::Env),
             ..Policy::default()
         };
-        assert!(refusal(&by_env, GIT_DEPENDENCY, "x", "y").contains("unset TOG_STRICT"));
+        assert!(refusal(&by_env, GIT_DEPENDENCY, "x", "y").contains("unset GREYWARD_STRICT"));
 
         let by_file = Policy {
             strict: true,
@@ -1765,7 +1766,7 @@ deny = ["git-dependency"]"#,
     }
 
     /// A retired kind is no kind any more: nothing records it, and a deny
-    /// list written for an older tog still loads, without the entry.
+    /// list written for an older ward still loads, without the entry.
     #[test]
     fn a_retired_kind_is_dropped_from_a_deny_list_not_refused() {
         for (kind, _) in RETIRED_KINDS {
@@ -1789,8 +1790,8 @@ deny = ["git-dependency"]"#,
         assert_eq!(canonical_kind("unattested_index"), UNATTESTED_INDEX);
         assert_eq!(canonical_kind(UNATTESTED_INDEX), UNATTESTED_INDEX);
         assert_eq!(
-            canonical_kind("kind-from-a-newer-tog"),
-            "kind-from-a-newer-tog"
+            canonical_kind("kind-from-a-newer-greyward"),
+            "kind-from-a-newer-greyward"
         );
         // A deny list written under either spelling denies the one kind.
         let parsed = parse_file(
@@ -1865,11 +1866,11 @@ deny = ["git-dependency"]"#,
         let parent = temp.0.join("parent");
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(parent.join("project")).unwrap();
-        fs::create_dir_all(parent.join(".tog")).unwrap();
-        fs::write(parent.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::create_dir_all(parent.join(".greyward")).unwrap();
+        fs::write(parent.join(".greyward/policy.toml"), "strict = true\n").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let root = ProjectRoot::open(&parent.join("project")).unwrap();
         fs::rename(&parent, temp.0.join("moved")).unwrap();
         fs::create_dir_all(parent.join("project")).unwrap();
@@ -1889,17 +1890,17 @@ deny = ["git-dependency"]"#,
         let locked = base.join("search-only");
         let project = locked.join("project");
         fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(base.join(".tog")).unwrap();
-        fs::create_dir_all(locked.join(".tog")).unwrap();
-        fs::write(base.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::create_dir_all(base.join(".greyward")).unwrap();
+        fs::create_dir_all(locked.join(".greyward")).unwrap();
+        fs::write(base.join(".greyward/policy.toml"), "strict = true\n").unwrap();
         fs::write(
-            locked.join(".tog/policy.toml"),
+            locked.join(".greyward/policy.toml"),
             "deny = [\"git-dependency\"]\n",
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", temp.0.join("home").as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o111)).unwrap();
         let result = ProjectRoot::open(&project)
             .and_then(|root| load_with_sources_from(root.path(), Some(&root), false));
@@ -1916,12 +1917,12 @@ deny = ["git-dependency"]"#,
         let project = base.join("project");
         let moved = base.join("a/b/c/d/e/f/project");
         fs::create_dir_all(project.clone()).unwrap();
-        fs::create_dir_all(base.join(".tog")).unwrap();
+        fs::create_dir_all(base.join(".greyward")).unwrap();
         fs::create_dir_all(moved.parent().unwrap()).unwrap();
-        fs::write(base.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::write(base.join(".greyward/policy.toml"), "strict = true\n").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let root = ProjectRoot::open(&project).unwrap();
         fs::rename(&project, &moved).unwrap();
         let result = load_with_sources_from(root.path(), Some(&root), false);
@@ -1937,12 +1938,12 @@ deny = ["git-dependency"]"#,
         let project = restricted.join("project");
         let moved = temp.0.join("unrestricted/project");
         fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(restricted.join(".tog")).unwrap();
+        fs::create_dir_all(restricted.join(".greyward")).unwrap();
         fs::create_dir_all(moved.parent().unwrap()).unwrap();
-        fs::write(restricted.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::write(restricted.join(".greyward/policy.toml"), "strict = true\n").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let root = ProjectRoot::open(&project).unwrap();
         fs::rename(&project, &moved).unwrap();
         let result = load_with_sources_from(root.path(), Some(&root), false);
@@ -1963,10 +1964,10 @@ deny = ["git-dependency"]"#,
         let parent = temp.0.join("parent");
         let project = parent.join("project");
         fs::create_dir_all(&project).unwrap();
-        fs::write(parent.join(".tog"), "malformed").unwrap();
+        fs::write(parent.join(".greyward"), "malformed").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let root = ProjectRoot::open(&project).unwrap();
         assert!(load_with_sources_from(root.path(), Some(&root), false).is_err());
         assert!(load_with_sources_from(root.path(), None, false).is_err());
@@ -1977,16 +1978,16 @@ deny = ["git-dependency"]"#,
         let temp = crate::kernel::testutil::TempDir::new();
         let project = temp.0.join("project");
         let machine = temp.0.join("machine.toml");
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         fs::write(&machine, "strict = false\n").unwrap();
-        fs::write(project.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::write(project.join(".greyward/policy.toml"), "strict = true\n").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
-        let _policy = EnvVarGuard::set("TOG_POLICY", machine.as_os_str());
+        let _policy = EnvVarGuard::set("GREYWARD_POLICY", machine.as_os_str());
         let root = ProjectRoot::open(&project).unwrap();
         fs::rename(&project, temp.0.join("moved")).unwrap();
-        fs::create_dir_all(project.join(".tog")).unwrap();
-        fs::hard_link(&machine, project.join(".tog/policy.toml")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
+        fs::hard_link(&machine, project.join(".greyward/policy.toml")).unwrap();
         assert!(
             load_with_sources_from(root.path(), Some(&root), false).is_err(),
             "the replacement path must not suppress held policy"
@@ -2000,28 +2001,28 @@ deny = ["git-dependency"]"#,
         let project = temp.0.join("project");
         let outside = temp.0.join("outside");
         fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("policy.toml"), "strict = true\n").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let root = ProjectRoot::open(&project).unwrap();
-        fs::write(project.join(".tog/policy.toml"), "strict = true\n").unwrap();
+        fs::write(project.join(".greyward/policy.toml"), "strict = true\n").unwrap();
         let (policy, _) = load_with_sources_from(root.path(), Some(&root), false).unwrap();
         assert!(policy.strict);
 
-        // A symlinked policy file, and a symlinked `.tog`, are refused.
-        fs::remove_file(project.join(".tog/policy.toml")).unwrap();
+        // A symlinked policy file, and a symlinked `.greyward`, are refused.
+        fs::remove_file(project.join(".greyward/policy.toml")).unwrap();
         std::os::unix::fs::symlink(
             outside.join("policy.toml"),
-            project.join(".tog/policy.toml"),
+            project.join(".greyward/policy.toml"),
         )
         .unwrap();
         let error = load_with_sources_from(root.path(), Some(&root), false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
-        fs::remove_dir_all(project.join(".tog")).unwrap();
-        std::os::unix::fs::symlink(&outside, project.join(".tog")).unwrap();
+        fs::remove_dir_all(project.join(".greyward")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".greyward")).unwrap();
         let error = load_with_sources_from(root.path(), Some(&root), false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
     }
@@ -2033,27 +2034,27 @@ deny = ["git-dependency"]"#,
         let home = root.join("home");
         let parent = root.join("workspace");
         let project = parent.join("member");
-        fs::create_dir_all(home.join(".tog")).unwrap();
-        fs::create_dir_all(parent.join(".tog")).unwrap();
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(home.join(".greyward")).unwrap();
+        fs::create_dir_all(parent.join(".greyward")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         fs::write(
-            home.join(".tog/policy.toml"),
+            home.join(".greyward/policy.toml"),
             "deny = [\"git-dependency\"]\n",
         )
         .unwrap();
         fs::write(
-            project.join(".tog/policy.toml"),
+            project.join(".greyward/policy.toml"),
             "strict = true\ndeny = [\"file-collision\"]\n",
         )
         .unwrap();
         fs::write(
-            parent.join(".tog/policy.toml"),
+            parent.join(".greyward/policy.toml"),
             "deny = [\"weak-integrity\"]\n",
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let (merged, sources) = load_with_sources(&project, false).unwrap();
         let from_load = load(&project, false).unwrap();
         // Ancestors above the temp root belong to the machine running the
@@ -2064,19 +2065,19 @@ deny = ["git-dependency"]"#,
         let expected = [
             (
                 SourceOrigin::Machine,
-                home.join(".tog/policy.toml"),
+                home.join(".greyward/policy.toml"),
                 false,
                 GIT_DEPENDENCY,
             ),
             (
                 SourceOrigin::Project,
-                project.join(".tog/policy.toml"),
+                project.join(".greyward/policy.toml"),
                 true,
                 FILE_COLLISION,
             ),
             (
                 SourceOrigin::Project,
-                parent.join(".tog/policy.toml"),
+                parent.join(".greyward/policy.toml"),
                 false,
                 WEAK_INTEGRITY,
             ),
@@ -2104,8 +2105,8 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
         let (policy, sources) = load_with_sources(&root, true).unwrap();
         assert!(policy.strict);
         let flags: Vec<&PolicySource> = sources
@@ -2124,32 +2125,32 @@ deny = ["git-dependency"]"#,
 
         // With the variable set too, dropping the flag lifts nothing, so
         // the refusal names the variable instead.
-        let _strict = EnvVarGuard::set("TOG_STRICT", "1");
+        let _strict = EnvVarGuard::set("GREYWARD_STRICT", "1");
         let (policy, _) = load_with_sources(&root, true).unwrap();
         assert!(policy.strict);
         let message = refusal(&policy, WEAK_INTEGRITY, "left-pad", "sha1");
-        assert!(message.contains("unset TOG_STRICT"), "{message}");
+        assert!(message.contains("unset GREYWARD_STRICT"), "{message}");
         assert!(!message.contains("rerun without --strict"), "{message}");
     }
 
     /// A file that sets `strict = true` outlives the command, so it is the
-    /// source a refusal must name even when `--strict` or `TOG_STRICT=1`
+    /// source a refusal must name even when `--strict` or `GREYWARD_STRICT=1`
     /// asked for the same thing: dropping either one lifts nothing.
     #[test]
     fn a_strict_file_owns_the_refusal_even_under_the_flag() {
         let scratch = TempDir::named("policy-strict-file");
         let root = scratch.0.clone();
-        let machine = root.join(".tog/policy.toml");
-        fs::create_dir_all(root.join(".tog")).unwrap();
+        let machine = root.join(".greyward/policy.toml");
+        fs::create_dir_all(root.join(".greyward")).unwrap();
         fs::write(&machine, "strict = true\n").unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
 
         for (flag, env) in [(true, None), (false, Some("1")), (true, Some("1"))] {
             let _strict = match env {
-                Some(value) => EnvVarGuard::set("TOG_STRICT", value),
-                None => EnvVarGuard::remove("TOG_STRICT"),
+                Some(value) => EnvVarGuard::set("GREYWARD_STRICT", value),
+                None => EnvVarGuard::remove("GREYWARD_STRICT"),
             };
             let (policy, _) = load_with_sources(&root, flag).unwrap();
             assert!(policy.strict);
@@ -2160,7 +2161,7 @@ deny = ["git-dependency"]"#,
                 "flag={flag} env={env:?}: {message}"
             );
             assert!(!message.contains("rerun without --strict"), "{message}");
-            assert!(!message.contains("unset TOG_STRICT"), "{message}");
+            assert!(!message.contains("unset GREYWARD_STRICT"), "{message}");
         }
     }
 
@@ -2170,15 +2171,15 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let home = root.join("home");
         let project = home.join("project");
-        let machine = home.join(".tog/policy.toml");
-        fs::create_dir_all(home.join(".tog")).unwrap();
+        let machine = home.join(".greyward/policy.toml");
+        fs::create_dir_all(home.join(".greyward")).unwrap();
         fs::create_dir_all(&project).unwrap();
         fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
 
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
 
         let (merged, sources) = load_with_sources(&project, false).unwrap();
         assert!(merged.deny.contains(GIT_DEPENDENCY));
@@ -2187,7 +2188,7 @@ deny = ["git-dependency"]"#,
         assert_eq!(ours[0].origin, SourceOrigin::Machine);
         assert_eq!(ours[0].path.as_deref(), Some(machine.as_path()));
 
-        let project_policy = project.join(".tog/policy.toml");
+        let project_policy = project.join(".greyward/policy.toml");
         fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
         fs::write(&project_policy, "deny = [\"weak-integrity\"]\n").unwrap();
         let (merged, sources) = load_with_sources(&project, false).unwrap();
@@ -2210,17 +2211,17 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let home = root.join("home");
         let project = root.join("project");
-        let machine = home.join(".tog/policy.toml");
-        let project_policy = project.join(".tog/policy.toml");
-        fs::create_dir_all(home.join(".tog")).unwrap();
+        let machine = home.join(".greyward/policy.toml");
+        let project_policy = project.join(".greyward/policy.toml");
+        fs::create_dir_all(home.join(".greyward")).unwrap();
         fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
         fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
         fs::hard_link(&machine, &project_policy).unwrap();
 
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
 
         let (merged, sources) = load_with_sources(&project, false).unwrap();
 
@@ -2267,7 +2268,7 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let machine = root.join("machine.toml");
         let project = root.join("project");
-        let project_policy = project.join(".tog/policy.toml");
+        let project_policy = project.join(".greyward/policy.toml");
         fs::create_dir_all(project_policy.parent().unwrap()).unwrap();
         fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
         fs::hard_link(&machine, &project_policy).unwrap();
@@ -2276,8 +2277,8 @@ deny = ["git-dependency"]"#,
         fs::rename(&replacement, &machine).unwrap();
 
         let _env = test_env_lock();
-        let _policy = EnvVarGuard::set("TOG_POLICY", machine.as_os_str());
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _policy = EnvVarGuard::set("GREYWARD_POLICY", machine.as_os_str());
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
         let (merged, sources) = load_with_sources(&project, false).unwrap();
 
         assert!(merged.deny.contains(GIT_DEPENDENCY));
@@ -2303,18 +2304,18 @@ deny = ["git-dependency"]"#,
         let machine = root.join("machine.toml");
         fs::write(&machine, "deny = [\"git-dependency\"]\n").unwrap();
         let project = root.join("outer/project");
-        fs::create_dir_all(project.join(".tog")).unwrap();
-        fs::create_dir_all(root.join("outer/.tog")).unwrap();
-        fs::hard_link(&machine, root.join("outer/.tog/policy.toml")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
+        fs::create_dir_all(root.join("outer/.greyward")).unwrap();
+        fs::hard_link(&machine, root.join("outer/.greyward/policy.toml")).unwrap();
         fs::write(
-            project.join(".tog/policy.toml"),
+            project.join(".greyward/policy.toml"),
             "deny = [\"weak-integrity\"]\n",
         )
         .unwrap();
         let held = ProjectRoot::open(&project).unwrap();
         let _env = test_env_lock();
-        let _policy = EnvVarGuard::set("TOG_POLICY", machine.as_os_str());
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _policy = EnvVarGuard::set("GREYWARD_POLICY", machine.as_os_str());
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
         MACHINE_HELD_AT_COMPARE.with(|seen| seen.borrow_mut().clear());
         let (_, sources) = load_with_sources_from(&project, Some(&held), false).unwrap();
         let seen = MACHINE_HELD_AT_COMPARE.with(|seen| std::mem::take(&mut *seen.borrow_mut()));
@@ -2329,7 +2330,7 @@ deny = ["git-dependency"]"#,
             .collect();
         assert_eq!(projects.len(), 1, "{projects:?}");
         assert!(
-            projects[0].ends_with("outer/project/.tog/policy.toml"),
+            projects[0].ends_with("outer/project/.greyward/policy.toml"),
             "{projects:?}"
         );
     }
@@ -2340,7 +2341,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn policy_scopes_cannot_relax_another_threads_attribution() {
         let _env = test_env_lock();
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
         let _attribution = attribution_test_lock();
         let _policy = PolicyScope::install(Policy {
             deny: BTreeSet::from([WEAK_INTEGRITY.to_string()]),
@@ -2413,7 +2414,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn strict_scopes_follow_each_dispatch_and_restore() {
         let _env = test_env_lock();
-        let _strict_env = EnvVarGuard::remove("TOG_STRICT");
+        let _strict_env = EnvVarGuard::remove("GREYWARD_STRICT");
         for requested in [false, true, false] {
             let _dispatch = request_strict(requested);
             assert_eq!(requested_strict(), requested);
@@ -2449,7 +2450,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn strict_scopes_do_not_cross_dispatch_threads() {
         let _env = test_env_lock();
-        let _strict_env = EnvVarGuard::remove("TOG_STRICT");
+        let _strict_env = EnvVarGuard::remove("GREYWARD_STRICT");
         let _owner = request_strict(true);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2474,7 +2475,7 @@ deny = ["git-dependency"]"#,
     #[test]
     fn each_policy_scope_is_in_force_only_while_held() {
         let _env = test_env_lock();
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
         let _attribution = attribution_test_lock();
         let denying = |kind: &str| Policy {
             deny: BTreeSet::from([kind.to_string()]),
@@ -2505,18 +2506,18 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         for (env, flag) in [(false, false), (false, true), (true, false), (true, true)] {
             let _strict = if env {
-                EnvVarGuard::set("TOG_STRICT", "1")
+                EnvVarGuard::set("GREYWARD_STRICT", "1")
             } else {
-                EnvVarGuard::remove("TOG_STRICT")
+                EnvVarGuard::remove("GREYWARD_STRICT")
             };
             let (loaded, loaded_sources) = load_with_sources(&root, flag).unwrap();
             let mut built = Policy::default();
             let mut built_sources = Vec::new();
             apply_requested_strictness(&mut built, &mut built_sources, flag);
-            let label = format!("TOG_STRICT={env} --strict={flag}");
+            let label = format!("GREYWARD_STRICT={env} --strict={flag}");
             assert_eq!(built.strict, loaded.strict, "{label}");
             assert_eq!(built.strict_source, loaded.strict_source, "{label}");
             assert_eq!(built.deny, loaded.deny, "{label}");
@@ -2540,12 +2541,14 @@ deny = ["git-dependency"]"#,
         policy.strict_source = Some(StrictSource::Env);
         assert_eq!(
             strict_trace(&policy).as_deref(),
-            Some("policy: strict (TOG_STRICT=1)")
+            Some("policy: strict (GREYWARD_STRICT=1)")
         );
-        policy.strict_source = Some(StrictSource::File(PathBuf::from("/co/.tog/policy.toml")));
+        policy.strict_source = Some(StrictSource::File(PathBuf::from(
+            "/co/.greyward/policy.toml",
+        )));
         assert_eq!(
             strict_trace(&policy).as_deref(),
-            Some("policy: strict (/co/.tog/policy.toml)")
+            Some("policy: strict (/co/.greyward/policy.toml)")
         );
     }
 
@@ -2555,8 +2558,8 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", root.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
-        let _strict = EnvVarGuard::set("TOG_STRICT", "1");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
+        let _strict = EnvVarGuard::set("GREYWARD_STRICT", "1");
 
         let (policy, env_sources) = load_with_sources(&root, false).unwrap();
         assert!(policy.strict);
@@ -2594,21 +2597,21 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let home = root.join("home");
         let project = root.join("project");
-        fs::create_dir_all(home.join(".tog")).unwrap();
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(home.join(".greyward")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         fs::write(
-            home.join(".tog/policy.toml"),
+            home.join(".greyward/policy.toml"),
             "deny = [\"git-dependency\"]\n",
         )
         .unwrap();
         fs::write(
-            project.join(".tog/policy.toml"),
+            project.join(".greyward/policy.toml"),
             "strict = true\ndeny = [\"file-collision\"]\n",
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
         let loaded = load(&project, false).unwrap();
         // Ancestor rule: a workspace member inherits the root's policy.
         let member = project.join("crates/member");
@@ -2822,22 +2825,22 @@ deny = ["git-dependency"]"#,
         let root = scratch.0.clone();
         let home = root.join("home");
         let project = root.join("project");
-        fs::create_dir_all(home.join(".tog")).unwrap();
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(home.join(".greyward")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         let toml_list = |bytes: &[u8]| {
             let entries: Vec<String> = bytes.iter().map(|b| format!("\"{}\"", key(*b))).collect();
             format!("[signing]\ntrusted = [{}]\n", entries.join(", "))
         };
-        fs::write(home.join(".tog/policy.toml"), toml_list(&[1, 2])).unwrap();
+        fs::write(home.join(".greyward/policy.toml"), toml_list(&[1, 2])).unwrap();
         fs::write(
-            project.join(".tog/policy.toml"),
+            project.join(".greyward/policy.toml"),
             format!("deny = [\"git-dependency\"]\n{}", toml_list(&[2, 3])),
         )
         .unwrap();
         let _env = test_env_lock();
         let _home = EnvVarGuard::set("HOME", home.as_os_str());
-        let _policy = EnvVarGuard::remove("TOG_POLICY");
-        let _strict = EnvVarGuard::remove("TOG_STRICT");
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
+        let _strict = EnvVarGuard::remove("GREYWARD_STRICT");
         let (policy, sources) = load_with_sources(&project, true).unwrap();
         assert_eq!(policy.signing.as_ref().unwrap().trusted, keys(&[2]));
         assert!(policy.deny.contains(GIT_DEPENDENCY));
@@ -2855,14 +2858,18 @@ deny = ["git-dependency"]"#,
         assert_eq!(flag.trusted, None);
         // Without a machine declaration the project list is recorded but
         // trust stays unconfigured.
-        fs::write(home.join(".tog/policy.toml"), "deny = []\n").unwrap();
+        fs::write(home.join(".greyward/policy.toml"), "deny = []\n").unwrap();
         let (policy, sources) = load_with_sources(&project, false).unwrap();
         assert_eq!(policy.signing, None);
         let fixture = fixture_sources(&sources, &root);
         assert_eq!(fixture[0].trusted, None);
         assert_eq!(fixture[1].trusted, Some(keys(&[2, 3])));
         // An explicitly empty machine list is recorded as `Some([])`.
-        fs::write(home.join(".tog/policy.toml"), "[signing]\ntrusted = []\n").unwrap();
+        fs::write(
+            home.join(".greyward/policy.toml"),
+            "[signing]\ntrusted = []\n",
+        )
+        .unwrap();
         let (policy, sources) = load_with_sources(&project, false).unwrap();
         assert_eq!(policy.signing, Some(Signing::default()));
         assert_eq!(

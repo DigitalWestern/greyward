@@ -1,22 +1,22 @@
 //! Manifest discovery (python tailor): which files a project has, which
-//! manifest shape wins, and the `tog.toml` `[python]` configuration that steers it.
+//! manifest shape wins, and the `greyward.toml` `[python]` configuration that steers it.
 
 use super::*;
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct TogPythonConfig {
+pub(super) struct GreywardPythonConfig {
     pub(super) requirements: Option<PathBuf>,
     pub(super) extras: BTreeSet<String>,
 }
 
-pub(super) fn config(project: &ProjectRoot) -> io::Result<TogPythonConfig> {
-    let path = project.path().join("tog.toml");
+pub(super) fn config(project: &ProjectRoot) -> io::Result<GreywardPythonConfig> {
+    let path = project.path().join("greyward.toml");
     if !is_project_file(project, &path)? {
-        return Ok(TogPythonConfig::default());
+        return Ok(GreywardPythonConfig::default());
     }
     let value = parse_toml(&path, &read_text(project, &path)?)?;
     let Some(python) = value.get("python").and_then(toml::Value::as_table) else {
-        return Ok(TogPythonConfig::default());
+        return Ok(GreywardPythonConfig::default());
     };
     let requirements = python
         .get("requirements")
@@ -30,7 +30,7 @@ pub(super) fn config(project: &ProjectRoot) -> io::Result<TogPythonConfig> {
         .filter_map(toml::Value::as_str)
         .map(str::to_ascii_lowercase)
         .collect();
-    Ok(TogPythonConfig {
+    Ok(GreywardPythonConfig {
         requirements,
         extras,
     })
@@ -185,7 +185,7 @@ pub fn discover(
 
 pub(super) fn dynamic_dependencies_manifest(
     project: &ProjectRoot,
-    cfg: &TogPythonConfig,
+    cfg: &GreywardPythonConfig,
 ) -> io::Result<Manifest> {
     match setup_or_requirements_manifest(project, cfg) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Err(unreadable(
@@ -215,14 +215,14 @@ pub fn dynamic_requirements_fallback(project: &ProjectRoot) -> io::Result<Option
 }
 
 /// The requirements-directory source discovery would consume, including
-/// an explicit `tog.toml` choice. Resolution receipts cover its includes too.
+/// an explicit `greyward.toml` choice. Resolution receipts cover its includes too.
 pub(crate) fn resolution_requirements_source(project: &ProjectRoot) -> io::Result<Option<PathBuf>> {
     requirements_directory_candidate(project, &config(project)?)
 }
 
 pub(super) fn setup_or_requirements_manifest(
     project: &ProjectRoot,
-    cfg: &TogPythonConfig,
+    cfg: &GreywardPythonConfig,
 ) -> io::Result<Manifest> {
     let dir = project.path();
     let setup_cfg_path = dir.join("setup.cfg");
@@ -308,7 +308,7 @@ pub(super) fn project_manifest(
     root: &ProjectRoot,
     value: &toml::Value,
     source: &str,
-    cfg: &TogPythonConfig,
+    cfg: &GreywardPythonConfig,
 ) -> io::Result<Manifest> {
     let dir = root.path();
     let mut requirements = Vec::new();

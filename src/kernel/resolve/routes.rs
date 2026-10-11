@@ -16,7 +16,7 @@ use std::io;
 use std::net::SocketAddr;
 use url::Url;
 
-/// The upstream hosts the proxy may reach: the public registries tog
+/// The upstream hosts the proxy may reach: the public registries ward
 /// already fetches from, plus the GitHub hosts resolvers use for git
 /// dependencies. A registry that lives elsewhere is refused until it is
 /// configured as a permitted endpoint in machine policy.
@@ -168,7 +168,7 @@ impl Permitted {
     }
 }
 
-/// One upstream origin a route may reach, and the credential tog attaches
+/// One upstream origin a route may reach, and the credential ward attaches
 /// to requests for that origin. A credential never follows a redirect to
 /// another origin, and the tool never sees it.
 #[derive(Clone, PartialEq, Eq)]
@@ -310,9 +310,9 @@ impl ProxyAddress {
     }
 
     /// The forward-proxy URL with the session token as credentials:
-    /// `http://tog:<token>@<address>`.
+    /// `http://ward:<token>@<address>`.
     pub fn proxy_url(&self) -> String {
-        format!("http://tog:{}@{}", self.token, self.address)
+        format!("http://ward:{}@{}", self.token, self.address)
     }
 
     /// The registry-mirror base of one route:

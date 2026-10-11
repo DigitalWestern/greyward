@@ -1,20 +1,23 @@
 [package]
-name = "tog"
+name = "greyward"
 version = "0.1.0"
 edition = "2021"
 # Matches rust-toolchain.toml: the one compiler CI tests and releases build with.
 rust-version = "1.98.1"
 description = "One command for every package manager: pinned toolchains, locked graphs, an immutable store"
-repository = "https://github.com/DigitalWestern/tog"
-homepage = "https://github.com/DigitalWestern/tog"
+repository = "https://github.com/DigitalWestern/greyward"
+homepage = "https://github.com/DigitalWestern/greyward"
 readme = "README.md"
 license = "Apache-2.0"
 keywords = ["package-manager", "toolchain", "lockfile", "reproducible", "store"]
 categories = ["command-line-utilities", "development-tools"]
-# Not published to crates.io: the `tog` name there belongs to an unrelated
-# process-multiplexer crate. Pick a crate name, then remove this line.
-# `cargo install --git` and `cargo install --path .` work regardless.
+# Not published to crates.io yet. `cargo install --git` and
+# `cargo install --path .` work regardless.
 publish = false
+
+[[bin]]
+name = "ward"
+path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -53,15 +56,15 @@ url = "2"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 # Cargo workspace `members` globs, matched one path part at a time with the
 # crate cargo itself expands them with (rust-lang/glob), so `[**]`, classes
-# and the rest mean what they mean to cargo. tog walks the directories
+# and the rest mean what they mean to cargo. ward walks the directories
 # itself, without following symlinks; only `glob::Pattern` is used.
 glob = "0.3"
 
 [lints.rust]
-# `--cfg tog_dead_code` makes the internal modules private, so rustc's
+# `--cfg ward_dead_code` makes the internal modules private, so rustc's
 # dead-code lint sees what no command reaches (#247). CI's "No dead code"
 # step runs it with `-D dead_code`.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tog_dead_code)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(ward_dead_code)"] }
 
 # CI runs `cargo clippy --locked --all-targets -- -D warnings`, so every
 # clippy warning fails the build. These few are allowed project-wide.

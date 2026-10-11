@@ -1,4 +1,4 @@
-//! `tog add` / `remove` / `update` for Elixir (`Tailor::edit_manifest`).
+//! `ward add` / `remove` / `update` for Elixir (`Tailor::edit_manifest`).
 //! Mix has no command that edits mix.exs, so add and remove refuse with the
 //! exact line to write; update runs the store mix's `deps.update` through
 //! the edit door, which publishes mix.lock with its signed record.
@@ -9,7 +9,7 @@ use crate::tailors::edit::{
 };
 use std::io;
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "hex",
     name: "Hex",
@@ -44,11 +44,11 @@ pub(crate) fn edit_manifest(
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(by_hand(format!(
-                "there is no 'mix add': put {lines} in the deps list of mix.exs, then 'tog' (it runs mix deps.get and re-locks)"
+                "there is no 'mix add': put {lines} in the deps list of mix.exs, then 'ward' (it runs mix deps.get and re-locks)"
             )))
         }
         EditVerb::Remove => Err(by_hand(format!(
-            "there is no 'mix remove': delete {} from the deps list of mix.exs, then 'tog'",
+            "there is no 'mix remove': delete {} from the deps list of mix.exs, then 'ward'",
             texts
                 .iter()
                 .map(|name| format!("{{:{name}, ...}}"))

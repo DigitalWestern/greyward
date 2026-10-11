@@ -1,6 +1,6 @@
-# Tog limitations ledger
+# Greyward limitations ledger
 
-A standing, honest record of what tog fails to address or does not get
+A standing, honest record of what Greyward fails to address or does not get
 right. Items leave this list only when fixed and regression-tested. Each
 entry says what breaks, for whom, and whether it fails loud or silent.
 
@@ -12,11 +12,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Kernel-wide
 
-- **`tog fmt` is Rust-only**; other ecosystems fail clearly (the locked Rust release's
+- **`ward fmt` is Rust-only**; other ecosystems fail clearly (the locked Rust release's
   rustfmt, or a local toolchain's own, no `Cargo.lock`). It writes no closure, so nothing
-  roots the rustfmt object: `tog gc` between two runs can reclaim it, and the next
-  `tog fmt` realizes it again (a download when gc also cleared the archive cache).
-- **`tog audit` vouches for who wrote a record only under a `[signing]` policy.** Without
+  roots the rustfmt object: `ward gc` between two runs can reclaim it, and the next
+  `ward fmt` realizes it again (a download when gc also cleared the archive cache).
+- **`ward audit` vouches for who wrote a record only under a `[signing]` policy.** Without
   a `[signing]` table in the machine policy it judges records on their contents, says that
   signatures were not checked, and `--signed` refuses to run. Under CI (`CI` set, not
   `false` or `0`) a plain audit refuses too, unless `--allow-unsigned` is passed. With
@@ -24,34 +24,34 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   every closure file in
   the working tree carries a valid signature from a key the machine policy trusts, that
   every detected ecosystem has its primary closure, that each record is current for the
-  inputs on disk, and that no recorded exception is denied or unknown. It reads `tog-toolchain.toml` the way
+  inputs on disk, and that no recorded exception is denied or unknown. It reads `greyward-toolchain.toml` the way
   `status` does: a missing lock, a missing section, a stale lock row, or a record built from
   another bundle than the lock names is `stale`. It does not prove the signer's sync was
   honest or safe to run. Every door that changes a lock (`add`/`remove`/`update`,
   missing-lock generation during `sync`/`plan`, `attest`) runs the ecosystem's tool confined
-  through tog's proxy, and the signed resolution record says which ledger saw its traffic,
+  through Greyward's proxy, and the signed resolution record says which ledger saw its traffic,
   but audit judges the record, not the run. Nor does it re-verify store bytes, re-check
   object metadata, or judge what
-  `tog run`/`x` executed. A job that runs untrusted project code must not hold a signing
-  key. The machine policy is whatever `TOG_POLICY` or `$HOME` selects: the gate's
+  `ward run`/`x` executed. A job that runs untrusted project code must not hold a signing
+  key. The machine policy is whatever `GREYWARD_POLICY` or `$HOME` selects: the gate's
   workflow, environment, binary, and machine policy must be controlled outside the
-  untrusted checkout, and pointing `TOG_POLICY` at a checkout-controlled file gives that
+  untrusted checkout, and pointing `GREYWARD_POLICY` at a checkout-controlled file gives that
   file machine authority. `projected_at` is authenticated metadata, not an expiry: a genuine
   old record whose recorded inputs still match passes. Any record the gate cannot believe or
   compare (no signature, no recorded inputs, no recorded platform, no exception record)
-  fails as `outdated` rather than passing, so pre-signing projects need one `tog`
+  fails as `outdated` rather than passing, so pre-signing projects need one `ward`
   under a trusted key before the gate is
-  useful. An exception kind this binary does not know (a record written by a newer tog)
+  useful. An exception kind this binary does not know (a record written by a newer Greyward)
   fails as `unknown` rather than being permitted. Loud.
 - **GC is conservative around what it cannot read.** Store jobs hold a shared activity
   lease; GC skips while work is active (older binaries do not know the protocol). `root/2`
   records survive moves, but a pathname-only root (the form before them) and an unreadable
-  object record block the sweep — an unreadable registry record blocks it too. `tog gc
-  --forget <key>` and `tog gc --drop-object <id>` are the give-up valves.
-- **The GC safety guarantee has a stated boundary.** It covers cooperating tog processes
+  object record block the sweep — an unreadable registry record blocks it too. `ward gc
+  --forget <key>` and `ward gc --drop-object <id>` are the give-up valves.
+- **The GC safety guarantee has a stated boundary.** It covers cooperating Greyward processes
   on a local filesystem with working locks and atomic rename. Not covered: older binaries;
   programs run directly from store paths; malicious same-user modification; descendants
-  outliving the awaited child; orphans after SIGKILL of the supervising tog; network
+  outliving the awaited child; orphans after SIGKILL of the supervising Greyward; network
   filesystems, where `flock` is advisory in name only.
 - **Signal delivery has three edges.** Parent-directed TERM is forwarded to the direct child;
   a group-directed TERM reaches parent and child independently and is forwarded too
@@ -59,16 +59,16 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   forwarded — terminal process-group delivery (`^C`) is the supported path. A cancellation
   across the spawn boundary is never dropped. `128 + signal` is a shell-visible exit code, not
   a wait status. An inherited ignored SIGCHLD (`SIG_IGN` or `SA_NOCLDWAIT`) is overridden from
-  tog's first supervised child on, for the life of the process, so no exit status is
+  Greyward's first supervised child on, for the life of the process, so no exit status is
   auto-reaped away; the child still execs with the inherited `SIG_IGN`. A TERM that reaches no
   child (it arrives after the child was reaped, while its output still drains) is re-raised
-  when the last supervision ends, so tog stops as the inherited disposition says. Code that
-  installs its own TERM/INT/HUP/QUIT handler after tog's first supervised child replaces tog's
+  when the last supervision ends, so Greyward stops as the inherited disposition says. Code that
+  installs its own TERM/INT/HUP/QUIT handler after Greyward's first supervised child replaces Greyward's
   for good, and supervision stops forwarding that signal (debug builds assert against it).
 - **The tools a sync runs find the project by pathname.** A sync holds the project
   directory open from its first read to its last write: detection, the project's own
-  `.tog/policy.toml`, manifests, locks, closures (including the ones root registration
-  imports), `.venv`/`node_modules` links and `.tog` all go through that one descriptor. The GC
+  `.greyward/policy.toml`, manifests, locks, closures (including the ones root registration
+  imports), `.venv`/`node_modules` links and `.greyward` all go through that one descriptor. The GC
   root and the per-project lock are keyed on the canonical path the project was opened at,
   never resolved again, and the sync refuses once that path stops naming the held directory
   (after the store wait, before each ecosystem, before a root is registered, and after the
@@ -81,10 +81,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   tool is handed (a member manifest, a requirements file, `BUNDLE_GEMFILE`) are named
   relative to the directory it entered, or read from a held snapshot when they lie outside
   the project, so the tool opens them in the held directory too. The one absolute input
-  left is `tog run`'s `BUNDLE_GEMFILE`: the user's command may start in a subdirectory and
+  left is `ward run`'s `BUNDLE_GEMFILE`: the user's command may start in a subdirectory and
   still needs the root Gemfile, so it is named by its full path, and Bundler in that
   command resolves the path when it reads it. Files above the project (a Cargo workspace
-  root, a parent `go.work`, .NET `Directory.*` files, a parent `.tog/policy.toml`) are read
+  root, a parent `go.work`, .NET `Directory.*` files, a parent `.greyward/policy.toml`) are read
   from the directories that contain the held one (`..` from its descriptor), not from the
   path's parents. Policy loading verifies each held ancestor still has its original name and
   refuses a changed chain, so a temporary move cannot lift a parent policy.
@@ -95,26 +95,26 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   [CLI status table](CLI.md#conventions) for ordinary errors, usage errors,
   refusals (3), stale locks (4), unsupported requests (5) and signals.
   Completed `audit`, `status` and `doctor` reports retain their verdict codes.
-  `run`, `x` and `fmt` pass the program's status through. A tool argument that is spelled like one of tog's
+  `run`, `x` and `fmt` pass the program's status through. A tool argument that is spelled like one of Greyward's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the
   global options (`-C`, `-q`, `-v`, `--no-color`) while they precede the tool's first
   non-option word. `run` and `build` never take one, so they need no `--` for those.
-- **`tog status` compares recorded inputs only.** `-r` includes, `requirements/` members,
+- **`ward status` compares recorded inputs only.** `-r` includes, `requirements/` members,
   and workspace-member package.json are not recorded. Cargo/Ruby/Elixir/.NET compare the lock
   hash only; Go catches `require`/`replace` only via `go.sum`; a closure written before those
   fields were recorded is reported `unchecked` and fails the command, since nothing about it
   can be compared.
 - **One toolchain per lock root.** Toolchain discovery is anchored at the project root
-  where `tog-toolchain.toml` sits, not at the current directory, so every developer, CI
+  where `greyward-toolchain.toml` sits, not at the current directory, so every developer, CI
   job and subdirectory produces the same consulted-path list and the same staleness
   verdict. The cost is that a toolchain source in a subdirectory — `web/.node-version`
-  under a root-level lock — is not a toolchain source for tog, though uv or `nvm` would
+  under a root-level lock — is not a toolchain source for Greyward, though uv or `nvm` would
   honor it. Per-subproject toolchains would need per-subproject sections and are not
   designed.
 - **The two-machine lock diff has been run once, by hand.** A lock carries a row per
   platform and is written from the intersection of releases complete on both. On
   2026-09-25 a seven-ecosystem lock written on Linux synced unchanged on an arm64 Mac, the
-  Mac wrote the same bytes from scratch, and `tog status` matched. No CI job repeats it, so
+  Mac wrote the same bytes from scratch, and `ward status` matched. No CI job repeats it, so
   a change after that date is proven by test, not by two machines.
 - **A committed lock is a set of URLs to review.** A lock row's URL must sit under an
   endpoint the source policy admits for the row's own `provider`, and so must every
@@ -130,10 +130,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
 - **`add` / `remove` / `update` run the ecosystem's tool in the resolution sandbox**, with
-  no network of its own, through tog's resolution proxy: Go, Cargo, Node (npm and the pinned
+  no network of its own, through Greyward's resolution proxy: Go, Cargo, Node (npm and the pinned
   pnpm), Python (uv) and Ruby (Bundler). There is no unsandboxed fallback: a host where
   neither bubblewrap nor rootless podman can isolate the tool refuses the edit and names
-  what is missing (`tog doctor --isolation`).
+  what is missing (`ward doctor --isolation`).
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.
 - **A Node `file:` or `link:` dependency outside the project is refused** by every door
   (edits, a missing lock, `attest`), naming the manifest and the path: the confined npm or
@@ -145,31 +145,31 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Membership is the `pnpm-lock.yaml` `importers` list and nothing else. **A member added since
   the last `pnpm install` is not in the lock and cannot be distinguished from a deliberate
   exclusion**, so edits refuse loudly with two remedies: `pnpm install` at the root, or a
-  `.tog` directory in it.
+  `.greyward` directory in it.
 - **pnpm patches are resolution inputs only when `package.json` names them.** The patch
   files `pnpm.patchedDependencies` lists are in the resolution basis and the record, so a
   patch edited after signing reads as a change. The same setting in `pnpm-workspace.yaml`
-  (pnpm 10) is not read: tog reads that file's `packages` alone.
-- **An npm workspace member is edited at the root.** `tog add` in a member whose root
+  (pnpm 10) is not read: Greyward reads that file's `packages` alone.
+- **An npm workspace member is edited at the root.** `ward add` in a member whose root
   `package.json` names it in `workspaces` runs npm in the member with the root as the lock
   root, so the root's `package-lock.json` (created there if it has none) and resolution record
   are what change. A pnpm member whose root has `pnpm-workspace.yaml` naming it but no
-  `pnpm-lock.yaml` yet is placed at the root the same way. A member with a lock or a `.tog`
+  `pnpm-lock.yaml` yet is placed at the root the same way. A member with a lock or a `.greyward`
   directory of its own is its own root. A sync run in a member (npm or pnpm) that has no lock
-  of its own refuses, naming the root: run `tog` there.
+  of its own refuses, naming the root: run `ward` there.
 - **Yarn classic edits remain a refusal** (no lockfile-only edit mode); run the Yarn command
-  tog names. Yarn Berry is not imported (cache-zip checksums are not tarball integrity
+  Greyward names. Yarn Berry is not imported (cache-zip checksums are not tarball integrity
   values).
-- **`tog x` covers PyPI and npm**. A removed *node* environment orphans its node_modules
-  forest under `<store>/forests/`, which plain `tog gc` never visits: only `tog gc
+- **`ward x` covers PyPI and npm**. A removed *node* environment orphans its node_modules
+  forest under `<store>/forests/`, which plain `ward gc` never visits: only `ward gc
   --project` reclaims it. Cleanup stops with an error when a root's recorded originating
   store is unavailable, and skips a root with no request record whose owning store its
   closure does not name.
 - **A store is never migrated.** The store carries a format marker (`<store>/format`), and
-  this tog reads exactly one format. A store written before the marker existed, or by a
-  newer tog, or whose marker is damaged or unreadable, is refused by every command that
-  reads or writes the store. `tog store path` and `tog doctor` still report on it, and
-  `tog gc --reset` empties it (the download cache is kept), after which every project
+  this Greyward reads exactly one format. A store written before the marker existed, or by a
+  newer Greyward, or whose marker is damaged or unreadable, is refused by every command that
+  reads or writes the store. `ward store path` and `ward doctor` still report on it, and
+  `ward gc --reset` empties it (the download cache is kept), after which every project
   syncs again. Nothing carries old objects across a format change.
 - **Unpinned host build inputs.** The Linux host C toolchain (gcc, binutils, glibc headers)
   and the macOS Xcode/clang/SDK are not in build identity — two hosts can produce different
@@ -178,7 +178,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   libxcrypt, the compiler's own files): every other host header, `-l` library, static
   archive and pkg-config file is absent from the compiler's and linker's default search
   paths and from pkg-config in that sandbox. Other host shared libraries stay loadable so
-  the compiler and linker themselves run: they are moved into a `.tog-host-runtime`
+  the compiler and linker themselves run: they are moved into a `.greyward-host-runtime`
   subdirectory of their library directory, which `ld` does not search, and reached through
   the sandbox's own copy of the loader cache (`/etc/ld.so.cache`), which names them there.
   The loader searches that cache after a program's own `DT_RUNPATH`, so a program a gem
@@ -186,7 +186,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   (#332). A library subdirectory
   with headers, static or libtool archives, `pkgconfig` or `cmake` under it
   (`/usr/lib64/perl5/CORE`, a Python package's CFFI headers, `/usr/lib64/libnl`), or that
-  tog cannot list, is curated the same way, so an explicit `-I` or `-L` into it finds no
+  Greyward cannot list, is curated the same way, so an explicit `-I` or `-L` into it finds no
   header, archive, object, `lib*.so` symlink or linker script (#331); the compiler's own
   `gcc` and `clang` directories are kept whole, as are a versioned LLVM tree's
   (`llvm-<N>`) `bin` and `lib/clang`, where Ubuntu keeps clang's own headers; the rest
@@ -199,15 +199,15 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   path), so `-L` into it can link it; and a plugin directory missing from that list loses
   its `lib*.so` symlinks, so a program that loads one by that name fails in the build
   sandbox until the directory is added. Kept files are symlinks into
-  one read-only bind of each whole curated host directory under `/.tog-host-files` (#334),
+  one read-only bind of each whole curated host directory under `/.greyward-host-files` (#334),
   so every file the view hides is still readable there by that path: no default search
   path, pkg-config directory or symlink in the view names it, but a build that names
-  `/.tog-host-files` on purpose reads the host's development files. A build that
+  `/.greyward-host-files` on purpose reads the host's development files. A build that
   resolves a kept file's real path reaches that copy too: `readlink -f
-  /usr/lib64/libssl.so.3` names it under `/.tog-host-files`, and a `-L` into that
+  /usr/lib64/libssl.so.3` names it under `/.greyward-host-files`, and a `-L` into that
   directory finds `libssl.so`. For the same reason `find -type f` in a curated directory
   does not list the libraries it kept, which are symlinks there (#559). Native
-  gems also build with tog's pinned native library set mounted (zlib, openssl, libffi,
+  gems also build with Greyward's pinned native library set mounted (zlib, openssl, libffi,
   libxml2, sqlite, ncurses and the rest of `nativelibs.rs`), and load it at run time through
   their rpath (#329); every Linux gems object with a native gem names that set, so those
   objects rebuild once after the change. An extconf that ignores pkg-config, `CPATH`,
@@ -230,7 +230,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   taken right before and right after each build against the whole host (about 12 ms on a
   Fedora 44 workstation); if the two differ, or two gems of one object fell back against
   different host states, the sync fails ("host development files changed during the build
-  of <gem>; re-run tog"). A store record keyed by the runtime-only id and that build-time
+  of <gem>; re-run Greyward"). A store record keyed by the runtime-only id and that build-time
   fingerprint lets a later sync over the same store, on any host whose build inputs
   fingerprint the same, reuse the object instead of rebuilding; the lookup fingerprints the
   host again, only when the runtime-only object is missing, and a host in another state
@@ -260,15 +260,15 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   change with the host state the build environment fell back against. Python
   sdists with no native or Rust input, and macOS builds, still see the whole host.
 - **Pinned native-library objects are store-root-specific**: `native-libs/libset/3` includes
-  the canonical `TOG_STORE` root in its identity; moving a store requires re-realizing the
+  the canonical `GREYWARD_STORE` root in its identity; moving a store requires re-realizing the
   libset. **Linux sandbox roots are canonical paths** (a symlink alias root is invisible).
   Both matter only to new callers.
-- **Tog's security claim is provenance, not runtime containment.** Acquisition and build
+- **Greyward's security claim is provenance, not runtime containment.** Acquisition and build
   happen behind one door, builds cannot reach the network, and every closure lists what went
   in and every exception waved through. A hostile package can still put its payload in its
-  build output and run it at `tog run` time with full network. Do not describe tog
+  build output and run it at `ward run` time with full network. Do not describe Greyward
   as stopping malicious code from running.
-- **Sandboxes are cooperative hermeticity, not hostile-code containment.** On Linux, tog scans
+- **Sandboxes are cooperative hermeticity, not hostile-code containment.** On Linux, Greyward scans
   every declared root, the cwd, the scratch and the fixed `/etc` entries it binds for Unix
   sockets before invoking bubblewrap. The build sandbox trusts `/usr` unscanned; the
   resolution sandbox scans `/usr` and the other system roots once per process. A socket created
@@ -279,7 +279,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **Delegated planning runs in the resolution sandbox.** A Gemfile, a mix.exs and a
   csproj are code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler), Elixir's
   (mix) and .NET's (restore) resolvers all run confined, reaching their registry only
-  through tog's proxy.
+  through Greyward's proxy.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
@@ -324,15 +324,15 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `Cargo.lock` get a store-Cargo lock recorded `unattested-cargo-lock`; that lock is
   generated confined, through the resolution proxy, like a project's.
 - **Immutable venvs are not drop-in venvs**: no activate scripts, and pip cannot mutate them.
-  `tog run pip ...` and `tog run activate` are refused with the verb that replaces them
-  (`tog add`, `tog run <command>`) rather than left to report a missing file, but **no pip
+  `ward run pip ...` and `ward run activate` are refused with the verb that replaces them
+  (`ward add`, `ward run <command>`) rather than left to report a missing file, but **no pip
   shim and no `activate` script are planned**: a shim that accepted `pip install` would have
   to either mutate a read-only store object or silently rewrite the manifest, and an
   `activate` script inside the projection would have to be written into a read-only object.
-  For a shell, `tog env` prints the environment as exports and `eval "$(tog env)"` applies
+  For a shell, `ward env` prints the environment as exports and `eval "$(ward env)"` applies
   it; that environment is then **ambient** for that shell — every later command sees it,
-  tog's or not, and it outlives a `cd` out of the project. direnv is the way to scope it back
-  to a directory (`echo 'eval "$(tog env)"' > .envrc && direnv allow`), which is why tog
+  Greyward's or not, and it outlives a `cd` out of the project. direnv is the way to scope it back
+  to a directory (`echo 'eval "$(ward env)"' > .envrc && direnv allow`), which is why Greyward
   prints the environment instead of activating anything itself.
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
@@ -343,12 +343,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
   the project's own backend because it can request third-party source builds.
   sdist build-requirement resolution never builds.
 - **Lock markers are read as PEP 508 and `packaging` 25 read them, with these
-  refusals.** Each is a marker tog will not guess at, so a lock that uses one fails
+  refusals.** Each is a marker Greyward will not guess at, so a lock that uses one fails
   to import, naming it:
   - `platform_release` and `platform_version` are the running kernel's `uname -r` and
     `uname -v`, so a marker using them is evaluated only when the target is this host,
     and refused for a cross target. A project whose `uv.lock` names either records the
-    kernel in its closure, so `tog status` reports a change and the next sync re-reads
+    kernel in its closure, so `ward status` reports a change and the next sync re-reads
     the lock after a kernel update. A Linux release such as `6.8.0-45-generic` is not a
     PEP 440 version, so ordering it (`platform_release >= '5.0'`) is refused by the next
     rule. `==`, `!=` and `in` work.
@@ -367,41 +367,41 @@ Selection covers every patch of each maintained CPython minor that python-build-
   One divergence evaluates differently: `python_full_version ~= '3.12.0c1'` follows
   PEP 440 (`>=3.12.0c1, ==3.12.*`) and is true for 3.12.5, where `packaging` 25 keeps an
   extra release component for the `c`/`pre`/`preview` spellings and answers false.
-- **Entry-point names are checked against tog's Unicode version, not the interpreter's.** The
-  identifier tables come from the ICU data tog is built with, so a letter added in a newer
-  Unicode than the target CPython knows is accepted by tog and is a SyntaxError in the
+- **Entry-point names are checked against Greyward's Unicode version, not the interpreter's.** The
+  identifier tables come from the ICU data Greyward is built with, so a letter added in a newer
+  Unicode than the target CPython knows is accepted by Greyward and is a SyntaxError in the
   generated launcher.
 
 ## JavaScript / npm
 
-- **`npm install` is refused, not prevented.** `tog run npm install` is refused with an
+- **`npm install` is refused, not prevented.** `ward run npm install` is refused with an
   explanation, but npm run directly in the project still replaces the `node_modules` symlink
-  with a real directory. Nothing enforces the projection at the filesystem level. `tog status`
+  with a real directory. Nothing enforces the projection at the filesystem level. `ward status`
   reports it as a real directory written over the projection and the next sync moves it
   aside and re-projects, so it is recoverable, not prevented.
 - **Install scripts needing network for logic** are permissive with `install-script-failed`
   (declared-artifacts covers only matching cache locations; Electron-class needs per-version
   declarations). **Git sources are realized only when pinned to a full commit.**
   Branch/tag/bare URLs and ambient Git config fail closed. npm runs a git dep's `prepare`
-  script; tog does not. Python and Cargo git deps work the same way, but Cargo's are not
+  script; Greyward does not. Python and Cargo git deps work the same way, but Cargo's are not
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
-  cargo, not tog.
+  cargo, not Greyward.
 - **A required package for another platform is installed only from a pnpm lock.** pnpm
   installs a non-optional package whose `os`/`cpu`/`libc` excludes the host (with a warning);
-  npm refuses the same lock with `EBADPLATFORM`, and tog follows whichever tool wrote the
+  npm refuses the same lock with `EBADPLATFORM`, and Greyward follows whichever tool wrote the
   lock. From a pnpm lock the package is placed as verified files, recorded as
   `foreign-platform-package`, and its install scripts are not run. From a `package-lock.json`
   the sync stops and says to make the dependency optional. `yarn.lock` records no
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
-- **A `pnpm-workspace.yaml` whose `packages` tog cannot read refuses sync, edits, and
+- **A `pnpm-workspace.yaml` whose `packages` Greyward cannot read refuses sync, edits, and
   `attest`** (an anchor, an alias, a block scalar, a mapping item): a resolution record names
-  every workspace member's `package.json`, so a members list tog cannot read would leave a
+  every workspace member's `package.json`, so a members list Greyward cannot read would leave a
   member uncovered. The refusal comes in preflight, before anything is realized; write
   `packages` as a plain list of patterns.
 - **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
-  planning, tog refuses a `pnpm-lock.yaml` that is missing a workspace member
+  planning, Greyward refuses a `pnpm-lock.yaml` that is missing a workspace member
   `pnpm-workspace.yaml` names, or whose importers disagree with a package.json, applying the
   lock's `overrides` by pnpm's selector rules (`name@range`, `parent>name`). A
   `.pnpmfile.cjs` `readPackage` hook that rewrites a project's own dependencies is not run,
@@ -411,10 +411,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `packages` value that is not a plain list (an anchor, an alias) skips the member check with
   a note.
 - **A workspace member whose `node_modules` holds files git tracks is not projected.** Some
-  repositories commit a fixture `node_modules` (vite does). tog moves an npm-made
+  repositories commit a fixture `node_modules` (vite does). Greyward moves an npm-made
   `node_modules` into the store's backups before projecting, but moving a tracked one would
   delete committed source, so that member keeps its directory, gets no projected
-  dependencies, and the sync prints a warning naming it (`tog status` counts that member
+  dependencies, and the sync prints a warning naming it (`ward status` counts that member
   synced while its directory is there). A tracked `node_modules` at the project root stops
   the sync instead, even when the only tracked file is a `.gitkeep` or `.gitignore`: untrack
   it (`git rm -r --cached node_modules`) and sync again. Each workspace's own repository
@@ -427,7 +427,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
   package's real path, and a store object cannot hold a link into a project, so for such a
   project the whole tree is copied into the projection (copy-on-write where the filesystem
   has reflinks: XFS, Btrfs, APFS; a full copy on ext4) instead of linked. The copy is
-  writable and tog does not re-verify it, so each such package records
+  writable and Greyward does not re-verify it, so each such package records
   `unattested-mutable-state`, which the company policy template denies. Copying only the
   packages that need it is not built.
 - **Skipped install-time downloads are not in the closure**: puppeteer- and cypress-class
@@ -443,10 +443,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 - **Cargo resolves in the sandbox, through TLS interception** (`add`/`remove`/`update`, a
   missing `Cargo.lock`, `attest`, and an sdist's missing lock). Cargo has no network of its
-  own: tog's proxy answers the crates.io index and download hosts and pinned git fetches,
+  own: Greyward's proxy answers the crates.io index and download hosts and pinned git fetches,
   and records each request. Known edges: a project `.cargo/config.toml` that sets
   `registry.global-credential-providers` or a `credential-provider` as an array stops cargo
-  with a config merge error, because tog forces string forms so no project provider can run
+  with a config merge error, because Greyward forces string forms so no project provider can run
   (set them as strings or drop them). Authenticated alternative registries fail, as the
   sandbox gets no token. Path dependencies outside the workspace root are found from the
   manifests (dependency tables, `[patch]`, `[replace]`, `target.*`, `[workspace]`) and
@@ -456,15 +456,15 @@ Selection covers every patch of each maintained CPython minor that python-build-
   there is no repository, never in a hidden directory, and that bound may not be `/` or the
   home directory: anything else is refused before cargo starts, naming the manifest. A
   resolution record names files inside the workspace only, so a workspace with a path
-  dependency outside it is not attested (`tog attest` refuses it by name) and its edits and
+  dependency outside it is not attested (`ward attest` refuses it by name) and its edits and
   generated lock carry no record (`unrecorded-resolution` at sync). `attest` runs at the
-  workspace root only. tog finds that root itself, reading the manifests the way cargo does;
+  workspace root only. Greyward finds that root itself, reading the manifests the way cargo does;
   no cargo runs on the host. A project file that is the signing key under another name (a
-  symlink, a hard link, an `include`) is refused before cargo reads it, and no message tog
+  symlink, a hard link, an `include`) is refused before cargo reads it, and no message Greyward
   prints carries the key. A workspace member reached through a symlinked directory is refused
   for lock generation, edits and attest: the confined cargo would not see it. A `members`
   entry outside the workspace root (`../x`, an absolute path elsewhere) is treated like a
-  path dependency outside it: the same location rules, `tog attest` refuses it by name, and
+  path dependency outside it: the same location rules, `ward attest` refuses it by name, and
   edits and generated locks carry no record. Config `include`s are followed for the registries they declare and recorded as inputs; one
   that leads out of the workspace is refused. A git dependency resolved through the proxy
   has no offline test yet (the fixture registry holds no upload-pack body), only the git
@@ -473,7 +473,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
   manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
   Cross `targets` get their standard library from the release's signed channel manifest,
-  but tog provides no linker or C sysroot for them, so a crate that links for another
+  but Greyward provides no linker or C sysroot for them, so a crate that links for another
   platform still needs one on the machine. A custom toolchain works as a local directory
   (`path =` in rust-toolchain.toml), below.
 - **A local toolchain (`[toolchain] path`) is trusted by content, not by origin.** The lock
@@ -488,9 +488,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   were (an NFS mount with coarse or cached attributes, or a write through a shared `mmap`
   that never updates the times) is not seen until the import's copy, hashed from the
   bytes, disagrees. That refusal re-reads the whole tree and rewrites the cache. Locking
-  (`tog update --toolchain rust`) always reads every file. The lock row names
+  (`ward update --toolchain rust`) always reads every file. The lock row names
   an absolute path on one machine and one host platform, so a checkout elsewhere needs
-  `tog update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
+  `ward update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
   components, targets or a profile. A symlink in the tree is resolved against the tree
   itself, through any links it passes, and a tree with one that leads outside is refused.
 - **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
@@ -500,10 +500,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
 - **`profile = "complete"` fails on releases that did not build all of it** (1.96.1 lists
   `miri` and `rustc-codegen-cranelift` for Linux and macOS and marks both unavailable), as
   rustup's does; name the components instead.
-  **`tog build` covers `build` only** — no sandboxed test/clippy/doc; those run via
-  `tog run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
+  **`ward build` covers `build` only** — no sandboxed test/clippy/doc; those run via
+  `ward run cargo ...` offline but unsandboxed. target/ is unmanaged scratch (no shared
   build cache). **`cargo install` through the wrapper is unmanaged** (lands in
-  `.tog/cargo-home/bin`, outside the closure).
+  `.greyward/cargo-home/bin`, outside the closure).
 
 ## Go
 
@@ -517,7 +517,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
   GOPROXY=off errors. **Private modules are unsupported**: GOPROXY forced to proxy.golang.org,
   GOVCS off, GOPRIVATE scrubbed.
 - **The planner runs `go mod tidy` on out-of-sync manifests automatically**, mutating
-  go.mod/go.sum. **`tog build` stages outputs then moves them**: `-o`-dependent workflows
+  go.mod/go.sum. **`ward build` stages outputs then moves them**: `-o`-dependent workflows
   differ from plain `go build`; `-mod`/`-toolexec`/`-o` are rejected. The plan-cache key
   includes only `*.go` sources — go:embed and non-.go inputs do not invalidate it.
 
@@ -529,7 +529,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
   locked json/psych/openssl older than the toolchain's default can Gem::LoadError if something
   activates the default before Bundler setup. Untested matrix; potentially silent.
 - **`bundle exec` compatibility is unproven**: env-based GEM_HOME activation works for
-  `tog run ruby/rake`; full bundler runtime activation has not been exercised on a real
+  `ward run ruby/rake`; full bundler runtime activation has not been exercised on a real
   Rails-class app.
 - **System /etc/gemrc is still read** (GEMRC=/dev/null blocks only the user file).
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
@@ -546,11 +546,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   incompatible host fails only at execution time. Loud, but late.
 - **Fail-closed rows**: git deps; non-hexpm repos; legacy mix.lock entry shapes (3/6/7-field —
   "refresh the lock"). **Umbrella projects are untested**. **Only OTP releases with a Linux build in
-  `tog-toolchains` are realizable** (OTP 29.0.5 today, with each Elixir 1.20 patch); erlef
+  `greyward-toolchains` are realizable** (OTP 29.0.5 today, with each Elixir 1.20 patch); erlef
   publishes the Darwin builds for many more. **No rebar3 build for OTP 29 exists
   yet**: the pinned otp-28 escript runs on the 29 VM — a version-skew impurity until upstream
   ships otp-29 builds. **Mix's compilation lock is disabled in-sandbox**, so concurrent
-  unsandboxed `mix compile` against one build root is unprotected; `tog build` runs
+  unsandboxed `mix compile` against one build root is unprotected; `ward build` runs
   MIX_ENV=dev only. **mix.exs elixir requirements are not consulted**: the OTP and Elixir
   entries in `.tool-versions` are the declarative sources the toolchain lock reads, because
   reading mix.exs means evaluating an Elixir program. **The deps projection is whole-tree
@@ -567,10 +567,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.
   Ancestor SDK inputs (global.json, Directory.Packages.props, Directory.Build.rsp,
   packages.config) fail closed.
-- **Build-capable dotnet verbs are refused at `tog run`**; everything compiling goes
-  through `tog build dotnet`, which covers build only (no test/publish verbs). The guard
+- **Build-capable dotnet verbs are refused at `ward run`**; everything compiling goes
+  through `ward build dotnet`, which covers build only (no test/publish verbs). The guard
   is advisory — `sh -c` can bypass it. Missing-lock restore runs in the resolution
-  sandbox through tog's NuGet mirror, so the project's MSBuild code never runs on the host.
+  sandbox through Greyward's NuGet mirror, so the project's MSBuild code never runs on the host.
   **Preflight is a fail-closed text scan, not an XML parse**:
   exotic-but-legitimate projects can be refused; nothing banned can hide (XML cannot
   entity-encode element names) — the build sandbox, not preflight, is the security boundary.
@@ -584,7 +584,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
 ## Real-project proof gaps (all ecosystems)
 
 - Python/npm were proven on Ethan's real projects (CX-Games, deja, Financial-Filing…). Cargo
-  was proven on tog itself. **Go and Ruby have only been proven on small
+  was proven on Greyward itself. **Go and Ruby have only been proven on small
   synthetic-but-real-dependency projects** — Go on a hello-world module pulling `rsc.io/quote`
   plus a cgo build; Ruby on rake/racc/nokogiri with nokogiri's native build. No large
-  real-world Go service or Rails app has run under tog yet.
+  real-world Go service or Rails app has run under Greyward yet.

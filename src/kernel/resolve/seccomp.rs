@@ -119,7 +119,7 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Insn {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arch {
     X86_64,
-    // Built only where tog runs on aarch64; the tables cover both.
+    // Built only where ward runs on aarch64; the tables cover both.
     #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     Aarch64,
 }
@@ -150,7 +150,7 @@ pub struct Numbers {
 }
 
 impl Arch {
-    /// The architecture this tog was built for.
+    /// The architecture this ward was built for.
     pub fn native() -> Arch {
         #[cfg(target_arch = "aarch64")]
         {

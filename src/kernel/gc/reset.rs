@@ -1,7 +1,7 @@
-//! `tog gc --reset` (kernel gc): empty the store and start it again in the
+//! `ward gc --reset` (kernel gc): empty the store and start it again in the
 //! current format.
 //!
-//! This is the way out of a store this tog refuses to open: one written
+//! This is the way out of a store this ward refuses to open: one written
 //! before the format marker existed, or one whose marker it does not know.
 //! There is no reader for those records, so nothing here reads one. It
 //! removes the namespaces that hold records or point into them
@@ -10,8 +10,8 @@
 //!
 //! No root survives a reset, so no project is protected afterwards and none
 //! needs to be: there is nothing left to protect. A project's own
-//! `.tog/closures/` still name the objects that are gone, and the next
-//! `tog` there finds them missing and realizes them again, from the cache
+//! `.greyward/closures/` still name the objects that are gone, and the next
+//! `ward` there finds them missing and realizes them again, from the cache
 //! where it can.
 
 use super::*;
@@ -73,7 +73,7 @@ pub fn reset<W: Write>(
         for (name, bytes) in &present {
             writeln!(
                 out,
-                "tog: {verb} {} ({})",
+                "ward: {verb} {} ({})",
                 store.root.join(name).display(),
                 size(*bytes)
             )?;
@@ -84,7 +84,7 @@ pub fn reset<W: Write>(
 
     // The sweep's locks, in the sweep's order: no fetch and no publication
     // is in flight while the namespaces they write into are removed. The
-    // lock files themselves are never unlinked, so a tog that arrives
+    // lock files themselves are never unlinked, so a ward that arrives
     // meanwhile waits on the same inode this reset holds.
     let _gc_lock = store.gc_lock()?;
     store.ensure_namespace(Path::new("tmp"))?;
@@ -103,7 +103,7 @@ pub fn reset<W: Write>(
         store::remove_tree_entry_at(root.as_raw_fd(), name.as_bytes())?;
         writeln!(
             out,
-            "tog: {verb} {} ({})",
+            "ward: {verb} {} ({})",
             store.root.join(name).display(),
             size(*bytes)
         )?;
@@ -130,7 +130,7 @@ fn report_stages<W: Write>(
     }
     writeln!(
         out,
-        "tog: {verb} {count} staging {} under {} ({})",
+        "ward: {verb} {count} staging {} under {} ({})",
         if count == 1 { "entry" } else { "entries" },
         store.root.join("tmp").display(),
         size(bytes)
@@ -163,8 +163,8 @@ mod reset_tests {
     use crate::kernel::activity::ActivityMode;
     use crate::kernel::store::{ObjectDeps, StoreFormat, FORMAT_FILE};
 
-    /// The lease `tog gc --reset` takes: exclusive, and not validated
-    /// against the marker, since these stores are ones tog refuses.
+    /// The lease `ward gc --reset` takes: exclusive, and not validated
+    /// against the marker, since these stores are ones ward refuses.
     fn run(store: &Store, dry_run: bool) -> (io::Result<ResetReport>, String) {
         let activity = store.try_activity_exclusive_unchecked().unwrap().unwrap();
         let mut out = Vec::new();
@@ -173,7 +173,7 @@ mod reset_tests {
     }
 
     /// One published object, a root that protects it, a cached download, a
-    /// backup, a stale stage and a file tog never wrote, in a store with no
+    /// backup, a stale stage and a file ward never wrote, in a store with no
     /// format marker.
     fn populated(temp: &TempStore) -> (Store, String) {
         let store = temp.store();
@@ -193,7 +193,7 @@ mod reset_tests {
         fs::create_dir_all(store.root.join("resolve/meta")).unwrap();
         fs::create_dir_all(store.root.join("tmp/stage-old")).unwrap();
         fs::write(store.root.join("maintenance-deferred"), b"old").unwrap();
-        fs::write(store.root.join("notes.txt"), b"not tog's").unwrap();
+        fs::write(store.root.join("notes.txt"), b"not ward's").unwrap();
         fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
         (store, id)
     }
@@ -221,7 +221,7 @@ mod reset_tests {
         assert!(report.freed_bytes > 0);
         assert!(
             text.contains(&format!(
-                "tog: removed {}",
+                "ward: removed {}",
                 store.root.join("objects").display()
             )),
             "{text}"
@@ -230,7 +230,7 @@ mod reset_tests {
         // The marker is back, and the store opens.
         assert_eq!(
             fs::read(store.root.join(FORMAT_FILE)).unwrap(),
-            b"tog-store 1\n"
+            b"greyward-store 1\n"
         );
         let reopened = Store::open_at(&store.root).unwrap();
         assert_eq!(reopened.root, store.root.canonicalize().unwrap());
@@ -250,7 +250,7 @@ mod reset_tests {
         assert!(store.roots().unwrap().is_empty());
         assert!(!store.registry_initialized().unwrap());
 
-        // The download cache, the user's backup, the locks and the file tog
+        // The download cache, the user's backup, the locks and the file ward
         // never wrote are all still there.
         assert_eq!(
             fs::read(store.cache_path("sha256", &"a".repeat(64))).unwrap(),
@@ -262,7 +262,7 @@ mod reset_tests {
         );
         assert_eq!(
             fs::read(store.root.join("notes.txt")).unwrap(),
-            b"not tog's"
+            b"not ward's"
         );
         assert!(store.root.join("activity.lock").is_file());
         assert!(store.root.join("gc.lock").is_file());
@@ -293,7 +293,7 @@ mod reset_tests {
         for namespace in ["objects", "meta", "roots", "forests", "records", "resolve"] {
             assert!(
                 text.contains(&format!(
-                    "tog: would remove {}",
+                    "ward: would remove {}",
                     store.root.join(namespace).display()
                 )),
                 "{namespace}: {text}"
@@ -317,8 +317,8 @@ mod reset_tests {
     }
 
     #[test]
-    fn reset_replaces_a_marker_this_tog_does_not_know() {
-        for marker in [&b"tog-store 2\n"[..], b"something else"] {
+    fn reset_replaces_a_marker_this_ward_does_not_know() {
+        for marker in [&b"greyward-store 2\n"[..], b"something else"] {
             let temp = TempStore::new("reset-marker");
             let (store, _) = populated(&temp);
             fs::write(store.root.join(FORMAT_FILE), marker).unwrap();
@@ -336,7 +336,7 @@ mod reset_tests {
         run(&store, false).0.unwrap();
         assert_eq!(
             fs::read(store.root.join(FORMAT_FILE)).unwrap(),
-            b"tog-store 1\n"
+            b"greyward-store 1\n"
         );
     }
 
@@ -363,7 +363,7 @@ mod reset_tests {
     fn reset_needs_the_exclusive_lease() {
         let temp = TempStore::new("reset-lease");
         let (store, id) = populated(&temp);
-        // A shared lease exists only on a store tog reads: mark this one.
+        // A shared lease exists only on a store ward reads: mark this one.
         fs::write(store.root.join(FORMAT_FILE), StoreFormat::current_line()).unwrap();
         let shared = store.activity(ActivityMode::Shared).unwrap();
         let mut out = Vec::new();
@@ -425,7 +425,7 @@ mod reset_tests {
             );
             assert!(store::refusal_fix(&error)
                 .unwrap()
-                .ends_with(" tog gc --reset"));
+                .ends_with(" ward gc --reset"));
         }
         // The refusal released the lease it had taken: reset can run.
         run(&store, false).0.unwrap();
@@ -439,7 +439,7 @@ mod reset_tests {
         let temp = TempStore::new("reset-unreadable");
         let (store, _) = populated(&temp);
         let marker = store.root.join(FORMAT_FILE);
-        fs::write(&marker, b"tog-store 1\n").unwrap();
+        fs::write(&marker, b"greyward-store 1\n").unwrap();
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).unwrap();
         if fs::read(&marker).is_ok() {
             // Running as root: every mode is readable, nothing to prove.
@@ -453,7 +453,7 @@ mod reset_tests {
         assert!(error.to_string().contains("cannot read"), "{error}");
         assert!(store::refusal_fix(&error)
             .unwrap()
-            .ends_with(" tog gc --reset"));
+            .ends_with(" ward gc --reset"));
 
         let (result, text) = run(&store, true);
         result.unwrap();

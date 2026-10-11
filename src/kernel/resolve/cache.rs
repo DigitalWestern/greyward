@@ -16,7 +16,7 @@
 //! failure, or `--offline`). It is a cache under the store's GC rules:
 //! entries unused for the retention window are swept, and losing one costs
 //! only a refetch. Artifacts are not cached here; a claimed artifact lives
-//! in the verified `cache/<algo>/` like every other artifact tog fetched.
+//! in the verified `cache/<algo>/` like every other artifact ward fetched.
 
 use crate::kernel::store::Store;
 use serde::{Deserialize, Serialize};

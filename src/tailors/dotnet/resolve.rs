@@ -1,5 +1,5 @@
 //! The .NET resolution doors: the store SDK's restore confined through the
-//! proxy session's NuGet mirror, for a missing lock and for `tog attest`.
+//! proxy session's NuGet mirror, for a missing lock and for `ward attest`.
 
 use super::door::{dotnet_tool, run_restore, DotnetRun};
 use super::{err, find_project, require_lock, LOCK_FILE};
@@ -64,7 +64,7 @@ fn reject_lock_controls(
                 .windows(control.len())
                 .any(|part| part == control.as_bytes())
             {
-                return Err(err(format!("{path}: unsupported MSBuild lock control {control}; restore must check packages.lock.json with tog's global settings")));
+                return Err(err(format!("{path}: unsupported MSBuild lock control {control}; restore must check packages.lock.json with ward's global settings")));
             }
         }
     }
@@ -142,7 +142,7 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
     project.verify_observed_inputs()?;
     if resolution_basis(project)? != basis {
         return Err(err(
-            ".NET resolution inputs changed during preflight; run `tog` again",
+            ".NET resolution inputs changed during preflight; run `ward` again",
         ));
     }
     Ok(Preflight {
@@ -230,7 +230,7 @@ pub fn generate_lock(
     Ok(())
 }
 
-/// `tog attest` for .NET: `restore --locked-mode` in the project, through
+/// `ward attest` for .NET: `restore --locked-mode` in the project, through
 /// `door`'s transaction with the record's producer. A csproj the lock no
 /// longer matches fails locked mode (NU1004); a lock it would rewrite
 /// anyway is refused by the record. Nothing is published here.
@@ -265,7 +265,7 @@ pub fn attest_project(
     if !report.status.success() {
         return Err(err(format!(
             "packages.lock.json in {} is not what restore would write, so it is not attested; \
-             run `tog` to bring it up to date and commit the result\n{}",
+             run `ward` to bring it up to date and commit the result\n{}",
             project.path().display(),
             restore_failure(&report)
         )));
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn msbuild_data_and_nested_imports_are_resolution_inputs() {
         let temp = TempDir::named("dotnet-inputs");
-        for directory in ["config/nested", "obj", "bin", ".git", ".tog"] {
+        for directory in ["config/nested", "obj", "bin", ".git", ".greyward"] {
             fs::create_dir_all(temp.0.join(directory)).unwrap();
         }
         fs::write(temp.0.join("app.csproj"), csproj("")).unwrap();
@@ -335,7 +335,7 @@ mod tests {
             "obj/ignored",
             "bin/ignored",
             ".git/config",
-            ".tog/closure.json",
+            ".greyward/closure.json",
         ] {
             fs::write(temp.0.join(file), "excluded").unwrap();
         }
@@ -422,12 +422,12 @@ mod tests {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("Tog.Fixture.nuspec", options).unwrap();
+        zip.start_file("Greyward.Fixture.nuspec", options).unwrap();
         zip.write_all(
             b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<package \
               xmlns=\"http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd\">\n  \
-              <metadata>\n    <id>Tog.Fixture</id>\n    <version>1.0.0</version>\n    \
-              <authors>tog</authors>\n    <description>tog test fixture</description>\n  \
+              <metadata>\n    <id>Greyward.Fixture</id>\n    <version>1.0.0</version>\n    \
+              <authors>ward</authors>\n    <description>ward test fixture</description>\n  \
               </metadata>\n</package>\n",
         )
         .unwrap();
@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// A harness whose upstream answers api.nuget.org from the recorded
-    /// NuGet rows plus a served Tog.Fixture 1.0.0 and an empty
+    /// NuGet rows plus a served Greyward.Fixture 1.0.0 and an empty
     /// vulnerability base (the recording kept neither body), and whose
     /// proxy every door in this thread uses while it lives.
     fn nuget_harness(label: &str) -> Option<&'static Harness> {
@@ -451,11 +451,11 @@ mod tests {
         let stamp = "2026.09.23.05.36.38";
         for (path, body) in [
             (
-                "/v3-flatcontainer/tog.fixture/index.json".to_string(),
+                "/v3-flatcontainer/greyward.fixture/index.json".to_string(),
                 br#"{"versions":["1.0.0"]}"#.to_vec(),
             ),
             (
-                "/v3-flatcontainer/tog.fixture/1.0.0/tog.fixture.1.0.0.nupkg".to_string(),
+                "/v3-flatcontainer/greyward.fixture/1.0.0/greyward.fixture.1.0.0.nupkg".to_string(),
                 fixture_nupkg(),
             ),
             (
@@ -530,7 +530,7 @@ mod tests {
     /// The .NET door against the recorded api.nuget.org: a missing lock
     /// restored through the NuGet mirror (the rewritten service index, the
     /// flat container, NuGetAudit's files), published with its record and
-    /// no `obj/`, then `tog attest`'s locked-mode check: an unchanged lock
+    /// no `obj/`, then `ward attest`'s locked-mode check: an unchanged lock
     /// signed, a drifted csproj refused.
     #[test]
     #[ignore = "realizes the store .NET SDK over the network"]
@@ -553,7 +553,7 @@ mod tests {
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
         let reference =
-            "    <PackageReference Include=\"Tog.Fixture\" Version=\"$(FixtureVersion)\" Condition=\"!Exists('empty-switch') And Exists('feature.flag')\" />\n";
+            "    <PackageReference Include=\"Greyward.Fixture\" Version=\"$(FixtureVersion)\" Condition=\"!Exists('empty-switch') And Exists('feature.flag')\" />\n";
         fs::write(dir.join("app.csproj"), csproj(reference)).unwrap();
         fs::write(dir.join("feature.flag"), "enabled").unwrap();
         fs::create_dir_all(dir.join("config")).unwrap();
@@ -564,12 +564,12 @@ mod tests {
         fs::write(dir.join("Directory.Build.props"), r#"<Project>
           <Import Project="config/package.props" />
           <PropertyGroup>
-            <TogDiagnostics>$([System.Environment]::GetEnvironmentVariable('DOTNET_EnableDiagnostics'))</TogDiagnostics>
-            <TogNodeReuse>$([System.Environment]::GetEnvironmentVariable('MSBUILDDISABLENODEREUSE'))</TogNodeReuse>
+            <GreywardDiagnostics>$([System.Environment]::GetEnvironmentVariable('DOTNET_EnableDiagnostics'))</GreywardDiagnostics>
+            <GreywardNodeReuse>$([System.Environment]::GetEnvironmentVariable('MSBUILDDISABLENODEREUSE'))</GreywardNodeReuse>
           </PropertyGroup>
-          <Target Name="TogNoUnixSettings" BeforeTargets="Restore">
-            <Error Condition="'$(TogDiagnostics)' != '0'" Text="diagnostic IPC not disabled" />
-            <Error Condition="'$(TogNodeReuse)' != '1'" Text="MSBuild node reuse not disabled" />
+          <Target Name="GreywardNoUnixSettings" BeforeTargets="Restore">
+            <Error Condition="'$(GreywardDiagnostics)' != '0'" Text="diagnostic IPC not disabled" />
+            <Error Condition="'$(GreywardNodeReuse)' != '1'" Text="MSBuild node reuse not disabled" />
             <Error Condition="'$(MSBuildNodeCount)' != '1'" Text="parallel MSBuild workers not disabled" />
           </Target>
         </Project>"#).unwrap();
@@ -582,9 +582,9 @@ mod tests {
         generated.unwrap();
         assert!(recorded.is_empty(), "{recorded:?}");
         let lock = fs::read_to_string(dir.join(LOCK_FILE)).unwrap();
-        assert!(lock.contains("\"Tog.Fixture\""), "{lock}");
+        assert!(lock.contains("\"Greyward.Fixture\""), "{lock}");
         assert!(lock.contains("\"resolved\": \"1.0.0\""), "{lock}");
-        assert!(dir.join(".tog/resolution/dotnet.json").is_file());
+        assert!(dir.join(".greyward/resolution/dotnet.json").is_file());
         assert!(
             !dir.join("obj").exists(),
             "restore output reached the project"
@@ -624,7 +624,7 @@ mod tests {
         AFTER_PREFLIGHT_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(Box::new(move || {
             fs::write(replacement, "<Project TreatAsLocalProperty=\"NuGetLockFilePath\"><PropertyGroup><NuGetLockFilePath>alternate.lock.json</NuGetLockFilePath></PropertyGroup></Project>").unwrap();
         })));
-        let receipt_before = fs::read(dir.join(".tog/resolution/dotnet.json")).unwrap();
+        let receipt_before = fs::read(dir.join(".greyward/resolution/dotnet.json")).unwrap();
         let (replaced, _) = through_door(harness, DoorKind::Attest, |door| {
             attest_project(door, &held, &sdk, &selected)
         });
@@ -632,7 +632,7 @@ mod tests {
         assert!(why.contains("changed while planning"), "{why}");
         assert_eq!(fs::read(dir.join(LOCK_FILE)).unwrap(), before_lock);
         assert_eq!(
-            fs::read(dir.join(".tog/resolution/dotnet.json")).unwrap(),
+            fs::read(dir.join(".greyward/resolution/dotnet.json")).unwrap(),
             receipt_before
         );
         fs::write(&props, original_props).unwrap();
@@ -657,7 +657,7 @@ mod tests {
         let why = replaced_missing.unwrap_err().to_string();
         assert!(why.contains("changed while planning"), "{why}");
         assert!(!missing.join(LOCK_FILE).exists());
-        assert!(!missing.join(".tog/resolution/dotnet.json").exists());
+        assert!(!missing.join(".greyward/resolution/dotnet.json").exists());
 
         // Remove an input during receipt-spec creation, then restore it before
         // staging. Receipt filenames must come from the captured generation.

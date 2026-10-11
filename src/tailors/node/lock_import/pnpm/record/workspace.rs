@@ -167,7 +167,7 @@ fn pnpm_glob_matches(pattern: &str, path: &str, below: bool) -> bool {
 /// Collect every directory under `directory` (project-relative, `.` for
 /// the root) holding a package.json that an `include` glob matches and no
 /// `exclude` glob does. Only directories an `include` glob can reach are
-/// opened, and one tog may not open (another user's database directory)
+/// opened, and one ward may not open (another user's database directory)
 /// holds no member, as for pnpm's own search. A symlinked directory is not
 /// descended into, and nothing under `node_modules` is a member.
 fn collect_members(

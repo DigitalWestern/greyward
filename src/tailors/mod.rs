@@ -34,7 +34,7 @@ pub use edit::{
     CachedTool, DepSpec, EditHost, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
 
-/// One row of `tog ls`.
+/// One row of `ward ls`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageRow {
     pub name: String,
@@ -50,7 +50,7 @@ pub struct ClosureListing {
     pub packages: Vec<PackageRow>,
 }
 
-/// A project script `tog run` executes step by step, from
+/// A project script `ward run` executes step by step, from
 /// [`Tailor::projected_script`]: a package.json script with its `pre` and
 /// `post` hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +94,7 @@ impl SyncRequest<'_> {
 /// `default_helper` otherwise. A helper with neither is absent, which means
 /// the build decides per artifact (an sdist's own toolchain file).
 ///
-/// `sync`, `status` and `tog x` all decide helpers through this rule, so a
+/// `sync`, `status` and `ward x` all decide helpers through this rule, so a
 /// status line predicts what the next sync would build on.
 pub fn helper_selections(
     tailor: &dyn Tailor,
@@ -134,7 +134,7 @@ pub fn helper_record(
     serde_json::Value::Object(record)
 }
 
-/// One `tog doctor` line contributed by a tailor.
+/// One `ward doctor` line contributed by a tailor.
 #[derive(Debug, Clone)]
 pub struct DoctorCheck {
     pub name: &'static str,
@@ -145,7 +145,7 @@ pub struct DoctorCheck {
 fn unsupported(id: &str, verb: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("tog {verb} does not support {id}"),
+        format!("ward {verb} does not support {id}"),
     )
 }
 
@@ -158,14 +158,14 @@ pub(crate) fn missing_lock(project: &ProjectRoot, lock: &str) -> io::Error {
     crate::kernel::error::stale(
         io::ErrorKind::NotFound,
         format!(
-            "{} is missing and --frozen never creates it; run `tog` once without \
+            "{} is missing and --frozen never creates it; run `ward` once without \
              --frozen and commit the file",
             project.path().join(lock).display()
         ),
     )
 }
 
-/// One source-file extension an ecosystem claims for `tog <file>`.
+/// One source-file extension an ecosystem claims for `ward <file>`.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceFile {
     /// Lowercase, without the dot: `py`, `mjs`.
@@ -174,7 +174,7 @@ pub struct SourceFile {
 }
 
 /// How a realized runtime runs one source file (`Tailor::lone_file`).
-/// The environment is scrubbed the way `tog run` scrubs it for the same
+/// The environment is scrubbed the way `ward run` scrubs it for the same
 /// runtime (`kernel::sandbox::force_env`): the host's interpreter
 /// configuration never changes what the file runs with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +216,7 @@ impl LoneFile {
     }
 }
 
-/// What `tog <file>` does with a file of one ecosystem.
+/// What `ward <file>` does with a file of one ecosystem.
 #[derive(Debug, Clone, Copy)]
 pub enum FileRunner {
     /// The program, with its leading arguments, that runs the file inside
@@ -268,12 +268,12 @@ pub trait Tailor: Sync {
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool>;
 
     /// The files [`Tailor::detect`] looks for, in words, for the message
-    /// that says none were found. `tog help inputs` is the long form.
+    /// that says none were found. `ward help inputs` is the long form.
     fn input_files(&self) -> &'static str;
 
-    /// `tog <file>`: the source-file extensions this ecosystem runs, and
+    /// `ward <file>`: the source-file extensions this ecosystem runs, and
     /// how. The command layer picks the tailor by the file's extension and
-    /// runs the file inside the project's environment, as `tog run` would.
+    /// runs the file inside the project's environment, as `ward run` would.
     fn source_files(&self) -> &'static [SourceFile] {
         &[]
     }
@@ -289,7 +289,7 @@ pub trait Tailor: Sync {
     }
 
     /// Before any store-touching work, for the ecosystems the command will
-    /// realize: can this host run this ecosystem, and does this tog pin a
+    /// realize: can this host run this ecosystem, and does this ward pin a
     /// toolchain for it here? Runs after `check_inputs`, so it may assume
     /// well-formed inputs.
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
@@ -314,7 +314,7 @@ pub trait Tailor: Sync {
         Ok(())
     }
 
-    /// `tog plan`: the plan as pretty-printed JSON text. Planning realizes
+    /// `ward plan`: the plan as pretty-printed JSON text. Planning realizes
     /// no dependency environment, but it may fetch the pinned toolchain
     /// into the store, and Python's writes its requirements lock and stamp
     /// into the project. `None` when, after `prepare`, there is nothing of
@@ -340,18 +340,18 @@ pub trait Tailor: Sync {
         attribution: &mut crate::kernel::policy::Attribution,
     ) -> io::Result<bool>;
 
-    /// Can `tog build <id>` name this ecosystem at all?
+    /// Can `ward build <id>` name this ecosystem at all?
     fn builds(&self) -> bool {
         false
     }
 
-    /// `tog build` inference: is there something of this ecosystem to
+    /// `ward build` inference: is there something of this ecosystem to
     /// build from `cwd`? (Ancestor search where the ecosystem supports it.)
     fn build_present(&self, _cwd: &Path) -> io::Result<bool> {
         Ok(false)
     }
 
-    /// The directory `tog build` roots at for this ecosystem from `cwd`.
+    /// The directory `ward build` roots at for this ecosystem from `cwd`.
     fn build_root(&self, _cwd: &Path) -> io::Result<PathBuf> {
         Err(unsupported(self.id(), "build"))
     }
@@ -369,7 +369,7 @@ pub trait Tailor: Sync {
         Err(unsupported(self.id(), "build"))
     }
 
-    /// `tog run`: the PATH prefixes and environment this ecosystem's
+    /// `ward run`: the PATH prefixes and environment this ecosystem's
     /// projection under `dir` contributes to `command`. `cwd` is where the
     /// user ran from (a workspace subdirectory); `cmd` is the command line,
     /// for ecosystems that refuse some commands.
@@ -384,7 +384,7 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
-    /// `tog <file>` where the project does not have this ecosystem, or
+    /// `ward <file>` where the project does not have this ecosystem, or
     /// outside any project: realize the runtime `toolchain` names and say
     /// how it runs one file with `extension`, a [`SourceFile`] extension
     /// this tailor claims. `None`: a lone file of this ecosystem does not
@@ -398,7 +398,7 @@ pub trait Tailor: Sync {
         Ok(None)
     }
 
-    /// `tog run`: the runtime programs `run_env`'s prefixes provide once
+    /// `ward run`: the runtime programs `run_env`'s prefixes provide once
     /// this ecosystem is synced (`python`, `node`). One of them named bare
     /// in a project with this ecosystem must come from those prefixes, never
     /// from the host PATH after them.
@@ -406,7 +406,7 @@ pub trait Tailor: Sync {
         &[]
     }
 
-    /// `tog run`: why `cmd` is refused before any environment is looked
+    /// `ward run`: why `cmd` is refused before any environment is looked
     /// up, when it is one of this ecosystem's package-manager verbs that
     /// would write into a projection (`pip install`, `npm install`). The
     /// refusal is the same in every project, so it needs no projection.
@@ -419,7 +419,7 @@ pub trait Tailor: Sync {
 
     /// The steps of the project script `name` at `root`, read straight from
     /// the project's inputs before any sync: `None` when this ecosystem has
-    /// no such script there. `tog <script>` and `tog fmt` ask this to
+    /// no such script there. `ward <script>` and `ward fmt` ask this to
     /// decide whether a word is a script.
     fn project_script(
         &self,
@@ -430,9 +430,9 @@ pub trait Tailor: Sync {
         Ok(None)
     }
 
-    /// `tog run`: the script `cmd` names in this ecosystem's projection
+    /// `ward run`: the script `cmd` names in this ecosystem's projection
     /// under `dir`, run from `cwd`. `None` when `cmd` is not one, and
-    /// `tog run` spawns it as a program instead.
+    /// `ward run` spawns it as a program instead.
     fn projected_script(
         &self,
         _dir: &Path,
@@ -442,17 +442,17 @@ pub trait Tailor: Sync {
         Ok(None)
     }
 
-    /// `tog run`: why a package.json script may not run in `dir`, when this
+    /// `ward run`: why a package.json script may not run in `dir`, when this
     /// ecosystem's projection there forbids running project code outside
-    /// the sandbox (.NET: MSBuild belongs in `tog build`).
+    /// the sandbox (.NET: MSBuild belongs in `ward build`).
     fn refused_package_script(&self, _dir: &Path) -> Option<String> {
         None
     }
 
-    /// `tog ls`: what a closure of this ecosystem lists.
+    /// `ward ls`: what a closure of this ecosystem lists.
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing;
 
-    /// `tog status`: is the closure's projection still current? Read
+    /// `ward status`: is the closure's projection still current? Read
     /// through the project the command holds, never its path.
     fn closure_state(
         &self,
@@ -462,12 +462,12 @@ pub trait Tailor: Sync {
         body: &Value,
     ) -> io::Result<State>;
 
-    /// `tog doctor`: project-level checks specific to this ecosystem.
+    /// `ward doctor`: project-level checks specific to this ecosystem.
     fn doctor(&self, _platform: Platform, _project: &ProjectRoot) -> Vec<DoctorCheck> {
         Vec::new()
     }
 
-    /// `tog sbom`: CycloneDX components for a closure of this ecosystem.
+    /// `ward sbom`: CycloneDX components for a closure of this ecosystem.
     fn sbom_components(
         &self,
         ecosystem: &str,
@@ -484,7 +484,7 @@ pub trait Tailor: Sync {
     }
 
     /// The object kinds among `object_kinds` that are this ecosystem's
-    /// realized toolchain (`cpython`, `nodejs`, ...), which `tog doctor`
+    /// realized toolchain (`cpython`, `nodejs`, ...), which `ward doctor`
     /// lists from the store's metadata.
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &[]
@@ -514,12 +514,12 @@ pub trait Tailor: Sync {
         Ok(BTreeMap::new())
     }
 
-    /// `tog fmt`: this ecosystem's pinned formatter, when it has one.
+    /// `ward fmt`: this ecosystem's pinned formatter, when it has one.
     fn formatter(&self) -> Option<&'static dyn Formatter> {
         None
     }
 
-    /// `tog add`: the ecosystem's public package registry, the `prefix:`
+    /// `ward add`: the ecosystem's public package registry, the `prefix:`
     /// that names it on the command line, and its name in messages. `None`
     /// for an ecosystem `add` cannot choose.
     fn package_registry(&self) -> Option<PackageRegistry> {
@@ -527,7 +527,7 @@ pub trait Tailor: Sync {
     }
 
     /// Whether a package name's shape alone says it belongs here
-    /// (`@scope/name` is npm's), so `tog add` needs no lookup to choose.
+    /// (`@scope/name` is npm's), so `ward add` needs no lookup to choose.
     fn claims_package_name(&self, _name: &str) -> bool {
         false
     }
@@ -544,7 +544,7 @@ pub trait Tailor: Sync {
         Ok(project.to_path_buf())
     }
 
-    /// `tog add` / `remove` / `update` for this ecosystem: edit the manifest
+    /// `ward add` / `remove` / `update` for this ecosystem: edit the manifest
     /// and lock with the ecosystem's pinned tool, run through `door`. A
     /// tailor that cannot make an edit refuses with the exact command to
     /// run; the default refuses.
@@ -557,7 +557,7 @@ pub trait Tailor: Sync {
         Err(unsupported(self.id(), "add, remove, and update"))
     }
 
-    /// `tog x`: how this ecosystem runs a tool straight from its public
+    /// `ward x`: how this ecosystem runs a tool straight from its public
     /// registry, when it can.
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
         Err(unsupported(self.id(), "x"))
@@ -596,13 +596,13 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
-    /// `tog attest`: run this ecosystem's lock check through `door` (an
+    /// `ward attest`: run this ecosystem's lock check through `door` (an
     /// attest door) in `project`. A check that leaves the lock and manifest
     /// byte-unchanged yields the signed record and its bytes; a check that
     /// fails or would change the lock is an error. Either way the check
-    /// publishes nothing: `tog attest` publishes every ecosystem's record
+    /// publishes nothing: `ward attest` publishes every ecosystem's record
     /// together (`record::publish_receipts`) only after all checks passed.
-    /// `host` lends what an edit borrows from its command (the `tog x`
+    /// `host` lends what an edit borrows from its command (the `ward x`
     /// cache a pinned package manager lives in), asked only once a tool
     /// will run.
     fn attest_lock(
@@ -616,7 +616,7 @@ pub trait Tailor: Sync {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "tog attest does not support {}: it has no lock check that runs through a \
+                "ward attest does not support {}: it has no lock check that runs through a \
                  resolution door",
                 self.id()
             ),
@@ -642,7 +642,7 @@ pub fn resolution_files(
 
 /// The record a door run of `tailor` leaves in `project`: the tailor's
 /// resolution files, the operation's signing key (`None` writes it unsigned),
-/// and the tool with the arguments it ran with. `tog attest`'s check sets
+/// and the tool with the arguments it ran with. `ward attest`'s check sets
 /// `require_unchanged` and clears `publish_receipt`.
 pub fn record_spec(
     tailor: &dyn Tailor,
@@ -681,11 +681,11 @@ pub fn install_resolution_files() {
     ));
 }
 
-/// `tog fmt`: an ecosystem's pinned formatter (`Tailor::formatter`),
+/// `ward fmt`: an ecosystem's pinned formatter (`Tailor::formatter`),
 /// Rust's rustfmt today. The command picks the formatter and the toolchain
 /// lock that decides; the formatter owns everything about running it.
 pub trait Formatter: Sync {
-    /// The `--eco` word `tog fmt` selects this formatter by.
+    /// The `--eco` word `ward fmt` selects this formatter by.
     fn word(&self) -> &'static str;
 
     /// Before the store is opened: refuse a host with no pinned formatter
@@ -697,7 +697,7 @@ pub trait Formatter: Sync {
     fn check_project(&self, cwd: &Path) -> io::Result<()>;
 
     /// The root of the workspace `cwd` belongs to, found with the toolchain
-    /// `toolchain` names. The workspace is formatted as one, so `tog fmt`
+    /// `toolchain` names. The workspace is formatted as one, so `ward fmt`
     /// takes its toolchain from that directory's lock when it has one,
     /// whichever member it was run from.
     fn root(&self, ctx: &Context, cwd: &Path, toolchain: &Selected) -> io::Result<PathBuf>;
@@ -714,14 +714,14 @@ pub trait Formatter: Sync {
     ) -> io::Result<i32>;
 }
 
-/// What `tog x` asks of an ecosystem that installs tools from a public
+/// What `ward x` asks of an ecosystem that installs tools from a public
 /// registry (`Tailor::registry_tool`). The command owns everything around
-/// the tool: the `~/.tog/x` directory, its cache key, its lifecycle lock,
+/// the tool: the `~/.greyward/x` directory, its cache key, its lifecycle lock,
 /// its gc root, and the cached-projection checks. The tool owns resolving
 /// one package, realizing and projecting it into that directory, and the
 /// environment a launched executable runs in.
 pub trait RegistryTool: Sync {
-    /// The first word of every `~/.tog/x` directory this tool's caches live
+    /// The first word of every `~/.greyward/x` directory this tool's caches live
     /// in (`py`, `npm`). It is part of the cache directory name, so changing
     /// it orphans every existing cache.
     fn cache_prefix(&self) -> &'static str;
@@ -734,14 +734,14 @@ pub trait RegistryTool: Sync {
     /// `py:`/`npm:` tool prefix and the `--py`/`--npm` flag.
     fn spelling(&self) -> &'static str;
 
-    /// The registry's name in `tog x` messages (`PyPI`, `npm`).
+    /// The registry's name in `ward x` messages (`PyPI`, `npm`).
     fn registry_name(&self) -> &'static str;
 
-    /// The ecosystem's name for a project in `tog x` messages (`Python`,
+    /// The ecosystem's name for a project in `ward x` messages (`Python`,
     /// `Node`).
     fn project_label(&self) -> &'static str;
 
-    /// Why `tog x` chose this registry from the project it runs in, for the
+    /// Why `ward x` chose this registry from the project it runs in, for the
     /// trace line.
     fn detection_reason(&self) -> &'static str;
 
@@ -766,7 +766,7 @@ pub trait RegistryTool: Sync {
         env_path: &Path,
     ) -> io::Result<bool>;
 
-    /// What `tog x --clean` adds to its summary when it removed at least
+    /// What `ward x --clean` adds to its summary when it removed at least
     /// one of this tool's environments.
     fn clean_note(&self) -> Option<&'static str> {
         None
@@ -845,7 +845,7 @@ pub fn by_id(id: &str) -> Option<&'static dyn Tailor> {
     registry().iter().copied().find(|tailor| tailor.id() == id)
 }
 
-/// The tailor that wrote `.tog/closures/<name>.json`, if any: every
+/// The tailor that wrote `.greyward/closures/<name>.json`, if any: every
 /// closure is named for its tailor's id.
 pub fn for_closure(name: &str) -> Option<&'static dyn Tailor> {
     by_id(name)
@@ -987,7 +987,7 @@ mod tests {
                 "{tailor}: {message}"
             );
             assert!(
-                message.contains("run `tog` once without --frozen"),
+                message.contains("run `ward` once without --frozen"),
                 "{tailor}: {message}"
             );
             assert!(!temp.0.join(lock).exists(), "{tailor}");
@@ -1019,7 +1019,7 @@ mod tests {
         assert!(nothing_to_detect(&temp.0.join("absent"), &missing));
         assert!(detected(&temp.0.join("absent")).unwrap().is_empty());
         // A project `ProjectRoot::open` really refuses: it exists, behind a
-        // parent tog may not search. That is an error naming the path, not
+        // parent ward may not search. That is an error naming the path, not
         // an empty detection. (root searches anything, so it has no case.)
         if unsafe { libc::geteuid() } != 0 {
             use std::os::unix::fs::PermissionsExt;
@@ -1344,7 +1344,7 @@ mod tests {
         (
             "elixir",
             "beam-otp29.0.5-elixir1.20.4",
-            "sha256:a465cce7520aa1206afd7ae6b171fc6090581d9f18d0abaf9221c657b40996b4",
+            "sha256:e05f0fa36f649bb6f33c3335ff2c30d3951e672154be89adb230bf81a88c27d8",
         ),
         (
             "dotnet",
@@ -1584,7 +1584,7 @@ mod tests {
         (
             "elixir",
             "beam-otp29.0.5-elixir1.20.4",
-            "sha256:a465cce7520aa1206afd7ae6b171fc6090581d9f18d0abaf9221c657b40996b4",
+            "sha256:e05f0fa36f649bb6f33c3335ff2c30d3951e672154be89adb230bf81a88c27d8",
         ),
         (
             "dotnet",

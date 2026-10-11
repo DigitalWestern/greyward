@@ -6,7 +6,7 @@ use std::process::Command;
 
 /// How long output is still read once the direct child is reaped. A process
 /// the command left running (a compiler server, an MSBuild node) can hold
-/// the pipe open for good, and tog must not wait on it.
+/// the pipe open for good, and ward must not wait on it.
 pub(super) const DRAIN_AFTER_EXIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Say that a command's leftover process kept its output open, once.

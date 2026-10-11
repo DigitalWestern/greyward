@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(bare.status, 407);
         assert_eq!(
             bare.headers.get("proxy-authenticate"),
-            Some("Basic realm=\"tog\"")
+            Some("Basic realm=\"greyward\"")
         );
         let crossed = crate::kernel::resolve::testing::send(
             &address,

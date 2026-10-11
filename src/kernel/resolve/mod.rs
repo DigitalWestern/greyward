@@ -1,4 +1,4 @@
-//! The resolution door: the one way tog starts a dependency tool that may
+//! The resolution door: the one way ward starts a dependency tool that may
 //! use the network or evaluate project code (`npm install
 //! --package-lock-only`, `cargo generate-lockfile`, `bundle lock`, a Gemfile
 //! check, and every other row of the census in the design).
@@ -66,7 +66,7 @@ use std::rc::Rc;
 /// records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoorKind {
-    /// `tog add` / `remove` / `update`: the tool edits the manifest and lock.
+    /// `ward add` / `remove` / `update`: the tool edits the manifest and lock.
     Edit,
     /// A dependency lock the project (or an sdist) does not ship, generated
     /// by the ecosystem's own tool.
@@ -74,9 +74,9 @@ pub enum DoorKind {
     /// A planning step that asks the tool (a consistency gate, a closure
     /// download, a lock parser) and writes no project input.
     Planner,
-    /// `tog x`: resolving one registry tool into its `~/.tog/x` cache.
+    /// `ward x`: resolving one registry tool into its `~/.greyward/x` cache.
     X,
-    /// `tog attest`: an ecosystem's lock-consistency check.
+    /// `ward attest`: an ecosystem's lock-consistency check.
     Attest,
 }
 
@@ -196,7 +196,7 @@ impl<'a> ResolutionDoor<'a> {
 /// Where the tool's standard streams go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DelegateStdio {
-    /// Stdin, stdout and stderr are tog's own: the user watches the tool.
+    /// Stdin, stdout and stderr are ward's own: the user watches the tool.
     #[default]
     Inherit,
     /// Stdin is empty and both outputs are captured into the report.
@@ -214,12 +214,12 @@ pub struct DelegateSpec {
     pub program: PathBuf,
     pub args: Vec<OsString>,
     /// The directory the tool runs in: the project (or stage) whose lock it
-    /// resolves. `None` runs it in tog's own working directory.
+    /// resolves. `None` runs it in ward's own working directory.
     pub lock_root: Option<PathBuf>,
     /// Variables set (`Some`) or removed (`None`) on top of the base
     /// environment, one final value per name.
     pub env: BTreeMap<OsString, Option<OsString>>,
-    /// The base environment is empty rather than tog's own.
+    /// The base environment is empty rather than ward's own.
     pub env_clear: bool,
     pub stdio: DelegateStdio,
 }
@@ -279,7 +279,7 @@ impl DelegateSpec {
     }
 
     /// `kernel::sandbox::force_env` for a spec: strip the inherited
-    /// variables the tool must not see, then set tog's values last.
+    /// variables the tool must not see, then set ward's values last.
     pub fn force_env(
         &mut self,
         remove_prefixes: &[&str],

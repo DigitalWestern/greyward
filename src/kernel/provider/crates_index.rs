@@ -1,4 +1,4 @@
-//! crates.io's sparse registry protocol, as tog's resolution proxy serves
+//! crates.io's sparse registry protocol, as ward's resolution proxy serves
 //! it. It lives in the kernel because two tailors run cargo through the
 //! door: the Cargo tailor, and Python for an sdist's Rust extension
 //! ([`super::cargo_door`]).

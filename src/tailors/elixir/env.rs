@@ -23,7 +23,7 @@ pub fn project_elixir_env(
     let beam_obj = beam_obj.canonicalize()?;
     let deps_obj = deps_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&beam_obj)
-        .ok_or_else(|| err("BEAM object is not in a Tog store"))?;
+        .ok_or_else(|| err("BEAM object is not in a Greyward store"))?;
     let project_dir = project.path();
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
     let project_lock = store.project_lock_in(project)?;

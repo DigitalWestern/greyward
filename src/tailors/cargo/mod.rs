@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 pub use crate::kernel::provider::crates::{lock_digest, plan_cargo, CargoPlan};
 pub(crate) use crate::kernel::provider::crates::{
-    plan_git_sources, project_git_sources, tog_config_text_for,
+    plan_git_sources, project_git_sources, ward_config_text_for,
 };
 pub use crate::kernel::provider::rust::{
     preflight_platform, project_extras_in, runtime_object_id, toolchain_catalog, Extras,
@@ -172,7 +172,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     cases
 }
 
-/// A locked local-toolchain selection, as `tog-toolchain.toml` records one.
+/// A locked local-toolchain selection, as `greyward-toolchain.toml` records one.
 #[cfg(test)]
 pub(crate) fn path_selection_for_test(platform: Platform) -> Selected {
     use crate::kernel::toolchain::{ArtifactRow, Bundle, Component, Source};
@@ -203,12 +203,12 @@ pub(crate) fn path_selection_for_test(platform: Platform) -> Selected {
 }
 
 /// A later `--config` outranks ours; letting one through would let a hostile
-/// invocation swap the vendor source while provenance still claims tog's.
+/// invocation swap the vendor source while provenance still claims ward's.
 fn reject_user_config(args: &[String]) -> io::Result<()> {
     for arg in args {
         if arg == "--config" || arg.starts_with("--config=") {
             return Err(err(
-                "--config is managed by tog (it enforces the verified vendor source); \
+                "--config is managed by ward (it enforces the verified vendor source); \
                  put project settings in .cargo/config.toml instead",
             ));
         }
@@ -239,17 +239,17 @@ pub fn project_cargo_env(
     let rust_obj = rust_obj.canonicalize()?;
     let vendor_obj = vendor_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&rust_obj)
-        .ok_or_else(|| err("Rust object is not in a Tog store"))?;
+        .ok_or_else(|| err("Rust object is not in a Greyward store"))?;
     // Every component is created and walked from the held descriptor with
-    // O_NOFOLLOW: a symlinked `.tog`, cargo-home or bin is refused rather
+    // O_NOFOLLOW: a symlinked `.greyward`, cargo-home or bin is refused rather
     // than carrying the wrapper write outside the project.
-    project.create_dir_all(Path::new(".tog/cargo-home/bin"))?;
-    let cargo_home = project_dir.join(".tog/cargo-home");
-    let config = cargo_home.join("tog-config.toml");
+    project.create_dir_all(Path::new(".greyward/cargo-home/bin"))?;
+    let cargo_home = project_dir.join(".greyward/cargo-home");
+    let config = cargo_home.join("greyward-config.toml");
 
     project.write_file(
-        Path::new(".tog/cargo-home/tog-config.toml"),
-        tog_config_text_for(&vendor_obj, &plan_git_sources(plan))?.as_bytes(),
+        Path::new(".greyward/cargo-home/greyward-config.toml"),
+        ward_config_text_for(&vendor_obj, &plan_git_sources(plan))?.as_bytes(),
     )?;
 
     let cargo_bin = rust_obj.join("bin/cargo");
@@ -258,7 +258,7 @@ pub fn project_cargo_env(
     // point the wrapper at a different path than the one it names.
     let mut wrapper = b"#!/bin/sh\n\
          for a in \"$@\"; do case \"$a\" in --config|--config=*)\n\
-           echo 'tog: --config is managed by tog' >&2; exit 2;; esac; done\n\
+           echo 'ward: --config is managed by ward' >&2; exit 2;; esac; done\n\
          export CARGO_HOME=\""
         .to_vec();
     wrapper.extend(shell_double_quote(&cargo_home));
@@ -273,7 +273,7 @@ pub fn project_cargo_env(
     wrapper.extend(b"\" --frozen --config \"");
     wrapper.extend(shell_double_quote(&config));
     wrapper.extend(b"\" \"$@\"\n");
-    project.write_file_mode(Path::new(".tog/cargo-home/bin/cargo"), &wrapper, 0o755)?;
+    project.write_file_mode(Path::new(".greyward/cargo-home/bin/cargo"), &wrapper, 0o755)?;
 
     let mut body = serde_json::json!({
         "rust_object": crate::comforter::object_ref(&rust_obj)?,
@@ -336,7 +336,7 @@ pub fn build_sandboxed(
     let target = project_child_dir(project, "target")?;
     let cargo_bin = rust_obj.join("bin/cargo");
     if !cargo_bin.is_file() || !vendor_obj.is_dir() {
-        return Err(err("cargo environment is incomplete; run `tog` first"));
+        return Err(err("cargo environment is incomplete; run `ward` first"));
     }
 
     let store_tmp = rust_obj
@@ -348,13 +348,13 @@ pub fn build_sandboxed(
     // Disposable per-build CARGO_HOME + config inside the scratch dir: the
     // projected cargo-home must never be writable in-sandbox, or a build
     // script could replace the wrapper that later runs UNsandboxed under
-    // `tog run`.
+    // `ward run`.
     let build_home = scratch.join("cargo-home");
     fs::create_dir_all(&build_home)?;
-    let config = build_home.join("tog-config.toml");
+    let config = build_home.join("greyward-config.toml");
     fs::write(
         &config,
-        tog_config_text_for(&vendor_obj, &project_git_sources(&project_dir))?,
+        ward_config_text_for(&vendor_obj, &project_git_sources(&project_dir))?,
     )?;
     let mut argv = vec![
         cargo_bin
@@ -480,7 +480,7 @@ mod tests {
         use crate::tailors::Tailor as _;
         let scratch = crate::kernel::testutil::TempDir::named("cargo-status-gone");
         let project = scratch.0.join("project");
-        std::fs::create_dir_all(project.join(".tog/cargo-home")).unwrap();
+        std::fs::create_dir_all(project.join(".greyward/cargo-home")).unwrap();
         std::fs::write(project.join("Cargo.lock"), "").unwrap();
         let present = scratch.0.join("rust");
         std::fs::create_dir_all(&present).unwrap();
@@ -612,8 +612,8 @@ mod tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => env::set_var("TOG_STORE", value),
-                None => env::remove_var("TOG_STORE"),
+                Some(value) => env::set_var("GREYWARD_STORE", value),
+                None => env::remove_var("GREYWARD_STORE"),
             }
         }
     }
@@ -621,8 +621,8 @@ mod tests {
     pub(super) fn with_temp_store(f: impl FnOnce(&Store, &Path)) {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::named("cargo-store");
-        let old = env::var_os("TOG_STORE");
-        env::set_var("TOG_STORE", &temp.0);
+        let old = env::var_os("GREYWARD_STORE");
+        env::set_var("GREYWARD_STORE", &temp.0);
         let _env = StoreEnv(old);
         let store = Store::open().unwrap();
         f(&store, &temp.0);
@@ -728,7 +728,7 @@ checksum = "{hash_b}"
     }
 
     /// An unpacked sdist reads only its own toolchain file. The store's
-    /// scratch directory sits under `$HOME` or wherever `TOG_STORE` points, so
+    /// scratch directory sits under `$HOME` or wherever `GREYWARD_STORE` points, so
     /// a file above the sdist is someone else's: a `~/rust-toolchain` naming
     /// nightly must not fail every Rust sdist build, and its components must
     /// not be provisioned for one.
@@ -815,7 +815,7 @@ checksum = "{hash_b}"
             .unwrap()
             .starts_with("1.95."));
         fs::remove_file(sdist.join("rust-toolchain")).unwrap();
-        // A pin this tog does not ship is refused by name.
+        // A pin this ward does not ship is refused by name.
         let error = resolve_toolchain_within_or(platform, &sdist, Some("1.2.3")).unwrap_err();
         assert!(error.to_string().contains("pins Rust 1.2.3"), "{error}");
         crate::kernel::policy::clear();
@@ -932,7 +932,7 @@ checksum = "{hash_b}"
     /// A selection built from another ecosystem's bundle, or one whose rows
     /// name a layout this binary has never heard of, is refused before
     /// anything is fetched. A lock is an input like any other: it can name a
-    /// recipe a newer tog invented, and the honest answer is to say so.
+    /// recipe a newer ward invented, and the honest answer is to say so.
     #[test]
     fn realization_refuses_a_foreign_selection_and_an_unknown_recipe() {
         use crate::kernel::toolchain::fixtures;
@@ -978,7 +978,7 @@ checksum = "{hash_b}"
             .unwrap_err()
             .to_string();
         assert!(error.contains("recipe example/1"), "{error}");
-        assert!(error.contains("upgrade tog"), "{error}");
+        assert!(error.contains("upgrade ward"), "{error}");
 
         // A row with no artifact for this platform is refused by name too.
         let one_platform = Selected {
@@ -1312,9 +1312,9 @@ checksum = "{hash_b}"
             // A registered, resolvable root: the sweep refuses outright when
             // a recorded project cannot be resolved.
             let project = root.join("project");
-            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::create_dir_all(project.join(".greyward/closures")).unwrap();
             fs::write(
-                project.join(".tog/closures/cargo.json"),
+                project.join(".greyward/closures/cargo.json"),
                 serde_json::to_vec(&serde_json::json!({
                     "schema": "closure/1",
                     "ecosystem": "cargo",
@@ -1432,7 +1432,7 @@ checksum = "{hash_b}"
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
-            !root.join(".tog").exists(),
+            !root.join(".greyward").exists(),
             "projected into a workspace no record can name"
         );
         attribution.discard();
@@ -1490,12 +1490,12 @@ checksum = "{hash_b}"
         .unwrap();
         attribution.finish(true).unwrap();
 
-        let home = project.join(".tog/cargo-home").canonicalize().unwrap();
+        let home = project.join(".greyward/cargo-home").canonicalize().unwrap();
         let vendor = vendor.canonicalize().unwrap();
         let rust = rust.canonicalize().unwrap();
-        let config = fs::read_to_string(home.join("tog-config.toml")).unwrap();
+        let config = fs::read_to_string(home.join("greyward-config.toml")).unwrap();
         assert!(config.contains("[source.crates-io]"));
-        assert!(config.contains("replace-with = \"tog-vendor\""));
+        assert!(config.contains("replace-with = \"greyward-vendor\""));
         assert!(config.contains(&format!("directory = \"{}\"", vendor.display())));
         assert!(config.contains("[net]\noffline = true"));
 
@@ -1507,7 +1507,7 @@ checksum = "{hash_b}"
             format!(
                 "#!/bin/sh\n\
                  for a in \"$@\"; do case \"$a\" in --config|--config=*)\n\
-                 echo 'tog: --config is managed by tog' >&2; exit 2;; esac; done\n\
+                 echo 'ward: --config is managed by ward' >&2; exit 2;; esac; done\n\
                  export CARGO_HOME=\"{home}\"\n\
                  export RUSTC=\"{rustc}\"\n\
                  export RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER=\n\
@@ -1516,7 +1516,7 @@ checksum = "{hash_b}"
                 home = home.display(),
                 rustc = rust.join("bin/rustc").display(),
                 cargo = rust.join("bin/cargo").display(),
-                config = home.join("tog-config.toml").display(),
+                config = home.join("greyward-config.toml").display(),
             )
         );
         assert!(wrapper.contains(&format!("export CARGO_HOME=\"{}\"", home.display())));
@@ -1670,11 +1670,11 @@ checksum = "{hash_b}"
         let outside = temp.0.join("outside");
         let rust = temp.0.join("objects/rust-id");
         let vendor = temp.0.join("objects/vendor-id");
-        fs::create_dir_all(project.join(".tog/cargo-home")).unwrap();
+        fs::create_dir_all(project.join(".greyward/cargo-home")).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::create_dir_all(rust.join("bin")).unwrap();
         fs::create_dir_all(&vendor).unwrap();
-        std::os::unix::fs::symlink(&outside, project.join(".tog/cargo-home/bin")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join(".greyward/cargo-home/bin")).unwrap();
         let plan = CargoPlan {
             rust_version: "1.96.1".into(),
             crates: vec![],
@@ -1776,7 +1776,7 @@ checksum = "{hash_b}"
             .unwrap_err()
             .to_string();
             assert!(
-                error.contains("--config is managed by tog"),
+                error.contains("--config is managed by ward"),
                 "{bad}: {error}"
             );
         }

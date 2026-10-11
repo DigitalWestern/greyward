@@ -25,8 +25,8 @@ use common::{command, fresh_store, TempDir};
 /// different id, and a record with no schema cannot be read at all, so the
 /// fixture publishes a complete `object-meta/2` record the way
 /// `tests/cli.rs::publish_certified_object` does.
-fn protected_identity() -> tog::kernel::types::Identity {
-    tog::kernel::types::Identity {
+fn protected_identity() -> greyward::kernel::types::Identity {
+    greyward::kernel::types::Identity {
         kind: "test".into(),
         name: "protected".into(),
         version: "1".into(),
@@ -100,7 +100,7 @@ impl Fixture {
     }
 
     fn make_project(&self, project: &Path, live: bool) {
-        let closures = project.join(".tog/closures");
+        let closures = project.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         if live {
             fs::write(
@@ -119,7 +119,7 @@ impl Fixture {
     /// Write a `root/2` record by hand naming the protected object, the
     /// record `gc --register` writes for a live project.
     fn record(&self, project: &Path) -> String {
-        let key = tog::kernel::store::Store::root_key(project).unwrap();
+        let key = greyward::kernel::store::Store::root_key(project).unwrap();
         let record = serde_json::json!({
             "schema": "root/2",
             "key": key,
@@ -379,7 +379,7 @@ fn a_pathname_that_is_not_utf8_is_refused() {
     }
     fixture.make_project(&raw_project, true);
     let lossy_twin = fixture.project("project-\u{fffd}", false);
-    let twin_key = tog::kernel::store::Store::root_key(&lossy_twin).unwrap();
+    let twin_key = greyward::kernel::store::Store::root_key(&lossy_twin).unwrap();
 
     // argv stays UTF-8; the child canonicalizes `.` into the raw pathname.
     let register = fixture.run_in(&raw_project, &["gc", "--register", ".", "--keep-days=0"]);
@@ -413,7 +413,7 @@ fn dry_run_never_writes_a_record() {
     let key = fixture.record(&old);
     fs::remove_dir_all(&old).unwrap();
     let new = fixture.project("new", true);
-    let new_key = tog::kernel::store::Store::root_key(&new).unwrap();
+    let new_key = greyward::kernel::store::Store::root_key(&new).unwrap();
 
     let before = fixture.record_names();
     let combined = fixture.run(&[
@@ -717,7 +717,7 @@ fn an_unusable_root2_record_is_refused_by_name_and_forgettable() {
     ] {
         let fixture = Fixture::new(shape);
         let project = fixture.project("project", false);
-        let key = tog::kernel::store::Store::root_key(&project).unwrap();
+        let key = greyward::kernel::store::Store::root_key(&project).unwrap();
         let record = |key: &str, objects: serde_json::Value, projections: serde_json::Value| {
             serde_json::json!({
                 "schema": "root/2",
@@ -848,7 +848,7 @@ fn register_refuses_an_unknown_closure_and_keeps_the_old_record() {
     let fixture = Fixture::new("register-unknown");
     let project = fixture.project("project", true);
     fixture.record(&project);
-    let extra = project.join(".tog/closures/extra.json");
+    let extra = project.join(".greyward/closures/extra.json");
     let shapes = [
         (
             "unknown-ecosystem",
@@ -998,7 +998,7 @@ fn forget_registry_symlink_never_touches_its_target() {
         };
         symlink(&target, &link).unwrap();
         let target_bytes = fs::read(&target).ok();
-        let closure = project.join(".tog/closures/python.json");
+        let closure = project.join(".greyward/closures/python.json");
         let closure_bytes = fs::read(&closure).unwrap();
 
         let forget = fixture.run(&["gc", "--forget", &key]);

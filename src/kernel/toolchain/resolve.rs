@@ -23,11 +23,11 @@ use super::{invalid, Bundle, Catalog};
 use std::io;
 
 /// The next step every refusal in this module names.
-pub const UPDATE_HINT: &str = "run `tog update --toolchain`";
+pub const UPDATE_HINT: &str = "run `ward update --toolchain`";
 
 /// What `.python-version` accepts, spelled the way the refusal spells it.
 const PYTHON_HINT: &str =
-    "put an X.Y or X.Y.Z CPython version in .python-version, then run `tog update --toolchain`";
+    "put an X.Y or X.Y.Z CPython version in .python-version, then run `ward update --toolchain`";
 
 /// The value a row holds, looked up by the (path, field) pair discovery
 /// recorded it under. A row with no value reads the same as no row.

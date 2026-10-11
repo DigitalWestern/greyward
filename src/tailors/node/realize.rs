@@ -644,7 +644,7 @@ fn extract_tarball_packages(
 
 /// Git packages: the realized commit IS the package content. npm would run
 /// the package's `prepare` script here (git deps are installed from source);
-/// tog does not, because that script is unsandboxed build logic with its
+/// ward does not, because that script is unsandboxed build logic with its
 /// own dependency needs — the exception says so rather than pretending.
 fn place_git_packages(
     activity: &StoreActivity,
@@ -678,7 +678,7 @@ fn place_git_packages(
         }
         fs::create_dir_all(&dest)?;
         let staging = dest.with_file_name(format!(
-            ".tog-git-{}",
+            ".greyward-git-{}",
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("pkg")
         ));
         let _ = crate::kernel::store::remove_tree(&staging);
@@ -705,7 +705,7 @@ fn place_git_packages(
             crate::kernel::policy::record(
                 crate::kernel::policy::GIT_DEPENDENCY,
                 &format!("{}@{}", p.name, p.version),
-                "package has a `prepare` script; tog does not run it for git sources",
+                "package has a `prepare` script; ward does not run it for git sources",
             )?;
         }
         if p.bin.is_empty() {
@@ -872,7 +872,7 @@ pub(super) fn realize_node_env_with_node_object(
 
 pub(super) enum LifecycleFailure {
     SandboxUnavailable(io::Error),
-    /// tog was asked to stop while the script ran. The script's own status
+    /// ward was asked to stop while the script ran. The script's own status
     /// says nothing about the package then, so this ends the sync instead
     /// of becoming an exception.
     Interrupted(io::Error),
@@ -1131,7 +1131,7 @@ fn lifecycle_base_envs(
 /// A documented skip switch turns a doomed fetch into a recorded exception
 /// naming what the user runs later; a prebuilt-binary downloader is told to
 /// compile instead, which is the path it would have fallen back to anyway
-/// once the network denied it. Provisioning comes first: if tog can
+/// once the network denied it. Provisioning comes first: if ward can
 /// supply the artifact, the package is really installed rather than skipped.
 fn apply_artifact_policy(
     store: &Store,
@@ -1210,7 +1210,7 @@ fn require_provisioning(
             error.kind(),
             format!(
                 "{}@{}: provisioning the artifact its install script downloads failed: {error}; \
-                 re-run 'tog' once the download is reachable",
+                 re-run 'ward' once the download is reachable",
                 p.name, p.version
             ),
         )
@@ -1342,8 +1342,8 @@ mod tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => std::env::set_var("TOG_STORE", value),
-                None => std::env::remove_var("TOG_STORE"),
+                Some(value) => std::env::set_var("GREYWARD_STORE", value),
+                None => std::env::remove_var("GREYWARD_STORE"),
             }
         }
     }
@@ -1408,8 +1408,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = crate::kernel::testutil::TempDir::new();
-        let old_store = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let old_store = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", temp.0.join("store"));
         let _store_env = StoreEnv(old_store);
         let store = Store::open().unwrap();
         let activity = &store
@@ -1509,7 +1509,7 @@ mod tests {
         // Three bubblewrap arguments each (`--setenv K V`): well past the
         // limit bubblewrap accepts.
         let envs: Vec<(String, String)> = (0..4000)
-            .map(|i| (format!("TOG_FILL_{i}"), "x".to_string()))
+            .map(|i| (format!("GREYWARD_FILL_{i}"), "x".to_string()))
             .collect();
         let tmp_snapshot = temp.0.join("tmp-snapshot");
         fs::create_dir_all(&tmp_snapshot).unwrap();

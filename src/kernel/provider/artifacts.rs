@@ -2,8 +2,8 @@
 //! whose install scripts run with the network denied.
 //!
 //! Install scripts run with the network denied, so a package that downloads
-//! something at install time fails unless tog does one of three things:
-//! provision the file first (declared artifacts, see `TogConfig`), tell the
+//! something at install time fails unless ward does one of three things:
+//! provision the file first (declared artifacts, see `GreywardConfig`), tell the
 //! installer to skip the download, or make it build from source. All three
 //! live here: provisioning for electron, a small table of packages whose skip
 //! switch is documented by the package itself, and detection of the
@@ -92,7 +92,7 @@ pub fn source_build_envs() -> Vec<(String, String)> {
     ]
 }
 
-/// Provisioning: tog downloads the artifact itself, verifies it, and puts
+/// Provisioning: ward downloads the artifact itself, verifies it, and puts
 /// it where the installer's own cache lookup finds it, so the package is
 /// really installed rather than skipped.
 ///
@@ -242,7 +242,7 @@ pub fn provision(
         &sha256,
     )?;
 
-    let cache_root = scratch.join(".cache/tog-electron");
+    let cache_root = scratch.join(".cache/greyward-electron");
     let dir = cache_root.join(electron_cache_directory(&release_url));
     fs::create_dir_all(&dir)?;
     // Belt and braces: the destination must still be inside the cache dir.

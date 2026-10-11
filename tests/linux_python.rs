@@ -6,13 +6,13 @@
 
 use std::process::Command;
 
-use tog::kernel::platform::Platform;
-use tog::kernel::store::Store;
-use tog::tailors::python;
+use greyward::kernel::platform::Platform;
+use greyward::kernel::store::Store;
+use greyward::tailors::python;
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, tog_at, warm_store, TempDir};
+use common::{assert_ok, copy_tree, fixture, ward_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -31,7 +31,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
     copy_tree(&fixture("proj-a"), &project);
     let store_path = warm_store(&temp);
 
-    assert_ok(tog_at(&project, &temp.0, &store_path, &["sync"]), "sync");
+    assert_ok(ward_at(&project, &temp.0, &store_path, &["sync"]), "sync");
 
     let imports = Command::new(project.join(".venv/bin/python"))
         .args([
@@ -44,7 +44,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
     assert_eq!(imports.trim(), "3.0.2 1.17.0");
 
     let run = assert_ok(
-        tog_at(
+        ward_at(
             &project,
             &temp.0,
             &store_path,
@@ -55,7 +55,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
                 "import sys, sysconfig; print(sys.version.split()[0]); print(sysconfig.get_platform())",
             ],
         ),
-        "tog run python",
+        "ward run python",
     );
     let mut lines = run.lines();
     assert_eq!(lines.next(), Some("3.12.14"));
@@ -68,7 +68,7 @@ fn linux_python_sync_run_and_uv_round_trip() {
 
     let store = Store::open_at(&store_path).unwrap();
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let uv = python::ensure_uv_for(&store, activity, Platform::host().unwrap()).unwrap();
     let uv_version = Command::new(uv.join("uv"))
@@ -78,10 +78,10 @@ fn linux_python_sync_run_and_uv_round_trip() {
     let uv_version = assert_ok(uv_version, "uv --version");
     assert!(uv_version.contains("0.12.7"), "{uv_version}");
 
-    let plan_path = project.join(".tog/plan.json");
+    let plan_path = project.join(".greyward/plan.json");
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
     assert_ok(
-        tog_at(&project, &temp.0, &store_path, &["sync"]),
+        ward_at(&project, &temp.0, &store_path, &["sync"]),
         "warm sync",
     );
     assert_eq!(

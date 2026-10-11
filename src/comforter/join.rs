@@ -6,7 +6,7 @@
 //! installs that lookup once per process, `install_resolution_files`), the
 //! candidates are every record supplied with `--resolution-record` whose
 //! `ecosystem` names this one, in command-line order, then the committed
-//! receipt `.tog/resolution/<ecosystem>.json`. Each is judged by
+//! receipt `.greyward/resolution/<ecosystem>.json`. Each is judged by
 //! `kernel::resolve::record::judge`. The first that attests is joined: the
 //! closure body gains `"resolution": <envelope>`, the record's exceptions
 //! are recorded into the attribution on the writer's thread, and its ledger
@@ -41,7 +41,7 @@ static LOOKUP: Mutex<Option<Arc<ResolutionFilesLookup>>> = Mutex::new(None);
 
 /// Install the lookup for this process. The command layer calls it once,
 /// before any verb that writes a project closure; the first install wins,
-/// like the object-kind rows. A process that never installs one (`tog x`,
+/// like the object-kind rows. A process that never installs one (`ward x`,
 /// whose closures describe cache roots, not projects) joins nothing, and
 /// a cache root written by any other process (the pinned pnpm a dependency
 /// edit realizes) joins nothing either: the command marks it
@@ -155,7 +155,7 @@ fn read_supplied_file(path: &Path) -> io::Result<SuppliedRecord> {
 }
 
 /// Hand this process's supplied records to every later join. Called once
-/// by `tog sync` before it syncs; the records are read now, so a bad path
+/// by `ward sync` before it syncs; the records are read now, so a bad path
 /// fails before anything is realized.
 pub fn supply_records(paths: &[PathBuf]) -> io::Result<()> {
     let records = read_supplied(paths)?;
@@ -210,7 +210,7 @@ pub(crate) fn join_for_closure(
         .as_object_mut()
         .expect("the closure writer validated the body object");
     object.remove("resolution");
-    // A `tog x` cache root is not a project: no door leaves a record in it
+    // A `ward x` cache root is not a project: no door leaves a record in it
     // (an `x` door writes none), so joining it would only record
     // `unrecorded-resolution` against its own lock, in the process that
     // realized it for an edit or a lock check. The command marked it by
@@ -277,7 +277,7 @@ fn read_basis(object: &serde_json::Map<String, Value>, ecosystem: &str) -> io::R
             io::ErrorKind::InvalidData,
             format!(
                 "the {ecosystem} closure {why}, so the resolution join cannot bind a record \
-                 to the lock files its plan read; this is a tog bug"
+                 to the lock files its plan read; this is a ward bug"
             ),
         )
     };
@@ -320,8 +320,8 @@ fn check_basis(
         return Ok(());
     }
     Err(io::Error::other(format!(
-        "{} changed in {} after this {ecosystem} sync planned from {}; another tog command or \
-         an editor wrote {} meanwhile, so nothing was published; run `tog` again",
+        "{} changed in {} after this {ecosystem} sync planned from {}; another ward command or \
+         an editor wrote {} meanwhile, so nothing was published; run `ward` again",
         changed.join(", "),
         project.path().display(),
         if changed.len() == 1 { "it" } else { "them" },
@@ -370,8 +370,8 @@ fn check_record_basis(
     }
     Err(io::Error::other(format!(
         "{origin}: the {ecosystem} resolution record describes {} at a different version than \
-         this sync planned from; another tog command changed the lock meanwhile, so nothing was \
-         published; run `tog` again",
+         this sync planned from; another ward command changed the lock meanwhile, so nothing was \
+         published; run `ward` again",
         changed.join(", ")
     )))
 }
@@ -489,7 +489,7 @@ fn record_unrecorded(
 }
 
 /// What a refusal of `unrecorded-resolution` tells the reader to do. A
-/// record whose trusted signature already verified only needs a fresh `tog
+/// record whose trusted signature already verified only needs a fresh `ward
 /// attest`; anything short of that also needs a key the machine trusts.
 /// The last sentence names the knob that refused, as every refusal does.
 fn remedy(policy: &Policy, ecosystem: &str, locks: &[String], finding: &Finding) -> String {
@@ -502,14 +502,14 @@ fn remedy(policy: &Policy, ecosystem: &str, locks: &[String], finding: &Finding)
     );
     let steps = if finding.authenticated {
         format!(
-            "To create one: run `tog attest {ecosystem}` with `TOG_SIGNING_KEY` set to a key \
+            "To create one: run `ward attest {ecosystem}` with `GREYWARD_SIGNING_KEY` set to a key \
              your machine policy trusts."
         )
     } else {
         format!(
-            "To create one: run `tog keygen <path>`, set `TOG_SIGNING_KEY=<path>`, add the \
+            "To create one: run `ward keygen <path>`, set `GREYWARD_SIGNING_KEY=<path>`, add the \
              printed public key to the `[signing] trusted` list in your machine policy \
-             (`TOG_POLICY`, else `~/.tog/policy.toml`), then run `tog attest {ecosystem}`."
+             (`GREYWARD_POLICY`, else `~/.greyward/policy.toml`), then run `ward attest {ecosystem}`."
         )
     };
     if policy.strict {
@@ -518,7 +518,7 @@ fn remedy(policy: &Policy, ecosystem: &str, locks: &[String], finding: &Finding)
             None => "use a policy that is not strict".to_string(),
         };
         return format!(
-            "`tog --strict` requires every lock to carry a signed resolution record. {what}. \
+            "`ward --strict` requires every lock to carry a signed resolution record. {what}. \
              {steps} Or {lift}."
         );
     }
@@ -652,7 +652,7 @@ mod tests {
         record::envelope_bytes(&record.envelope(key).unwrap()).unwrap()
     }
 
-    /// Sign an envelope that was edited as JSON, the way a newer tog or a
+    /// Sign an envelope that was edited as JSON, the way a newer ward or a
     /// hand would write it.
     fn resigned(mut envelope: Value, key: &SigningKey) -> Vec<u8> {
         key.sign(&mut envelope).unwrap();
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(
             error.to_string().contains(
-                "exception kind `quantum-dependency`, which this tog cannot read; upgrade tog"
+                "exception kind `quantum-dependency`, which this ward cannot read; upgrade ward"
             ),
             "{error}"
         );
@@ -946,7 +946,7 @@ mod tests {
         let error = result.unwrap_err().to_string();
         assert!(
             error.contains(
-                "the resolution record uses schema `resolution/2`, which this tog cannot read; upgrade tog"
+                "the resolution record uses schema `resolution/2`, which this ward cannot read; upgrade ward"
             ),
             "{error}"
         );
@@ -1020,7 +1020,7 @@ mod tests {
         company.deny = template.deny;
         company.deny_sources.insert(
             UNRECORDED_RESOLUTION.into(),
-            PathBuf::from("/etc/tog/policy.toml"),
+            PathBuf::from("/etc/greyward/policy.toml"),
         );
         let (result, recorded) = run_join(&company, &temp.0, &[]);
         let error = result.unwrap_err();
@@ -1033,12 +1033,12 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains(&format!("run `tog attest {ECO}`")),
+            message.contains(&format!("run `ward attest {ECO}`")),
             "{message}"
         );
         assert!(
             message.contains(
-                "remove 'unrecorded-resolution' from the deny list in /etc/tog/policy.toml"
+                "remove 'unrecorded-resolution' from the deny list in /etc/greyward/policy.toml"
             ),
             "{message}"
         );
@@ -1054,12 +1054,12 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "policy denies unrecorded-resolution: test.lock, test.toml: missing; `tog --strict` \
+                "policy denies unrecorded-resolution: test.lock, test.toml: missing; `ward --strict` \
                  requires every lock to carry a signed resolution record. `test.lock`, `test.toml` \
-                 have none (`missing`). To create one: run `tog keygen <path>`, set \
-                 `TOG_SIGNING_KEY=<path>`, add the printed public key to the `[signing] trusted` \
-                 list in your machine policy (`TOG_POLICY`, else `~/.tog/policy.toml`), then run \
-                 `tog attest {ECO}`. Or rerun without --strict."
+                 have none (`missing`). To create one: run `ward keygen <path>`, set \
+                 `GREYWARD_SIGNING_KEY=<path>`, add the printed public key to the `[signing] trusted` \
+                 list in your machine policy (`GREYWARD_POLICY`, else `~/.greyward/policy.toml`), then run \
+                 `ward attest {ECO}`. Or rerun without --strict."
             )
         );
     }
@@ -1079,11 +1079,11 @@ mod tests {
         let message = result.unwrap_err().to_string();
         assert!(message.contains("(`stale-outputs`)"), "{message}");
         assert!(
-            message.contains(&format!("run `tog attest {ECO}` with")),
+            message.contains(&format!("run `ward attest {ECO}` with")),
             "{message}"
         );
-        assert!(!message.contains("tog keygen"), "{message}");
-        assert!(message.ends_with("Or unset TOG_STRICT."), "{message}");
+        assert!(!message.contains("ward keygen"), "{message}");
+        assert!(message.ends_with("Or unset GREYWARD_STRICT."), "{message}");
     }
 
     #[test]
@@ -1305,7 +1305,7 @@ mod tests {
         match result {
             Ok(()) => {
                 attribution.finish(true).unwrap();
-                let bytes = fs::read(dir.join(format!(".tog/closures/{ECO}.json"))).unwrap();
+                let bytes = fs::read(dir.join(format!(".greyward/closures/{ECO}.json"))).unwrap();
                 Ok(serde_json::from_slice(&bytes).unwrap())
             }
             Err(error) => {
@@ -1346,10 +1346,10 @@ mod tests {
         );
     }
 
-    /// A `tog x` cache root this process marked joins nothing: under a
+    /// A `ward x` cache root this process marked joins nothing: under a
     /// policy denying `unrecorded-resolution`, publishing its closure
     /// succeeds with no record and no exception. A project is a project
-    /// whatever it commits: with a `.tog/x.json` in it and no mark, the
+    /// whatever it commits: with a `.greyward/x.json` in it and no mark, the
     /// same publish is still joined and still refused.
     #[test]
     fn only_a_marked_cache_root_joins_nothing() {
@@ -1362,8 +1362,8 @@ mod tests {
         crate::comforter::clear_cache_roots_for_test();
         let (_store_dir, store) = test_store("join-x-root");
         // A committed request record forges nothing.
-        fs::create_dir_all(temp.0.join(".tog")).unwrap();
-        fs::write(temp.0.join(".tog/x.json"), r#"{"state":"ready"}"#).unwrap();
+        fs::create_dir_all(temp.0.join(".greyward")).unwrap();
+        fs::write(temp.0.join(".greyward/x.json"), r#"{"state":"ready"}"#).unwrap();
         let refused = publish(&temp.0, &store).unwrap_err().to_string();
         assert!(refused.contains("unrecorded-resolution"), "{refused}");
         // The command's mark, by canonical path, does.
@@ -1419,7 +1419,7 @@ mod tests {
         let (_store_dir, store) = test_store("join-denied");
         let error = publish(&temp.0, &store).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
-        assert!(!temp.0.join(".tog/closures").exists());
+        assert!(!temp.0.join(".greyward/closures").exists());
         assert_eq!(
             fs::read(temp.0.join(record::receipt_path(ECO))).unwrap(),
             stale
@@ -1468,7 +1468,7 @@ mod tests {
         .unwrap();
         attribution.finish(true).unwrap();
         let closure: Value = serde_json::from_slice(
-            &fs::read(temp.0.join(format!(".tog/closures/{ECO}.json"))).unwrap(),
+            &fs::read(temp.0.join(format!(".greyward/closures/{ECO}.json"))).unwrap(),
         )
         .unwrap();
         assert_eq!(closure["body"]["exceptions"], json!([fact]));
@@ -1500,14 +1500,14 @@ mod tests {
         let _writer = Writer::new(trusting(&[ci_key()]), Vec::new());
         let (_store_dir, store) = test_store("join-race-edit");
         let planned = planned_body(&temp.0, json!({}));
-        // A concurrent `tog add` publishes a new lock between the plan and
+        // A concurrent `ward add` publishes a new lock between the plan and
         // the closure write.
         fs::write(temp.0.join("test.lock"), "left-pad 1.3.1 sha256:cd\n").unwrap();
         let error = publish_planned(&temp.0, &store, planned).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("test.lock changed"), "{message}");
-        assert!(message.contains("run `tog` again"), "{message}");
-        assert!(!temp.0.join(".tog/closures").exists());
+        assert!(message.contains("run `ward` again"), "{message}");
+        assert!(!temp.0.join(".greyward/closures").exists());
         assert!(root_objects(&store, &temp.0).is_empty());
     }
 
@@ -1535,7 +1535,7 @@ mod tests {
             message.contains("test.lock, test.toml changed"),
             "{message}"
         );
-        assert!(!temp.0.join(".tog/closures").exists());
+        assert!(!temp.0.join(".greyward/closures").exists());
         // The same record joins a closure planned from the new lock.
         let closure = publish(&temp.0, &store).unwrap();
         assert_eq!(
@@ -1581,7 +1581,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
-        assert!(!temp.0.join(".tog/closures").exists());
+        assert!(!temp.0.join(".greyward/closures").exists());
     }
 
     /// The join runs under the project lock that every door's transaction

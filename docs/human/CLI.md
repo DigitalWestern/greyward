@@ -1,4 +1,4 @@
-# Tog CLI
+# Greyward CLI
 
 *Written 2026-09-10. Replaces the 2026-09-06 plan at the repo root: what it
 promised is shipped, so this file describes only what exists. The help screen
@@ -6,24 +6,24 @@ below is the spec, generated from the command table in `src/cli/spec.rs`; if thi
 file and the binary differ, fix this file.*
 
 ```
-tog 0.1.0 — one command for every package manager
+ward 0.1.0 — one command for every package manager
 
 USAGE:
-  tog                        set up this project
-  tog <command> [<args>...]  run a command ('tog help <command>' explains it)
-  tog <script> [<args>...]   run a package.json script (like 'npm run')
-  tog <file> [<args>...]     run a source file in the environment (tog app.py)
+  ward                        set up this project
+  ward <command> [<args>...]  run a command ('ward help <command>' explains it)
+  ward <script> [<args>...]   run a package.json script (like 'npm run')
+  ward <file> [<args>...]     run a source file in the environment (ward app.py)
 
 START HERE:
-  tog                   set up the project from its lockfiles
-  tog run <command>     run something inside that environment
-  tog add <package>     add a dependency, re-lock, sync
-  tog doctor            check this machine when something looks wrong
+  ward                   set up the project from its lockfiles
+  ward run <command>     run something inside that environment
+  ward add <package>     add a dependency, re-lock, sync
+  ward doctor            check this machine when something looks wrong
 
 EVERYDAY:
   add          add a dependency, re-lock, sync
   remove       remove a dependency, re-lock, sync
-  update       update dependencies, --toolchain, or --self (tog itself)
+  update       update dependencies, --toolchain, or --self (ward itself)
   run          run a command or package.json script in the environment(s)
   env          print the environment as shell exports (for eval or direnv)
   x            run a tool without adding it as a dependency (like npx / uvx)
@@ -47,33 +47,33 @@ MAINTAIN:
   help         show help for a command
   version      print the version
 
-SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
+SETUP OPTIONS (the bare 'ward' only; 'ward help setup' explains them):
   --fresh     rebuild .venv / node_modules from scratch
 
 OPTIONS (before or after the command; after 'run', 'build' or a script name
 everything belongs to the program, and 'fmt' and 'x' take them only ahead of
 the tool's own arguments):
-  -C, --directory <dir>  run as if tog had been started in <dir>
+  -C, --directory <dir>  run as if ward had been started in <dir>
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
       --frozen           CI: the implicit sync checks the locks instead of
                          writing them
       --strict           the implicit sync refuses every policy exception
-                         (same as TOG_STRICT=1)
-  -h, --help             this help ('tog help <command>' for one command)
+                         (same as GREYWARD_STRICT=1)
+  -h, --help             this help ('ward help <command>' for one command)
   -V, --version          print the version
 
 ENVIRONMENT:
-  TOG_STORE           store root (default ~/.tog/store)
-  TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
-  TOG_POLICY          policy file used instead of ~/.tog/policy.toml
-  TOG_SIGNING_KEY     key file that signs closures and resolution records
+  GREYWARD_STORE           store root (default ~/.greyward/store)
+  GREYWARD_STRICT=1        refuse every policy exception, like 'ward --strict'
+  GREYWARD_POLICY          policy file used instead of ~/.greyward/policy.toml
+  GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
 
 Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
-the program's status through. Which files tog reads per ecosystem:
-'tog help inputs'. Full reference: docs/human/CLI.md.
+the program's status through. Which files ward reads per ecosystem:
+'ward help inputs'. Full reference: docs/human/CLI.md.
 ```
 
 ## Conventions
@@ -82,20 +82,20 @@ the program's status through. Which files tog reads per ecosystem:
   `store path`, and the `--json` forms write parseable output to stdout and
   nothing else (`env` is evaled by a shell, so a stray word there is a
   syntax error in someone's session). Narration stays on stderr with a
-  `tog:` prefix, and the prefix says which kind it is: progress is
-  `tog: <what is happening>`, an advisory you may want to act on (a
+  `ward:` prefix, and the prefix says which kind it is: progress is
+  `ward: <what is happening>`, an advisory you may want to act on (a
   fallback, a directory moved aside, unsigned closures under a policy that
   checks signatures) is
-  `tog: warning: <what happened>`, and every warning is followed by
-  `tog:     fix: <command>`, the one command that resolves it, ready to
+  `ward: warning: <what happened>`, and every warning is followed by
+  `ward:     fix: <command>`, the one command that resolves it, ready to
   paste. Where no command clears it, the second line is
-  `tog:    next: <command>` instead, a command that shows why (a failed
-  setup.py probe's `egg_info`, `tog audit` over recorded exceptions); the
+  `ward:    next: <command>` instead, a command that shows why (a failed
+  setup.py probe's `egg_info`, `ward audit` over recorded exceptions); the
   command starts in the same column either way. A line with nothing for
   you to do is progress, not a warning. A
-  failure is `tog: error: <what failed>`. A store this tog refuses to open
+  failure is `ward: error: <what failed>`. A store this Greyward refuses to open
   is the one failure with a single command that clears it, so that error
-  is followed by the same `tog:     fix: <command>` line (under `--json`,
+  is followed by the same `ward:     fix: <command>` line (under `--json`,
   a `"fix"` key beside `"error"`). `--quiet` silences the first two
   and never the third. `gc` narrates, so every line it prints — registered,
   forgot, would free, freed, cleanup skipped — is stderr and `--quiet`
@@ -115,9 +115,9 @@ the program's status through. Which files tog reads per ecosystem:
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
-- **A signal that stops tog exits `128 + signal`**, the shell's
+- **A signal that stops Greyward exits `128 + signal`**, the shell's
   convention: Ctrl-C during a sync exits 130 and says it was interrupted.
-  `tog run` and `tog x` exit with their child's code, so the child decides
+  `ward run` and `ward x` exit with their child's code, so the child decides
   what an interrupt means there.
 - **The exit status says what kind of failure it was**, so a script or a CI
   job can branch on it without reading the message:
@@ -127,7 +127,7 @@ the program's status through. Which files tog reads per ecosystem:
   | 0 | success | |
   | 1 | any other failure | read the message |
   | 2 | usage error (argv), or `audit`'s misconfigured gate | fix the command line |
-  | 3 | refused by rule: a policy denial, a store tog will not open, a project path swapped under it, `pip install` inside `tog run` | change the policy or the input; rerunning changes nothing |
+  | 3 | refused by rule: a policy denial, a store Greyward will not open, a project path swapped under it, `pip install` inside `ward run` | change the policy or the input; rerunning changes nothing |
   | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
   | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
   | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; HTTP 403/404, invalid request or proxy settings, and TLS certificate/protocol failures exit 1 |
@@ -159,12 +159,12 @@ the program's status through. Which files tog reads per ecosystem:
   `NO_COLOR` turns it off, and stdout never gets it.
 - **Global options work before or after the command.** `-C <dir>`, `-q`,
   `-v`, `--no-color`, `--frozen` and `--strict` mean the same thing in
-  either position (`tog ls -v` and `tog -v ls` are the same command),
+  either position (`ward ls -v` and `ward -v ls` are the same command),
   except where the rest of the line belongs to something else: `run`,
   `build` and a script name pass every argument after them to the program
-  (`tog dev --strict` gives the script `--strict`), `fmt` and `x` accept
+  (`ward dev --strict` gives the script `--strict`), `fmt` and `x` accept
   them only ahead of the tool's own arguments, and the value slot of a
-  command's own option is never searched (`tog gc --register -v` registers
+  command's own option is never searched (`ward gc --register -v` registers
   a directory called `-v`; the command table says which options take a
   value). What reaches that slot is then the option's own business — see
   the next rule. `--frozen` and `--strict` govern a sync, so only the
@@ -178,26 +178,26 @@ the program's status through. Which files tog reads per ecosystem:
   options go.
 - **Pass-through is sacred.** `run`, `build`, `x`, and `fmt` hand every
   argument after the command to the tool unchanged, and `--` forces
-  pass-through (`tog build --release` works). What tog keeps for itself is
+  pass-through (`ward build --release` works). What Greyward keeps for itself is
   a *leading* `-h`/`--help` in all four, plus, for `fmt` and `x` only, the
   global options while they still precede the tool's first non-option word:
-  `tog x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
-  a tool argument is spelled like one of those (`tog fmt -- -v`).
+  `ward x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
+  a tool argument is spelled like one of those (`ward fmt -- -v`).
 - **An option's single value follows one rule.** An option that takes one
   value refuses an empty one, and refuses a separate word that starts with
-  `-`: `tog sbom -o --json` is a mistyped flag, not a request to write a
-  file named `--json`, and `tog -C ""` is a usage error rather than a
+  `-`: `ward sbom -o --json` is a mistyped flag, not a request to write a
+  file named `--json`, and `ward -C ""` is a usage error rather than a
   directory change that fails later. A value that really does start with a
   dash is given inline, after an `=`:
 
-      tog sbom --output=-report.json
-      tog --directory=-work plan
+      ward sbom --output=-report.json
+      ward --directory=-work plan
 
   A lone `-` is a separate word starting with `-` like any other, so it is
-  refused too; `tog sbom --output=-` names a file called `-`. Nothing needs
+  refused too; `ward sbom --output=-` names a file called `-`. Nothing needs
   it: `sbom` already writes to stdout when `--output` is left off.
 
-  The rule stops at the option's own grammar, so a value tog will not use
+  The rule stops at the option's own grammar, so a value Greyward will not use
   as a path is refused in both forms: `--eco` and `--from` name an
   ecosystem and a package, `--forget` and `--drop-object` a key and an
   object id, `--keep-days` a number, and none of those can start with a
@@ -207,68 +207,68 @@ the program's status through. Which files tog reads per ecosystem:
 
 ## Completions
 
-`tog completions bash|zsh|fish` prints a script generated from the same
+`ward completions bash|zsh|fish` prints a script generated from the same
 command table as the help: commands, per-command options, `store path|roots`,
 `build <ecosystem>`. package.json script names complete under `run` and as
 the first word when a package.json is present.
 
 ## Everyday verbs
 
-**The bare `tog`** is the setup step, and there is no verb for it: like
+**The bare `ward`** is the setup step, and there is no verb for it: like
 `cargo build`, every command that needs the environment brings it current on
-the way in. Inside a project a bare `tog` discovers every ecosystem present
+the way in. Inside a project a bare `ward` discovers every ecosystem present
 in the current directory, realizes each locked plan into the store, projects
-it (`.venv`, `node_modules`, `.tog/...`), and then prints a short footer:
+it (`.venv`, `node_modules`, `.greyward/...`), and then prints a short footer:
 the commands most likely to come next (`run`, `add`, `build`, `doctor`) and
-`tog --help` for the full list. Outside a project it prints what `tog help`
+`ward --help` for the full list. Outside a project it prints what `ward help`
 prints and exits 0. A manifest with no dependencies syncs an
 interpreter-only environment. The footer only follows a sync that
 succeeded, so a failure stays the last thing on screen.
 
 It takes three flags, and with any of them the footer is not printed and a
 directory with no project is a failure (exit 1) rather than orientation, so
-a CI job pointed at the wrong directory goes red: `tog --frozen` validates
-the locks without writing them (below), `tog --fresh` drops project-local
-caches and rebuilds, and `tog --strict` refuses every policy exception.
-Inside a project `tog -q` is a sync with no narration and no footer. `--fresh`
+a CI job pointed at the wrong directory goes red: `ward --frozen` validates
+the locks without writing them (below), `ward --fresh` drops project-local
+caches and rebuilds, and `ward --strict` refuses every policy exception.
+Inside a project `ward -q` is a sync with no narration and no footer. `--fresh`
 stays on the bare form: rebuilding before every command is never what
-someone means, so `tog --fresh status` is a usage error. `--frozen` and
+someone means, so `ward --fresh status` is a usage error. `--frozen` and
 `--strict` are global options, accepted before the verb and after it where
 any global option is: `run`, `build` and a script name hand everything after
-them to the program, so there the flags go first (`tog --frozen dev`), and
+them to the program, so there the flags go first (`ward --frozen dev`), and
 `fmt` and `x` take them only ahead of the tool's own arguments. They govern
-the implicit sync of `run`, `env`, `build`, `tog <script>` and a
+the implicit sync of `run`, `env`, `build`, `ward <script>` and a
 package.json `fmt` script. `plan` takes both: under `--frozen` it never
-generates a missing dependency lock, so `tog --frozen plan` of a project
+generates a missing dependency lock, so `ward --frozen plan` of a project
 with no lock fails naming the file, and under `--strict` it plans with
 every policy exception refused. `x` takes `--strict` and judges the tool
 under that policy; it refuses `--frozen`, since it resolves its tool from a
 registry and has no lock to check. `--strict` also governs the sync after
 `add`, `remove` and `update`; `--frozen` is refused there, because those
 verbs exist to write the lock. A verb that never syncs refuses both flags with a usage
-error (exit 2) naming the verb: `tog --frozen status` says `status` never
-syncs rather than ignoring the flag. `tog help setup` is the
-bare form's screen and `tog help inputs` the files it reads per ecosystem.
+error (exit 2) naming the verb: `ward --frozen status` says `status` never
+syncs rather than ignoring the flag. `ward help setup` is the
+bare form's screen and `ward help inputs` the files it reads per ecosystem.
 
-`run`, `env`, `build` and `tog <script>` sync on their own when the project
-is not synced or its inputs changed (see **run**), so a bare `tog` is only
+`run`, `env`, `build` and `ward <script>` sync on their own when the project
+is not synced or its inputs changed (see **run**), so a bare `ward` is only
 needed for a sync with nothing to run after it. `sync`, `install` and `i`
 still work as hidden aliases of the bare form, flags included, so a pip or
 npm reflex and existing CI keep working; they are not listed, completed, or
-suggested. They take no package name: `tog install requests` is a usage
-error that names `tog add requests`.
+suggested. They take no package name: `ward install requests` is a usage
+error that names `ward add requests`.
 
 The first writable sync of a project with no toolchain lock selects a
-runtime per ecosystem, writes `tog-toolchain.toml` at the project root, and
+runtime per ecosystem, writes `greyward-toolchain.toml` at the project root, and
 says so; commit it. Every later sync honors that file and reselects nothing,
 so a catalog or binary upgrade alone cannot move a locked runtime. A
 declarative toolchain source that disagrees with what the lock recorded —
 `.python-version`, `requires-python`, `.node-version`, `engines.node`,
 `rust-toolchain.toml`, `go.mod`, `.ruby-version`, `.tool-versions`,
 `global.json` — stops the sync with both values and names
-`tog update --toolchain`. So does a lock with no section for an ecosystem
+`ward update --toolchain`. So does a lock with no section for an ecosystem
 the project just gained: that is stale, not absent. Comparison is by the
-re-derived value, never by the file's digest alone, so a `tog add` that
+re-derived value, never by the file's digest alone, so a `ward add` that
 rewrites a multi-purpose manifest leaves the lock fresh. The `targets`,
 `components` and `profile` of `rust-toolchain(.toml)` are rows too (list
 order and duplicates do not count), and a toolchain file that does not
@@ -282,7 +282,7 @@ release, and the lock records it. `path = "<dir>"` names a local toolchain
 directory instead: the lock records its `rustc -vV` and `cargo -V` lines
 and a hash of the whole tree on a row marked `source = "path"`, each sync
 imports it after checking the tree still hashes the same (a changed tree
-refuses and names `tog update --toolchain rust`), and each use records the
+refuses and names `ward update --toolchain rust`), and each use records the
 `external-toolchain` exception. A path beside a channel, components,
 targets or a profile is refused, as rustup refuses it.
 
@@ -291,13 +291,13 @@ build on when neither the project (no `rust` section) nor the sdist (no
 channel of its own, or `stable`) names one: `[toolchain.python.helpers]
 rust = "<version>"`, the catalog's default when the section was written.
 A section from before that pin keeps Rust 1.96.1, so an existing lock's
-wheels do not change; `tog update --toolchain python` pins today's
+wheels do not change; `ward update --toolchain python` pins today's
 default.
 
 `--frozen` validates the committed lock instead of creating one and refuses
 a missing or stale one.
 
---frozen never modifies project inputs, tog-toolchain.toml, or the catalog
+--frozen never modifies project inputs, greyward-toolchain.toml, or the catalog
 cache; it may realize store objects and write the projection after validation
 succeeds; validation failure exits before any write.
 
@@ -309,20 +309,20 @@ add. `--frozen` also skips missing-lock generation, so a project with no
 dependency lock is refused by the ecosystem that needs one rather than
 having one written for it.
 
-Policy exceptions are recorded in `.tog/closures/*.json`
+Policy exceptions are recorded in `.greyward/closures/*.json`
 and summarized as a count with where to read them; `--strict`,
-`TOG_STRICT=1`, or a `.tog/policy.toml` deny list refuses them instead —
+`GREYWARD_STRICT=1`, or a `.greyward/policy.toml` deny list refuses them instead —
 note that `--strict` fails the sync, so it is a setting to sync *under*, not
 a way to clear exceptions already recorded. An extra or dev group the
 project declares and nobody requested is not an exception, so `--strict`
 and `strict = true` pass it: before `optional_groups_skipped` existed they
 failed such a sync. Closures are written unsigned
-unless `TOG_SIGNING_KEY` is set; sync says so once per store, and on every
+unless `GREYWARD_SIGNING_KEY` is set; sync says so once per store, and on every
 sync only where the policy chain declares a `[signing]` table.
 
 **Resolution records.** A lock written by a delegated tool (`go mod tidy`,
 `uv lock`, and so on) through a resolution door carries a signed receipt in
-`.tog/resolution/<ecosystem>.json`: the tool and command that ran, the
+`.greyward/resolution/<ecosystem>.json`: the tool and command that ran, the
 isolation tier it ran in, the sha256 of every output (the lock and the
 manifest it rewrote) and every input it read, a summary of the ledger of
 what it fetched, and the exceptions that run recorded. Commit it beside the
@@ -334,31 +334,31 @@ are judged like the sync's own. Anything else (no record, unsigned, an
 untrusted key, a bad signature, a malformed record, a new file it does not
 cover, or a lock or manifest edited since) records `unrecorded-resolution`
 with that reason, and the stale receipt is left as it is. A record from a
-newer tog, with a schema, isolation tier or exception kind this binary cannot
-read, fails the sync outright under every policy: upgrade tog.
+newer Greyward, with a schema, isolation tier or exception kind this binary cannot
+read, fails the sync outright under every policy: upgrade Greyward.
 
-`--strict` and `TOG_STRICT=1` deny `unrecorded-resolution` like every other
+`--strict` and `GREYWARD_STRICT=1` deny `unrecorded-resolution` like every other
 kind, so a strict sync requires every such lock to carry an attesting
 record, and so does the company template's deny list. The refusal says what
 to do:
 
 ```
-tog: error: policy denies unrecorded-resolution: go.mod, go.sum: missing; `tog --strict`
+ward: error: policy denies unrecorded-resolution: go.mod, go.sum: missing; `ward --strict`
 requires every lock to carry a signed resolution record. `go.mod`, `go.sum` have none
-(`missing`). To create one: run `tog keygen <path>`, set `TOG_SIGNING_KEY=<path>`, add the
-printed public key to the `[signing] trusted` list in your machine policy (`TOG_POLICY`,
-else `~/.tog/policy.toml`), then run `tog attest go`. Or rerun without --strict.
+(`missing`). To create one: run `ward keygen <path>`, set `GREYWARD_SIGNING_KEY=<path>`, add the
+printed public key to the `[signing] trusted` list in your machine policy (`GREYWARD_POLICY`,
+else `~/.greyward/policy.toml`), then run `ward attest go`. Or rerun without --strict.
 ```
 
 When the record is signed by a trusted key but stale or incomplete, the
-steps are only `run tog attest <eco> with TOG_SIGNING_KEY set`. The last
-sentence follows what made the kind denied: the flag, `unset TOG_STRICT`,
+steps are only `run ward attest <eco> with GREYWARD_SIGNING_KEY set`. The last
+sentence follows what made the kind denied: the flag, `unset GREYWARD_STRICT`,
 the file that set `strict = true`, or the file whose deny list names it.
 
 `--resolution-record <path>` (repeatable, bare form only) also judges
 records that are not committed: a file, or a directory whose `*.json`
 files are read in name order. This is how a CI job consumes a record
-another job signed as an artifact (`tog --strict --frozen
+another job signed as an artifact (`ward --strict --frozen
 --resolution-record records/`) without anyone committing it. Supplied
 records are judged first, then the committed one, and the first that
 attests wins; a supplied record is never written into the project. A path
@@ -368,7 +368,7 @@ that cannot be read, or a file that is not a record, fails the sync.
 pinned tool (uv, npm, pnpm, cargo, go, bundler, mix), then sync. `--no-sync`
 stops after the edit so the diff can be reviewed; `--dev` (`-D`) selects
 development dependencies (`remove --dev` only for uv and Cargo). The global
-`--strict` governs the edit's policy checks and the sync after it (`tog
+`--strict` governs the edit's policy checks and the sync after it (`ward
 --strict add requests`); `--frozen` is a usage error ahead of all three
 verbs, including `update --toolchain` and `update --self`, because they
 exist to write the lock `--frozen` only checks. Refusals —
@@ -387,15 +387,15 @@ refused with both roots named. Ecosystem choice, cheapest rung first:
 3. registry existence checks when one directory holds several manifests — a
    name known to exactly one registry wins, known to several asks at the
    terminal;
-4. non-interactive: the error lists the candidates and the prefixes. Tog
+4. non-interactive: the error lists the candidates and the prefixes. Greyward
    never guesses from the bare name.
 
 Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
 
-**update --self** updates tog itself and touches no project, store, or key.
+**update --self** updates Greyward itself and touches no project, store, or key.
 It reads GitHub's latest release (one request), stops with "nothing to do"
 when this build already is that version or newer, and otherwise downloads
-`tog-<triple>.tar.gz` and its `.sha256` from the release, verifies the
+`greyward-<triple>.tar.gz` and its `.sha256` from the release, verifies the
 digest, extracts the binary to a sibling of the running one, runs its
 `--version`, and renames it over the running binary, which keeps working
 because it holds its open file. The writability probe runs before anything
@@ -407,7 +407,7 @@ name the commit it was built from: a local build of the same crate version
 is "at the latest release's version" and stays. The asset names and the
 checksum rule are `install.sh`'s, so the two read a release the same way. Releases are built for Linux x86_64
 only for now (macOS waits on #66); a 404 from the anonymous request is
-reported as no published release. `TOG_RELEASE_MANIFEST` names another
+reported as no published release. `GREYWARD_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
@@ -416,7 +416,7 @@ default release when the sources admit it (else the newest compatible one)
 for every ecosystem the project has — as discovery finds
 them, which is how a newly added ecosystem gains its section — or only the
 named one (`python`, `node`, `rust` or `cargo`, `go`, `ruby`, `elixir`, `dotnet`),
-rewrites `tog-toolchain.toml` atomically, and then syncs. It takes no
+rewrites `greyward-toolchain.toml` atomically, and then syncs. It takes no
 package name, never touches a dependency lock, and is the only thing that
 moves a locked runtime. `--no-sync` stops after the lock is written, so the
 diff can be reviewed before anything is realized.
@@ -425,14 +425,14 @@ diff can be reviewed before anything is realized.
 store Cargo and `--no-deps`, so a project that has never been synced needs
 no Cargo.lock or vendor object; `--check` passes rustfmt's status through.
 The formatter is the `rustfmt` row of the same Rust release the compiler
-comes from (the committed `tog-toolchain.toml` at the Cargo workspace root
+comes from (the committed `greyward-toolchain.toml` at the Cargo workspace root
 when there is one, so a member directory formats with the same one), and it
-is checked by sha256 like the compiler, so the run writes no record of it. A `.tog/closures/rustfmt.json` that an older tog
+is checked by sha256 like the compiler, so the run writes no record of it. A `.greyward/closures/rustfmt.json` that an older Greyward
 wrote is deleted by a run without `--check` once another closure sits beside
-it, or once `gc` has forgotten the root the older tog registered (until then,
+it, or once `gc` has forgotten the root the older Greyward registered (until then,
 alone, it is what keeps that root readable); every reader but gc skips it. Nothing roots the formatter object, so `gc` can reclaim it between runs
 and the next run realizes it again. A package.json script named `fmt` wins and runs as
-`tog run fmt`; an explicit `--eco rust` bypasses the script.
+`ward run fmt`; an explicit `--eco rust` bypasses the script.
 
 Rust formatting reads Cargo configuration and its includes from the held
 workspace. A config that resolves outside that workspace, or to the signing
@@ -441,46 +441,46 @@ files inside the workspace. An absolute alias outside it is refused even
 when that alias points back inside. Missing optional includes remain allowed.
 
 **run** executes a command with the PATH and ecosystem variables of the
-nearest projected root (the closest ancestor with `.tog/closures/`). A
+nearest projected root (the closest ancestor with `.greyward/closures/`). A
 package.json script of the same name wins over an executable on PATH and
 runs with the npm lifecycle environment; the exit code passes through.
 The projected prefixes come first and the host PATH after them, but the
 runtime of an ecosystem the project has, and the programs that ship in it
 (`python`, `python3`, `pip`, `pip3`; `node`, `npm`, `npx`; `ruby`, `gem`,
 `bundle`; `go`, `gofmt`; `mix`, `elixir`, `iex`, `erl`; `dotnet`; `cargo`,
-`rustc`), named bare comes from the prefixes or not at all: `tog run node`
+`rustc`), named bare comes from the prefixes or not at all: `ward run node`
 in a Node project never runs the host's `node`. A package.json script of
 the same name still wins.
-`tog <script>` is the short form for any first word that is not a
-built-in command, and a built-in always wins (`tog build` is the
-sandboxed build, never a script named build; `tog run build` reaches the
+`ward <script>` is the short form for any first word that is not a
+built-in command, and a built-in always wins (`ward build` is the
+sandboxed build, never a script named build; `ward run build` reaches the
 script). Arguments after the script name go to the script unchanged, so
-there is no npm-style `--` separator: `tog test --watch` passes `--watch`,
-and `tog test -- --watch` passes a literal `--` as well. Completion offers
+there is no npm-style `--` separator: `ward test --watch` passes `--watch`,
+and `ward test -- --watch` passes a literal `--` as well. Completion offers
 the package.json script names as first words whenever a package.json is
 present, which is where most people find the shorthand.
 
-`tog <file>` is the other short form: a first word that names an existing
+`ward <file>` is the other short form: a first word that names an existing
 source file runs it with its ecosystem's program inside the project's
-environment, so `tog app.py` is `tog run python app.py` and `tog main.go`
-is `tog run go run main.go`. The extension decides: `.py` (python),
+environment, so `ward app.py` is `ward run python app.py` and `ward main.go`
+is `ward run go run main.go`. The extension decides: `.py` (python),
 `.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts` (node), `.rb` (ruby), `.exs` (mix run, so the project's
 deps are loaded), `.go` (go run).
 A TypeScript file runs on the project's Node as it is from 23.6 and
 22.18, which strip types themselves, and with `--experimental-strip-types`
 from 22.6. An older Node is refused before the sync, naming the version:
-raise the version the project asks for (and run `tog update --toolchain node`
-if `tog-toolchain.toml` pins Node). The check applies to `tog <file>` only:
-`tog run node app.ts` hands the file to Node as it is.
+raise the version the project asks for (and run `ward update --toolchain node`
+if `greyward-toolchain.toml` pins Node). The check applies to `ward <file>` only:
+`ward run node app.ts` hands the file to Node as it is.
 Uppercase extensions and paths with directories count. In a project
 without that ecosystem, or outside any project, the file runs on the
-ecosystem's runtime alone, the one `tog x` would use there, realized into
+ecosystem's runtime alone, the one `ward x` would use there, realized into
 the store, never whatever `python` the host has. Which version: the
 project's toolchain lock when it has a section for the ecosystem; with no
 lock at all, the project's version file (`.ruby-version`, `.node-version`);
 a lock without that section, or no project, means the shipped release. It
 gets no dependencies and no sync, and the host's interpreter settings are
-removed as `tog run` removes them (RUBYOPT, GEM_HOME and Bundler variables
+removed as `ward run` removes them (RUBYOPT, GEM_HOME and Bundler variables
 for Ruby; ERL_LIBS, Mix and Hex variables for Elixir, with `HEX_OFFLINE=1`
 and a private home, so a `Mix.install` cannot fetch): `python3` runs a
 `.py`, `node` a `.js` or `.ts` (by the TypeScript rule above), `ruby` a
@@ -488,9 +488,9 @@ and a private home, so a `Mix.install` cannot fetch): `python3` runs a
 mode off and scratch caches, so a go.mod above the file does not apply and
 only the standard library resolves (`GOPROXY=off`). A `.rs` or `.cs` file
 is refused with
-a pointer to `tog build`: Rust builds a crate, never a lone file, and a
+a pointer to `ward build`: Rust builds a crate, never a lone file, and a
 .NET file-based app would restore packages outside the lock. A file with any other extension is a usage error that names
-`tog run <program> <file>`. A package.json script with the same name as
+`ward run <program> <file>`. A package.json script with the same name as
 the file wins, and so does a built-in command. Arguments after the file
 go to the program unchanged. Completion offers files with those
 extensions as first words.
@@ -499,14 +499,14 @@ The environment is the one the project's inputs describe. Before the
 command runs, `run` makes the same check `status` prints, offline: when
 nothing is synced yet, a manifest or lock changed since the last sync, the
 projection is gone, or the closure was synced on another platform, the
-project is synced first, with one `tog: syncing first: <ecosystem>
+project is synced first, with one `ward: syncing first: <ecosystem>
 <state>` line on stderr saying why, and then the command runs. It is the
-same sync a bare `tog` runs, so a sync that would refuse (a stale toolchain
+same sync a bare `ward` runs, so a sync that would refuse (a stale toolchain
 lock, a denied exception) refuses here in its own words before anything
 runs. One sync per command, never a second look: a state a sync does not
 clear costs a sync per command, not a loop. From a subdirectory of a
 never-synced project the nearest ancestor with a manifest is the project;
-once synced, the nearest `.tog/closures/` decides, as before. A directory
+once synced, the nearest `.greyward/closures/` decides, as before. A directory
 with no manifest above it has nothing to sync and exits 1 saying so.
 
 A projection is a symlink into an immutable store object, so the commands
@@ -514,9 +514,9 @@ that would *mutate* one are refused with the verb that replaces them, before
 the projection is even looked up:
 
 - `pip install|uninstall|wheel` and `easy_install` — and the same through
-  `python -m pip` — name `tog add` / `tog remove`.
+  `python -m pip` — name `ward add` / `ward remove`.
 - `activate`, and `source .../activate`: there is no activate script.
-  `tog run <command>` *is* the activation, per command rather than per
+  `ward run <command>` *is* the activation, per command rather than per
   shell.
 - `npm`/`pnpm`/`yarn`/`bun` with an installing subcommand (`install`, `ci`,
   `add`, `remove`, `update`, `link`, `dedupe`, …), plus bare `yarn`, which
@@ -524,14 +524,14 @@ the projection is even looked up:
   prefix only one command starts with (`dedu`). So does an install another
   command runs: `npm exec -- npm install`, `npx yarn add x`, `pnpm dlx npm
   ci`, `yarn workspaces foreach -A install`. `install` and `ci` are
-  answered with the bare `tog`, which sets `node_modules` up from the
-  lockfile (`tog --fresh` rebuilds it); the verbs that change the lockfile
-  are answered with `tog add` / `tog remove` / `tog update`.
+  answered with the bare `ward`, which sets `node_modules` up from the
+  lockfile (`ward --fresh` rebuilds it); the verbs that change the lockfile
+  are answered with `ward add` / `ward remove` / `ward update`.
 
 Reading an environment is not changing it, so `pip list`, `pip freeze`,
 `pip show`, `pip check`, `pip download` and `npm ls` run normally, as does
 everything else: `npm run build`, `npm test`, `python -m pytest`. A
-`node_modules` that a tool already replaced is reported by `tog status` as a
+`node_modules` that a tool already replaced is reported by `ward status` as a
 real directory written over the projection, and the next sync moves it
 aside — saying where it went — and re-projects.
 
@@ -553,7 +553,7 @@ projection prints the same bytes.
 `--shell bash|zsh|fish` picks the syntax. bash and zsh are identical POSIX
 sh; fish gets `set -gx PATH <dir>... $PATH` and `set -e NAME`. The default
 is the basename of `$SHELL` when that is one of the three and bash
-otherwise, so a shell tog does not speak gets the form most likely to work
+otherwise, so a shell Greyward does not speak gets the form most likely to work
 rather than a refusal; an unrecognized `--shell` value is a usage error with
 a suggestion, exactly like `completions`. Like `run`, it syncs first when
 the project is not synced or its inputs changed; that narration is stderr,
@@ -561,19 +561,19 @@ so stdout still carries the environment or nothing at all. Outside a
 project nothing is printed and it exits 1 saying there is no manifest.
 
 ```sh
-eval "$(tog env)"        # this shell, until it exits
-echo 'eval "$(tog env)"' > .envrc && direnv allow   # this directory
+eval "$(ward env)"        # this shell, until it exits
+echo 'eval "$(ward env)"' > .envrc && direnv allow   # this directory
 ```
 
-The trade-off is worth stating, because it is the one tog otherwise avoids:
-`tog run <command>` scopes the environment to one child process, while an
-evaled `tog env` is *ambient* — every later command in that shell sees it,
-including ones tog knows nothing about, and it outlives a `cd` out of the
+The trade-off is worth stating, because it is the one Greyward otherwise avoids:
+`ward run <command>` scopes the environment to one child process, while an
+evaled `ward env` is *ambient* — every later command in that shell sees it,
+including ones Greyward knows nothing about, and it outlives a `cd` out of the
 project. direnv is what puts the scope back, loading the environment on
 entering the directory and unloading it on leaving. That is also why this is
-a verb you type rather than an `activate` script tog writes into the
+a verb you type rather than an `activate` script Greyward writes into the
 projection ([LIMITATIONS.md](LIMITATIONS.md)). A package.json script named
-`env` is reached with `tog run env`; a built-in always wins. Editors see a
+`env` is reached with `ward run env`; a built-in always wins. Editors see a
 projection through this verb and through the `.venv` interpreter path:
 [EDITORS.md](EDITORS.md).
 
@@ -582,28 +582,28 @@ environment (a store hit from the second run on), and executes it. Registry:
 a `py:`/`npm:` prefix on the tool, `--py` (`--python`) or `--npm`
 (`--node`), or the current project's ecosystem (Python first, then Node);
 outside a project the prefix is required. `--from` names the package when the executable is called
-something else (`tog x --from httpie http`). Sharp edges of `x --clean`:
+something else (`ward x --from httpie http`). Sharp edges of `x --clean`:
 
-- It removes cached environments under `~/.tog/x/`, or only the selected
+- It removes cached environments under `~/.greyward/x/`, or only the selected
   tool's (all versions when `@version` is omitted); store objects stay until
-  the next `tog gc` — for a node tool the summary names
-  `tog gc --project`, the only pass that reclaims the forest.
+  the next `ward gc` — for a node tool the summary names
+  `ward gc --project`, the only pass that reclaims the forest.
 - It takes flags and an optional tool, never free arguments. The exit
   status is 0 when every matched environment was removed (or none
   matched), and 1 when any was skipped, so a script cannot take a partial
   clean for a full one. `nothing to clean` prints only when no candidate
   matched — a root skipped as in use is reported.
 - A running tool is left in place, reported as in use; retry after it exits.
-- An environment made under a store this tog refuses to open (see "Store
+- An environment made under a store this Greyward refuses to open (see "Store
   format" in ARCHITECTURE.md) is left in place and reported as skipped,
-  with the fix for that store: `TOG_STORE=<that store> tog gc --reset`
-  unless it is the store an absolute or unset `TOG_STORE` selects, so
+  with the fix for that store: `GREYWARD_STORE=<that store> ward gc --reset`
+  unless it is the store an absolute or unset `GREYWARD_STORE` selects, so
   pasting the fix never empties another store. Nothing in that store is read or changed.
 - An environment is keyed on the runtime it runs on as well as the tool, so
   a project with a toolchain lock gets the tool on the locked runtime and an
   `update --toolchain` gives the next run a fresh environment. An
-  environment an older tog made, with another name or without the request
-  record a run now writes, is never reused. `tog x --clean` with no tool
+  environment an older Greyward made, with another name or without the request
+  record a run now writes, is never reused. `ward x --clean` with no tool
   removes it, and a filtered clean leaves it alone.
 
 **build** runs the ecosystem's build tool in the network-denied sandbox with
@@ -612,27 +612,27 @@ inferred only when exactly one build-capable project (Cargo.toml, go.mod,
 mix.exs, `*.csproj`) is found from here upward — name it when several are.
 Like `run`, it syncs first when the ecosystem it builds is not synced or its
 inputs changed, so it never builds against a lock the manifest has moved
-past; that sync may write a lock (and `tog-toolchain.toml`), as `cargo build`
+past; that sync may write a lock (and `greyward-toolchain.toml`), as `cargo build`
 updates `Cargo.lock`. Only the built ecosystem decides: a stale Python or Node
 environment elsewhere in the repository does not start a sync in front of a
 Cargo build, and when the built ecosystem is stale the sync that runs
 checks host support for, prepares, and realizes the built one only, so an
 unrelated environment this host cannot run, or whose install fails
 (offline, a broken install script), does not stop the build. The toolchain
-lock is still resolved for the whole project, so `tog-toolchain.toml` keeps
+lock is still resolved for the whole project, so `greyward-toolchain.toml` keeps
 every ecosystem's section, and an unrelated ecosystem whose lock section is
 stale, or whose version request is malformed (a non-string
 `requires-python`), still refuses before the build. So does the first
-build in a project with no `tog-toolchain.toml` yet when another
+build in a project with no `greyward-toolchain.toml` yet when another
 ecosystem's version request is one no catalog serves (a Python pin no
-release carries stops `tog build cargo`): creating the lock selects every
+release carries stops `ward build cargo`): creating the lock selects every
 ecosystem, the lock is never written with sections missing, and the error
 names the ecosystem to fix. Once the lock exists, a missing, stale, or
 invalid lock section, or a malformed request outside the built ecosystem,
 still blocks a build. The build
-itself never writes one. CI that must not write a lock runs `tog --frozen`
+itself never writes one. CI that must not write a lock runs `ward --frozen`
 before it, and the check then finds nothing to do — or goes one step in a
-single command, `tog --frozen build`, whose implicit sync runs frozen.
+single command, `ward --frozen build`, whose implicit sync runs frozen.
 
 On Linux, Ruby native extensions, Python sdists that use Rust or pinned native
 libraries, and Node install scripts first build with a restricted view of host
@@ -646,7 +646,7 @@ The next sync rebuilds affected environments or wheels once instead of reusing
 objects built under the older view. See [host-view limitations](LIMITATIONS.md)
 for the plugin allowlist and the remaining explicitly reachable host paths.
 
-Debug builds that use the `TOG_TEST_HOST_DEV_FILES` test fixture now refuse
+Debug builds that use the `GREYWARD_TEST_HOST_DEV_FILES` test fixture now refuse
 symlinked directories, including a symlinked fixture root, with refusal
 status 3. Copy those directories into the fixture. File symlinks remain
 recorded in its fingerprint. Release builds ignore this test variable.
@@ -663,10 +663,10 @@ was written on another platform and says nothing about this host),
 and `unchecked` — a closure this binary could not compare, because the
 record predates the input recording the comparison needs. The toolchain lock
 is part of the comparison and reports under `changed`, naming
-`tog-toolchain.toml`: a missing lock (run `tog` to create it), a
+`greyward-toolchain.toml`: a missing lock (run `ward` to create it), a
 source that disagrees with a recorded row or a lock with no section for
-this ecosystem (both name `tog update --toolchain <ecosystem>`), or a
-projection built from a bundle the lock no longer names (run `tog`).
+this ecosystem (both name `ward update --toolchain <ecosystem>`), or a
+projection built from a bundle the lock no longer names (run `ward`).
 A verdict that a sync would refuse is reported ahead of the closure's
 own changed files, so the row names the verb that moves it; a closure that
 recorded no toolchain at all is `unchecked` until one sync records it.
@@ -682,7 +682,7 @@ cannot vouch for (a failed install script, a git dependency, a SHA-1 lock
 entry), read from the closure with no policy and no key. They are not
 part of the state: a synced closure with three exceptions is `synced`,
 and the summary adds one line with the count and the command that judges
-them, `tog audit`. `--json` carries them as each ecosystem's `exceptions`
+them, `ward audit`. `--json` carries them as each ecosystem's `exceptions`
 array (`kind`, `subject`, `detail`). A record whose exception list cannot
 be read says so on its row: a row that was otherwise synced is `unchecked`
 with the reason, and a row in any other state keeps that state and adds an
@@ -698,15 +698,15 @@ is a choice, and no policy judges it. `status` lists it under the row as
 `requirements`). A list that cannot be read is reported as an unreadable
 exception list is: `unchecked` on an otherwise synced row, an
 `optional unreadable <why>` line under any other, and
-`optional_groups_skipped_error` in `--json`. `sbom` lists it as a `tog:optional-group-skipped`
-metadata property, apart from the `tog:exception:*` ones.
+`optional_groups_skipped_error` in `--json`. `sbom` lists it as a `greyward:optional-group-skipped`
+metadata property, apart from the `greyward:exception:*` ones.
 
 **audit** answers "does this environment pass my policy?": it reads the
-closure records every sync committed to `.tog/closures/*.json`,
+closure records every sync committed to `.greyward/closures/*.json`,
 authenticates each one when the machine policy trusts signing keys, and
-judges the exceptions it records against the policy chain (`TOG_POLICY` or
-`~/.tog/policy.toml`, every ancestor's `.tog/policy.toml`,
-`TOG_STRICT`) merged with `--policy <file>`. Merging only tightens: a
+judges the exceptions it records against the policy chain (`GREYWARD_POLICY` or
+`~/.greyward/policy.toml`, every ancestor's `.greyward/policy.toml`,
+`GREYWARD_STRICT`) merged with `--policy <file>`. Merging only tightens: a
 project or `--policy` file can add denials and drop trusted keys, never the
 reverse; a `--policy` file that is missing or malformed is a usage error
 (exit 2), never ignored, so CI can tell an operator mistake from a denied
@@ -716,20 +716,20 @@ What a pass proves: every closure file carries a valid signature from a key
 the machine policy trusts (when the policy has a `[signing]` table; see
 "Without trusted keys" below), every ecosystem detected in the directory
 has its primary closure, each record is current for the inputs on disk and for the
-committed `tog-toolchain.toml` (a missing or stale lock, or a record built
+committed `greyward-toolchain.toml` (a missing or stale lock, or a record built
 from another bundle than the lock names, is `stale`, the same answer
 `status` gives), and no recorded exception is denied or unknown. It does not prove the signer's
 sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 
 **What has to be in the repository for this to work.** `audit` reads
-`.tog/closures/*.json`, and the policy chain includes `.tog/policy.toml` at
+`.greyward/closures/*.json`, and the policy chain includes `.greyward/policy.toml` at
 every ancestor. Both are records of a decision, so both are committed; the
-rest of `.tog/` (`plan.json`, `go-plan.json`, the Python manifest snapshots
+rest of `.greyward/` (`plan.json`, `go-plan.json`, the Python manifest snapshots
 and stamps, `cargo-home/`) is a machine-local cache and is ignored. A
-repository that ignores all of `.tog/` has nothing for `ls`, `sbom` or
+repository that ignores all of `.greyward/` has nothing for `ls`, `sbom` or
 `status` to read, and no closure diff for a reviewer to look at. The
 `.gitignore` stanza and the full table are in
-[the README](../../README.md#what-tog-holds-and-what-to-commit).
+[the README](../../README.md#what-greyward-holds-and-what-to-commit).
 
 Be clear about what committing them does and does not buy. `ls` and `sbom`
 read a committed closure with no store and no projection, and a closure diff
@@ -747,10 +747,10 @@ overwrite each other's record, and the one the gate did not run on is
 when the environment is unchanged. Have one protected job, on one platform,
 write the closures that are committed.
 
-Signing: `tog keygen <path>` writes an Ed25519 key file (mode 0600,
+Signing: `ward keygen <path>` writes an Ed25519 key file (mode 0600,
 never overwriting an existing file or symlink) and prints the `[signing]`
 table that trusts it; the private seed is never printed. With
-`TOG_SIGNING_KEY=<path>` set, every command that writes a closure
+`GREYWARD_SIGNING_KEY=<path>` set, every command that writes a closure
 (`sync`, `build`, `add`, `remove`, `update`) signs it, and `attest`
 and the edit verbs sign the resolution records they write (`x` loads it too,
 so a bad key fails there the same way). The key is
@@ -759,7 +759,7 @@ missing, malformed, not a regular file, or readable by group or other fails
 the command, never silently downgrades to unsigned. Unset, the record is
 written unsigned and the sync summary says so. Trust is the machine
 policy's `[signing]` table, `trusted = ["ed25519:<64 hex>", ...]`, in
-`TOG_POLICY` or `~/.tog/policy.toml`; a project `.tog/policy.toml`
+`GREYWARD_POLICY` or `~/.greyward/policy.toml`; a project `.greyward/policy.toml`
 or the `--policy` file can only intersect with it, so a pull request that
 edits the record and the project policy can only remove trust. An explicit
 `trusted = []` is a decision: every signed record is `untrusted`. Rotation:
@@ -785,7 +785,7 @@ matter; any change to the parsed value does. `run`, `x`, `ls`, `sbom`, and
 signatures are not checked: a signed record and an unsigned one are judged
 alike, on freshness and on their exceptions, and the report says so where
 it could be misread, with a `signatures: not checked` line before the
-verdicts (naming `tog keygen`, which prints the table that turns the check
+verdicts (naming `ward keygen`, which prints the table that turns the check
 on), `"signatures_checked": false` and `"policy": {"trusted": null}` in
 the JSON, and `signature.state` `not-checked` on every closure (`key`
 present when a signature verified, without claiming anyone trusts it). A
@@ -799,17 +799,17 @@ lost its keys fails loudly instead of passing with signatures unchecked.
 
 **Under CI.** When the `CI` environment variable is set to anything but
 `false` or `0` (GitHub Actions, GitLab and most CI services set it), plain
-`tog audit` with no `[signing]` table refuses as `--signed` does: exit 2,
+`ward audit` with no `[signing]` table refuses as `--signed` does: exit 2,
 before any record is judged. A CI job that means to judge records without
 signatures passes `--allow-unsigned`, which changes nothing when a
 `[signing]` table exists. `--signed` and `--allow-unsigned` together are a
 usage error.
 
-**Migrating an existing gate.** Before this mode existed, plain `tog audit`
+**Migrating an existing gate.** Before this mode existed, plain `ward audit`
 exited 2 whenever the machine policy had no `[signing]` table. Under CI it
 still does, so a gate that relied on that refusal keeps it. Outside CI it
 now judges the records and can exit 0 with signatures unchecked; a job that
-does not set `CI` runs `tog audit --signed` to keep the refusal.
+does not set `CI` runs `ward audit --signed` to keep the refusal.
 
 Per closure it prints the ecosystem, the record (sha256 of the closure file
 bytes), and the first of these that applies: `bad-signature` (a signature
@@ -819,9 +819,9 @@ when signatures are checked), `untrusted` (signatures checked: verifies
 under a key the effective set does not contain; the line names the key and
 the scopes that exclude it), `outdated` (no signature while signatures are
 checked, or a record from before inputs, platform, or the exception record
-were written; run `tog` once, under a trusted key when signatures are
-checked, then commit. A record carrying an exception kind tog has retired is outdated
-too, with the reason and the command that rewrites it (`run 'tog' once`): a closure recording
+were written; run `ward` once, under a trusted key when signatures are
+checked, then commit. A record carrying an exception kind Greyward has retired is outdated
+too, with the reason and the command that rewrites it (`run 'ward' once`): a closure recording
 `toolchain-component-unavailable` says `closure predates component
 provisioning`, and one recording `skipped-optional`, retired when
 unrequested optional groups stopped being exceptions, says `closure
@@ -834,9 +834,9 @@ when signatures are checked, an `untrusted` or unsigned one, is not
 evaluated further: freshness is not computed and no exception is judged,
 and the line says `(not evaluated)` rather than claiming anything about
 its contents. A detected ecosystem with no
-`.tog/closures/<ecosystem>.json` is listed as `missing` and fails the
+`.greyward/closures/<ecosystem>.json` is listed as `missing` and fails the
 report. Only `clean` with nothing missing passes. A `rustfmt.json` left by
-an older `tog fmt` is not a closure and is not judged. A closure file whose `ecosystem` field
+an older `ward fmt` is not a closure and is not judged. A closure file whose `ecosystem` field
 disagrees with its name, or whose envelope is malformed (not `closure/1`,
 no ecosystem string, a non-object body), is refused with exit 1, not
 judged. No rebuild, no store access, no network, no sandbox: it works on a
@@ -862,9 +862,9 @@ and `trusted` (`null` when the file has no `[signing]` table, `[]` when it
 explicitly trusts nobody); file-backed sources also have `path` as a lossy
 UTF-8 string. A non-UTF-8 path also has `path_bytes` as the lowercase hex
 of its raw bytes; that field is present only for non-UTF-8 paths. `origin`
-is `machine` (`TOG_POLICY`, or `~/.tog/policy.toml`), `project` (an
-ancestor's `.tog/policy.toml`), `flag` (the `--policy <file>` file, and
-nothing else for audit), or `env` (`TOG_STRICT=1`). The supplied
+is `machine` (`GREYWARD_POLICY`, or `~/.greyward/policy.toml`), `project` (an
+ancestor's `.greyward/policy.toml`), `flag` (the `--policy <file>` file, and
+nothing else for audit), or `env` (`GREYWARD_STRICT=1`). The supplied
 `--policy` file is listed after the ordinary chain. The `path` field is
 omitted for strictness-only sources, and `deny` is always an array,
 including when it is empty. A file source is listed when it exists and is
@@ -887,24 +887,24 @@ earlier versions, and are judged and printed as the hyphenated name.
 
 A refusal names the knob that refused and the edit that lifts it, not just
 the kind: `policy denies weak-integrity: left-pad: sha1 integrity;
-'weak-integrity' is in the deny list in /etc/tog/policy.toml; remove that
+'weak-integrity' is in the deny list in /etc/greyward/policy.toml; remove that
 line to allow it`, or, when strictness is the cause, the flag
 (`--strict ...; rerun without --strict`), the variable (`unset
-TOG_STRICT`), or the file that set `strict = true`.
+GREYWARD_STRICT`), or the file that set `strict = true`.
 
-**ls** reads `.tog/closures/*.json` (no store access): name, version, and
+**ls** reads `.greyward/closures/*.json` (no store access): name, version, and
 toolchain per package, `-v` adds artifact and store object (and works in
 either position); the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`.
 **plan** prints what a sync would realize, one JSON document per ecosystem.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
-this build against the newest release (the first row, `warn` with `run 'tog
+this build against the newest release (the first row, `warn` with `run 'ward
 update --self'` when one is newer, `ok` with `no build for this machine`
 when the newer one has nothing for this host, `ok` with `not checked` when
 the manifest is unreachable: offline is not unhealthy), then platform, store, sandbox,
 host C toolchain, and realized toolchains, each line `ok`/`warn`/`fail`
 (lowercase, in text and in JSON) with the fix; exit 1 on any fail. It does
-not wait for a store another Tog job (a `gc`, a sync) is using: the store
+not wait for a store another Greyward job (a `gc`, a sync) is using: the store
 row is `warn`, says so, and every check that needs no store still runs.
 The one wait is behind a `gc --reset` that is emptying the store: doctor
 says what it is waiting for, like every other command, and goes on when
@@ -912,8 +912,8 @@ the reset is done.
 
 `doctor --isolation` checks only what isolates a tool that changes a lock
 (npm, cargo, Bundler, mix, `dotnet restore` and the rest, through the
-resolution door): bubblewrap, then rootless podman, which tog uses only
-where bubblewrap cannot create a user namespace, then the `tog-isolate`
+resolution door): bubblewrap, then rootless podman, which Greyward uses only
+where bubblewrap cannot create a user namespace, then the `greyward-isolate`
 helper, which this build does not have. It exits 1 when neither engine
 can run one here. The podman row needs the store, so it is `warn` and
 `not checked` when the store is busy or cannot be opened.
@@ -925,7 +925,7 @@ validated on Linux. The probe runs the actual relay with its environment
 and log descriptors, rather than checking only that a container starts.
 Older engines that cannot pass that probe are refused.
 
-Tog supplies its own engine configuration and a minimal engine environment.
+Greyward supplies its own engine configuration and a minimal engine environment.
 User and system `containers.conf`, automatic secret mounts, OCI hooks,
 remote-engine settings and `storage.conf` overrides are excluded. This
 prevents engine defaults from exposing host files or joining host process
@@ -936,15 +936,15 @@ disabled, while private namespaces, dropped capabilities, seccomp and
 read-only mounts enforce the door's boundary.
 
 Container mount paths containing commas or colons are refused. On
-cancellation, Tog stops the client and force-removes its own container.
+cancellation, Greyward stops the client and force-removes its own container.
 Removal has a ten-second deadline, and a failure refuses all outputs with
-a diagnostic naming the container to inspect. Forced termination of Tog
+a diagnostic naming the container to inspect. Forced termination of Greyward
 itself, such as SIGKILL or a machine crash, cannot run that cleanup. An
-operator must inspect any remaining `tog-resolve-*` container with Podman
+operator must inspect any remaining `greyward-resolve-*` container with Podman
 before removing it. Automated crash recovery is deferred.
 
-**--version** prints `tog <crate version> (<short commit> <commit date>)`,
-stamped at build time from the checkout (`tog 0.1.0 (7688cfd 2026-09-21)`);
+**--version** prints `ward <crate version> (<short commit> <commit date>)`,
+stamped at build time from the checkout (`ward 0.1.0 (7688cfd 2026-09-21)`);
 outside a checkout the parenthesis says `unknown build`. Two binaries of the
 same crate version built from different commits print different lines, which
 is what makes "is this binary stale?" answerable and what a bug report
@@ -958,64 +958,64 @@ also makes the gate stronger than a file check: the sync itself fails on a
 denied exception, so the policy is enforced while the environment is built
 rather than inspected afterwards.
 
-The short form is the tog GitHub Action (`action.yml` at the root of this
-repository). One step installs a released tog (checksum verified), makes
+The short form is the Greyward GitHub Action (`action.yml` at the root of this
+repository). One step installs a released Greyward (checksum verified), makes
 the Linux sandbox usable on the runner, sets the policy, runs
-`tog --frozen`, `tog audit` and `tog sbom`, and uploads the SBOM:
+`ward --frozen`, `ward audit` and `ward sbom`, and uploads the SBOM:
 
 ```yaml
-name: tog
+name: ward
 on: [pull_request]
 
 jobs:
-  tog:
+  ward:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DigitalWestern/tog@main
+      - uses: DigitalWestern/greyward@main
 ```
 
 The action is newer than `v0.1.0`, so that tag does not carry it: name
-`@main` until the next release is tagged, then the tag. Which tog it
+`@main` until the next release is tagged, then the tag. Which Greyward it
 installs is the `version` input, not the ref after the `@`.
 
-`--frozen` writes nothing, so `tog-toolchain.toml` and the lockfiles have to
-be committed first: run `tog` once on your machine and commit what it wrote.
-`tog` stays on `PATH` and `TOG_POLICY` stays set for the rest of the job, so
-a later step can `tog run` the tests under the same policy. Its inputs:
+`--frozen` writes nothing, so `greyward-toolchain.toml` and the lockfiles have to
+be committed first: run `ward` once on your machine and commit what it wrote.
+`ward` stays on `PATH` and `GREYWARD_POLICY` stays set for the rest of the job, so
+a later step can `ward run` the tests under the same policy. Its inputs:
 
 | input | default | what it does |
 |---|---|---|
 | `version` | `latest` | release to install, as a tag (`v0.1.0`) |
-| `token` | the job's token | reads the release; the job's own token is enough, since tog's repository is public |
+| `token` | the job's token | reads the release; the job's own token is enough, since Greyward's repository is public |
 | `working-directory` | `.` | the project to set up |
 | `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file in the workspace |
-| `frozen` | `true` | `false` runs a plain `tog`, which may write the locks |
+| `frozen` | `true` | `false` runs a plain `ward`, which may write the locks |
 | `strict` | `false` | `true` adds `--strict` |
-| `audit` | `true` | `signed` runs `tog audit --signed`; `false` skips the audit |
-| `signing-key` | *(empty)* | contents of a `tog keygen` file, from a secret; on disk only while the sync runs (see "Which jobs may hold the key") |
+| `audit` | `true` | `signed` runs `ward audit --signed`; `false` skips the audit |
+| `signing-key` | *(empty)* | contents of a `ward keygen` file, from a secret; on disk only while the sync runs (see "Which jobs may hold the key") |
 | `sbom` | `sbom.json` | where the SBOM is written; empty skips it |
 | `upload-sbom` | `true` | upload it as the artifact named by `sbom-artifact` (`sbom`) |
 | `cache` | `false` | `true` keeps the store in the Actions cache between runs (see below) |
-| `sandbox` | `true` | install bubblewrap when missing, and the AppArmor profile `tog doctor` names where Ubuntu 24.04 denies bwrap a user namespace |
+| `sandbox` | `true` | install bubblewrap when missing, and the AppArmor profile `ward doctor` names where Ubuntu 24.04 denies bwrap a user namespace |
 
-The outputs are `version` (what `tog --version` prints) and `sbom` (the
-SBOM's path). The gate with trusted keys is `policy: ci/tog-policy.toml`,
-`audit: signed` and `signing-key: ${{ secrets.TOG_SIGNING_KEY }}`.
+The outputs are `version` (what `ward --version` prints) and `sbom` (the
+SBOM's path). The gate with trusted keys is `policy: ci/greyward-policy.toml`,
+`audit: signed` and `signing-key: ${{ secrets.GREYWARD_SIGNING_KEY }}`.
 
 **The store cache.** Without it every run downloads the toolchains and
 packages again. `cache: true` restores the store an earlier run saved
-(keyed on the tog version and the project's `tog-toolchain.toml` and
+(keyed on the Greyward version and the project's `greyward-toolchain.toml` and
 lockfiles, falling back to the newest store of the same version), and saves
-it again after a sync and an audit that passed, once `tog gc` has swept what no project
-roots any more. tog checks a store's format when it opens it but does not
+it again after a sync and an audit that passed, once `ward gc` has swept what no project
+roots any more. Greyward checks a store's format when it opens it but does not
 re-hash the objects in it, so a restored store is trusted as if this run
 had built it. GitHub keeps what a pull request's run saves to that pull
 request, so a run on `main` never restores it. Do not turn the cache on in
 a `pull_request_target` workflow: there a fork's code runs with the base
 branch's cache.
 
-**From another repository.** `uses: DigitalWestern/tog@main` works from
+**From another repository.** `uses: DigitalWestern/greyward@main` works from
 any repository: the action and its releases are public, and the job's own
 token reads them.
 
@@ -1029,7 +1029,7 @@ The same trusted job written out by hand, for a runner the action does not
 cover or a step that has to differ. Its install step uses the one-line installer.
 
 ```yaml
-name: tog
+name: ward
 on:
   push:
     branches: [main]  # protect this ref and its workflow/policy files
@@ -1043,9 +1043,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tog
+      - name: Install ward
         run: |
-          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh \
+          curl -fsSL https://raw.githubusercontent.com/DigitalWestern/greyward/main/install.sh \
             | sh -s -- --no-modify-path --no-completions
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -1055,31 +1055,31 @@ jobs:
       # silently unconfigured.
       - name: Machine policy
         run: |
-          mkdir -p ~/.tog
-          cp ci/tog-policy.toml ~/.tog/policy.toml
+          mkdir -p ~/.greyward
+          cp ci/greyward-policy.toml ~/.greyward/policy.toml
 
       # Build the environment under that policy. A denied exception fails
       # here, before anything is judged. The key signs the closure this sync
       # writes; see the caveat below for which jobs may hold one.
       - name: Sync
         env:
-          TOG_SIGNING_KEY: ${{ runner.temp }}/tog.key
-          TOG_SIGNING_KEY_CONTENTS: ${{ secrets.TOG_SIGNING_KEY }}
+          GREYWARD_SIGNING_KEY: ${{ runner.temp }}/greyward.key
+          GREYWARD_SIGNING_KEY_CONTENTS: ${{ secrets.GREYWARD_SIGNING_KEY }}
         run: |
           # printf, not a herestring: no bash dependency, and no newline
           # appended to the key. umask before the write, so the file is
           # never briefly world-readable.
-          trap 'rm -f "$TOG_SIGNING_KEY"' EXIT
-          (umask 077; printf '%s' "$TOG_SIGNING_KEY_CONTENTS" > "$TOG_SIGNING_KEY")
-          unset TOG_SIGNING_KEY_CONTENTS
-          tog --frozen
+          trap 'rm -f "$GREYWARD_SIGNING_KEY"' EXIT
+          (umask 077; printf '%s' "$GREYWARD_SIGNING_KEY_CONTENTS" > "$GREYWARD_SIGNING_KEY")
+          unset GREYWARD_SIGNING_KEY_CONTENTS
+          ward --frozen
 
       # Every closure signed by a trusted key, current for the inputs on
-      # disk and tog-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
+      # disk and greyward-toolchain.toml, no denied or unknown exception. Exit 1 is a denied build,
       # exit 2 an operator mistake (missing or malformed policy, no trusted keys).
-      - run: tog audit --signed
+      - run: ward audit --signed
 
-      - run: tog sbom -o sbom.json
+      - run: ward sbom -o sbom.json
       - uses: actions/upload-artifact@v4
         with: { name: sbom, path: sbom.json }
 ```
@@ -1095,8 +1095,8 @@ as in the README recipe. Omitting audit never bypasses that requirement:
 
 
 ```yaml
-      - run: tog --frozen --strict    # or: tog --frozen, under ci/tog-policy.toml
-      - run: tog sbom -o sbom.json
+      - run: ward --frozen --strict    # or: ward --frozen, under ci/greyward-policy.toml
+      - run: ward sbom -o sbom.json
 ```
 
 That still refuses every exception the policy denies, which is the part that
@@ -1105,11 +1105,11 @@ The closures a reviewer reads in the diff come from the protected job, or
 from a developer running a signing sync locally.
 
 On a runner without unprivileged user namespaces the build sandbox is
-unavailable, so `tog build` and source-package compilation need a runner
+unavailable, so `ward build` and source-package compilation need a runner
 with the sandbox prerequisites. Ruby and Elixir also require resolution
 isolation for ordinary sync and plan with committed locks, because their
 manifest checks and lock parsers run project code through the door. Edits,
-missing-lock generation and `tog attest` require it too. On Linux, enable
+missing-lock generation and `ward attest` require it too. On Linux, enable
 unprivileged user namespaces and install bubblewrap. If the native runner
 is unavailable, these operations refuse before executing project code.
 Wheel-only Python sync with an existing recorded lock does not execute a
@@ -1124,12 +1124,12 @@ staging; objects touched in the last ten minutes are always kept so a
 concurrent sync cannot lose one. Sharp edges:
 
 - `--forget <key>...` removes protection records by the exact keys printed
-  by `tog store roots` (`<40-hex key>  <path>`, one line each), matched
+  by `ward store roots` (`<40-hex key>  <path>`, one line each), matched
   as typed including case. It removes only the record, so its objects become
   collectible; it clears even an unusable record without reading any other,
   so a damaged record never blocks recovering from it.
 - The one root a sweep forgets by itself is one whose project holds only
-  retired closure records (the `rustfmt.json` an older `tog fmt` wrote) and
+  retired closure records (the `rustfmt.json` an older `ward fmt` wrote) and
   which protects nothing those records do not name: no other object or
   projection in its record, no linked forest, no run home. It prints
   `forgot root <key> (<path>): its only closures are retired records`, and a
@@ -1154,19 +1154,19 @@ concurrent sync cannot lose one. Sharp edges:
   the run home (`<store>/run-homes/<key>`) of any project no root record
   names once it is older than `--keep-days`. A root record keeps its run
   home as it keeps its objects, even after the project directory is gone,
-  until `--forget` gives it up. It also removes the store records tog keeps
+  until `--forget` gives it up. It also removes the store records Greyward keeps
   about one project (the last passing `mix deps.get --check-locked`) once
   that project's directory is gone. Such a record is only a cache: a project
   that comes back (a drive mounted again) pays one more registry check on
   its next sync, and nothing else.
 - `--reset` empties the store and starts it again in the current format. It
-  is the fix for a store this tog refuses to open: one written before the
+  is the fix for a store this Greyward refuses to open: one written before the
   format marker existed, or one whose marker it does not know or cannot
   read (see "Store format" in ARCHITECTURE.md). It removes every object,
   record, root and forest, and keeps the download cache, `backups/` and the
   run homes, so the next sync in each project rebuilds from the cache
   rather than the network where it can. It never reads the marker, so it
-  works on any store, readable or not. It refuses while another Tog job is
+  works on any store, readable or not. It refuses while another Greyward job is
   using the store, takes `--dry-run` (which lists what it would remove and
   writes nothing) and no other option. A reset that is interrupted leaves
   a store with no marker, which is still refused: run it again.
@@ -1174,7 +1174,7 @@ concurrent sync cannot lose one. Sharp edges:
 Resolution has no unsandboxed fallback. The former Legacy mode is removed.
 Dependency edits, missing-lock generation and executable-manifest planning
 require usable bubblewrap or rootless Podman. A host with neither refuses
-resolution and names the missing capability. Run `tog doctor --isolation`
+resolution and names the missing capability. Run `ward doctor --isolation`
 to check the host before migrating a CI runner.
 
 **attest** `[<ecosystem>...]` gives existing locks a signed resolution
@@ -1182,15 +1182,15 @@ record without changing them. For each named ecosystem (all detected ones
 that have a resolution door when none is named) it runs the ecosystem's own
 lock check through a verification door, and when the check leaves the lock
 and manifest byte-for-byte unchanged it signs the record with
-`TOG_SIGNING_KEY` and writes `.tog/resolution/<ecosystem>.json`. A check that
+`GREYWARD_SIGNING_KEY` and writes `.greyward/resolution/<ecosystem>.json`. A check that
 would change the lock fails with nothing written; every ecosystem is checked
-before any record is written. With `TOG_SIGNING_KEY` unset it warns and
+before any record is written. With `GREYWARD_SIGNING_KEY` unset it warns and
 writes the record unsigned, which no sync will attest. It reads
-`tog-toolchain.toml` the way `--frozen` does and never writes it, and it
+`greyward-toolchain.toml` the way `--frozen` does and never writes it, and it
 refuses `--frozen` (exit 2). An ecosystem with no resolution door is
 refused by name. Every ecosystem has one. Go's check is `go mod download -json
 all` then `go mod tidy -diff`. Cargo's is `cargo metadata --locked` at the
-workspace root, run in the sandbox through tog's resolution proxy (TLS
+workspace root, run in the sandbox through Greyward's resolution proxy (TLS
 interception to crates.io), so its fetches are in the record's ledger. Run
 it at the workspace root: from a member crate it is refused, naming the
 root, because the root's `Cargo.lock` is the one the record covers. A
@@ -1224,13 +1224,13 @@ the store interpreter. Preserving safe resolver settings needs a reviewed
 allowlist so configuration cannot bypass these controls.
 
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
-lock the same `uv pip compile` tog ran to write it, which must leave it
-byte for byte the same: `requirements.lock.txt` from the requirements tog
+lock the same `uv pip compile` Greyward ran to write it, which must leave it
+byte for byte the same: `requirements.lock.txt` from the requirements Greyward
 compiles it from, or `requirements.txt` from `requirements.in`. A
-compiled lock whose header names another command than `tog` (one written
+compiled lock whose header names another command than `ward` (one written
 by uv or pip-tools directly) is refused. For a pip-compile pair, retain
-`requirements.txt` and run `tog update`. For a generated
-`requirements.lock.txt`, delete only that lock and run `tog` again.
+`requirements.txt` and run `ward update`. For a generated
+`requirements.lock.txt`, delete only that lock and run `ward` again.
 Commit the regenerated lock before attesting. A project with no lock a
 tool resolved (a hand-pinned
 `requirements.txt`) has no check and is refused, as is a requirements
@@ -1241,7 +1241,7 @@ execute code that can load other project files. Their resolution records
 therefore cover every regular file visible in the resolver's project snapshot,
 including Ruby `eval_gemfile` inputs, umbrella app manifests and nested
 configuration. Editing one of these files requires a fresh resolution or
-`tog attest`, even if the lock still agrees. `.git`, `.tog`, Ruby's `.bundle`
+`ward attest`, even if the lock still agrees. `.git`, `.greyward`, Ruby's `.bundle`
 and `vendor/bundle`, and Elixir's `deps` and `_build` are excluded from that
 snapshot. During these Ruby and Elixir checks, project files have mode 0644,
 directories have mode 0755, and empty directories are absent. These rules
@@ -1258,33 +1258,33 @@ rubygems.org only through the session's RubyGems mirror
 rubygems.org. Elixir's is `mix deps.get --check-locked`, with Hex pointed
 at the session's mirror of repo.hex.pm (`HEX_MIRROR`). Both run confined,
 like the others, and their fetches are in the record's ledger. .NET's is
-`dotnet restore --locked-mode` with a tog-written `nuget.config` whose one
+`dotnet restore --locked-mode` with a greyward-written `nuget.config` whose one
 source is the session's NuGet mirror. Missing-lock restore and attestation
 require the resolution sandbox. MSBuild can read arbitrary project data, so
 .NET records every regular file visible in the resolver view, except `obj/`,
-`bin/`, `.git/` and `.tog/`. Changes or added files invalidate that evidence.
+`bin/`, `.git/` and `.greyward/`. Changes or added files invalidate that evidence.
 Symlinks in this input set are refused. As with Ruby and Elixir, the staged
 resolver view uses file mode 0644 and directory mode 0755, and omits empty
 directories. The checkout's permissions and empty directories are preserved.
 Restore always names `packages.lock.json` explicitly. Project files containing
 `NuGetLockFilePath` or `TreatAsLocalProperty` are conservatively refused,
-including imported files and UTF-16/32 XML. Use Tog's default lock path.
+including imported files and UTF-16/32 XML. Use Greyward's default lock path.
 Existing .NET locks need a trusted resolution receipt under strict/company
-policy. Run `tog attest dotnet` with a signing key trusted by that policy,
-then commit `.tog/resolution/dotnet.json`. The mirror supports public
+policy. Run `ward attest dotnet` with a signing key trusted by that policy,
+then commit `.greyward/resolution/dotnet.json`. The mirror supports public
 api.nuget.org only. It records transport and package content hashes, without
 claiming publisher-signature verification.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
 To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
-beside the existing file, then run a Python `tog update` to compile the pair.
-For example, `tog update --no-sync py:six` in a project that pins six writes
+beside the existing file, then run a Python `ward update` to compile the pair.
+For example, `ward update --no-sync py:six` in a project that pins six writes
 the compiled lock and its resolution receipt before sync or attest.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.
   The checkout is left unchanged, so a CI job can upload the file as an
-  artifact for `--resolution-record`. It needs `TOG_SIGNING_KEY` and
+  artifact for `--resolution-record`. It needs `GREYWARD_SIGNING_KEY` and
   refuses without it, before running anything: an unsigned artifact would
   never attest.
 - `--ledger-export <ecosystem> <file>` writes the portable ledger the
@@ -1301,11 +1301,11 @@ moves one ledger.
 **keygen** `<path>` creates a closure-signing key (see **audit** above) and
 prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
-root (`store roots`). `store path` also answers for a store tog refuses to
-open, with a `warning:` and the `fix:` on stderr. **version** prints `tog 0.1.0`.
+root (`store roots`). `store path` also answers for a store Greyward refuses to
+open, with a `warning:` and the `fix:` on stderr. **version** prints `ward 0.1.0`.
 
 ## Open questions
 
-- `tog why <pkg>`: closures record packages, not dependency edges.
-- `x` for cargo and go; a `tog.toml` `[tasks]` table for cross-language
+- `ward why <pkg>`: closures record packages, not dependency edges.
+- `x` for cargo and go; a `greyward.toml` `[tasks]` table for cross-language
   scripts — both wait for a real need.

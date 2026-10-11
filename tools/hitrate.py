@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hit-rate measurement: does `tog` work, zero
+"""Hit-rate measurement: does `ward` work, zero
 config, on a random popular real project?
 
     python3 tools/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
@@ -7,16 +7,16 @@ config, on a random popular real project?
 Picks the top-starred non-archived GitHub repos per ecosystem that carry a
 manifest (python: requirements.txt/pyproject.toml/setup.cfg/setup.py; npm:
 package.json), shallow-clones each into a scratch dir, runs the release
-binary's `sync` with a throwaway TOG_STORE, and records outcome +
+binary's `sync` with a throwaway GREYWARD_STORE, and records outcome +
 failure class. Everything but the toolchain objects is pruned from the
 store between repos so the run fits in a few GB of disk.
 """
 import argparse, csv, glob, json, os, re, shutil, signal, stat, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# TOG_BIN overrides the binary under test (e.g. a fix built into another
+# GREYWARD_BIN overrides the binary under test (e.g. a fix built into another
 # CARGO_TARGET_DIR while a long run still needs the original release binary).
-TOG = os.environ.get("TOG_BIN") or os.path.join(ROOT, "target/release/tog")
+GREYWARD = os.environ.get("GREYWARD_BIN") or os.path.join(ROOT, "target/release/ward")
 TOOLCHAIN = ("-cpython-", "-nodejs-", "-uv-")
 SKIP_NAMES = re.compile(
     r"awesome|interview|cheat|roadmap|tutorial|book|course|system-design|"
@@ -40,15 +40,15 @@ CLASSES = [
     ("policy_denied", r"policy denies [a-z_-]+"),
     ("platform_unsupported", r"\(unsupported platform\)|no pinned CPython satisfies"),
     ("rust_toolchain_unpinned", r"unsupported Rust toolchain"),
-    # Both manifest rows carry two spellings: tog dropped the `no_manifest:`
+    # Both manifest rows carry two spellings: ward dropped the `no_manifest:`
     # and `unreadable_manifest:` prefixes from the text a user reads (#100),
     # and CSVs recorded before that still have to classify.
-    # Before the manifest rows: tog's uv error now carries uv's own output
+    # Before the manifest rows: ward's uv error now carries uv's own output
     # (#216), and a dynamic-metadata build failure inside it can mention a
     # manifest without the manifest being the problem.
     ("py_uv_resolve_failed", r"uv pip compile failed"),
     ("no_manifest", r"\bno_manifest\b|nothing to sync here"),
-    ("unreadable_manifest", r"unreadable_manifest|manifest is broken, or this is a tog bug"),
+    ("unreadable_manifest", r"unreadable_manifest|manifest is broken, or this is a ward bug"),
     ("py_editable", r"editable requirements"),
     ("py_markers", r"environment markers are not supported"),
     ("py_extras", r"extras are not supported"),
@@ -82,7 +82,7 @@ COMPANY_DENY = {
 
 CSV_COLUMNS = [
     "lang", "repo", "stars", "status", "class", "seconds", "inputs", "error",
-    "exceptions", "exception_kinds", "platform", "tog_commit",
+    "exceptions", "exception_kinds", "platform", "ward_commit",
 ]
 
 
@@ -253,9 +253,9 @@ def platform_from_text(text):
 
 def platform_from_closures(project):
     values = []
-    for path in glob.glob(os.path.join(project, ".tog", "closure*.json")):
+    for path in glob.glob(os.path.join(project, ".greyward", "closure*.json")):
         values.append(path)
-    values += glob.glob(os.path.join(project, ".tog", "closures", "*.json"))
+    values += glob.glob(os.path.join(project, ".greyward", "closures", "*.json"))
     for path in values:
         try:
             with open(path) as f:
@@ -285,8 +285,8 @@ def platform_from_closures(project):
 
 
 def exceptions_from_closures(project):
-    paths = set(glob.glob(os.path.join(project, ".tog", "closure*.json")))
-    paths.update(glob.glob(os.path.join(project, ".tog", "closures", "*.json")))
+    paths = set(glob.glob(os.path.join(project, ".greyward", "closure*.json")))
+    paths.update(glob.glob(os.path.join(project, ".greyward", "closures", "*.json")))
     kinds = []
     for path in sorted(paths):
         try:
@@ -304,7 +304,7 @@ def exceptions_from_closures(project):
     return len(kinds), ",".join(kinds)
 
 
-def tog_commit():
+def ward_commit():
     result = subprocess.run(
         ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
         capture_output=True, text=True,
@@ -371,7 +371,7 @@ def dry_run(targets, work, strict=False):
             )
         print(f"{lang}\t{full}\t{commit}")
         print(f"  {git}")
-        print(f"  TOG_STORE={os.path.join(work, 'store')} {TOG} sync{' --strict' if strict else ''}")
+        print(f"  GREYWARD_STORE={os.path.join(work, 'store')} {GREYWARD} sync{' --strict' if strict else ''}")
 
 
 def classify(rc, out):
@@ -390,13 +390,13 @@ def main():
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--out", default="hitrate.csv")
-    ap.add_argument("--work", default=os.environ.get("HITRATE_WORK", "/tmp/tog-hitrate"))
+    ap.add_argument("--work", default=os.environ.get("HITRATE_WORK", "/tmp/greyward-hitrate"))
     ap.add_argument("--only", choices=["python", "npm"])
     ap.add_argument("--repos", help="tab-separated '<ecosystem>\t<owner/name>\t<commit>' file")
     ap.add_argument("--dry-run", action="store_true", help="print planned commands without touching disk or network")
     ap.add_argument("--keep", action="store_true", help="retain failed clones under WORK/failures")
     ap.add_argument("--strict", action="store_true",
-                    help="run `tog --strict`: a repo that needs any policy exception fails as policy_denied")
+                    help="run `ward --strict`: a repo that needs any policy exception fails as policy_denied")
     a = ap.parse_args()
 
     manifests = {
@@ -430,13 +430,13 @@ def main():
         dry_run(targets, a.work, a.strict)
         return
 
-    if not os.path.exists(TOG):
-        sys.exit(f"build first: cargo build --release ({TOG} missing)")
+    if not os.path.exists(GREYWARD):
+        sys.exit(f"build first: cargo build --release ({GREYWARD} missing)")
     os.makedirs(a.work, exist_ok=True)
     store = os.path.join(a.work, "store")
-    env = dict(os.environ, TOG_STORE=store, GIT_TERMINAL_PROMPT="0")
+    env = dict(os.environ, GREYWARD_STORE=store, GIT_TERMINAL_PROMPT="0")
     run_platform = uname_platform()
-    tool_commit = tog_commit()
+    tool_commit = ward_commit()
 
     done = set()
     rows = read_rows(a.out)
@@ -450,7 +450,7 @@ def main():
     w = csv.writer(fout)
     if new:
         mode = "strict" if a.strict else "permissive"
-        fout.write(f"# platform={run_platform} tog_commit={tool_commit} mode={mode}\n")
+        fout.write(f"# platform={run_platform} ward_commit={tool_commit} mode={mode}\n")
         w.writerow(CSV_COLUMNS)
 
     for lang, full, stars, commit in targets:
@@ -476,7 +476,7 @@ def main():
                                 "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]
                     if os.path.exists(os.path.join(clone, n))
                 )
-                sync = [TOG, "sync"] + (["--strict"] if a.strict else [])
+                sync = [GREYWARD, "sync"] + (["--strict"] if a.strict else [])
                 rc, out, secs = run_timed(sync, clone, env, a.timeout)
                 cls = classify(rc, out)
                 err = ""
@@ -507,7 +507,7 @@ def main():
     # Summary
     rows = read_rows(a.out)
     print(f"\nplatform: {run_platform}")
-    print(f"tog_commit: {tool_commit}")
+    print(f"ward_commit: {tool_commit}")
     print(f"mode: {'strict' if a.strict else 'permissive'}")
     for lang in ("python", "npm"):
         rs = [r for r in rows if r["lang"] == lang]

@@ -1,4 +1,4 @@
-//! `tog doctor`: environment health checks over the project and store.
+//! `ward doctor`: environment health checks over the project and store.
 
 use crate::cli;
 use crate::commands::inspect;
@@ -14,7 +14,7 @@ pub fn run(json: bool, isolation: bool) -> io::Result<i32> {
     // lease: `inspect::doctor` reads a store only through the pair, so it
     // never reads one this command did not open and lease, and a store
     // that changes while doctor runs cannot move it from one answer to the
-    // other. A store that cannot be opened or leased (one this tog refuses
+    // other. A store that cannot be opened or leased (one this ward refuses
     // among them) is a failing row with its fix, not a reason to print no
     // rows at all. Nor is a busy one: the lease is taken without waiting,
     // so behind a sweep or a reset doctor says the store is in use and

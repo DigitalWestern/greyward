@@ -12,7 +12,7 @@ use std::path::Path;
 /// `mix deps.get --check-locked` that passed there.
 const CHECK_LOCKED: &str = "mix-check-locked";
 
-/// Directory names the manifest walk never enters: tog's and the user's
+/// Directory names the manifest walk never enters: ward's and the user's
 /// dot state, `_build`, fetched dependency sources, and JavaScript assets.
 fn skipped_by_manifest_walk(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('_') || name == "deps" || name == "node_modules"
@@ -121,7 +121,7 @@ pub(super) fn check_locked_inputs(
 /// the walk does not cover: one that leaves the project, one inside a
 /// directory the walk skips (see [`skipped_by_manifest_walk`]), or one whose path
 /// is not a plain string literal (an interpolation, a sigil, a variable),
-/// since tog never evaluates mix.exs to find out where that points. A
+/// since ward never evaluates mix.exs to find out where that points. A
 /// `path:` inside a comment counts too, which only costs a registry check.
 /// `deps_path:`, `config_path:` and the like are other keys.
 fn path_dependency_escapes(dir: &Path, manifest: &[u8]) -> bool {
@@ -165,9 +165,9 @@ fn path_dependency_escapes(dir: &Path, manifest: &[u8]) -> bool {
     false
 }
 
-/// Whether the last passing check in this project, as tog recorded it in the
+/// Whether the last passing check in this project, as ward recorded it in the
 /// store, read exactly `inputs`. The record is store data: a repository
-/// cannot ship one, so a match means tog itself saw the check pass on these
+/// cannot ship one, so a match means ward itself saw the check pass on these
 /// bytes.
 pub(super) fn check_locked_passed(
     store: &Store,
@@ -282,7 +282,7 @@ mod tests {
     }
 
     /// A `path:` dependency the walk covers keeps the hash; one outside the
-    /// project, or one tog would have to evaluate mix.exs to place, does not.
+    /// project, or one ward would have to evaluate mix.exs to place, does not.
     #[test]
     fn a_path_dependency_outside_the_project_is_not_vouched_for() {
         let inside = Path::new("apps/web");

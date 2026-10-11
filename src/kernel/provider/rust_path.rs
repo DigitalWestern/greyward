@@ -2,14 +2,14 @@
 //! layer): what `[toolchain] path = "/custom/rust"` in a rustup toolchain
 //! file names.
 //!
-//! rustup runs such a toolchain as it is. tog does the same, with the two
+//! rustup runs such a toolchain as it is. ward does the same, with the two
 //! things a lock needs added. First, identity: the tree is probed
 //! (`bin/rustc -vV`, `bin/cargo -V`) and content-hashed when the lock is
 //! written, and the lock's row for it carries `source = "path"`, the
 //! `file://` URL of the tree, both version lines, and that hash. Second,
 //! the check: every later realization re-probes and re-hashes the tree, and
 //! a tree that is no longer the one the lock names is refused (fail closed)
-//! until `tog update --toolchain rust` locks the new one.
+//! until `ward update --toolchain rust` locks the new one.
 //!
 //! The tree is imported into the store as an ordinary Rust object (a copy,
 //! verified against the same hash), so builds, closures and GC treat it
@@ -98,7 +98,7 @@ fn probe_scratch_under(root: &Path) -> io::Result<PathBuf> {
     let mut taken = None;
     for _ in 0..ATTEMPTS {
         let random = crate::kernel::fsroot::urandom_bytes(16)?;
-        let scratch = root.join(format!("tog-rust-path-probe-{}", hex::encode(random)));
+        let scratch = root.join(format!("greyward-rust-path-probe-{}", hex::encode(random)));
         match fs::DirBuilder::new().mode(0o700).create(&scratch) {
             Ok(()) => return Ok(scratch),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = Some(error),
@@ -166,7 +166,7 @@ fn version_output(platform: Platform, tree: &Path, binary: &str, flag: &str) -> 
 }
 
 /// The numeric part of a release string (`1.97.0-nightly` -> `1.97.0`),
-/// which must be a version tog can compare.
+/// which must be a version ward can compare.
 fn numeric_release(tree: &Path, what: &str, release: &str) -> io::Result<String> {
     let numeric = release.split(['-', '+']).next().unwrap_or_default();
     Version::parse(numeric).map_err(|_| {
@@ -356,7 +356,7 @@ impl FileAt<'_> {
         let opened = store::fd_stat(file.as_raw_fd())?;
         if file_kind(&opened) != libc::S_IFREG || !store::same_inode(&opened, &self.stat) {
             return Err(invalid(format!(
-                "the Rust toolchain at {}: {} changed while tog read it; run tog again",
+                "the Rust toolchain at {}: {} changed while ward read it; run ward again",
                 root.display(),
                 path.display()
             )));
@@ -427,7 +427,7 @@ fn walk_dir(
                 store::read_link_at(dirfd, bytes).map_err(|error| at_entry(root, &path, error))?;
             if !contained_link(root, &path, &target) {
                 return Err(invalid(format!(
-                    "the Rust toolchain at {}: {} links to {}, which resolves outside the toolchain; tog imports only a self-contained tree",
+                    "the Rust toolchain at {}: {} links to {}, which resolves outside the toolchain; ward imports only a self-contained tree",
                     root.display(),
                     path.display(),
                     target.display()
@@ -444,7 +444,7 @@ fn walk_dir(
             .map_err(|error| at_entry(root, &path, error))?;
             if !store::same_inode(&store::fd_stat(child.as_raw_fd())?, &stat) {
                 return Err(invalid(format!(
-                    "the Rust toolchain at {}: {} changed while tog read it; run tog again",
+                    "the Rust toolchain at {}: {} changed while ward read it; run ward again",
                     root.display(),
                     path.display()
                 )));
@@ -472,7 +472,7 @@ fn walk_dir(
 }
 
 /// The cheap pass: every link resolved and every entry's kind checked,
-/// no file opened. It runs before anything is hashed, so a tree tog will
+/// no file opened. It runs before anything is hashed, so a tree ward will
 /// refuse is refused before a whole toolchain is read.
 fn check_tree(root: &Path) -> io::Result<()> {
     walk(root, &mut |_, _| Ok(()))
@@ -606,7 +606,7 @@ fn tree_digest_quiet(
                 let key = FileKey::of(&stat);
                 if FileKey::of(&store::fd_stat(opened.as_raw_fd())?) != key {
                     return Err(invalid(format!(
-                        "the Rust toolchain at {}: {} changed while tog read it; run tog again",
+                        "the Rust toolchain at {}: {} changed while ward read it; run ward again",
                         root.display(),
                         path.display()
                     )));
@@ -923,8 +923,8 @@ fn verify(
 
 fn changed_since_locked(tree: &Path, what: &str) -> io::Error {
     invalid(format!(
-        "the Rust toolchain at {} changed since tog-toolchain.toml locked it ({what}); \
-         run `tog update --toolchain rust` to lock the tree as it is now",
+        "the Rust toolchain at {} changed since greyward-toolchain.toml locked it ({what}); \
+         run `ward update --toolchain rust` to lock the tree as it is now",
         tree.display()
     ))
 }
@@ -946,7 +946,7 @@ fn copy_mismatch(tree: &Path, row: &ArtifactSpec, copied: &Digest, cache: &Path)
             ),
         ),
         Ok(_) => invalid(format!(
-            "the Rust toolchain at {} changed while it was imported (locked content {}, copied {}); run tog again",
+            "the Rust toolchain at {} changed while it was imported (locked content {}, copied {}); run ward again",
             tree.display(),
             qualified(&row.digest),
             qualified(copied)
@@ -1377,7 +1377,7 @@ mod tests {
         assert!(
             first
                 .to_string()
-                .contains("changed since tog-toolchain.toml locked it"),
+                .contains("changed since greyward-toolchain.toml locked it"),
             "{first}"
         );
         // The forged sum is gone: the cache holds what the file holds.
@@ -1391,7 +1391,7 @@ mod tests {
         assert!(
             again
                 .to_string()
-                .contains("changed since tog-toolchain.toml locked it"),
+                .contains("changed since greyward-toolchain.toml locked it"),
             "{again}"
         );
         // Restoring the bytes the lock names imports the tree.
@@ -1540,10 +1540,10 @@ mod locked_row_tests {
     }
 
     #[test]
-    fn a_recipe_this_tog_does_not_know_is_refused() {
+    fn a_recipe_this_ward_does_not_know_is_refused() {
         assert_eq!(
             refusal(&selected("rust-path/2", "file:///opt/rust", sha256())),
-            "cargo: recipe rust-path/2 in tog-toolchain.toml is not known to this tog; upgrade tog"
+            "cargo: recipe rust-path/2 in greyward-toolchain.toml is not known to this ward; upgrade ward"
         );
     }
 
@@ -1554,7 +1554,7 @@ mod locked_row_tests {
         new.source = Source::Created;
         assert_eq!(
             refusal(&new),
-            "cargo: recipe rust-path/2 in the toolchain catalog is not known to this tog; upgrade tog"
+            "cargo: recipe rust-path/2 in the toolchain catalog is not known to this ward; upgrade ward"
         );
     }
 
@@ -1588,7 +1588,7 @@ mod locked_row_tests {
 
     #[test]
     fn the_recipe_is_checked_before_the_digest_and_the_url() {
-        // Every field wrong: the recipe refusal wins, so an old tog says
+        // Every field wrong: the recipe refusal wins, so an old ward says
         // "upgrade" rather than complaining about a row it cannot read.
         let sha512 = Digest::sha512(&"b".repeat(128)).unwrap();
         let error = refusal(&selected("rust-path/2", "https://x/rust", sha512.clone()));

@@ -93,7 +93,7 @@ pub struct Report {
 #[allow(clippy::disallowed_methods)]
 pub fn collect<W: Write>(store: &Store, options: Options, out: &mut W) -> io::Result<Report> {
     let Some(activity) = store.try_activity_exclusive()? else {
-        writeln!(out, "cleanup skipped: a Tog job is using this store")?;
+        writeln!(out, "cleanup skipped: a Greyward job is using this store")?;
         return Ok(Report::default());
     };
     collect_with_activity(store, &activity, options, out)
@@ -114,7 +114,7 @@ pub fn collect_with_activity<W: Write>(
         return Err(io::Error::other(
             "refusing to sweep: the project-root registry is not initialized; register existing "
                 .to_string()
-                + "projects with `tog gc --register <dir>...` or run `tog` in each "
+                + "projects with `ward gc --register <dir>...` or run `ward` in each "
                 + "project",
         ));
     }
@@ -143,7 +143,7 @@ pub fn collect_with_activity<W: Write>(
 }
 
 /// Forget each root whose project holds only retired closure records (the
-/// `rustfmt.json` an older `tog fmt` wrote and registered a root for) and
+/// `rustfmt.json` an older `ward fmt` wrote and registered a root for) and
 /// that protects nothing those records do not name. Nothing reads such a
 /// record any more; left alone the root would keep its objects forever, or
 /// stop every sweep once the record is deleted. A dry run only reports, and
@@ -180,7 +180,7 @@ fn forget_retired_roots<W: Write>(
             store.remove_root_entry_with_activity(activity, &root)?;
             writeln!(
                 out,
-                "forgot {what}; `tog sync` there registers the project again"
+                "forgot {what}; `ward sync` there registers the project again"
             )?;
         }
         options.forgotten.push(root.key);
@@ -194,7 +194,7 @@ fn forget_retired_roots<W: Write>(
 /// judged by the ordinary root rules.
 fn retired_only(project: &Path) -> Option<Vec<String>> {
     let mut retired = Vec::new();
-    for entry in fs::read_dir(project.join(".tog/closures")).ok()? {
+    for entry in fs::read_dir(project.join(".greyward/closures")).ok()? {
         let entry = entry.ok()?;
         let path = entry.path();
         if path.extension().is_none_or(|ext| ext != "json") {
@@ -225,7 +225,7 @@ fn protects_only_retired(
     let mut ids = HashSet::new();
     let mut paths = Vec::new();
     for name in retired {
-        let path = project.join(".tog/closures").join(name);
+        let path = project.join(".greyward/closures").join(name);
         let Some(value) = fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -410,13 +410,13 @@ mod tests {
     }
 
     fn closure(project: &Path, object: &Path, extra: serde_json::Value) {
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         let body = serde_json::json!({
             "env_object": object.display().to_string(),
             "extra": extra,
         });
         fs::write(
-            project.join(".tog/closures/python.json"),
+            project.join(".greyward/closures/python.json"),
             serde_json::to_vec(&serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -486,7 +486,7 @@ mod tests {
     }
 
     /// A record says for itself what its object needs, so the sweep reads
-    /// it without a kind row: an object whose kind or schema this tog no
+    /// it without a kind row: an object whose kind or schema this ward no
     /// longer produces is ordinary garbage once nothing roots it, and is
     /// kept while something does. Needing the row would instead block every
     /// sweep on a store that holds one, after any schema bump. What such a
@@ -713,7 +713,7 @@ mod tests {
     }
 
     /// A record or a record kind the sweep cannot read is left alone: records
-    /// are a cache, and before them `tog gc --project` never read records/.
+    /// are a cache, and before them `ward gc --project` never read records/.
     #[test]
     fn an_unreadable_record_does_not_fail_a_project_sweep() {
         use std::os::unix::fs::PermissionsExt;
@@ -831,9 +831,9 @@ mod tests {
                 "id": objects[0],
                 "path": store.object_path(objects[0]).display().to_string(),
             }});
-            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::create_dir_all(project.join(".greyward/closures")).unwrap();
             fs::write(
-                project.join(".tog/closures/rustfmt.json"),
+                project.join(".greyward/closures/rustfmt.json"),
                 serde_json::to_vec(&serde_json::json!({
                     "schema": "closure/1", "ecosystem": "cargo", "body": body,
                 }))
@@ -1749,9 +1749,9 @@ mod tests {
             .is_file());
     }
 
-    /// A tog killed mid-write leaves a temporary under `tmp/`. Every kind tog
+    /// A ward killed mid-write leaves a temporary under `tmp/`. Every kind ward
     /// writes is swept once it is past the stage window. A fresh one, the
-    /// publish lock, and a name tog never writes are left alone.
+    /// publish lock, and a name ward never writes are left alone.
     #[test]
     fn every_kind_of_crashed_temporary_is_swept_once_stale() {
         let temp = TempStore::new("tmp-leftovers");
@@ -1776,7 +1776,7 @@ mod tests {
             stale.push(old);
             fresh.push(make(&format!("{prefix}0-0-running"), *kind));
         }
-        let foreign = make("not-a-tog-temporary", libc::S_IFREG);
+        let foreign = make("not-a-greyward-temporary", libc::S_IFREG);
         age(&foreign);
         fresh.push(foreign);
         fresh.push(tmp.join(".publish.lock"));
@@ -2136,8 +2136,8 @@ mod tests {
         attribution.finish(true).unwrap();
         drop(activity);
         // Crash window: the visible closure is gone, the durable record is not.
-        fs::remove_dir_all(project.join(".tog/closures")).unwrap();
-        assert!(!project.join(".tog/closures").exists());
+        fs::remove_dir_all(project.join(".greyward/closures")).unwrap();
+        assert!(!project.join(".greyward/closures").exists());
 
         let (report, text) = sweep(
             &store,
@@ -2196,7 +2196,7 @@ mod tests {
             "{unfinished}"
         );
         let project = project.canonicalize().unwrap();
-        assert!(!project.join(".tog/closures/python.json").exists());
+        assert!(!project.join(".greyward/closures/python.json").exists());
         let roots = store.roots().unwrap();
         assert!(
             roots.iter().all(|root| root
@@ -2232,9 +2232,9 @@ mod tests {
             let live = commit(&store, "live", None);
             age(&store.object_path(&live));
             let project = temp.root.join("project");
-            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::create_dir_all(project.join(".greyward/closures")).unwrap();
             fs::write(
-                project.join(".tog/closures/python.json"),
+                project.join(".greyward/closures/python.json"),
                 serde_json::json!({
                     "schema": "closure/1",
                     "ecosystem": "python",
@@ -2656,7 +2656,7 @@ mod tests {
         assert!(
             message.contains("refusing to sweep: invalid object entry")
                 && message.contains(&format!(
-                    "; it has no record, so drop it with `tog gc --drop-object {id}`"
+                    "; it has no record, so drop it with `ward gc --drop-object {id}`"
                 )),
             "{message}"
         );
@@ -2683,7 +2683,7 @@ mod tests {
         });
         assert!(message.contains("has no readable metadata"), "{message}");
         assert!(
-            message.contains("; drop it with `tog gc --drop-object ")
+            message.contains("; drop it with `ward gc --drop-object ")
                 && message
                     .contains("` (the next sync that needs it rebuilds it), or restore meta/"),
             "{message}"
@@ -2707,7 +2707,7 @@ mod tests {
         let message = result.expect_err(&text).to_string();
         assert!(
             message.contains(&format!(
-                "; drop it and the 1 object(s) that depend on it with `tog gc --drop-object \
+                "; drop it and the 1 object(s) that depend on it with `ward gc --drop-object \
                  {} {}`",
                 whole_set[0], whole_set[1]
             )),
@@ -2758,7 +2758,7 @@ mod tests {
     // Issue #101: a record that no longer hashes to its own id.
     //
     // The store this models came from a text rewrite of an identity input
-    // (`~/.blanket/store` -> `~/.tog/store`), which left the stored id as the
+    // (`~/.blanket/store` -> `~/.greyward/store`), which left the stored id as the
     // hash of the old text. Nothing can read the record, so the fail-closed
     // sweep refuses — correctly — and before `--drop-object` existed there
     // was no command that changed the situation.

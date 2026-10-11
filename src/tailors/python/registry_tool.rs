@@ -1,4 +1,4 @@
-//! The Python tailor's `RegistryTool`: how `tog x` resolves one PyPI
+//! The Python tailor's `RegistryTool`: how `ward x` resolves one PyPI
 //! package with the store uv, realizes it as an ordinary env object, and
 //! projects it as `.venv` in the command's cache directory.
 

@@ -101,7 +101,7 @@ pub struct Requirement {
 }
 
 /// Parse `name @ git+URL@<40-hex commit>`, optionally with
-/// `#subdirectory=path`. Anything less pinned is not a requirement tog can
+/// `#subdirectory=path`. Anything less pinned is not a requirement ward can
 /// lock, and the caller reports it.
 pub fn parse_git_requirement(spec: &str) -> Option<Requirement> {
     let (name, reference) = spec.split_once('@')?;
@@ -226,7 +226,7 @@ pub fn is_requirement_option(line: &str) -> bool {
         || first.starts_with("--constraint=")
 }
 
-/// Index configuration is deliberately data-only: tog reports it as an
+/// Index configuration is deliberately data-only: ward reports it as an
 /// unattested input and never follows the configured index during locking.
 pub fn unattested_index_options(text: &str) -> Vec<String> {
     logical_lines(text)
@@ -291,7 +291,7 @@ pub fn skippable_specs(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether a requirement is project-local or a direct reference that tog
+/// Whether a requirement is project-local or a direct reference that ward
 /// cannot turn into a verified registry package.
 pub fn is_skippable_spec(spec: &str) -> bool {
     let spec = spec.trim();
@@ -402,7 +402,7 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
         }
         if hashes.is_empty() {
             return Err(err(format!(
-                "{spec}: tog requires hash-pinned requirements; \
+                "{spec}: ward requires hash-pinned requirements; \
                  generate with: uv pip compile --generate-hashes"
             )));
         }
@@ -955,7 +955,7 @@ Six==1.0 --hash=sha256:000000000000000000000000000000000000000000000000000000000
                 "six>=1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
                 "only exact '==' pins are supported",
             ),
-            ("six==1.0", "tog requires hash-pinned requirements"),
+            ("six==1.0", "ward requires hash-pinned requirements"),
             (
                 "six[extra]==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000001",
                 "extras are not supported",

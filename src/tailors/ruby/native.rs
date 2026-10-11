@@ -64,7 +64,7 @@ pub(super) struct GemInstall<'a> {
     pub(super) helper: &'a Path,
     pub(super) scratch: &'a Path,
     pub(super) staged: &'a Path,
-    /// tog's native library set, which native gems build with
+    /// ward's native library set, which native gems build with
     /// (`native_libs`).
     pub(super) native_libs: Option<&'a Path>,
 }
@@ -625,7 +625,7 @@ mod tests {
             .is_some_and(|inner| inner.is::<hostfallback::HostChanged>()));
         assert_eq!(
             error.to_string(),
-            "host development files changed during the build of nokogiri-1.18.10; re-run tog"
+            "host development files changed during the build of nokogiri-1.18.10; re-run ward"
         );
         assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
 

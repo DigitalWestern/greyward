@@ -22,7 +22,7 @@ pub fn pnpm_lock_importers(lock_yaml: &str) -> io::Result<Vec<String>> {
 }
 
 /// A version without its peer context. Lockfile v6 and v9, the versions
-/// tog reads, write peer context only in parentheses
+/// ward reads, write peer context only in parentheses
 /// (`1.0.0(react@18.0.0)`), so an underscore is an ordinary character of
 /// a version, a `file:` path or a tarball URL.
 ///
@@ -408,7 +408,7 @@ pub(super) fn attach_pnpm_patches(
         let recorded = recorded_patch_hash(&node.key)?;
         let version = trim_peer_suffix(&node.version);
         let rule = select_pnpm_patch(rules, &node.name, version, recorded)?;
-        // The snapshot key names the patch pnpm applied; tog must pick the
+        // The snapshot key names the patch pnpm applied; ward must pick the
         // same one. A lock without the suffix (hand-written) is taken at its
         // patchedDependencies word.
         if let Some(recorded) = recorded {
@@ -988,7 +988,7 @@ fn plan_pnpm_with_recorder(
     let version = version.trim_end_matches(".0");
     if version != "9" && version != "6" {
         return Err(err(format!(
-            "unsupported pnpm lockfileVersion {:?} (tog supports 9.0 and 6.0)",
+            "unsupported pnpm lockfileVersion {:?} (ward supports 9.0 and 6.0)",
             yaml_str(root.get("lockfileVersion")).unwrap_or_default()
         )));
     }
@@ -1254,7 +1254,7 @@ mod patch_hash_tests {
     /// (`tools/hitrate/hitrate-linux-2026-09-11.csv`): `paperclipai/paperclip`
     /// at commit ad0ad43 declares `fymctidcjqjhi4cj72qtivlxry` for
     /// `patches/@agentclientprotocol__claude-agent-acp@0.70.0.patch`. That file
-    /// has sha256 `823c105c…d6c` (what tog printed as "got" when it hashed
+    /// has sha256 `823c105c…d6c` (what ward printed as "got" when it hashed
     /// patches with sha256 by mistake) and md5 `2e1829a0624c12747049fea13455778e`,
     /// which base32-encodes to the declared string: md5 is the input.
     #[test]

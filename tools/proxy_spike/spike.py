@@ -6,18 +6,18 @@ shape the door will use on Linux, and checks the design's † claims.
 
     python3 -m venv $W/venv && $W/venv/bin/pip install mitmproxy
     cc -O2 -o $W/nounix tools/proxy_spike/nounix.c
-    tools/proxy_spike/spike.py --store $TOG_STORE --work $W --mitmdump $W/venv/bin/mitmdump \\
+    tools/proxy_spike/spike.py --store $GREYWARD_STORE --work $W --mitmdump $W/venv/bin/mitmdump \\
         --nounix $W/nounix census [ecosystem ...]
     tools/proxy_spike/spike.py --work $W report
 
-`--store` is a tog store that already holds the toolchains (sync one fixture
-project per ecosystem with the tog under test first; `tog add` in a Python
+`--store` is a ward store that already holds the toolchains (sync one fixture
+project per ecosystem with the ward under test first; `ward add` in a Python
 and a pnpm project realizes uv and pnpm). Every tool runs:
 
 - under bwrap with `--unshare-net --unshare-pid --clearenv`, the host root
   read-only, fresh /tmp and /run, and only the scenario directory writable;
 - behind `relay.py`, which is the only way out of the network namespace (a
-  Unix socket bound at /run/tog/proxy.sock, spliced to 127.0.0.1:8119);
+  Unix socket bound at /run/ward/proxy.sock, spliced to 127.0.0.1:8119);
 - under `nounix` (the AF_UNIX / io_uring / ptrace seccomp filter), traced by
   strace for `socket` and `io_uring_setup` so denied attempts are counted;
 - with an environment built from empty.
@@ -86,7 +86,7 @@ class Session:
             "--listen-host", "127.0.0.1",
             "--listen-port", str(self.port),
             "--set", f"confdir={self.confdir}",
-            # The tog proxy offers only http/1.1 (design, "ALPN").
+            # The ward proxy offers only http/1.1 (design, "ALPN").
             "--set", "http2=false",
             "--set", "connection_strategy=lazy",
             "--set", "flow_detail=0",
@@ -159,7 +159,7 @@ class Session:
 
     @property
     def proxy_url(self):
-        return f"http://tog:{self.token}@127.0.0.1:{self.tool_port}"
+        return f"http://ward:{self.token}@127.0.0.1:{self.tool_port}"
 
     def mirror(self, route):
         return f"http://127.0.0.1:{self.tool_port}/{self.token}/{route}/"
@@ -191,7 +191,7 @@ class Session:
             "HOME": os.path.join(spike, "home"),
             "TMPDIR": os.path.join(spike, "tmp"),
             "LANG": "C.UTF-8",
-            "USER": os.environ.get("USER", "tog"),
+            "USER": os.environ.get("USER", "ward"),
         }
 
     def run(self, name, argv, env, cwd, scenario, confined=True, seccomp=True, trace=True,
@@ -216,7 +216,7 @@ class Session:
                 "--proc", "/proc",
                 "--tmpfs", "/tmp",
                 "--tmpfs", "/run",
-                "--ro-bind", self.sockdir, "/run/tog",
+                "--ro-bind", self.sockdir, "/run/ward",
                 "--bind", scenario, scenario,
                 "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
                 "--die-with-parent", "--new-session",
@@ -225,7 +225,7 @@ class Session:
             for key, value in env.items():
                 command += ["--setenv", key, value]
             command += ["--chdir", cwd, "--", "/usr/bin/python3", os.path.join(HERE, "relay.py"),
-                        "/run/tog/proxy.sock", str(RELAY_PORT), "--"] + inner
+                        "/run/ward/proxy.sock", str(RELAY_PORT), "--"] + inner
             run_env = {}
         else:
             command = inner
@@ -366,7 +366,7 @@ def sha256(path):
 
 
 def git_env(session, extra=()):
-    """The git row: env-carried config (tools, not tog, run git)."""
+    """The git row: env-carried config (tools, not ward, run git)."""
     pairs = [
         ("http.proxy", session.proxy_url),
         ("http.sslCAInfo", session.ca),
@@ -428,7 +428,7 @@ def census_python(s):
         env.update(extra)
         return env
 
-    # Missing lock / tog x: uv pip compile --generate-hashes.
+    # Missing lock / ward x: uv pip compile --generate-hashes.
     d = s.scenario_dir("py-missing-lock", {"requirements.in": "iniconfig\nsix==1.16.0\n"})
     s.run("py-missing-lock", [uv, "pip", "compile", "requirements.in", "--generate-hashes", "--quiet",
                               "--python", python, "--python-version", version, "--index-url", "https://pypi.org/simple",
@@ -527,7 +527,7 @@ def census_python(s):
                     env, d, d, confined=False, seccomp=False, trace=False)
     s.claim("uv-ssl-cert-file-replaces-roots",
             "confirmed" if direct["rc"] != 0 and control["rc"] == 0 else "refuted",
-            f"direct with SSL_CERT_FILE=tog CA rc={direct['rc']} "
+            f"direct with SSL_CERT_FILE=ward CA rc={direct['rc']} "
             f"({direct['stderr'].strip()[-200:]!r}); without it rc={control['rc']}")
     # And through the proxy it works (the census runs above), which needs the file.
     d = s.scenario_dir("py-no-cafile", {"requirements.in": "iniconfig\n"})
@@ -616,14 +616,14 @@ def census_npm(s):
                     env, d, d, confined=False, seccomp=False, trace=False)
     s.claim("npm-cafile-replaces-roots",
             "confirmed" if direct["rc"] != 0 and control["rc"] == 0 else "refuted",
-            f"direct with --cafile=tog CA rc={direct['rc']} ({direct['stderr'].strip()[-160:]!r}); "
+            f"direct with --cafile=ward CA rc={direct['rc']} ({direct['stderr'].strip()[-160:]!r}); "
             f"without rc={control['rc']}")
 
 
 def census_pnpm(s):
     node, pnpm = node_paths(s)
     if not pnpm:
-        raise SystemExit("no pnpm in the store; run `tog add` in a pnpm project first")
+        raise SystemExit("no pnpm in the store; run `ward add` in a pnpm project first")
     tool_root = os.path.dirname(os.path.dirname(os.path.dirname(pnpm)))
 
     def env_for(scenario, rc_lines=None):
@@ -745,7 +745,7 @@ def census_pnpm(s):
                     env, d, d, confined=False, seccomp=False, trace=False, timeout=120)
     s.claim("pnpm-config-cafile-replaces-roots",
             "confirmed" if direct["rc"] != 0 and control["rc"] == 0 else "refuted",
-            f"direct with --config.cafile=tog CA rc={direct['rc']}; without rc={control['rc']}")
+            f"direct with --config.cafile=ward CA rc={direct['rc']}; without rc={control['rc']}")
 
 
 def census_cargo(s):
@@ -794,7 +794,7 @@ def census_cargo(s):
                     confined=False, seccomp=False, trace=False)
     s.claim("cargo-http-cainfo-replaces-roots",
             "confirmed" if direct["rc"] != 0 and control["rc"] == 0 else "refuted",
-            f"direct with http.cainfo=tog CA rc={direct['rc']} ({direct['stderr'].strip()[-160:]!r}); "
+            f"direct with http.cainfo=ward CA rc={direct['rc']} ({direct['stderr'].strip()[-160:]!r}); "
             f"without rc={control['rc']}")
 
 
@@ -904,7 +904,7 @@ def census_ruby(s):
         remote_kept = "remote: https://rubygems.org/" in handle.read()
 
     # The mirror as a config file in BUNDLE_APP_CONFIG (the design's wording),
-    # under tog's BUNDLE_IGNORE_CONFIG=1, versus the environment variable.
+    # under ward's BUNDLE_IGNORE_CONFIG=1, versus the environment variable.
     d2 = s.scenario_dir("ruby-mirror-config-file", {"Gemfile": RUBY_GEMFILE})
     app_config = os.path.join(d2, ".spike", "bundle-config")
     os.makedirs(app_config)
@@ -1048,7 +1048,7 @@ def census_dotnet(s):
         attr = ' allowInsecureConnections="true"' if insecure else ""
         with open(path, "w") as handle:
             handle.write('<?xml version="1.0" encoding="utf-8"?>\n<configuration><packageSources><clear />'
-                         f'<add key="tog" value="{s.mirror("nuget")}v3/index.json" protocolVersion="3"{attr} />'
+                         f'<add key="ward" value="{s.mirror("nuget")}v3/index.json" protocolVersion="3"{attr} />'
                          '</packageSources></configuration>\n')
         return path
 
@@ -1147,7 +1147,7 @@ def census_git(s):
     control = s.run("git-cainfo-direct-control", [git, "ls-remote", "https://github.com/dtolnay/itoa", "HEAD"],
                     env, d, d, confined=False, seccomp=False, trace=False)
     s.claim("git-sslcainfo-replaces-roots", "confirmed" if direct["rc"] != 0 and control["rc"] == 0 else "refuted",
-            f"direct with http.sslCAInfo=tog CA rc={direct['rc']}; without rc={control['rc']}")
+            f"direct with http.sslCAInfo=ward CA rc={direct['rc']}; without rc={control['rc']}")
 
 
 def census_bwrap_loopback(s):
@@ -1282,13 +1282,13 @@ def fixtures(args):
             json.dump(entries, handle, indent=1, sort_keys=True)
             handle.write("\n")
     # Every session draws its own token, so they are found by shape: the
-    # proxy userinfo `tog:<token>` and the mirror prefix `/<token>/`.
+    # proxy userinfo `ward:<token>` and the mirror prefix `/<token>/`.
     tokens = set()
     for name in ("proxy.jsonl", "results.jsonl", "claims.jsonl", "forced.jsonl"):
         source = os.path.join(work, name)
         if os.path.exists(source):
             text = open(source).read()
-            tokens.update(re.findall(r"tog:([0-9a-f]{32})@", text))
+            tokens.update(re.findall(r"ward:([0-9a-f]{32})@", text))
             tokens.update(re.findall(r"127\.0\.0\.1:\d+/([0-9a-f]{32})/", text))
     store = os.path.abspath(args.store) if args.store else None
 

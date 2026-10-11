@@ -1,6 +1,6 @@
 //! The Elixir resolution doors: the store mix confined through the proxy
 //! session's Hex mirror for a missing lock, the planner's
-//! `--check-locked` gate and `tog attest`, and the helper's mix.lock parse
+//! `--check-locked` gate and `ward attest`, and the helper's mix.lock parse
 //! confined with no route at all.
 
 use super::check_locked::{check_locked_inputs, check_locked_passed, record_check_locked};
@@ -72,7 +72,7 @@ pub fn generate_lock(
     Ok(())
 }
 
-/// `tog update` for Elixir: `mix deps.update` through the edit door, which
+/// `ward update` for Elixir: `mix deps.update` through the edit door, which
 /// publishes mix.lock with its record.
 pub(crate) fn update(
     door: &mut ResolutionDoor<'_>,
@@ -131,7 +131,7 @@ fn check_locked(
     )?;
     if !out.status.success() {
         return Err(err(format!(
-            "mix.exs and mix.lock are out of sync; run `tog run mix deps.get` and retry\n{}",
+            "mix.exs and mix.lock are out of sync; run `ward run mix deps.get` and retry\n{}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
@@ -237,20 +237,20 @@ pub fn plan_elixir(
     };
     validate_plan(&plan)?;
     if read_mix_lock(project)? != lock {
-        return Err(err("mix.lock changed while planning; re-run 'tog'"));
+        return Err(err("mix.lock changed while planning; re-run 'ward'"));
     }
     // The resolution files this plan was built from, so the resolution
     // join binds a record to this generation of mix.exs and its lock.
     project.verify_observed_inputs()?;
     if resolution_basis(project)? != basis {
         return Err(err(
-            "Elixir resolution inputs changed while planning; run `tog` again",
+            "Elixir resolution inputs changed while planning; run `ward` again",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 
-/// `tog attest` for Elixir: `mix deps.get --check-locked` in the project
+/// `ward attest` for Elixir: `mix deps.get --check-locked` in the project
 /// through `door`'s transaction with the record's producer. A mix.exs the
 /// lock no longer matches fails the check; a lock it would rewrite anyway
 /// is refused by the record. Nothing is published here.
@@ -292,7 +292,7 @@ pub fn attest_project(
     if !report.status.success() {
         return Err(err(format!(
             "mix.lock in {} is not what mix deps.get would write, so it is not attested; \
-             run `tog` to bring it up to date and commit the result\n{}",
+             run `ward` to bring it up to date and commit the result\n{}",
             project.path().display(),
             String::from_utf8_lossy(&report.stderr).trim()
         )));
@@ -448,7 +448,7 @@ mod tests {
     /// The whole Elixir door against the recorded repo.hex.pm: a missing
     /// lock resolved by `mix deps.get` through the Hex mirror, the
     /// planner's `--check-locked` gate through it and the helper's lock
-    /// parse with no route at all, and `tog attest`'s check: an unchanged
+    /// parse with no route at all, and `ward attest`'s check: an unchanged
     /// lock signed, a drifted mix.exs refused.
     #[test]
     #[ignore = "realizes the store BEAM over the network"]
@@ -490,7 +490,7 @@ mod tests {
             lock.contains("\"jason\": {:hex, :jason, \"1.4.5\""),
             "{lock}"
         );
-        assert!(dir.join(".tog/resolution/elixir.json").is_file());
+        assert!(dir.join(".greyward/resolution/elixir.json").is_file());
 
         let direct = temp.0.join("direct");
         let direct_home = temp.0.join("direct-home");
@@ -609,9 +609,10 @@ mod tests {
         updated.unwrap();
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), lock.as_bytes());
-        let receipt: serde_json::Value =
-            serde_json::from_slice(&fs::read(dir.join(".tog/resolution/elixir.json")).unwrap())
-                .unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(dir.join(".greyward/resolution/elixir.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             receipt["command"],
             serde_json::json!(["mix", "deps.update", "jason"])
@@ -659,7 +660,7 @@ mod tests {
         let why = result.unwrap_err().to_string();
         assert!(why.to_ascii_lowercase().contains("signature"), "{why}");
         assert!(!dir.join("mix.lock").exists());
-        assert!(!dir.join(".tog/resolution/elixir.json").exists());
+        assert!(!dir.join(".greyward/resolution/elixir.json").exists());
         done();
     }
 }

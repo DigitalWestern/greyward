@@ -50,7 +50,7 @@ pub enum Target<'a> {
     Project {
         receipt: Option<ReceiptProducer<'a>>,
     },
-    /// The lock root is not a project (a planner step, a `tog x` cache
+    /// The lock root is not a project (a planner step, a `ward x` cache
     /// stage, an unpacked sdist): no transaction, no receipt. Accepted
     /// outputs are written back into the lock root one file at a time, and
     /// the ledger is committed but not rooted; the caller roots the ids in
@@ -116,7 +116,7 @@ pub struct ConfinedSpec<'a> {
     pub extra_roots: Vec<PathBuf>,
     /// Store objects the tool runs from, bound read-only.
     pub store_reads: Vec<PathBuf>,
-    /// Tog-owned persistent caches under the store, bound read-write and
+    /// Greyward-owned persistent caches under the store, bound read-write and
     /// never snapshotted (see `ConfinedRun::cache_roots`).
     pub cache_roots: Vec<PathBuf>,
     pub routes: Vec<Route>,
@@ -201,7 +201,7 @@ pub enum Publish<'a> {
         outputs: Vec<PathBuf>,
         receipt: Option<ReceiptProducer<'a>>,
     },
-    /// The lock root is tog's own: accepted `outputs` are written back
+    /// The lock root is ward's own: accepted `outputs` are written back
     /// into it, and the caller roots the ledger.
     Detached { outputs: Vec<PathBuf> },
 }
@@ -322,7 +322,7 @@ pub(super) fn run(
     if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
         return Err(io::Error::other(
             "project files changed while planning executable-manifest resolution; \
-             nothing was published; run `tog` again",
+             nothing was published; run `ward` again",
         ));
     }
     if confined.complete_inputs {
@@ -354,7 +354,7 @@ pub(super) fn run(
         {
             failed
                 .stderr
-                .extend_from_slice(format!("\ntog: {refusal}\n").as_bytes());
+                .extend_from_slice(format!("\nward: {refusal}\n").as_bytes());
         }
         return Ok(failed);
     }
@@ -404,7 +404,7 @@ fn check_planning_inputs(
         if !matches!(snapshot.baseline(&path), Some(EntryState::File { sha256, .. }) if hex::encode(sha256) == *digest)
         {
             return Err(io::Error::other(format!(
-                "{relative} changed while planning; nothing was published; run `tog` again"
+                "{relative} changed while planning; nothing was published; run `ward` again"
             )));
         }
     }
@@ -591,7 +591,7 @@ fn invocation(
     };
     extra_git.extend(wiring.extra_git);
     let forced = confine::forced_settings(confined.tool, &confined.forced, &extra_git)?;
-    // The spec's variables over nothing: a confined tool never sees tog's
+    // The spec's variables over nothing: a confined tool never sees ward's
     // own environment.
     let mut env: Vec<(OsString, OsString)> = spec
         .env
@@ -723,7 +723,7 @@ fn record_facts(confined: &ConfinedSpec<'_>, policy: &Policy, ran: &Ran) -> io::
             subject: confined.name.to_string(),
             detail: format!(
                 "ran in {}, which isolates files and processes but cannot fence the network \
-                 to tog's proxy",
+                 to ward's proxy",
                 tier.engine.name()
             ),
         })
@@ -811,7 +811,7 @@ fn publish_project(
         Ok(Published::CleanupPending(error)) => {
             crate::kernel::ui::warning(
                 &format!("the resolution was published, but cleaning up after it failed: {error}"),
-                "the next tog command in this project finishes the cleanup",
+                "the next ward command in this project finishes the cleanup",
             );
             Ok(())
         }
@@ -905,7 +905,7 @@ impl SessionDir {
         bases.push(std::env::temp_dir());
         bases.push(PathBuf::from("/tmp"));
         let name = format!(
-            "tog-door-{}",
+            "greyward-door-{}",
             hex::encode(crate::kernel::fsroot::urandom_bytes(8)?)
         );
         for base in bases {
@@ -960,7 +960,7 @@ fn process_proxy() -> io::Result<&'static Proxy> {
     super::proxy::proxy()
 }
 
-/// The tog executable bound as the relay.
+/// The ward executable bound as the relay.
 fn relay_executable() -> io::Result<PathBuf> {
     #[cfg(test)]
     if let Some(path) = RELAY_FOR_TEST.with(|relay| relay.borrow().clone()) {
@@ -979,7 +979,7 @@ fn socket_scan() -> SocketScan {
 
 #[cfg(test)]
 thread_local! {
-    /// The tog binary a unit test binds as the relay (the test binary is
+    /// The ward binary a unit test binds as the relay (the test binary is
     /// not one).
     pub(crate) static RELAY_FOR_TEST: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
@@ -1207,7 +1207,7 @@ get() {
         confined.policy = Some(policy);
         confined.wire = Some(Box::new(|wire: &Wire<'_>| {
             let auth =
-                crate::kernel::base64::encode(format!("tog:{}", wire.address.token()).as_bytes());
+                crate::kernel::base64::encode(format!("ward:{}", wire.address.token()).as_bytes());
             Ok(Wiring {
                 args: with_forced(wire.args, wire.forced_args),
                 env: vec![
@@ -1318,7 +1318,8 @@ exit 37
         let objects = report.ledger.unwrap();
         let lock = fs::read(fx.project.join("deps.lock")).unwrap();
         assert_eq!(lock, b"HTTP/1.1 200 OK\n");
-        let receipt = fs::read_to_string(fx.project.join(".tog/resolution/fixture.json")).unwrap();
+        let receipt =
+            fs::read_to_string(fx.project.join(".greyward/resolution/fixture.json")).unwrap();
         use sha2::Digest as _;
         assert_eq!(
             receipt,
@@ -1338,7 +1339,7 @@ exit 37
         assert_eq!(rooted.len(), 2, "the originals are released: {rooted:?}");
         let mut after = tree(&fx.project);
         after.remove(Path::new("deps.lock"));
-        after.remove(Path::new(".tog/resolution/fixture.json"));
+        after.remove(Path::new(".greyward/resolution/fixture.json"));
         let mut expected = before;
         expected.remove(Path::new("deps.lock"));
         assert_eq!(after, expected, "only the output and the receipt changed");
@@ -1692,7 +1693,7 @@ exit 37
             format!("{uid}\n")
         );
         assert_eq!(
-            fs::read_to_string(fx.project.join(".tog/resolution/fixture.json")).unwrap(),
+            fs::read_to_string(fx.project.join(".greyward/resolution/fixture.json")).unwrap(),
             "confined\n"
         );
         let portable =
@@ -1783,11 +1784,11 @@ exit 37
     #[test]
     #[ignore = "subprocess harness for the foreground Podman cancellation test"]
     fn podman_signal_harness() {
-        let Some(marker) = std::env::var_os("TOG_PODMAN_SIGNAL_MARKER") else {
+        let Some(marker) = std::env::var_os("GREYWARD_PODMAN_SIGNAL_MARKER") else {
             return;
         };
         let marker = PathBuf::from(marker);
-        let signal: i32 = std::env::var("TOG_PODMAN_SIGNAL_NUMBER")
+        let signal: i32 = std::env::var("GREYWARD_PODMAN_SIGNAL_NUMBER")
             .unwrap()
             .parse()
             .unwrap();
@@ -1971,8 +1972,8 @@ exit 37
                 "--ignored",
                 "--nocapture",
             ])
-            .env("TOG_PODMAN_SIGNAL_MARKER", &marker.0)
-            .env("TOG_PODMAN_SIGNAL_NUMBER", signal.to_string())
+            .env("GREYWARD_PODMAN_SIGNAL_MARKER", &marker.0)
+            .env("GREYWARD_PODMAN_SIGNAL_NUMBER", signal.to_string())
             .process_group(0)
             .spawn()
             .unwrap();
@@ -2006,7 +2007,7 @@ exit 37
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            // INT goes to the foreground group, TERM directly to Tog's
+            // INT goes to the foreground group, TERM directly to Greyward's
             // supervisor process. Both must reach checked force-removal.
             let pid = child.id() as i32;
             let target = if signal == libc::SIGINT { -pid } else { pid };
@@ -2031,7 +2032,7 @@ exit 37
                 .args([
                     "ps",
                     "--filter",
-                    &format!("name=tog-resolve-{pid}-"),
+                    &format!("name=greyward-resolve-{pid}-"),
                     "--format",
                     "{{.Names}}",
                 ])
@@ -2470,7 +2471,7 @@ exit 37
             b"HTTP/1.1 200 OK\n"
         );
         assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), OLD_LOCK);
-        assert!(!fx.project.join(".tog").exists());
+        assert!(!fx.project.join(".greyward").exists());
         ledger::read_portable(&fx.harness.store, &objects.ledger).unwrap();
         assert!(rooted(&fx).is_empty(), "{:?}", rooted(&fx));
     }
@@ -2744,7 +2745,7 @@ exit 37
     }
 
     fn receipt(fx: &Fixture) -> Option<Vec<u8>> {
-        fs::read(fx.project.join(".tog/resolution/fixture.json")).ok()
+        fs::read(fx.project.join(".greyward/resolution/fixture.json")).ok()
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -2760,8 +2761,12 @@ exit 37
         };
         use super::super::record::{producer, RecordSlot};
         let fx = fixture("door-stale-receipt");
-        fs::create_dir_all(fx.project.join(".tog/resolution")).unwrap();
-        fs::write(fx.project.join(".tog/resolution/fixture.json"), b"stale\n").unwrap();
+        fs::create_dir_all(fx.project.join(".greyward/resolution")).unwrap();
+        fs::write(
+            fx.project.join(".greyward/resolution/fixture.json"),
+            b"stale\n",
+        )
+        .unwrap();
         let before = tree(&fx.project);
 
         // The tool fails: nothing is published, the stale receipt stays.
@@ -2825,8 +2830,8 @@ exit 37
     }
 
     #[test]
-    fn tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one() {
-        let Some(relay) = relay("tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one")
+    fn ward_attest_signs_an_unchanged_lock_and_refuses_a_changed_one() {
+        let Some(relay) = relay("ward_attest_signs_an_unchanged_lock_and_refuses_a_changed_one")
         else {
             return;
         };

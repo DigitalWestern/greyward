@@ -3,7 +3,7 @@
 //! - a build that attempts undeclared network access fails, and the build
 //!   toolchain works offline (`network_access_during_build_fails`);
 //! - the bubblewrap command line keeps its contract (`bwrap_contract`);
-//! - the no-store relay scrubs the signing key `TOG_SIGNING_KEY` names;
+//! - the no-store relay scrubs the signing key `GREYWARD_SIGNING_KEY` names;
 //! - the runtime-only host view keeps a real LLVM tree's compiler whole;
 //! - the resolution door's Linux confinement (`door`): bubblewrap in the
 //!   proxy network mode, the relay, the seccomp filter, the socket scan,
@@ -13,28 +13,28 @@
 //! tree only the CI runner has) are #[ignore]d, and the heavy workflow
 //! (.github/workflows/heavy.yml) runs them:
 //!     cargo test --test sandbox_deny -- --ignored
-//! Without TOG_STORE the store is a scratch one, never the developer's own.
+//! Without GREYWARD_STORE the store is a scratch one, never the developer's own.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use greyward::kernel::platform::Platform;
+use greyward::kernel::sandbox::{run_build_spec, BuildSpec};
+use greyward::kernel::store::Store;
+use greyward::kernel::types::*;
+use greyward::tailors::python;
+use greyward::tailors::python::build;
 use sha2::{Digest, Sha256};
-use tog::kernel::platform::Platform;
-use tog::kernel::sandbox::{run_build_spec, BuildSpec};
-use tog::kernel::store::Store;
-use tog::kernel::types::*;
-use tog::tailors::python;
-use tog::tailors::python::build;
 
 mod common;
 
 use common::TempDir;
 use std::path::Path;
 
-/// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
+/// `GREYWARD_SANDBOX_TESTS=required` (any non-empty value) turns the Linux
 /// skip into a panic so CI cannot report a skipped check as passed.
 fn required_sandbox_tests() -> bool {
-    matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty())
+    matches!(std::env::var_os("GREYWARD_SANDBOX_TESTS"), Some(value) if !value.is_empty())
 }
 
 fn skip_or_panic(test_name: &str, reason: impl std::fmt::Display) {
@@ -117,9 +117,9 @@ fn network_access_during_build_fails() {
     let temp = TempDir::new("sandbox-deny");
     let store = common::open_store(&temp);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
+    let mut attribution = greyward::kernel::policy::Attribution::open("python").unwrap();
     let python = python::shipped_selection("3.12.14").unwrap();
     let platform = Platform::host().unwrap();
 
@@ -132,11 +132,11 @@ fn network_access_during_build_fails() {
         "\"connectrecord\"",
     );
     let wheel = build::build_sdist_wheel(
-        &mut tog::kernel::resolve::ResolutionDoor::open(
+        &mut greyward::kernel::resolve::ResolutionDoor::open(
             &store,
             activity,
             platform,
-            tog::kernel::resolve::DoorKind::Planner,
+            greyward::kernel::resolve::DoorKind::Planner,
             &mut attribution,
         )
         .unwrap(),
@@ -166,11 +166,11 @@ fn network_access_during_build_fails() {
         "",
     );
     let err = build::build_sdist_wheel(
-        &mut tog::kernel::resolve::ResolutionDoor::open(
+        &mut greyward::kernel::resolve::ResolutionDoor::open(
             &store,
             activity,
             platform,
-            tog::kernel::resolve::DoorKind::Planner,
+            greyward::kernel::resolve::DoorKind::Planner,
             &mut attribution,
         )
         .unwrap(),
@@ -215,9 +215,9 @@ fn bwrap_contract() {
             return;
         }
     }
-    // tog's own preflight, so this gate mounts exactly the system layout
+    // ward's own preflight, so this gate mounts exactly the system layout
     // real builds get and a skip carries the reason doctor would print.
-    if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+    if let Err(error) = greyward::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
         skip_or_panic(
             "bwrap_contract",
             format!("bubblewrap preflight failed: {error}"),
@@ -275,7 +275,7 @@ fn bwrap_contract() {
         write: vec![],
         scratch: scratch.clone(),
         path: "/usr/bin:/bin".into(),
-        host_view: tog::kernel::sandbox::HostView::Full,
+        host_view: greyward::kernel::sandbox::HostView::Full,
     };
     run_build_spec(&network).expect("network must be denied inside bwrap");
     drop(host_connection);
@@ -296,7 +296,7 @@ fn bwrap_contract() {
         write: vec![writable.clone()],
         scratch,
         path: "/usr/bin:/bin".into(),
-        host_view: tog::kernel::sandbox::HostView::Full,
+        host_view: greyward::kernel::sandbox::HostView::Full,
     };
     run_build_spec(&writes).expect("declared write must work and undeclared write must fail");
     assert!(writable.join("allowed").exists());
@@ -304,14 +304,14 @@ fn bwrap_contract() {
 }
 
 /// The no-store sandbox relay scrubs the key `signing_key_secrets()` reads
-/// from its real source, `TOG_SIGNING_KEY` (#594). The unit tests in
+/// from its real source, `GREYWARD_SIGNING_KEY` (#594). The unit tests in
 /// sandbox.rs hand the relay a secret directly; this runs `run_build_spec`
 /// in a fresh copy of this binary, so the secret comes from the key file
 /// itself, and a sandboxed child prints that file to both streams.
 #[test]
-fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
-    const CHILD: &str = "TOG_SCRUB_RELAY_CHILD";
-    const NAME: &str = "the_no_store_relay_scrubs_the_key_named_by_tog_signing_key";
+fn the_no_store_relay_scrubs_the_key_named_by_ward_signing_key() {
+    const CHILD: &str = "GREYWARD_SCRUB_RELAY_CHILD";
+    const NAME: &str = "the_no_store_relay_scrubs_the_key_named_by_ward_signing_key";
     if let Some(key) = std::env::var_os(CHILD) {
         let key = std::path::PathBuf::from(key);
         let scratch = key.parent().unwrap().parent().unwrap().join("scratch");
@@ -329,7 +329,7 @@ fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
             write: vec![],
             scratch,
             path: "/usr/bin:/bin".into(),
-            host_view: tog::kernel::sandbox::HostView::Full,
+            host_view: greyward::kernel::sandbox::HostView::Full,
         };
         run_build_spec(&spec).expect("the key printer runs");
         return;
@@ -338,7 +338,7 @@ fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
         skip_or_panic(NAME, "not an x86_64 Linux host");
         return;
     }
-    if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+    if let Err(error) = greyward::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
         skip_or_panic(NAME, format!("bubblewrap preflight failed: {error}"));
         return;
     }
@@ -346,14 +346,14 @@ fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
     let key = temp.path().join("keys/signing.key");
     std::fs::create_dir_all(key.parent().unwrap()).unwrap();
     std::fs::create_dir(temp.path().join("scratch")).unwrap();
-    tog::kernel::signing::generate(&key).unwrap();
+    greyward::kernel::signing::generate(&key).unwrap();
     let contents = std::fs::read_to_string(&key).unwrap();
     let seed = contents.trim().rsplit(':').next().unwrap().to_string();
     assert!(seed.len() >= 32, "{contents}");
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", NAME, "--nocapture"])
         .env(CHILD, &key)
-        .env("TOG_SIGNING_KEY", &key)
+        .env("GREYWARD_SIGNING_KEY", &key)
         .env("HOME", temp.path())
         .output()
         .unwrap();
@@ -377,7 +377,7 @@ fn the_no_store_relay_scrubs_the_key_named_by_tog_signing_key() {
 /// (#559, #609). The unit tests in hostview.rs curate a fake host; this
 /// runs against the host's own trees: clang's resource directory and the
 /// tree's `bin` are bound whole at their real paths (not reached as kept
-/// files through `/.tog-host-files`), clang compiles against its own
+/// files through `/.greyward-host-files`), clang compiles against its own
 /// `stddef.h` inside the view, and LLVM the library (`include/llvm`,
 /// `lib/*.a`) is absent. Ignored, for the heavy workflow's Ubuntu runner,
 /// which has these trees; a host with none (Fedora names them `llvm<N>`
@@ -410,7 +410,7 @@ fn the_runtime_only_view_keeps_a_real_llvm_trees_compiler_whole() {
         skip_or_panic(NAME, "not an x86_64 Linux host");
         return;
     }
-    if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+    if let Err(error) = greyward::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
         skip_or_panic(NAME, format!("bubblewrap preflight failed: {error}"));
         return;
     }
@@ -432,7 +432,7 @@ for tree in "$@"; do
       for entry in "$tree"/bin/*; do echo "bin $(basename "$entry")"; done
     fi
     # Curation may keep the directories of a dropped tree, so look for
-    # files: a header the view kept is a symlink into /.tog-host-files.
+    # files: a header the view kept is a symlink into /.greyward-host-files.
     [ -n "$(find "$tree/include/llvm" \( -type f -o -type l \) -print -quit 2>/dev/null)" ] &&
       echo include-llvm
     for archive in "$tree"/lib/*.a; do [ -e "$archive" ] && echo "archive $archive"; done
@@ -464,7 +464,7 @@ exit 0"#;
         write: vec![out.clone()],
         scratch,
         path: "/usr/bin:/bin".into(),
-        host_view: tog::kernel::sandbox::HostView::RuntimeOnly,
+        host_view: greyward::kernel::sandbox::HostView::RuntimeOnly,
     };
     run_build_spec(&spec).expect("the view report runs");
     let report = std::fs::read_to_string(&report).unwrap();
@@ -525,13 +525,22 @@ exit 0"#;
 }
 
 /// The resolution door's Linux confinement, end to end: bubblewrap in the
-/// `Proxy` network mode, the relay (the real `tog` binary), the seccomp
+/// `Proxy` network mode, the relay (the real `ward` binary), the seccomp
 /// filter, the socket scan, quiescence, and publication. The "tool" is a C
 /// probe compiled with the host's cc; the "proxy" is a stub Unix listener
 /// that answers every connection with one line.
 #[cfg(target_os = "linux")]
 mod door {
     use super::*;
+    use greyward::kernel::activity::ActivityMode;
+    use greyward::kernel::fsroot::ProjectRoot;
+    use greyward::kernel::resolve::confine::{
+        confined_run, ConfinedOutcome, ConfinedRun, SocketScan, Stdout,
+    };
+    use greyward::kernel::resolve::outputs::Outputs;
+    use greyward::kernel::resolve::relay::ToolStatus;
+    use greyward::kernel::resolve::snapshot::{Snapshot, SnapshotSpec};
+    use greyward::kernel::resolve::transaction::{HoldSpec, Transaction};
     use std::ffi::OsString;
     use std::io::Write as _;
     use std::os::unix::net::UnixListener;
@@ -539,15 +548,6 @@ mod door {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tog::kernel::activity::ActivityMode;
-    use tog::kernel::fsroot::ProjectRoot;
-    use tog::kernel::resolve::confine::{
-        confined_run, ConfinedOutcome, ConfinedRun, SocketScan, Stdout,
-    };
-    use tog::kernel::resolve::outputs::Outputs;
-    use tog::kernel::resolve::relay::ToolStatus;
-    use tog::kernel::resolve::snapshot::{Snapshot, SnapshotSpec};
-    use tog::kernel::resolve::transaction::{HoldSpec, Transaction};
 
     /// One supervised child per process at a time.
     static DOOR: Mutex<()> = Mutex::new(());
@@ -569,7 +569,7 @@ mod door {
             skip_or_panic(test, "not a supported Linux host");
             return None;
         }
-        if let Err(error) = tog::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
+        if let Err(error) = greyward::kernel::sandbox::probe(Platform::X86_64UnknownLinuxGnu) {
             skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
             return None;
         }
@@ -632,7 +632,7 @@ mod door {
                 &self.store,
                 &activity,
                 &SnapshotSpec {
-                    lock_root: &tog::kernel::fsroot::ProjectRoot::open(&self.project).unwrap(),
+                    lock_root: &greyward::kernel::fsroot::ProjectRoot::open(&self.project).unwrap(),
                     extra_roots: &[],
                     exclude: &[],
                     forbidden: &[],
@@ -700,7 +700,7 @@ mod door {
                     snapshot,
                     proxy_socket: &self.proxy,
                     ca_file: None,
-                    executable: Path::new(env!("CARGO_BIN_EXE_tog")),
+                    executable: Path::new(env!("CARGO_BIN_EXE_ward")),
                     argv,
                     cwd,
                     env: &env,
@@ -965,7 +965,7 @@ mod door {
     }
 
     /// The sandbox root is read-only once the binds are in place: the tool
-    /// cannot move /run/tog aside and plant another socket, or create
+    /// cannot move /run/ward aside and plant another socket, or create
     /// /etc/ld.so.preload, and it still reaches the proxy. The snapshot,
     /// scratch and /tmp stay writable.
     #[test]
@@ -975,8 +975,8 @@ mod door {
             return;
         };
         let snapshot = door.snapshot();
-        let script = "mv /run/tog /run/moved 2>/dev/null && echo moved || echo no-move\n\
-             ln -s /tmp/other.sock /run/tog/p2 2>/dev/null && echo linked || echo no-link\n\
+        let script = "mv /run/ward /run/moved 2>/dev/null && echo moved || echo no-move\n\
+             ln -s /tmp/other.sock /run/ward/p2 2>/dev/null && echo linked || echo no-link\n\
              echo x > /etc/ld.so.preload 2>/dev/null && echo preload || echo no-preload\n\
              mkdir /planted 2>/dev/null && echo mkdir || echo no-mkdir\n\
              echo x > /tmp/scratch && echo tmp-ok\n\
@@ -1211,7 +1211,7 @@ mod door {
             copy
         );
         assert_eq!(
-            std::fs::read(door.project.join(".tog/resolution/npm.json")).unwrap(),
+            std::fs::read(door.project.join(".greyward/resolution/npm.json")).unwrap(),
             b"receipt\n"
         );
         drop(door.temp);

@@ -6,7 +6,7 @@
 //! `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS` and
 //! `O_NOFOLLOW`, or a component-by-component `O_NOFOLLOW` walk where the
 //! kernel has no `openat2`), checked to be a regular file with `fstat`, and
-//! copied into a tog-owned directory under the store's `tmp/`. The copy is
+//! copied into a greyward-owned directory under the store's `tmp/`. The copy is
 //! made read-only and its directory is held open. Everything after this
 //! point (the receipt's digests, publication) reads the copy, never the
 //! stage, so nothing the tool left behind can change what is published.
@@ -74,7 +74,7 @@ impl Drop for Outputs {
 }
 
 impl Outputs {
-    /// No outputs: for a publication that replaces only the receipt (`tog
+    /// No outputs: for a publication that replaces only the receipt (`ward
     /// attest`, whose lock check changed nothing), while its held outputs
     /// must still read as they did.
     pub fn none(store: &Store, activity: &StoreActivity) -> io::Result<Outputs> {
@@ -428,7 +428,7 @@ mod tests {
         let staged = snapshot.lock_root().staged.clone();
         fs::write(
             staged.join("package-lock.json"),
-            b"resolved: http://tog:tok-secret@127.0.0.1:8119/x.tgz",
+            b"resolved: http://greyward:tok-secret@127.0.0.1:8119/x.tgz",
         )
         .unwrap();
         let message = copy(&store, &snapshot, &["package-lock.json"])

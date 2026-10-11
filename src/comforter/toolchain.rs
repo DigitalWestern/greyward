@@ -5,7 +5,7 @@
 //! does this project use, and where did that answer come from. Frozen and
 //! strict validation run here, before a store is opened, so a refusal
 //! leaves no trace. `commit` is the only writer: it takes the
-//! toolchain-input lock, re-reads `tog-toolchain.toml` under it, publishes
+//! toolchain-input lock, re-reads `greyward-toolchain.toml` under it, publishes
 //! a pending lock, and installs a guard for that project in a
 //! process-global list. Every closure writer calls
 //! `recheck_before_publication` with the project it writes, so a
@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Project-relative path of the toolchain-input lock. It is advisory and
-/// lives inside the ignored `.tog/`: it coordinates writers, it is never
+/// lives inside the ignored `.greyward/`: it coordinates writers, it is never
 /// the guarantee (the byte comparison before publication is).
-pub const INPUT_LOCK_PATH: &str = ".tog/toolchain-input.lock";
+pub const INPUT_LOCK_PATH: &str = ".greyward/toolchain-input.lock";
 
 /// What a command is allowed to do about the lock.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub enum Mode {
     /// Read-only consumers: honor a lock, fall
     /// back to selection, write nothing.
     ReadOnly,
-    /// `tog update --toolchain [<ecosystem>]`: re-select and replace.
+    /// `ward update --toolchain [<ecosystem>]`: re-select and replace.
     Update { only: Option<String> },
 }
 
@@ -76,7 +76,7 @@ pub struct EcosystemInput {
 impl EcosystemInput {
     /// A committed section's helper pins, refused when one names a helper
     /// this ecosystem does not build with: nothing would read it, so the
-    /// line is an edit or another tog's, and honoring the rest silently
+    /// line is an edit or another ward's, and honoring the rest silently
     /// would hide that.
     fn pinned_helpers(&self, section: &lock::EcoLock) -> io::Result<BTreeMap<String, String>> {
         let ecosystem = self.lock_ecosystem.as_str();
@@ -91,9 +91,9 @@ impl EcosystemInput {
                     )
                 };
                 return Err(invalid(format!(
-                    "tog-toolchain.toml [toolchain.{ecosystem}.helpers] pins {helper:?}, \
+                    "greyward-toolchain.toml [toolchain.{ecosystem}.helpers] pins {helper:?}, \
                      which is not a helper toolchain ({builds_with}); \
-                     run `tog update --toolchain {ecosystem}` to rewrite the section"
+                     run `ward update --toolchain {ecosystem}` to rewrite the section"
                 )));
             }
         }
@@ -120,7 +120,7 @@ impl ProjectToolchain {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "no toolchain selection for {lock_ecosystem}; run `tog update --toolchain {lock_ecosystem}`"
+                    "no toolchain selection for {lock_ecosystem}; run `ward update --toolchain {lock_ecosystem}`"
                 ),
             )
         })
@@ -171,13 +171,13 @@ fn choose(
 
 /// A selection that failed while creating the lock, with the reason the
 /// failing ecosystem matters even to a command scoped to another one: the
-/// lock describes the whole project, so a first `tog build cargo` still
+/// lock describes the whole project, so a first `ward build cargo` still
 /// selects for a Python pin (#180).
 fn first_lock_needs_every(ecosystem: &str, error: io::Error) -> io::Error {
     let message = format!(
-        "{error}\n(creating tog-toolchain.toml selects a toolchain for every ecosystem \
+        "{error}\n(creating greyward-toolchain.toml selects a toolchain for every ecosystem \
          in the project, {ecosystem} included, so every sync and build here waits on \
-         this; fix the {ecosystem} toolchain error above, then run `tog`)"
+         this; fix the {ecosystem} toolchain error above, then run `ward`)"
     );
     crate::kernel::error::describe(error, message)
 }
@@ -194,8 +194,8 @@ fn from_section(
     let bundle = section.bundle()?;
     if !bundle.complete_for(platform) {
         return Err(invalid(format!(
-            "tog-toolchain.toml [{ecosystem}]: release {} has no artifact rows for {}; \
-             run `tog update --toolchain {ecosystem}`",
+            "greyward-toolchain.toml [{ecosystem}]: release {} has no artifact rows for {}; \
+             run `ward update --toolchain {ecosystem}`",
             bundle.release,
             platform.triple()
         )));
@@ -239,7 +239,7 @@ pub fn resolve(
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "no {name} project found here; `tog update --toolchain {name}` needs one"
+                        "no {name} project found here; `ward update --toolchain {name}` needs one"
                     ),
                 ));
             }
@@ -285,16 +285,16 @@ pub fn resolve(
             let ecosystem = entry.lock_ecosystem.as_str();
             let section = committed.ecosystem(ecosystem).ok_or_else(|| {
                 stale_lock(format!(
-                    "tog-toolchain.toml has no [toolchain.{ecosystem}] section for the \
-                     {ecosystem} project found here; run `tog update --toolchain {ecosystem}`"
+                    "greyward-toolchain.toml has no [toolchain.{ecosystem}] section for the \
+                     {ecosystem} project found here; run `ward update --toolchain {ecosystem}`"
                 ))
             })?;
             let stale = lock::stale_rows(&section.inputs(), rows_of(&discovered, ecosystem));
             if !stale.is_empty() {
                 let rows: Vec<String> = stale.iter().map(ToString::to_string).collect();
                 return Err(stale_lock(format!(
-                    "tog-toolchain.toml is stale for {ecosystem}: {}; \
-                     run `tog update --toolchain {ecosystem}`",
+                    "greyward-toolchain.toml is stale for {ecosystem}: {}; \
+                     run `ward update --toolchain {ecosystem}`",
                     rows.join("; ")
                 )));
             }
@@ -313,14 +313,14 @@ pub fn resolve(
         match &mode {
             Mode::Frozen => {
                 return Err(stale_lock(
-                    "tog-toolchain.toml is missing and --frozen never creates it; run `tog` \
-                     (or `tog update --toolchain`) once without --frozen and commit the file",
+                    "greyward-toolchain.toml is missing and --frozen never creates it; run `ward` \
+                     (or `ward update --toolchain`) once without --frozen and commit the file",
                 ))
             }
             Mode::Writable if strict => {
                 return Err(stale_lock(
-                    "tog-toolchain.toml is missing and strict policy never creates it; run \
-                     `tog` (or `tog update --toolchain`) once and commit the file",
+                    "greyward-toolchain.toml is missing and strict policy never creates it; run \
+                     `ward` (or `ward update --toolchain`) once and commit the file",
                 ))
             }
             Mode::ReadOnly => {
@@ -463,7 +463,7 @@ pub fn commit(
         None => {
             if ToolchainLock::read_bytes_via(root)? != toolchain.lock_bytes {
                 return Err(invalid(
-                    "tog-toolchain.toml changed during sync (update --toolchain race)",
+                    "greyward-toolchain.toml changed during sync (update --toolchain race)",
                 ));
             }
         }
@@ -485,9 +485,9 @@ fn narrate(toolchain: &ProjectToolchain, replaced: bool) {
         ui::note(&format!("selected {}", selected.describe()));
     }
     if replaced {
-        ui::note("updated tog-toolchain.toml; commit it");
+        ui::note("updated greyward-toolchain.toml; commit it");
     } else {
-        ui::note("wrote tog-toolchain.toml; commit it");
+        ui::note("wrote greyward-toolchain.toml; commit it");
     }
 }
 
@@ -518,8 +518,8 @@ fn conflict(existing: &[u8], toolchain: &ProjectToolchain) -> io::Error {
         ));
     }
     invalid(format!(
-        "another sync wrote tog-toolchain.toml with a different selection ({}); \
-         keep the one you want and run `tog update --toolchain`",
+        "another sync wrote greyward-toolchain.toml with a different selection ({}); \
+         keep the one you want and run `ward update --toolchain`",
         lines.join("; ")
     ))
 }
@@ -564,7 +564,7 @@ fn recheck(state: &GuardState) -> io::Result<()> {
     root.check_still_named()?;
     if ToolchainLock::read_bytes_via(root)? != state.lock_bytes {
         return Err(invalid(
-            "tog-toolchain.toml changed during sync (update --toolchain race)",
+            "greyward-toolchain.toml changed during sync (update --toolchain race)",
         ));
     }
     for (ecosystem, recorded) in &state.inputs {
@@ -579,7 +579,7 @@ fn recheck(state: &GuardState) -> io::Result<()> {
             };
             if changed {
                 return Err(invalid(format!(
-                    "project toolchain inputs changed during sync ({} {}); run `tog` again",
+                    "project toolchain inputs changed during sync ({} {}); run `ward` again",
                     row.path.display(),
                     row.field
                 )));
@@ -708,7 +708,7 @@ mod tests {
         let chosen = created.bundle_id();
         // Resolution writes nothing at all.
         assert!(!dir.join(LOCK_PATH).exists());
-        assert!(!dir.join(".tog").exists());
+        assert!(!dir.join(".greyward").exists());
 
         drop(commit(&root, &mut first, &Mode::Writable).unwrap());
         assert_eq!(std::fs::read(dir.join(LOCK_PATH)).unwrap(), bytes);
@@ -741,7 +741,7 @@ mod tests {
         assert!(error.contains("is stale for python"), "{error}");
         assert!(error.contains(".python-version version"), "{error}");
         assert!(error.contains("recorded 3.12.14, now 3.13.15"), "{error}");
-        assert!(error.contains("tog update --toolchain python"), "{error}");
+        assert!(error.contains("ward update --toolchain python"), "{error}");
         // A comment-only edit changes the digest and nothing else.
         std::fs::write(dir.join(".python-version"), "# pinned\n3.12.14\n").unwrap();
         let fresh = resolve_python(&root, Mode::Writable).unwrap();
@@ -946,9 +946,9 @@ mod tests {
             "3.11.16"
         );
 
-        std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         std::fs::write(
-            dir.join(".tog/closures/python.json"),
+            dir.join(".greyward/closures/python.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -1014,7 +1014,7 @@ mod tests {
             assert_eq!(python.source, Source::Lock);
             assert_eq!(python.helpers["rust"], default);
         }
-        // The lock as a tog before pins wrote it: no pin, and the bundle's
+        // The lock as a ward before pins wrote it: no pin, and the bundle's
         // own id.
         let mut old = ToolchainLock::parse(text.as_bytes()).unwrap();
         old.set_helpers("python", &BTreeMap::new()).unwrap();
@@ -1135,7 +1135,7 @@ mod tests {
             error.contains("has no [toolchain.node] section for the node project"),
             "{error}"
         );
-        assert!(error.contains("tog update --toolchain node"), "{error}");
+        assert!(error.contains("ward update --toolchain node"), "{error}");
 
         // The update that adds the section keeps python's bytes untouched.
         let mode = Mode::Update {
@@ -1177,7 +1177,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("another sync wrote tog-toolchain.toml"),
+            error.contains("another sync wrote greyward-toolchain.toml"),
             "{error}"
         );
         assert!(error.contains("on disk cpython 3.13.15"), "{error}");
@@ -1185,7 +1185,7 @@ mod tests {
             error.contains("this sync selected cpython 3.12.14"),
             "{error}"
         );
-        assert!(error.contains("tog update --toolchain"), "{error}");
+        assert!(error.contains("ward update --toolchain"), "{error}");
         // The loser leaves the winner's file exactly as it found it.
         assert_eq!(
             std::fs::read(dir.join(LOCK_PATH)).unwrap(),
@@ -1222,7 +1222,7 @@ mod tests {
         std::fs::remove_file(dir.join(LOCK_PATH)).unwrap();
         let error = recheck_before_publication(&root).unwrap_err().to_string();
         assert!(
-            error.contains("tog-toolchain.toml changed during sync"),
+            error.contains("greyward-toolchain.toml changed during sync"),
             "{error}"
         );
         // Dropping the guard puts the process back to having no snapshot.

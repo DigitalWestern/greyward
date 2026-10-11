@@ -7,22 +7,22 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use tog::kernel::platform::Platform;
+use greyward::kernel::platform::Platform;
 
 mod common;
 
 use common::{
     add_git_dependency, assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree,
-    fixture, tog, TempDir,
+    fixture, ward, TempDir,
 };
 
 /// The binary with a private `TMPDIR` and `HOME` under `tmp`, and the
 /// sandbox required: these suites prove the build runs sandboxed, so a
 /// sandbox that cannot start must fail them rather than skip.
-fn tog_with_tmp(project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
+fn ward_with_tmp(project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Output {
     command(project, &tmp.join("home"), store)
         .env("TMPDIR", tmp)
-        .env("TOG_SANDBOX_TESTS", "required")
+        .env("GREYWARD_SANDBOX_TESTS", "required")
         .args(args)
         .output()
         .unwrap()
@@ -31,17 +31,20 @@ fn tog_with_tmp(project: &Path, store: &Path, tmp: &Path, args: &[&str]) -> Outp
 /// The Rust a project with no toolchain file gets: the shipped catalog's
 /// explicit default.
 fn default_rust() -> String {
-    tog::kernel::toolchain::shipped(&tog::kernel::provider::rust::toolchain_catalog().unwrap())
-        .unwrap()
-        .version("rustc")
-        .unwrap()
-        .to_string()
+    greyward::kernel::toolchain::shipped(
+        &greyward::kernel::provider::rust::toolchain_catalog().unwrap(),
+    )
+    .unwrap()
+    .version("rustc")
+    .unwrap()
+    .to_string()
 }
 
 fn assert_cargo_closure(project: &Path, store: &Path) -> (PathBuf, PathBuf) {
-    let closure: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/cargo.json")).unwrap())
-            .unwrap();
+    let closure: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(".greyward/closures/cargo.json")).unwrap(),
+    )
+    .unwrap();
     let objects = store.canonicalize().unwrap().join("objects");
     let object_path = |key: &str| {
         let path = PathBuf::from(closure["body"][key]["path"].as_str().unwrap());
@@ -78,10 +81,10 @@ fn cargo_sync_build_and_run_again_offline() {
     copy_tree(&fixture("cargo-hello"), &project);
     let store = temp.0.join("store");
 
-    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
     let (rust_obj, vendor_obj) = assert_cargo_closure(&project, &store);
     let rustc = assert_ok(
-        tog(&project, &temp.0, &["run", "rustc", "-vV"]),
+        ward(&project, &temp.0, &["run", "rustc", "-vV"]),
         "rustc -vV",
     );
     assert!(
@@ -94,22 +97,22 @@ fn cargo_sync_build_and_run_again_offline() {
             .any(|line| { line.trim() == format!("host: {}", Platform::host().unwrap().triple()) }),
         "rustc reported the wrong host:\n{rustc}"
     );
-    assert_ok(tog(&project, &temp.0, &["build"]), "build");
+    assert_ok(ward(&project, &temp.0, &["build"]), "build");
     // Cargo resolves through a door, so `--strict` wants the lock to carry
-    // a signed resolution record: `tog attest cargo` checks the committed
+    // a signed resolution record: `ward attest cargo` checks the committed
     // lock (`cargo metadata --locked`, confined) and signs one with a key
     // the machine policy trusts.
     let key = temp.0.join("signing.key");
-    let public = tog::kernel::signing::generate(&key).unwrap();
-    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    let public = greyward::kernel::signing::generate(&key).unwrap();
+    std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
     std::fs::write(
-        temp.0.join(".tog/policy.toml"),
+        temp.0.join(".greyward/policy.toml"),
         format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
     let lock_before = std::fs::read(project.join("Cargo.lock")).unwrap();
     let attest = command(&project, &temp.0, &store)
-        .env("TOG_SIGNING_KEY", &key)
+        .env("GREYWARD_SIGNING_KEY", &key)
         .args(["attest", "cargo"])
         .output()
         .unwrap();
@@ -118,7 +121,7 @@ fn cargo_sync_build_and_run_again_offline() {
         "attest cargo: {}",
         String::from_utf8_lossy(&attest.stderr)
     );
-    assert!(project.join(".tog/resolution/cargo.json").is_file());
+    assert!(project.join(".greyward/resolution/cargo.json").is_file());
     assert_eq!(
         std::fs::read(project.join("Cargo.lock")).unwrap(),
         lock_before,
@@ -126,7 +129,7 @@ fn cargo_sync_build_and_run_again_offline() {
     );
     // On a synced project no sync runs in front of the build, so the only
     // policy load is build's own: `--strict` must reach it all the same.
-    let strict = tog(&project, &temp.0, &["-v", "--strict", "build"]);
+    let strict = ward(&project, &temp.0, &["-v", "--strict", "build"]);
     let strict_stderr = String::from_utf8_lossy(&strict.stderr).into_owned();
     assert!(
         strict.status.success(),
@@ -139,7 +142,7 @@ fn cargo_sync_build_and_run_again_offline() {
     let executable = project.join("target/debug/cargo-hello");
     assert!(executable.is_file());
     let output = assert_ok(
-        tog(&project, &temp.0, &["run", "target/debug/cargo-hello"]),
+        ward(&project, &temp.0, &["run", "target/debug/cargo-hello"]),
         "run",
     );
     assert_eq!(output.trim(), "hello 128");
@@ -158,20 +161,20 @@ fn cargo_sync_build_and_run_again_offline() {
     }
 
     // Rebuild from a clean target: everything must come from the store
-    // (network denial is already enforced by `tog build` itself — the
+    // (network denial is already enforced by `ward build` itself — the
     // seatbelt sandbox cannot nest, so no outer sandbox-exec wrapper here).
     std::fs::remove_dir_all(project.join("target")).unwrap();
     assert!(
         !executable.exists(),
         "the first build result was not removed"
     );
-    assert_ok(tog(&project, &temp.0, &["build"]), "rebuild");
+    assert_ok(ward(&project, &temp.0, &["build"]), "rebuild");
     assert!(executable.is_file());
     let (rebuilt_rust_obj, rebuilt_vendor_obj) = assert_cargo_closure(&project, &store);
     assert_eq!(rebuilt_rust_obj, rust_obj);
     assert_eq!(rebuilt_vendor_obj, vendor_obj);
     let output = assert_ok(
-        tog(&project, &temp.0, &["run", "target/debug/cargo-hello"]),
+        ward(&project, &temp.0, &["run", "target/debug/cargo-hello"]),
         "run after rebuild",
     );
     assert_eq!(output.trim(), "hello 128");
@@ -197,11 +200,11 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
     let url = add_git_dependency(&temp.0, &project);
 
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["sync"]),
+        ward_with_tmp(&project, &store, &tmp, &["sync"]),
         "sync with a git dependency",
     );
 
-    let closures = project.join(".tog/closures");
+    let closures = project.join(".greyward/closures");
     let cargo: serde_json::Value =
         serde_json::from_slice(&std::fs::read(closures.join("cargo.json")).unwrap()).unwrap();
     // The committed lock carries no resolution record, which Cargo's door
@@ -273,7 +276,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     )
     .unwrap();
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["sync"]),
+        ward_with_tmp(&project, &store, &tmp, &["sync"]),
         "plain sync",
     );
     let (base, _) = assert_cargo_closure(&project, &store);
@@ -287,16 +290,16 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     .unwrap();
     // The lock is stale until the toolchain is updated on purpose.
     assert!(
-        !tog_with_tmp(&project, &store, &tmp, &["--frozen", "sync"])
+        !ward_with_tmp(&project, &store, &tmp, &["--frozen", "sync"])
             .status
             .success(),
         "a frozen sync accepted an edited toolchain file"
     );
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]),
+        ward_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]),
         "toolchain update",
     );
-    let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+    let lock = std::fs::read_to_string(project.join("greyward-toolchain.toml")).unwrap();
     assert!(
         lock.contains("value = \"clippy,rust-src,rustfmt\""),
         "{lock}"
@@ -306,7 +309,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         "{lock}"
     );
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["sync"]),
+        ward_with_tmp(&project, &store, &tmp, &["sync"]),
         "sync with extras",
     );
 
@@ -325,7 +328,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         );
     }
     let sysroot = assert_ok(
-        tog_with_tmp(
+        ward_with_tmp(
             &project,
             &store,
             &tmp,
@@ -343,11 +346,11 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         (&["run", "cargo", "clippy", "--version"][..], "clippy"),
         (&["run", "cargo", "fmt", "--version"][..], "rustfmt"),
     ] {
-        let output = assert_ok(tog_with_tmp(&project, &store, &tmp, args), &args.join(" "));
+        let output = assert_ok(ward_with_tmp(&project, &store, &tmp, args), &args.join(" "));
         assert!(output.contains(expect), "{args:?}: {output}");
     }
     assert_ok(
-        tog_with_tmp(
+        ward_with_tmp(
             &project,
             &store,
             &tmp,
@@ -362,7 +365,7 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     // Nothing about the toolchain is an exception any more, on any
     // closure. The committed lock carries no resolution record, which is
     // `unrecorded-resolution` on the Cargo closure and nothing toolchain.
-    for entry in std::fs::read_dir(project.join(".tog/closures")).unwrap() {
+    for entry in std::fs::read_dir(project.join(".greyward/closures")).unwrap() {
         let path = entry.unwrap().path();
         let closure: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -387,23 +390,23 @@ fn toolchain_file_components_and_targets_are_provisioned() {
     )
     .unwrap();
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]),
+        ward_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]),
         "toolchain update with a profile",
     );
-    let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+    let lock = std::fs::read_to_string(project.join("greyward-toolchain.toml")).unwrap();
     assert!(
         lock.contains("field = \"toolchain.profile\"\nvalue = \"default\""),
         "{lock}"
     );
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["sync"]),
+        ward_with_tmp(&project, &store, &tmp, &["sync"]),
         "sync with a profile",
     );
     let (profiled, _) = assert_cargo_closure(&project, &store);
     assert_ne!(profiled, rust);
     assert!(profiled.join("share/doc/rust/html").is_dir());
     let output = assert_ok(
-        tog_with_tmp(
+        ward_with_tmp(
             &project,
             &store,
             &tmp,
@@ -420,9 +423,9 @@ fn toolchain_file_components_and_targets_are_provisioned() {
         "[toolchain]\nchannel = \"1.96.1\"\ncomponents = [\"no-such-component\"]\n",
     )
     .unwrap();
-    let output = tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]);
+    let output = ward_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]);
     let output = if output.status.success() {
-        tog_with_tmp(&project, &store, &tmp, &["sync"])
+        ward_with_tmp(&project, &store, &tmp, &["sync"])
     } else {
         output
     };
@@ -433,9 +436,9 @@ fn toolchain_file_components_and_targets_are_provisioned() {
 }
 
 /// The build's sync is scoped to the ecosystem it builds (#158): beside a
-/// Python project whose install cannot succeed, `tog build` still syncs
+/// Python project whose install cannot succeed, `ward build` still syncs
 /// and builds the Cargo project, realizes nothing for Python, and the
-/// toolchain lock it publishes keeps both sections. The bare `tog`, which
+/// toolchain lock it publishes keeps both sections. The bare `ward`, which
 /// syncs everything, still fails on the Python install.
 #[test]
 #[ignore]
@@ -447,25 +450,25 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     std::fs::write(
         project.join("pyproject.toml"),
         "[project]\nname = \"fixture\"\nversion = \"0.1.0\"\n\
-         dependencies = [\"tog-no-such-package-158\"]\n",
+         dependencies = [\"greyward-no-such-package-158\"]\n",
     )
     .unwrap();
     let tmp = temp.0.join("tmp");
     std::fs::create_dir_all(tmp.join("home")).unwrap();
     let store = temp.0.join("store");
 
-    let output = tog_with_tmp(&project, &store, &tmp, &["build"]);
+    let output = ward_with_tmp(&project, &store, &tmp, &["build"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_ok(output, "build beside a failing python project");
     assert!(stderr.contains("syncing first: cargo"), "{stderr}");
     assert!(project.join("target/debug/cargo-hello").is_file());
     assert_cargo_closure(&project, &store);
-    let closures = project.join(".tog/closures");
+    let closures = project.join(".greyward/closures");
     assert!(
         !closures.join("python.json").exists(),
         "the build realized the python environment"
     );
-    let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+    let lock = std::fs::read_to_string(project.join("greyward-toolchain.toml")).unwrap();
     assert!(lock.contains("[toolchain.python]"), "{lock}");
     assert!(lock.contains("[toolchain.rust]"), "{lock}");
 
@@ -477,7 +480,7 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
     for (label, expected) in [
         (
             "stale python section",
-            "tog-toolchain.toml is stale for python",
+            "greyward-toolchain.toml is stale for python",
         ),
         ("malformed requires-python", "invalid"),
     ] {
@@ -489,27 +492,27 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
             )
             .unwrap();
         }
-        let output = tog_with_tmp(&project, &store, &tmp, &["build", "cargo"]);
+        let output = ward_with_tmp(&project, &store, &tmp, &["build", "cargo"]);
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(!output.status.success(), "{label}: build succeeded");
         assert!(!stderr.contains("syncing first"), "{label}: {stderr}");
         assert!(stderr.contains(expected), "{label}: {stderr}");
         assert_eq!(
-            std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap(),
+            std::fs::read_to_string(project.join("greyward-toolchain.toml")).unwrap(),
             lock,
             "{label}: the lock changed"
         );
     }
     std::fs::write(project.join("pyproject.toml"), &pyproject).unwrap();
 
-    let output = tog_with_tmp(&project, &store, &tmp, &[]);
+    let output = ward_with_tmp(&project, &store, &tmp, &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
         "the python install was expected to fail\nstderr:\n{stderr}"
     );
     // The failure is the missing package, not something unrelated.
-    assert!(stderr.contains("tog-no-such-package-158"), "{stderr}");
+    assert!(stderr.contains("greyward-no-such-package-158"), "{stderr}");
     assert!(!closures.join("python.json").exists());
 }
 
@@ -517,7 +520,7 @@ fn build_syncs_only_the_built_ecosystem_beside_a_failing_one() {
 /// Rust, synced once, is copied out of the store to stand in for a local
 /// rustup toolchain. The project then builds and runs with the imported
 /// copy, the closure records `external-toolchain`, and an edit to the
-/// directory makes the next sync refuse until `tog update --toolchain`.
+/// directory makes the next sync refuse until `ward update --toolchain`.
 #[test]
 #[ignore]
 fn a_local_toolchain_directory_builds_the_project() {
@@ -529,7 +532,7 @@ fn a_local_toolchain_directory_builds_the_project() {
     let store = temp.0.join("store");
 
     assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["sync"]),
+        ward_with_tmp(&project, &store, &tmp, &["sync"]),
         "catalog sync",
     );
     let (catalog_rust, _) = assert_cargo_closure(&project, &store);
@@ -555,15 +558,15 @@ fn a_local_toolchain_directory_builds_the_project() {
     .unwrap();
 
     // The toolchain file changed, so the lock is stale until updated.
-    let output = tog_with_tmp(&project, &store, &tmp, &["sync"]);
+    let output = ward_with_tmp(&project, &store, &tmp, &["sync"]);
     assert!(!output.status.success(), "a stale lock synced");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(stderr.contains("tog update --toolchain rust"), "{stderr}");
-    let output = tog_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]);
+    assert!(stderr.contains("ward update --toolchain rust"), "{stderr}");
+    let output = ward_with_tmp(&project, &store, &tmp, &["update", "--toolchain", "rust"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_ok(output, "update to the local toolchain");
     assert!(stderr.contains("exception external-toolchain"), "{stderr}");
-    let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+    let lock = std::fs::read_to_string(project.join("greyward-toolchain.toml")).unwrap();
     assert!(lock.contains("source = \"path\""), "{lock}");
     assert!(
         lock.contains(&format!("url = \"file://{}\"", local.display())),
@@ -575,22 +578,22 @@ fn a_local_toolchain_directory_builds_the_project() {
         imported, catalog_rust,
         "the import reused the catalog object"
     );
-    let closure = std::fs::read_to_string(project.join(".tog/closures/cargo.json")).unwrap();
+    let closure = std::fs::read_to_string(project.join(".greyward/closures/cargo.json")).unwrap();
     assert!(closure.contains("\"external-toolchain\""), "{closure}");
-    assert_ok(tog_with_tmp(&project, &store, &tmp, &["build"]), "build");
+    assert_ok(ward_with_tmp(&project, &store, &tmp, &["build"]), "build");
     let output = assert_ok(
-        tog_with_tmp(&project, &store, &tmp, &["run", "target/debug/cargo-hello"]),
+        ward_with_tmp(&project, &store, &tmp, &["run", "target/debug/cargo-hello"]),
         "run",
     );
     assert_eq!(output.trim(), "hello 128");
 
     // Editing the directory breaks the lock's content hash: fail closed.
     std::fs::write(local.join("lib/rustlib/extra.txt"), b"edited").unwrap();
-    let output = tog_with_tmp(&project, &store, &tmp, &["sync"]);
+    let output = ward_with_tmp(&project, &store, &tmp, &["sync"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(!output.status.success(), "a changed tree synced\n{stderr}");
     assert!(
-        stderr.contains("changed since tog-toolchain.toml locked it"),
+        stderr.contains("changed since greyward-toolchain.toml locked it"),
         "{stderr}"
     );
 }
@@ -624,19 +627,19 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
     let store = temp.0.join("store");
     let key = temp.0.join("keys/signing.key");
     std::fs::create_dir_all(key.parent().unwrap()).unwrap();
-    let public = tog::kernel::signing::generate(&key).unwrap();
+    let public = greyward::kernel::signing::generate(&key).unwrap();
     let contents = std::fs::read_to_string(&key).unwrap();
     let seed = contents.trim().rsplit(':').next().unwrap().to_string();
     assert!(seed.len() >= 32, "{contents}");
-    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
     std::fs::write(
-        temp.0.join(".tog/policy.toml"),
+        temp.0.join(".greyward/policy.toml"),
         format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
     let run = |project: &Path, args: &[&str]| -> (bool, String) {
         let out = command(project, &temp.0, &store)
-            .env("TOG_SIGNING_KEY", &key)
+            .env("GREYWARD_SIGNING_KEY", &key)
             .env("CARGO_HOME", temp.0.join(".cargo"))
             .args(args)
             .output()
@@ -756,7 +759,7 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
     let mut text = std::fs::read_to_string(&manifest).unwrap();
     text.push_str("\n[workspace]\nmembers = [\"linked\"]\n");
     std::fs::write(&manifest, text).unwrap();
-    // sync writes tog-toolchain.toml, which attest needs.
+    // sync writes greyward-toolchain.toml, which attest needs.
     // A sync from the committed lock runs no cargo: it succeeds.
     let (ok, stderr) = run(&project, &["sync"]);
     assert!(ok && stderr.contains("synced: cargo"), "sync: {stderr}");
@@ -792,7 +795,7 @@ fn the_signing_key_never_reaches_the_output_through_cargo_files() {
 /// A workspace member outside the workspace root (`members =
 /// ["../shared"]`, inside the same repository) is handled like an
 /// out-of-root path dependency: a sync from the committed lock works,
-/// `tog attest` refuses the workspace by name, and the missing-lock door
+/// `ward attest` refuses the workspace by name, and the missing-lock door
 /// runs cargo confined with the member as a read root and publishes the
 /// lock without a receipt, so the sync records `unrecorded-resolution`.
 #[test]

@@ -1,6 +1,6 @@
 # Build the released platforms on a version tag and attach them to a
 # GitHub Release. install.sh downloads exactly these asset names, so keep
-# them stable: tog-<triple>.tar.gz and tog-<triple>.tar.gz.sha256.
+# them stable: greyward-<triple>.tar.gz and greyward-<triple>.tar.gz.sha256.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
@@ -75,13 +75,13 @@ jobs:
       # Cargo.toml can invalidate the linker's ad-hoc signature. Re-sign.
       - name: Ad-hoc sign (macOS)
         if: runner.os == 'macOS'
-        run: codesign --force --sign - "target/${{ matrix.triple }}/release/tog"
+        run: codesign --force --sign - "target/${{ matrix.triple }}/release/ward"
 
       - name: Smoke test
         shell: bash
         run: |
           set -euo pipefail
-          bin="target/${{ matrix.triple }}/release/tog"
+          bin="target/${{ matrix.triple }}/release/ward"
           "$bin" --version
           "$bin" completions bash >/dev/null
           "$bin" completions zsh >/dev/null
@@ -91,14 +91,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="tog-${{ matrix.triple }}.tar.gz"
+          asset="greyward-${{ matrix.triple }}.tar.gz"
           mkdir -p dist/stage
-          cp "target/${{ matrix.triple }}/release/tog" dist/stage/tog
-          # No host metadata: macOS's bsdtar otherwise adds `._tog` and
-          # binary xattr records, and tog's own reader, which `tog self
+          cp "target/${{ matrix.triple }}/release/ward" dist/stage/ward
+          # No host metadata: macOS's bsdtar otherwise adds `._ward` and
+          # binary xattr records, and ward's own reader, which `ward self
           # update` unpacks with, refuses an archive whose headers and
           # tar's listing disagree.
-          COPYFILE_DISABLE=1 tar --no-xattrs -C dist/stage -czf "dist/$asset" tog
+          COPYFILE_DISABLE=1 tar --no-xattrs -C dist/stage -czf "dist/$asset" ward
           cd dist
           if command -v sha256sum >/dev/null; then
             sha256sum "$asset" > "$asset.sha256"
@@ -109,7 +109,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tog-${{ matrix.triple }}
+          name: greyward-${{ matrix.triple }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -141,6 +141,6 @@ jobs:
             gh release upload "$tag" dist/* --clobber
           else
             gh release create "$tag" dist/* \
-              --title "tog $tag" \
+              --title "ward $tag" \
               --generate-notes
           fi

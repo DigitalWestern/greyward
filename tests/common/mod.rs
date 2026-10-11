@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A scratch directory under the temp root (`TMPDIR` when set), named
-/// `tog-<label>-<pid>-<nanos>` so a leftover names the suite that made it.
+/// `greyward-<label>-<pid>-<nanos>` so a leftover names the suite that made it.
 /// Gone on drop: store objects are read-only by design, so a plain
 /// `remove_dir_all` fails on them and the tree stays behind, and enough
 /// leftovers fill the per-user /tmp quota until every shell command in the
@@ -29,7 +29,7 @@ impl TempDir {
     pub fn new(label: &str) -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "tog-{label}-{}-{}-{}",
+            "greyward-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -38,19 +38,19 @@ impl TempDir {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path).unwrap();
-        // tog records object paths under the store's canonicalized root and
+        // ward records object paths under the store's canonicalized root and
         // compares them exactly; on macOS the temp dir sits under /var, a
         // symlink to /private/var.
         Self(path.canonicalize().unwrap())
     }
 
     /// A scratch directory that is its own project boundary: it carries an
-    /// empty `.tog` directory, so ancestor discovery stops there. For
+    /// empty `.greyward` directory, so ancestor discovery stops there. For
     /// fixtures that are run in place, which could otherwise sit below a
     /// developer checkout with package manifests of its own.
     pub fn boundary(label: &str) -> Self {
         let temp = Self::new(label);
-        std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+        std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
         temp
     }
 
@@ -61,75 +61,75 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = tog::kernel::store::remove_tree(&self.0);
+        let _ = greyward::kernel::store::remove_tree(&self.0);
     }
 }
 
-/// The store a heavy suite should use: the developer's `TOG_STORE` when set,
+/// The store a heavy suite should use: the developer's `GREYWARD_STORE` when set,
 /// so repeated runs of an ignored suite reuse the toolchains it downloaded,
 /// else `store/` under the scratch directory. Only the store is shared; the
 /// binary still runs with the scratch home and no policy.
 pub fn warm_store(temp: &TempDir) -> PathBuf {
-    std::env::var_os("TOG_STORE")
+    std::env::var_os("GREYWARD_STORE")
         .map(PathBuf::from)
         .unwrap_or_else(|| temp.0.join("store"))
 }
 
 /// Make `root` a store of the current format, for a suite that lays its
 /// store out by hand: the directory and its format marker, nothing else. A
-/// hand-built store without the marker is one tog refuses to open.
+/// hand-built store without the marker is one ward refuses to open.
 pub fn fresh_store(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
     std::fs::write(
-        root.join(tog::kernel::store::FORMAT_FILE),
-        tog::kernel::store::StoreFormat::current_line(),
+        root.join(greyward::kernel::store::FORMAT_FILE),
+        greyward::kernel::store::StoreFormat::current_line(),
     )
     .unwrap();
 }
 
 /// `warm_store`, opened in this process. A test that drives the kernel
 /// directly calls this instead of `Store::open()`, which without
-/// `TOG_STORE` is the developer's real `~/.tog/store`: the test would write
+/// `GREYWARD_STORE` is the developer's real `~/.greyward/store`: the test would write
 /// there, and could pass on objects an earlier run cached rather than on
 /// the work it claims to prove.
-pub fn open_store(temp: &TempDir) -> tog::kernel::store::Store {
-    tog::kernel::store::Store::open_at(&warm_store(temp)).expect("store")
+pub fn open_store(temp: &TempDir) -> greyward::kernel::store::Store {
+    greyward::kernel::store::Store::open_at(&warm_store(temp)).expect("store")
 }
 
 /// The binary, configured to run in `cwd` against `store` with `home` as
-/// its `HOME`. Every `TOG_*` variable of the developer's session is dropped
-/// first, so the machine policy is `home/.tog/policy.toml` (absent unless
+/// its `HOME`. Every `GREYWARD_*` variable of the developer's session is dropped
+/// first, so the machine policy is `home/.greyward/policy.toml` (absent unless
 /// the test writes it), no signing key or strictness leaks in, and the
 /// release check `doctor` makes points at a file that does not exist so the
-/// suite stays offline. `TOG_SANDBOX_TESTS` passes through: CI sets it to
+/// suite stays offline. `GREYWARD_SANDBOX_TESTS` passes through: CI sets it to
 /// make a sandbox that cannot start a failure rather than a skip.
 ///
-/// Keep `home` out of the project: tog's default signing key path is
-/// `$HOME/.tog/signing.key`, and a resolution door refuses to run when
+/// Keep `home` out of the project: ward's default signing key path is
+/// `$HOME/.greyward/signing.key`, and a resolution door refuses to run when
 /// that path lies under a root it mounts (the project, the store), whether
 /// or not a key is there. `temp/project` beside `temp/home` is the layout
 /// that works; `home == project` is refused by every confined ecosystem.
 pub fn command(cwd: &Path, home: &Path, store: &Path) -> Command {
-    command_for(Path::new(env!("CARGO_BIN_EXE_tog")), cwd, home, store)
+    command_for(Path::new(env!("CARGO_BIN_EXE_ward")), cwd, home, store)
 }
 
-/// [`command`] for a tog binary at `binary` rather than the one cargo
+/// [`command`] for a ward binary at `binary` rather than the one cargo
 /// built: a test of self-update runs a copy it owns, since the update
 /// replaces the file it was started from.
 pub fn command_for(binary: &Path, cwd: &Path, home: &Path, store: &Path) -> Command {
     configure(Command::new(binary), cwd, home, store)
 }
 
-/// A child that is not tog (`git`, the test binary re-run) with the
-/// developer's environment kept out, as [`command`] keeps it out of tog:
-/// no `TOG_*` variable, `HOME` at `home`, and no global or system git
+/// A child that is not ward (`git`, the test binary re-run) with the
+/// developer's environment kept out, as [`command`] keeps it out of ward:
+/// no `GREYWARD_*` variable, `HOME` at `home`, and no global or system git
 /// config (signing, hooks, `init.defaultBranch`, `safe.directory`).
 pub fn child(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
     scrubbed(Command::new(program), home)
 }
 
-/// Drop the developer's `TOG_*` and `GIT_*` variables and `CI` (which
-/// changes what `tog audit` does, and GitHub's runner sets), and point
+/// Drop the developer's `GREYWARD_*` and `GIT_*` variables and `CI` (which
+/// changes what `ward audit` does, and GitHub's runner sets), and point
 /// `HOME` and git's config at the scratch world. `GIT_*` goes whole: under
 /// a git hook `GIT_DIR` and `GIT_INDEX_FILE` aim a fixture's `git commit`
 /// at the developer's own repository, and `GIT_CONFIG_COUNT` or
@@ -138,7 +138,8 @@ fn scrubbed(mut command: Command, home: &Path) -> Command {
     command.env_remove("CI");
     for (name, _) in std::env::vars_os() {
         let leaks = name.to_str().is_some_and(|name| {
-            (name.starts_with("TOG_") && name != "TOG_SANDBOX_TESTS") || name.starts_with("GIT_")
+            (name.starts_with("GREYWARD_") && name != "GREYWARD_SANDBOX_TESTS")
+                || name.starts_with("GIT_")
         });
         if leaks {
             command.env_remove(&name);
@@ -161,7 +162,7 @@ fn configure(command: Command, cwd: &Path, home: &Path, store: &Path) -> Command
     // project, which the offline cases use.
     assert!(
         home == cwd || cwd == Path::new("/") || !home.starts_with(cwd),
-        "test harness: HOME {} is inside the directory tog runs in, {}; put the project \
+        "test harness: HOME {} is inside the directory ward runs in, {}; put the project \
          beside home (temp/project and temp/home), see `command`",
         home.display(),
         cwd.display()
@@ -169,9 +170,9 @@ fn configure(command: Command, cwd: &Path, home: &Path, store: &Path) -> Command
     let mut command = scrubbed(command, home);
     command
         .current_dir(cwd)
-        .env("TOG_STORE", store)
+        .env("GREYWARD_STORE", store)
         .env(
-            "TOG_RELEASE_MANIFEST",
+            "GREYWARD_RELEASE_MANIFEST",
             format!("file://{}", home.join("no-release.json").display()),
         )
         .env("NO_COLOR", "1");
@@ -183,7 +184,7 @@ fn configure(command: Command, cwd: &Path, home: &Path, store: &Path) -> Command
 /// same wrappers `tests/acceptance.sh` uses. A run that reaches for the
 /// network fails instead of quietly downloading.
 pub fn offline_command(cwd: &Path, home: &Path, store: &Path) -> Command {
-    let binary = env!("CARGO_BIN_EXE_tog");
+    let binary = env!("CARGO_BIN_EXE_ward");
     let mut wrapper = if cfg!(target_os = "macos") {
         let mut wrapper = Command::new("sandbox-exec");
         wrapper.args(["-p", "(version 1)(allow default)(deny network*)"]);
@@ -197,25 +198,25 @@ pub fn offline_command(cwd: &Path, home: &Path, store: &Path) -> Command {
     configure(wrapper, cwd, home, store)
 }
 
-/// [`tog`] with the network cut, see [`offline_command`].
-pub fn tog_offline(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+/// [`ward`] with the network cut, see [`offline_command`].
+pub fn ward_offline(cwd: &Path, home: &Path, args: &[&str]) -> Output {
     offline_command(cwd, home, &home.join("store"))
         .args(args)
         .output()
-        .expect("spawn tog without network")
+        .expect("spawn ward without network")
 }
 
 /// Run the binary in `cwd` with `home` as its home and `home/store` as its
 /// store: the shape every offline suite uses, where the scratch directory
 /// is the home.
-pub fn tog(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    tog_at(cwd, home, &home.join("store"), args)
+pub fn ward(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    ward_at(cwd, home, &home.join("store"), args)
 }
 
-/// [`tog`] with extra environment for the child; values are anything that
-/// reads as an `OsStr`, so `&[("TOG_STRICT", "1")]` and `&[("TMPDIR", path)]`
+/// [`ward`] with extra environment for the child; values are anything that
+/// reads as an `OsStr`, so `&[("GREYWARD_STRICT", "1")]` and `&[("TMPDIR", path)]`
 /// both work.
-pub fn tog_env<V>(cwd: &Path, home: &Path, args: &[&str], env: &[(&str, &V)]) -> Output
+pub fn ward_env<V>(cwd: &Path, home: &Path, args: &[&str], env: &[(&str, &V)]) -> Output
 where
     V: AsRef<OsStr> + ?Sized,
 {
@@ -224,16 +225,16 @@ where
     for (name, value) in env {
         command.env(name, value);
     }
-    command.output().expect("spawn tog")
+    command.output().expect("spawn ward")
 }
 
 /// Run the binary against a store that is not under `home`, such as the
 /// one [`warm_store`] names.
-pub fn tog_at(cwd: &Path, home: &Path, store: &Path, args: &[&str]) -> Output {
+pub fn ward_at(cwd: &Path, home: &Path, store: &Path, args: &[&str]) -> Output {
     command(cwd, home, store)
         .args(args)
         .output()
-        .expect("spawn tog")
+        .expect("spawn ward")
 }
 
 /// The stdout of a run that must have succeeded; a failure shows both
@@ -289,7 +290,7 @@ pub fn fixture(name: &str) -> PathBuf {
 
 /// Every regular file under `dir` with its bytes, for a before-and-after
 /// comparison that proves a refused run wrote nothing to the project. The
-/// one file left out is `.tog/toolchain-input.lock`: tog's own empty
+/// one file left out is `.greyward/toolchain-input.lock`: ward's own empty
 /// advisory lock, created by every sync that reaches the store, which is
 /// not a project input.
 pub fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -299,7 +300,7 @@ pub fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             let path = entry.unwrap().path();
             if path.symlink_metadata().unwrap().is_dir() {
                 walk(&path, files);
-            } else if path.is_file() && !path.ends_with(".tog/toolchain-input.lock") {
+            } else if path.is_file() && !path.ends_with(".greyward/toolchain-input.lock") {
                 files.insert(path.clone(), std::fs::read(&path).unwrap());
             }
         }
@@ -315,7 +316,7 @@ pub fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 pub fn assert_frozen_never_writes_the_lock(project: &Path, home: &Path, lock: &str) {
     std::fs::remove_file(project.join(lock)).unwrap();
     let before = snapshot(project);
-    let frozen = tog(project, home, &["--frozen"]);
+    let frozen = ward(project, home, &["--frozen"]);
     assert!(!frozen.status.success(), "--frozen synced without {lock}");
     let stderr = text(&frozen.stderr);
     assert!(
@@ -324,7 +325,7 @@ pub fn assert_frozen_never_writes_the_lock(project: &Path, home: &Path, lock: &s
     );
     assert_eq!(snapshot(project), before, "--frozen changed the project");
     assert!(!project.join(lock).exists(), "--frozen wrote {lock}");
-    assert_ok(tog(project, home, &["plan"]), "plan regenerates the lock");
+    assert_ok(ward(project, home, &["plan"]), "plan regenerates the lock");
     assert!(
         project.join(lock).is_file(),
         "plan did not regenerate {lock}"
@@ -342,7 +343,7 @@ pub fn temp_entries(prefix: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// `tog env` over a synced project prints the same bytes twice, and the
+/// `ward env` over a synced project prints the same bytes twice, and the
 /// `HOME` it hands the child is the project's private run home inside
 /// `store`: `<store>/run-homes/<project key>/<ecosystem>`, each level a
 /// mode-0700 directory, with nothing named `temp_prefix` left under the
@@ -359,22 +360,22 @@ pub fn assert_private_run_home(
     use std::os::unix::fs::PermissionsExt;
     let before = temp_entries(temp_prefix);
     let first = assert_ok(
-        tog_at(project, home, store, &["env", "--shell", "bash"]),
-        "tog env",
+        ward_at(project, home, store, &["env", "--shell", "bash"]),
+        "ward env",
     );
     let second = assert_ok(
-        tog_at(project, home, store, &["env", "--shell", "bash"]),
-        "tog env again",
+        ward_at(project, home, store, &["env", "--shell", "bash"]),
+        "ward env again",
     );
     assert_eq!(
         first, second,
-        "two runs of `tog env` printed different bytes"
+        "two runs of `ward env` printed different bytes"
     );
     let printed = first
         .lines()
         .find_map(|line| line.strip_prefix("export HOME='"))
         .and_then(|rest| rest.strip_suffix('\''))
-        .unwrap_or_else(|| panic!("`tog env` printed no HOME:\n{first}"));
+        .unwrap_or_else(|| panic!("`ward env` printed no HOME:\n{first}"));
     let printed = PathBuf::from(printed);
     let run_homes = store.canonicalize().unwrap().join("run-homes");
     let relative = printed.strip_prefix(&run_homes).unwrap_or_else(|_| {

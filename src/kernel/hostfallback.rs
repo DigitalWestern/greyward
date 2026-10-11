@@ -38,7 +38,7 @@ impl std::fmt::Display for HostChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "host development files changed during the build of {}; re-run tog",
+            "host development files changed during the build of {}; re-run ward",
             self.0
         )
     }
@@ -234,7 +234,7 @@ pub(crate) struct Attempt<R, D, F, B> {
 /// attempt runs, so a policy that denies `host-build-inputs` stops here
 /// with nothing built against the host.
 ///
-/// A sandbox that could not be set up, or a run tog was asked to stop,
+/// A sandbox that could not be set up, or a run ward was asked to stop,
 /// says nothing about the build and is returned as is.
 ///
 /// Before the retry, `discard` removes what the failed attempt left

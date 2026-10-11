@@ -16,7 +16,7 @@ impl ProjectRoot {
     /// in scratch) to a project-relative path, the mirror image of
     /// `move_dir_out`: one `renameat` from the source's parent directory
     /// into the held parent, so a project renamed or replaced since it was
-    /// opened receives the file in the directory tog holds, never at its
+    /// opened receives the file in the directory ward holds, never at its
     /// old path. Missing parents are created with the no-follow walk, and
     /// the file and the destination directory are fsynced.
     ///

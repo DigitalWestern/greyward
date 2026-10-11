@@ -11,20 +11,20 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use greyward::comforter;
+use greyward::kernel::fetch::{self, Digest};
+use greyward::kernel::platform::Platform;
+use greyward::kernel::policy;
+use greyward::kernel::store::Store;
+use greyward::tailors::node::{self, NpmPackage, NpmPlan};
 use sha2::{Digest as Sha2Digest, Sha512};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use tog::comforter;
-use tog::kernel::fetch::{self, Digest};
-use tog::kernel::platform::Platform;
-use tog::kernel::policy;
-use tog::kernel::store::Store;
-use tog::tailors::node::{self, NpmPackage, NpmPlan};
 
 mod common;
 
 use common::node_stub::{sandbox_or_skip, seed_gyp_python, seed_shipped_node, stub_node_selection};
-use common::{child, tar_create, tog, TempDir};
+use common::{child, tar_create, ward, TempDir};
 
 /// Drop every `npm_config_*` variable (npm and pnpm read them in any case,
 /// `NPM_CONFIG_REGISTRY` as well as `npm_config_registry`) from `command`'s
@@ -163,7 +163,7 @@ fn plan_named(tarball: &std::path::Path, sri: &str, name: &str) -> NpmPlan {
 fn realize_offline(dir: &Path, platform: Platform, mut plan: NpmPlan) -> PathBuf {
     let store = store_at(dir);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let selected = stub_node_selection(dir, &store, activity, platform);
     seed_gyp_python(&store, platform);
@@ -235,7 +235,7 @@ fn make_fixture_tarball(
 
 fn seed_verified_fixture(store: &Store, tarball: &Path, sri: &str) {
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let digest = Digest::from_sri(sri).unwrap();
     fetch::download_verified_digest(
@@ -283,18 +283,18 @@ fn assert_success(output: &Output, label: &str) {
     );
 }
 
-/// Publish the `tog-toolchain.toml` section a writable sync of `project`
+/// Publish the `greyward-toolchain.toml` section a writable sync of `project`
 /// would write for `ecosystem` (a tailor id), through the same selection and
 /// writer the binary uses.
 fn commit_toolchain_lock(project: &Path, ecosystem: &str) {
-    use tog::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
-    let tailor = tog::tailors::by_id(ecosystem).unwrap();
+    use greyward::kernel::toolchain::lock::{ToolchainLock, LOCK_PATH};
+    let tailor = greyward::tailors::by_id(ecosystem).unwrap();
     let lock_ecosystem = tailor.lock_ecosystem();
-    tog::tailors::install_kernel_tables();
-    let root = tog::kernel::fsroot::ProjectRoot::open(project).unwrap();
-    let rows = tog::kernel::toolchain::input::discover(&root, lock_ecosystem).unwrap();
+    greyward::tailors::install_kernel_tables();
+    let root = greyward::kernel::fsroot::ProjectRoot::open(project).unwrap();
+    let rows = greyward::kernel::toolchain::input::discover(&root, lock_ecosystem).unwrap();
     let catalog = tailor.toolchain_catalog().unwrap();
-    let bundle = tog::kernel::toolchain::select_for(&catalog, lock_ecosystem, &rows).unwrap();
+    let bundle = greyward::kernel::toolchain::select_for(&catalog, lock_ecosystem, &rows).unwrap();
     let mut lock = ToolchainLock::read_via(&root)
         .unwrap()
         .unwrap_or_else(|| ToolchainLock::new(env!("CARGO_PKG_VERSION")));
@@ -307,14 +307,14 @@ fn commit_toolchain_lock(project: &Path, ecosystem: &str) {
 fn network_access_during_install_script_fails() {
     let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
-    if let Ok(dir) = std::env::var("TOG_NPM_STRICT_CHILD") {
+    if let Ok(dir) = std::env::var("GREYWARD_NPM_STRICT_CHILD") {
         let _attribution = policy::Attribution::open("node").expect("test attribution");
         let _scope = policy::init(std::path::Path::new(&dir)).unwrap();
-        let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
-        let sri = std::env::var("TOG_NPM_SRI").unwrap();
+        let tarball = PathBuf::from(std::env::var("GREYWARD_NPM_TARBALL").unwrap());
+        let sri = std::env::var("GREYWARD_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
         let activity = &store
-            .activity(tog::kernel::activity::ActivityMode::Shared)
+            .activity(greyward::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let result =
             node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[]);
@@ -347,8 +347,8 @@ fn network_access_during_install_script_fails() {
     let (tarball, sri) = make_pkg_tarball(
         dir,
         "node -e \"require('net').connect(443, '1.1.1.1')\
-         .on('connect', () => { console.error('TOG-PROBE connected'); process.exit(0) })\
-         .on('error', (e) => { console.error('TOG-PROBE connect failed: ' + e.code); process.exit(1) })\"",
+         .on('connect', () => { console.error('GREYWARD-PROBE connected'); process.exit(0) })\
+         .on('error', (e) => { console.error('GREYWARD-PROBE connect failed: ' + e.code); process.exit(1) })\"",
     );
     let child = common::child(std::env::current_exe().unwrap(), dir)
         .args([
@@ -357,11 +357,11 @@ fn network_access_during_install_script_fails() {
             "--ignored",
             "--nocapture",
         ])
-        .env("TOG_STORE", dir.join("store"))
-        .env("TOG_NPM_STRICT_CHILD", dir)
-        .env("TOG_NPM_TARBALL", &tarball)
-        .env("TOG_NPM_SRI", &sri)
-        .env("TOG_STRICT", "1")
+        .env("GREYWARD_STORE", dir.join("store"))
+        .env("GREYWARD_NPM_STRICT_CHILD", dir)
+        .env("GREYWARD_NPM_TARBALL", &tarball)
+        .env("GREYWARD_NPM_SRI", &sri)
+        .env("GREYWARD_STRICT", "1")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&child.stderr);
@@ -369,9 +369,9 @@ fn network_access_during_install_script_fails() {
     // The strict child checked the error names the script's failure; the
     // probe's own words say the failure was the connect, refused by a
     // namespace with no route out (not a DNS error, not a timeout).
-    assert!(!stderr.contains("TOG-PROBE connected"), "{stderr}");
+    assert!(!stderr.contains("GREYWARD-PROBE connected"), "{stderr}");
     assert!(
-        stderr.contains("TOG-PROBE connect failed: ENETUNREACH"),
+        stderr.contains("GREYWARD-PROBE connect failed: ENETUNREACH"),
         "the install script did not fail on a refused connection:\n{stderr}"
     );
 }
@@ -381,19 +381,19 @@ fn network_access_during_install_script_fails() {
 fn permissive_install_script_is_cached_but_rejected_strict() {
     let _policy_guard = policy_guard();
     let platform = Platform::host().expect("host platform");
-    if let Ok(dir) = std::env::var("TOG_NPM_CACHED_CHILD") {
+    if let Ok(dir) = std::env::var("GREYWARD_NPM_CACHED_CHILD") {
         let _scope = policy::init(std::path::Path::new(&dir)).unwrap();
-        let tarball = PathBuf::from(std::env::var("TOG_NPM_TARBALL").unwrap());
-        let sri = std::env::var("TOG_NPM_SRI").unwrap();
+        let tarball = PathBuf::from(std::env::var("GREYWARD_NPM_TARBALL").unwrap());
+        let sri = std::env::var("GREYWARD_NPM_SRI").unwrap();
         let store = Store::open().expect("store");
         let activity = &store
-            .activity(tog::kernel::activity::ActivityMode::Shared)
+            .activity(greyward::kernel::activity::ActivityMode::Shared)
             .unwrap();
         let err =
             node::realize_node_env(&store, activity, platform, &plan_for(&tarball, &sri), &[])
                 .expect_err("strict sync must reject the cached exception");
         assert!(err.to_string().contains("install-script-failed"));
-        assert!(err.to_string().contains("'tog --fresh' will not help"));
+        assert!(err.to_string().contains("'ward --fresh' will not help"));
         return;
     }
     let temp = TempDir::new("permissive-npm");
@@ -405,7 +405,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     );
     let store = store_at(dir);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let _scope = policy::init(dir).unwrap();
     let plan = plan_for(&tarball, &sri);
@@ -416,7 +416,7 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
     assert!(package_dir.is_dir());
     assert!(package_dir.join("package.json").is_file());
     assert!(!package_dir.join("partial.txt").exists());
-    let project = tog::kernel::fsroot::ProjectRoot::open(dir).unwrap();
+    let project = greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap();
     node::project_node_env(
         activity,
         &project,
@@ -441,11 +441,11 @@ fn permissive_install_script_is_cached_but_rejected_strict() {
             "--ignored",
             "--nocapture",
         ])
-        .env("TOG_STORE", dir.join("store"))
-        .env("TOG_NPM_CACHED_CHILD", dir)
-        .env("TOG_NPM_TARBALL", &tarball)
-        .env("TOG_NPM_SRI", &sri)
-        .env("TOG_STRICT", "1")
+        .env("GREYWARD_STORE", dir.join("store"))
+        .env("GREYWARD_NPM_CACHED_CHILD", dir)
+        .env("GREYWARD_NPM_TARBALL", &tarball)
+        .env("GREYWARD_NPM_SRI", &sri)
+        .env("GREYWARD_STRICT", "1")
         .output()
         .unwrap();
     assert!(
@@ -482,7 +482,7 @@ fn install_script_needing_host_headers_falls_back_once() {
     }
     if !Path::new("/usr/include/zlib.h").is_file() {
         let required =
-            matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty());
+            matches!(std::env::var_os("GREYWARD_SANDBOX_TESTS"), Some(value) if !value.is_empty());
         assert!(
             !required,
             "required test {test} needs /usr/include/zlib.h (the zlib development package)"
@@ -503,7 +503,7 @@ fn install_script_needing_host_headers_falls_back_once() {
     // one per call, which would key a different environment.
     let store = store_at(dir);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let selected = stub_node_selection(dir, &store, activity, platform);
     seed_gyp_python(&store, platform);
@@ -570,7 +570,7 @@ fn install_script_needing_host_headers_falls_back_once() {
         &format!("{:x}", Sha512::digest(std::fs::read(&tarball).unwrap())),
     );
     assert!(cached.exists(), "the tarball is not in the artifact cache");
-    tog::kernel::store::remove_tree(&cached)
+    greyward::kernel::store::remove_tree(&cached)
         .or_else(|_| std::fs::remove_file(&cached))
         .unwrap();
     std::fs::remove_file(&tarball).unwrap();
@@ -622,7 +622,7 @@ fn linux_npm_roundtrip() {
     let project = &temp.0;
     let store = store_at(project);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let store_root = store.root.clone();
     let node = node::ensure_node_for(&store, activity, platform).expect("pinned Linux Node");
@@ -635,14 +635,14 @@ fn linux_npm_roundtrip() {
 
     // The lock is generated by the pinned npm bundled with the pinned Node,
     // never by a host npm. Both optional platform packages must be present in
-    // the generated lock before tog applies its platform selector.
+    // the generated lock before ward applies its platform selector.
     // npm runs scrubbed, with a home of its own and no `npm_config_*`
     // variable: nothing in the caller's environment or npm config reaches
     // the lock it writes.
     let npm_home = TempDir::new("npm-scripts-home");
     let npm_lock = without_npm_config(child(node.join("bin/npm"), &npm_home.0))
         .current_dir(project)
-        .env("TOG_STORE", &store_root)
+        .env("GREYWARD_STORE", &store_root)
         .env(
             "PATH",
             format!(
@@ -726,7 +726,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     );
 
     // Lock entries use synthetic HTTPS URLs, while their verified cache
-    // entries are seeded through tog's normal digest-checked API. This
+    // entries are seeded through ward's normal digest-checked API. This
     // exercises cache reuse without weakening production HTTPS validation.
     seed_verified_fixture(&store, &addon_tarball, &addon_sri);
     seed_verified_fixture(&store, &script_tarball, &script_sri);
@@ -734,9 +734,9 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     add_fixture_dependency(project, "fixture-script", &script_sri);
 
     // Strict policy never creates the toolchain lock, so the project commits
-    // one first, exactly as a user runs `tog` once before CI goes strict.
+    // one first, exactly as a user runs `ward` once before CI goes strict.
     // A strict sync also wants the lock to carry a signed resolution
-    // record (`tog attest node`, an npm lock check through the door), and
+    // record (`ward attest node`, an npm lock check through the door), and
     // this fixture lock names `fixture.invalid` tarballs no npm run can
     // check, so the machine policy denies every kind strict denies but
     // `unrecorded-resolution`: every other refusal below is strict's.
@@ -745,15 +745,15 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
         .filter(|kind| **kind != policy::UNRECORDED_RESOLUTION)
         .map(|kind| format!("\"{kind}\""))
         .collect();
-    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
     std::fs::write(
-        temp.0.join(".tog/policy.toml"),
+        temp.0.join(".greyward/policy.toml"),
         format!("deny = [{}]\n", denied.join(", ")),
     )
     .unwrap();
     commit_toolchain_lock(project, "node");
-    let synced = tog(project, &temp.0, &["sync"]);
-    assert_success(&synced, "tog sync under the strict deny list");
+    let synced = ward(project, &temp.0, &["sync"]);
+    assert_success(&synced, "ward sync under the strict deny list");
 
     let closure = comforter::read_closure(project, "node").unwrap();
     let package_paths: Vec<&str> = closure["packages"]
@@ -792,8 +792,8 @@ if (addon.answer() !== 42) process.exit(13);
 esbuild.transformSync('const answer = 42', {loader: 'js'});
 console.log('linux-npm-roundtrip-ok');
 "#;
-    let run = tog(project, &temp.0, &["run", "node", "-e", node_check]);
-    assert_success(&run, "tog run Node/esbuild/addon check");
+    let run = ward(project, &temp.0, &["run", "node", "-e", node_check]);
+    assert_success(&run, "ward run Node/esbuild/addon check");
     assert!(String::from_utf8_lossy(&run.stdout).contains("linux-npm-roundtrip-ok"));
 
     // Re-project with identical inputs after clearing every downloaded npm
@@ -811,15 +811,15 @@ console.log('linux-npm-roundtrip-ok');
             .count(),
         0
     );
-    let repeated = tog(project, &temp.0, &["sync"]);
+    let repeated = ward(project, &temp.0, &["sync"]);
     assert_success(&repeated, "offline warm sync under the strict deny list");
     let repeated_closure = comforter::read_closure(project, "node").unwrap();
     assert_eq!(
         repeated_closure["env_object"], closure["env_object"],
         "identical inputs produced a different node environment object"
     );
-    let repeated_run = tog(project, &temp.0, &["run", "node", "-e", node_check]);
-    assert_success(&repeated_run, "repeat tog run Node/esbuild/addon check");
+    let repeated_run = ward(project, &temp.0, &["run", "node", "-e", node_check]);
+    assert_success(&repeated_run, "repeat ward run Node/esbuild/addon check");
 }
 
 #[test]
@@ -876,7 +876,7 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
     let _policy_guard = policy_guard();
     let _attribution = policy::Attribution::open("test").expect("test attribution");
     // A prebuild-install style script: with the network denied the download can
-    // never succeed, so tog asks for the source build up front.
+    // never succeed, so ward asks for the source build up front.
     let platform = Platform::host().expect("host platform");
     let temp = TempDir::new("src-npm");
     let dir = temp.path();
@@ -970,9 +970,9 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
             .unwrap();
         }
 
-        let synced = tog(&project, &temp.0, &["sync"]);
-        assert_success(&synced, &format!("tog sync ({name})"));
-        let lock = std::fs::read_to_string(project.join("tog-toolchain.toml")).unwrap();
+        let synced = ward(&project, &temp.0, &["sync"]);
+        assert_success(&synced, &format!("ward sync ({name})"));
+        let lock = std::fs::read_to_string(project.join("greyward-toolchain.toml")).unwrap();
         assert_eq!(lock.contains("cpython"), locked_python.is_some(), "{lock}");
 
         let closure = comforter::read_closure(&project, "node").unwrap();
@@ -1017,7 +1017,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
     let project = temp.0.join("locks-python");
     std::fs::remove_file(project.join("pyproject.toml")).unwrap();
     std::fs::remove_file(project.join(".python-version")).unwrap();
-    let status = tog(&project, &temp.0, &["status"]);
+    let status = ward(&project, &temp.0, &["status"]);
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&status.stdout),
@@ -1030,9 +1030,9 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 }
 
 /// Ctrl-C while a lifecycle script runs stops the sync. A terminal delivers
-/// the interrupt to its foreground process group, which holds tog and the
+/// the interrupt to its foreground process group, which holds ward and the
 /// outer bwrap but not the sandboxed script (bwrap starts it in a new
-/// session), so the case sends SIGINT to tog's own group the same way.
+/// session), so the case sends SIGINT to ward's own group the same way.
 #[test]
 fn interrupt_during_install_script_stops_the_sync() {
     let _policy_guard = policy_guard();
@@ -1043,7 +1043,7 @@ fn interrupt_during_install_script_stops_the_sync() {
     assert_signal_mid_script_stops_the_sync(libc::SIGINT, true);
 }
 
-/// A TERM sent to tog alone, as `kill <pid>` or a service manager sends it,
+/// A TERM sent to ward alone, as `kill <pid>` or a service manager sends it,
 /// is forwarded to bwrap and stops the sync the same way.
 #[test]
 fn terminate_during_install_script_stops_the_sync() {
@@ -1057,7 +1057,7 @@ fn terminate_during_install_script_stops_the_sync() {
 
 /// `root` and every process descended from it, one line each: pid, parent,
 /// state, the kernel function it waits in, and its command line. Read from
-/// `/proc` when a deadline passes, so the report says where tog was.
+/// `/proc` when a deadline passes, so the report says where ward was.
 fn process_listing(root: i32) -> String {
     let mut table = Vec::new();
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -1120,8 +1120,8 @@ fn sleepers(arg: &str) -> Vec<i32> {
 }
 
 /// Sync a project whose one dependency's postinstall sleeps, send `signal`
-/// to tog (or to its whole process group) once the script is running, and
-/// require that tog exits non-zero, says it was interrupted, and does not
+/// to ward (or to its whole process group) once the script is running, and
+/// require that ward exits non-zero, says it was interrupted, and does not
 /// write the interrupted script into the closure as an
 /// `install-script-failed` exception.
 fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: bool) {
@@ -1152,13 +1152,13 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
     // sandbox; the sleep outlives every deadline below, so only the
     // interrupt can end it. Its duration is unique to this run, so the
     // sleep can be found in /proc afterwards: the sandbox gives it its own
-    // pid namespace and session, so neither a pid it prints nor tog's
+    // pid namespace and session, so neither a pid it prints nor ward's
     // process group names it from out here.
     let sleep_arg = format!("600.{}", std::process::id());
     let sleeper_package = serde_json::json!({
         "name": "fixture-sleeper",
         "version": "1.0.0",
-        "scripts": {"postinstall": format!("printf 'TOG_SCRIPT_RUNNING\\n'; sleep {sleep_arg}")},
+        "scripts": {"postinstall": format!("printf 'GREYWARD_SCRIPT_RUNNING\\n'; sleep {sleep_arg}")},
         "main": "index.js"
     })
     .to_string();
@@ -1182,13 +1182,13 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .process_group(0);
-    let mut child = command.spawn().expect("spawn tog");
+    let mut child = command.spawn().expect("spawn ward");
     let pid = child.id() as i32;
     // Whatever happens below, nothing this case started outlives it.
     struct GroupGuard(i32);
     impl Drop for GroupGuard {
         fn drop(&mut self) {
-            // SAFETY: tog leads its own process group (process_group(0)).
+            // SAFETY: ward leads its own process group (process_group(0)).
             unsafe { libc::kill(-self.0, libc::SIGKILL) };
         }
     }
@@ -1204,7 +1204,7 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
             }
         }
     });
-    // Read as it comes, so a report made while tog still runs has it.
+    // Read as it comes, so a report made while ward still runs has it.
     let mut stderr = child.stderr.take().unwrap();
     // Raw bytes, decoded once at the end: a chunk may end inside a UTF-8
     // character, and EINTR is a retry, not the end of the stream.
@@ -1235,14 +1235,14 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
             Ok(line) => {
                 stdout_text.push_str(&line);
                 stdout_text.push('\n');
-                if line.contains("TOG_SCRIPT_RUNNING") {
+                if line.contains("GREYWARD_SCRIPT_RUNNING") {
                     break;
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(status) = child.try_wait().unwrap() {
                     panic!(
-                        "tog exited ({status}) before the script ran\nstdout:\n{stdout_text}\nstderr:\n{}",
+                        "ward exited ({status}) before the script ran\nstdout:\n{stdout_text}\nstderr:\n{}",
                         stderr_reader.join().unwrap()
                     );
                 }
@@ -1253,7 +1253,7 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 panic!(
-                    "tog closed stdout before the script ran\nstdout:\n{stdout_text}\nstderr:\n{}",
+                    "ward closed stdout before the script ran\nstdout:\n{stdout_text}\nstderr:\n{}",
                     stderr_reader.join().unwrap()
                 );
             }
@@ -1270,8 +1270,8 @@ fn assert_signal_mid_script_stops_the_sync(signal: libc::c_int, whole_group: boo
         }
         assert!(
             Instant::now() < exit_deadline,
-            "tog kept running after the interrupt\nstdout:\n{stdout_text}\nstderr so far:\n{}\n\
-             processes descended from tog:\n{}",
+            "ward kept running after the interrupt\nstdout:\n{stdout_text}\nstderr so far:\n{}\n\
+             processes descended from ward:\n{}",
             String::from_utf8_lossy(&stderr_so_far.lock().unwrap()),
             process_listing(pid)
         );

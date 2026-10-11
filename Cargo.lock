@@ -228,6 +228,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "greyward"
+version = "0.1.0"
+dependencies = [
+ "bzip2",
+ "caseless",
+ "flate2",
+ "glob",
+ "hex",
+ "icu_properties",
+ "libc",
+ "liblzma",
+ "rcgen",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "toml",
+ "unicode-normalization",
+ "ureq",
+ "url",
+ "webpki-roots 1.0.9",
+ "zip",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -749,33 +776,6 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
-name = "tog"
-version = "0.1.0"
-dependencies = [
- "bzip2",
- "caseless",
- "flate2",
- "glob",
- "hex",
- "icu_properties",
- "libc",
- "liblzma",
- "rcgen",
- "ring",
- "rustls",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "toml",
- "unicode-normalization",
- "ureq",
- "url",
- "webpki-roots 1.0.9",
- "zip",
-]
 
 [[package]]
 name = "toml"

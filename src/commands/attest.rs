@@ -1,4 +1,4 @@
-//! `tog attest [<ecosystem>...]`: give existing locks a signed resolution
+//! `ward attest [<ecosystem>...]`: give existing locks a signed resolution
 //! record, and move a record's ledger between machines.
 //!
 //! Attesting runs in two phases. First, each ecosystem's own lock check
@@ -6,14 +6,14 @@
 //! nothing: a check that leaves the lock and manifest byte-unchanged yields
 //! a record signed with the process key. Only when every check passed does
 //! the second phase write them: as the project's receipts
-//! (`.tog/resolution/<ecosystem>.json`, through `record::publish_receipts`,
+//! (`.greyward/resolution/<ecosystem>.json`, through `record::publish_receipts`,
 //! all or nothing, under the project lock, and only while each lock still
 //! reads as its record signed it), or with `--record-out` outside the
 //! checkout, which is then left unchanged. A failed check therefore leaves
 //! no receipt behind, whichever ecosystem it was, and a failed publication
 //! puts back the receipts it already wrote. A process killed between two
 //! publications can leave a partial set; each receipt in it still attests
-//! its own lock, and rerunning `tog attest` completes it.
+//! its own lock, and rerunning `ward attest` completes it.
 //!
 //! The ledger transfers never run a tool. `--ledger-export` writes the
 //! portable bytes of the ledger the committed record names, from the local
@@ -38,7 +38,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Run `tog attest` as parsed. It validates the host, preflights the
+/// Run `ward attest` as parsed. It validates the host, preflights the
 /// project, and loads the signing key itself, before it opens the store.
 pub fn run(command: Command) -> io::Result<i32> {
     let Command::Attest {
@@ -100,7 +100,7 @@ fn targets(
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "tog attest does not support {id}: it has no lock that a resolution door \
+                    "ward attest does not support {id}: it has no lock that a resolution door \
                      produces, so there is nothing to sign"
                 ),
             ));
@@ -124,7 +124,7 @@ fn attest(
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "--record-out writes a record for another machine's sync, which attests only a \
-             signed one, and TOG_SIGNING_KEY is not set; export TOG_SIGNING_KEY=<key file the \
+             signed one, and GREYWARD_SIGNING_KEY is not set; export GREYWARD_SIGNING_KEY=<key file the \
              sync's machine policy trusts>",
         ));
     }
@@ -147,9 +147,9 @@ fn attest(
     project.check_still_named()?;
     if crate::comforter::signing_key().is_none() {
         ui::warning(
-            "resolution records written unsigned: TOG_SIGNING_KEY is not set, so no sync \
+            "resolution records written unsigned: GREYWARD_SIGNING_KEY is not set, so no sync \
              will attest them",
-            "export TOG_SIGNING_KEY=<key file your machine policy trusts>",
+            "export GREYWARD_SIGNING_KEY=<key file your machine policy trusts>",
         );
     }
     let ids: Vec<&str> = targets.iter().map(|tailor| tailor.id()).collect();
@@ -268,7 +268,7 @@ fn export_ledger(
         io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{} does not exist, so no ledger is named; run 'tog attest {ecosystem}' first",
+                "{} does not exist, so no ledger is named; run 'ward attest {ecosystem}' first",
                 receipt.display()
             ),
         )
@@ -469,7 +469,7 @@ mod tests {
         attest_both(&fx, |dir| Ok(checked(dir, "beta"))).unwrap();
         assert_eq!(receipt(&fx.dir, "alpha"), Some(checked(&fx.dir, "alpha").1));
         assert_eq!(receipt(&fx.dir, "beta"), Some(checked(&fx.dir, "beta").1));
-        assert!(!fx.dir.join(".tog/journal/alpha.json").exists());
+        assert!(!fx.dir.join(".greyward/journal/alpha.json").exists());
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
         assert!(error.contains("no receipt was published"), "{error}");
         assert_eq!(receipt(&fx.dir, "alpha"), None);
         assert!(!fx.dir.join(record::RESOLUTION_DIR).exists());
-        assert!(!fx.dir.join(".tog").exists());
+        assert!(!fx.dir.join(".greyward").exists());
     }
 
     /// With a prior receipt, the first is restored byte for byte and with
@@ -534,8 +534,8 @@ mod tests {
         );
         assert_eq!(receipt(&fx.dir, "beta"), None);
         assert!(fx.dir.join(record::RESOLUTION_DIR).is_dir());
-        assert!(!fx.dir.join(".tog/journal/alpha.json").exists());
-        assert!(!fx.dir.join(".tog/journal/beta.json").exists());
+        assert!(!fx.dir.join(".greyward/journal/alpha.json").exists());
+        assert!(!fx.dir.join(".greyward/journal/beta.json").exists());
     }
 
     /// A lock that changed after its check passed is not given the record

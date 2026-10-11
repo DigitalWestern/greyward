@@ -1,4 +1,4 @@
-//! The pinned Rust formatting component used by `tog fmt`.
+//! The pinned Rust formatting component used by `ward fmt`.
 //!
 //! A catalog toolchain's rustfmt is its release's own `rustfmt` row, realized
 //! as a separate object beside the Rust object. A local toolchain
@@ -88,28 +88,28 @@ fn rustfmt_row(platform: Platform, selected: &Selected) -> io::Result<ArtifactSp
     selected.checked_artifact(platform, "rustfmt", RUSTFMT_RECIPE, "sha256")
 }
 
-/// Where tog 0.x wrote the `rustfmt` closure, relative to the workspace root.
-/// `tog fmt` no longer writes one: the lock's Rust row pins the rustfmt
+/// Where ward 0.x wrote the `rustfmt` closure, relative to the workspace root.
+/// `ward fmt` no longer writes one: the lock's Rust row pins the rustfmt
 /// archive by sha256, so the formatter that runs is the pinned one by
 /// construction, and a record of it proved nothing the lock did not.
-const LEGACY_RECORD: &str = ".tog/closures/rustfmt.json";
+const LEGACY_RECORD: &str = ".greyward/closures/rustfmt.json";
 
-/// Delete a `rustfmt` record an older `tog fmt` left in `project`, so the
+/// Delete a `rustfmt` record an older `ward fmt` left in `project`, so the
 /// workspace heals itself on the next run. The record was a single envelope
 /// (its signature is inside it), so there is nothing beside it to remove.
 /// An absent record is fine; a symlink or directory in its place is refused
-/// rather than followed, like every other write under `.tog`.
+/// rather than followed, like every other write under `.greyward`.
 ///
 /// It stays when it is the project's only closure (a directory or symlink
 /// under a closure name is not one, since gc skips it too) and the project
-/// is still `registered`: the older `tog fmt` also registered a gc root for
+/// is still `registered`: the older `ward fmt` also registered a gc root for
 /// the project, and a root whose closures directory is empty stops every
-/// `tog gc` sweep. Forgetting that root needs the store's exclusive lease,
-/// which a formatter run does not take. `tog gc` forgets a root whose only
+/// `ward gc` sweep. Forgetting that root needs the store's exclusive lease,
+/// which a formatter run does not take. `ward gc` forgets a root whose only
 /// closures are retired when it protects nothing they do not name, so the
 /// next run after that sweep removes the file.
 pub fn remove_legacy_record(project: &ProjectRoot, registered: bool) -> io::Result<()> {
-    let closures = Path::new(".tog/closures");
+    let closures = Path::new(".greyward/closures");
     let Some(names) = project.read_dir(closures)? else {
         return Ok(());
     };
@@ -156,7 +156,7 @@ fn object_id_for(
         .map(|identity| identity.object_id())
 }
 
-/// The formatter binaries `tog fmt` runs.
+/// The formatter binaries `ward fmt` runs.
 const FORMATTER_BINARIES: [&str; 2] = ["rustfmt", "cargo-fmt"];
 
 /// Ensure the rustfmt and cargo-fmt binaries paired with `rust_object` exist.
@@ -177,7 +177,7 @@ pub fn ensure_rustfmt(
     if rust_object != store.object_path(&expected_rust_id).canonicalize()? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "rustfmt was paired with an unexpected Rust object; run `tog` first",
+            "rustfmt was paired with an unexpected Rust object; run `ward` first",
         ));
     }
     if rust_path::is_path(selected) {
@@ -189,7 +189,7 @@ pub fn ensure_rustfmt(
                     format!(
                         "the local Rust toolchain {tree} has no bin/{binary}; add rustfmt to it \
                          (for a rustup toolchain, `rustup component add rustfmt`), then run \
-                         `tog update --toolchain rust`"
+                         `ward update --toolchain rust`"
                     ),
                 ));
             }
@@ -312,7 +312,7 @@ fn run_scratch(store_tmp: &Path) -> io::Result<PathBuf> {
 /// writable root, and cargo-fmt starts in the directory `invocation`
 /// holds. Both are named by the canonical path they were opened at, which
 /// the sandbox resolves through the held descriptors (#612), so a project
-/// renamed or replaced since tog opened it is not what gets formatted.
+/// renamed or replaced since ward opened it is not what gets formatted.
 /// Neither is canonicalized again: that would follow whatever sits at the
 /// path now.
 pub fn run_sandboxed(
@@ -413,7 +413,7 @@ mod tests {
         );
     }
 
-    /// `tog fmt` calls this before opening the store, so an unpinned or
+    /// `ward fmt` calls this before opening the store, so an unpinned or
     /// foreign platform is refused ahead of the toolchain download.
     #[test]
     fn preflight_accepts_the_host_and_refuses_a_foreign_platform() {
@@ -461,9 +461,9 @@ mod tests {
             // A registered, resolvable root: the sweep refuses outright when
             // the root registry is empty or a project cannot be resolved.
             let project = root.join("project");
-            fs::create_dir_all(project.join(".tog/closures")).unwrap();
+            fs::create_dir_all(project.join(".greyward/closures")).unwrap();
             fs::write(
-                project.join(".tog/closures/cargo.json"),
+                project.join(".greyward/closures/cargo.json"),
                 serde_json::to_vec(&serde_json::json!({
                     "schema": "closure/1",
                     "ecosystem": "cargo",
@@ -504,9 +504,9 @@ mod tests {
         assert_eq!(link, PathBuf::from(format!("../{rust_id}/lib")));
     }
 
-    /// `tog fmt` writes no closure and registers no root: the pinned
+    /// `ward fmt` writes no closure and registers no root: the pinned
     /// formatter is guaranteed by the lock, not by a record. A
-    /// `.tog/closures/rustfmt.json` left by an older tog is deleted on the
+    /// `.greyward/closures/rustfmt.json` left by an older ward is deleted on the
     /// run, so the workspace heals itself; `--check` leaves it, since a
     /// check changes no file. Both objects are cache hits with
     /// stub `cargo` and `cargo-fmt` scripts, so nothing is downloaded.
@@ -519,13 +519,13 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let scratch = TempDir::named("rustfmt-no-record");
         let root = scratch.0.clone();
-        let previous_store = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", root.join("store"));
+        let previous_store = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", root.join("store"));
         let platform = Platform::host().unwrap();
         let ctx = crate::kernel::context::Context::open(platform);
         match previous_store {
-            Some(value) => std::env::set_var("TOG_STORE", value),
-            None => std::env::remove_var("TOG_STORE"),
+            Some(value) => std::env::set_var("GREYWARD_STORE", value),
+            None => std::env::remove_var("GREYWARD_STORE"),
         }
         let ctx = ctx.unwrap();
         let store = ctx.store.clone();
@@ -549,7 +549,7 @@ mod tests {
             &store.object_path(&rust_id),
         )
         .unwrap();
-        // tog finds the workspace itself; `cargo-fmt` formats nothing and
+        // ward finds the workspace itself; `cargo-fmt` formats nothing and
         // succeeds.
         for (identity, script, body) in [
             (&rust_identity, "cargo", "#!/bin/sh\nexit 1\n"),
@@ -563,20 +563,20 @@ mod tests {
             });
         }
         let project = root.join("project");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         fs::write(
             project.join("Cargo.toml"),
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        let legacy = project.join(".tog/closures/rustfmt.json");
+        let legacy = project.join(".greyward/closures/rustfmt.json");
         fs::write(
             &legacy,
             br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
         )
         .unwrap();
         fs::write(
-            project.join(".tog/closures/cargo.json"),
+            project.join(".greyward/closures/cargo.json"),
             br#"{"schema":"closure/1","ecosystem":"cargo","body":{}}"#,
         )
         .unwrap();
@@ -591,13 +591,13 @@ mod tests {
             "the legacy rustfmt record was left behind"
         );
         assert!(
-            project.join(".tog/closures").is_dir(),
+            project.join(".greyward/closures").is_dir(),
             "only the record goes, not the closures directory"
         );
         assert!(store.roots().unwrap().is_empty(), "fmt registered a root");
     }
 
-    /// cargo-fmt runs in the workspace and the invocation directory tog
+    /// cargo-fmt runs in the workspace and the invocation directory ward
     /// holds: with the project renamed and another directory put at its
     /// path after both were opened, a stub cargo-fmt still writes into the
     /// held member directory, and nothing appears at the old path (#612).
@@ -659,19 +659,19 @@ mod tests {
     fn removing_the_legacy_record_keeps_a_lone_one_and_refuses_a_symlink() {
         let temp = TempDir::named("rustfmt-legacy-remove");
         let project = temp.0.join("project");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
         remove_legacy_record(&held, true).unwrap();
-        let legacy = project.join(".tog/closures/rustfmt.json");
+        let legacy = project.join(".greyward/closures/rustfmt.json");
         fs::write(&legacy, b"{}").unwrap();
         // The only closure stays: removing it would leave the old root
         // record over an empty closures directory.
         remove_legacy_record(&held, true).unwrap();
         assert!(legacy.is_file());
-        fs::write(project.join(".tog/closures/cargo.json"), b"{}").unwrap();
+        fs::write(project.join(".greyward/closures/cargo.json"), b"{}").unwrap();
         remove_legacy_record(&held, true).unwrap();
         assert!(!legacy.exists());
-        assert!(project.join(".tog/closures/cargo.json").is_file());
+        assert!(project.join(".greyward/closures/cargo.json").is_file());
         let outside = temp.0.join("outside.json");
         fs::write(&outside, b"{}").unwrap();
         std::os::unix::fs::symlink(&outside, &legacy).unwrap();
@@ -686,7 +686,7 @@ mod tests {
     fn a_sibling_that_is_not_a_regular_file_keeps_the_legacy_record() {
         super::super::tests::with_temp_store(|store, root| {
             let project = root.join("project");
-            let closures = project.join(".tog/closures");
+            let closures = project.join(".greyward/closures");
             fs::create_dir_all(&closures).unwrap();
             let legacy = closures.join("rustfmt.json");
             fs::write(
@@ -711,7 +711,7 @@ mod tests {
         });
     }
 
-    /// A project an older `tog fmt` registered and never synced holds only
+    /// A project an older `ward fmt` registered and never synced holds only
     /// the legacy record (#416). fmt keeps it while the root is registered,
     /// since an empty closures directory would stop the sweep. The sweep
     /// forgets a root whose only closures are retired (a dry run only says
@@ -720,8 +720,8 @@ mod tests {
     fn a_lone_legacy_record_is_forgotten_by_gc_then_removed_by_fmt() {
         super::super::tests::with_temp_store(|store, root| {
             let project = root.join("project");
-            fs::create_dir_all(project.join(".tog/closures")).unwrap();
-            let legacy = project.join(".tog/closures/rustfmt.json");
+            fs::create_dir_all(project.join(".greyward/closures")).unwrap();
+            let legacy = project.join(".greyward/closures/rustfmt.json");
             fs::write(
                 &legacy,
                 br#"{"schema":"closure/1","ecosystem":"rustfmt","body":{}}"#,
@@ -777,14 +777,14 @@ mod tests {
     fn registering_a_project_with_only_a_retired_record_names_it() {
         super::super::tests::with_temp_store(|store, root| {
             let project = root.join("project");
-            fs::create_dir_all(project.join(".tog/closures")).unwrap();
-            fs::write(project.join(".tog/closures/rustfmt.json"), b"{}").unwrap();
+            fs::create_dir_all(project.join(".greyward/closures")).unwrap();
+            fs::write(project.join(".greyward/closures/rustfmt.json"), b"{}").unwrap();
             let error = store.root_record_from_project(&project).unwrap_err();
             let message = error.to_string();
             assert!(
                 message.contains(
                     "contains no supported closure records: rustfmt.json is a retired record"
-                ) && message.contains("run `tog sync` in the project"),
+                ) && message.contains("run `ward sync` in the project"),
                 "{message}"
             );
         });

@@ -1,15 +1,15 @@
-//! The `tog` binary: parse argv, set up output, resolve the implicit
+//! The `ward` binary: parse argv, set up output, resolve the implicit
 //! forms, and hand the command to `commands::dispatch`.
 
+use greyward::cli;
+use greyward::commands;
+use greyward::kernel::ui;
 use std::process::exit;
-use tog::cli;
-use tog::commands;
-use tog::kernel::ui;
 
 fn main() {
-    // Before parsing: resolving a first word (`tog app.ts`) can already
+    // Before parsing: resolving a first word (`ward app.ts`) can already
     // read a project's toolchain sources.
-    tog::tailors::install_kernel_tables();
+    greyward::tailors::install_kernel_tables();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (options, pending) = match cli::parse(&args) {
         Ok(cli::Parsed::Run(invocation)) => (
@@ -54,13 +54,13 @@ fn main() {
             ui::error(message)
         }
     };
-    // A store this tog refuses to open fails with the reason and, on its
+    // A store this ward refuses to open fails with the reason and, on its
     // own line, the one command that is the way out.
     // Under `--json` the failure's class rides along as its own key.
     let report_failure = |error: &std::io::Error| {
-        let fix = tog::kernel::store::refusal_fix(error);
+        let fix = greyward::kernel::store::refusal_fix(error);
         if json {
-            let class = tog::kernel::error::class_of(error).map(|class| class.name());
+            let class = greyward::kernel::error::class_of(error).map(|class| class.name());
             return ui::failure_json(&error.to_string(), fix, class);
         }
         match fix {
@@ -82,7 +82,7 @@ fn main() {
         }
         ui::trace(&format!("working directory: {}", dir.display()));
     }
-    // A bare `tog` is a sync *and* an orientation: the one word a newcomer
+    // A bare `ward` is a sync *and* an orientation: the one word a newcomer
     // types should also show them what comes next. A short footer follows a
     // sync that succeeded (the full help would scroll the sync's own result
     // away), so a failure stays the last thing on screen, and `-q` (results
@@ -118,13 +118,13 @@ fn main() {
 }
 
 /// The exit code for a command that failed with `error`: `128 + signal` when
-/// a signal asked tog to stop (130 for Ctrl-C), the shell's convention and
-/// what `tog run` already passes on from its child; the class's own status
+/// a signal asked ward to stop (130 for Ctrl-C), the shell's convention and
+/// what `ward run` already passes on from its child; the class's own status
 /// for a classified failure (`kernel::error::Class::exit_code`); and 1
 /// otherwise.
 fn failure_code(error: &std::io::Error) -> i32 {
-    if let Some(signal) = tog::kernel::supervise::stop_signal(error) {
+    if let Some(signal) = greyward::kernel::supervise::stop_signal(error) {
         return 128 + signal;
     }
-    tog::kernel::error::class_of(error).map_or(cli::EXIT_FAILURE, |class| class.exit_code())
+    greyward::kernel::error::class_of(error).map_or(cli::EXIT_FAILURE, |class| class.exit_code())
 }

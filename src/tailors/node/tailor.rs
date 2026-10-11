@@ -35,7 +35,7 @@ const NODE_INPUTS: &[&str] = &[
 
 pub struct Node;
 
-/// The package.json `tog run` reads scripts from, as (canonical path,
+/// The package.json `ward run` reads scripts from, as (canonical path,
 /// text): only under a `node_modules` projection whose closure reads back,
 /// and only when `dir` has a package.json.
 fn projected_package_json(dir: &Path, cwd: &Path) -> io::Result<Option<(PathBuf, String)>> {
@@ -51,8 +51,8 @@ fn projected_package_json(dir: &Path, cwd: &Path) -> io::Result<Option<(PathBuf,
     Ok(Some((path.canonicalize()?, std::fs::read_to_string(path)?)))
 }
 
-/// Is `dir/node_modules` a tog projection, and which `node_modules`
-/// between `cwd` and `dir` should lead PATH? `tog run` works from
+/// Is `dir/node_modules` a ward projection, and which `node_modules`
+/// between `cwd` and `dir` should lead PATH? `ward run` works from
 /// workspace subdirectories like npm run does: the nearest projected
 /// `node_modules` inside the same forest wins, falling back to the root's.
 pub fn projected_node_modules(dir: &Path, cwd: &Path) -> (bool, PathBuf) {
@@ -60,7 +60,7 @@ pub fn projected_node_modules(dir: &Path, cwd: &Path) -> (bool, PathBuf) {
     let node_projected = std::fs::symlink_metadata(&nm)
         .map(|md| md.file_type().is_symlink())
         .unwrap_or(false)
-        && std::fs::symlink_metadata(dir.join(".tog/closures/node.json")).is_ok();
+        && std::fs::symlink_metadata(dir.join(".greyward/closures/node.json")).is_ok();
     let nearest_nm = if node_projected {
         let forest_root = nm
             .canonicalize()
@@ -214,7 +214,7 @@ impl Tailor for Node {
         ]
     }
 
-    /// `tog x` resolves from the public registry and projects into its own
+    /// `ward x` resolves from the public registry and projects into its own
     /// cache directory (`registry_tool.rs`).
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
         Ok(&node::registry_tool::NodeTool)
@@ -240,7 +240,7 @@ impl Tailor for Node {
         if inputs::needs_lock(project) {
             inputs::refuse_member_lock_generation(project)?;
         }
-        // A workspace whose members tog cannot name refuses here, before
+        // A workspace whose members ward cannot name refuses here, before
         // anything is realized: the closure writer would refuse it later.
         super::resolve::check_members_readable(project)
     }
@@ -309,10 +309,10 @@ impl Tailor for Node {
         };
         node::freshness::check_lock_freshness(project, &plan)?;
         // package.json is read through the held descriptor; a lock-only
-        // project has no "tog" config to read.
+        // project has no "greyward" config to read.
         let config = match project.read_input_string(Path::new("package.json"))? {
-            Some(pkg) => node::parse_tog_config(&pkg)?,
-            None => node::TogConfig::default(),
+            Some(pkg) => node::parse_greyward_config(&pkg)?,
+            None => node::GreywardConfig::default(),
         };
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
         // node-gyp runs on the helper Python selection when the project has
@@ -536,14 +536,18 @@ impl Tailor for Node {
             );
             // integrity is an SRI string (base64), not a hex digest;
             // recorded as a property rather than a malformed hash entry.
-            push_property(&mut c, "tog:integrity", &required(eco, &p, "integrity")?);
+            push_property(
+                &mut c,
+                "greyward:integrity",
+                &required(eco, &p, "integrity")?,
+            );
             // A `file:` directory package is packed from the project, not
             // fetched from the registry: a registry purl would name a
             // package that may exist there with other contents. Its
             // identity is its directory, and the integrity of the pack.
             if let Some(dir) = p["local"].as_str() {
                 c.as_object_mut().unwrap().remove("purl");
-                push_property(&mut c, "tog:local", dir);
+                push_property(&mut c, "greyward:local", dir);
             }
             out.push(c);
         }
@@ -577,7 +581,7 @@ fn closure_runtime(
     if closure["runtime_object"]["id"].as_str().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "node closure predates runtime recording; run `tog`",
+            "node closure predates runtime recording; run `ward`",
         ));
     }
     comforter::toolchain::runtime_object(store, activity, &closure, "bin/node")
@@ -610,11 +614,11 @@ pub(super) fn encoded_workspace(workspace: &str) -> Option<String> {
     Some(workspace.replace('%', "%25").replace('/', "%2F"))
 }
 
-/// A `node_modules` that exists but is not a symlink. tog only ever
+/// A `node_modules` that exists but is not a symlink. ward only ever
 /// projects a symlink, so a real directory here means an install tool
 /// (`npm install`, `yarn`, `pnpm`) ran and replaced the projection — the
 /// single most common way a synced project silently stops being synced.
-/// Named as its own detail so `tog status` says what happened rather than
+/// Named as its own detail so `ward status` says what happened rather than
 /// the generic "not the synced projection".
 fn replaced_by_a_real_directory(project: &ProjectRoot, node_modules: &Path) -> bool {
     project
@@ -630,7 +634,7 @@ fn held_link_target(project: &ProjectRoot, link: &Path) -> Option<PathBuf> {
 }
 
 /// The `State` detail for that case. Reads as one sentence inside the
-/// status line's "{what} is not the synced projection; run 'tog'".
+/// status line's "{what} is not the synced projection; run 'ward'".
 pub(crate) fn replaced_projection_detail(name: &str) -> String {
     format!("{name} (a real directory an install tool wrote over the projection)")
 }
@@ -732,7 +736,7 @@ fn typescript_runner(version: &str) -> Result<&'static [&'static str], String> {
         _ => Err(format!(
             "the project's Node is {version}, which cannot run TypeScript (Node strips types \
              from 22.6 on); raise the Node version the project asks for (its .node-version, \
-             package.json engines or similar), and if tog-toolchain.toml pins Node, run 'tog \
+             package.json engines or similar), and if greyward-toolchain.toml pins Node, run 'ward \
              update --toolchain node' to move that pin"
         )),
     }
@@ -798,7 +802,7 @@ mod tests {
             let why = typescript_runner(version).unwrap_err();
             assert!(why.contains(&format!("Node is {version}")), "{why}");
             assert!(why.contains(".node-version"), "{why}");
-            assert!(why.contains("tog update --toolchain node"), "{why}");
+            assert!(why.contains("ward update --toolchain node"), "{why}");
         }
     }
 
@@ -807,14 +811,14 @@ mod tests {
     impl Drop for StoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => std::env::set_var("TOG_STORE", value),
-                None => std::env::remove_var("TOG_STORE"),
+                Some(value) => std::env::set_var("GREYWARD_STORE", value),
+                None => std::env::remove_var("GREYWARD_STORE"),
             }
         }
     }
 
     fn write_closure(dir: &Path, body: Value) {
-        let closures = dir.join(".tog/closures");
+        let closures = dir.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::write(
             closures.join("node.json"),
@@ -866,7 +870,7 @@ mod tests {
         );
         assert_eq!(Path::new(&env["INIT_CWD"]), cwd);
 
-        // A name with no script, and a project tog has not projected, run
+        // A name with no script, and a project ward has not projected, run
         // nothing here.
         let missing = ["lint".to_string()];
         assert!(Node
@@ -922,8 +926,8 @@ mod tests {
         let forest = temp.0.join("forest");
         let outside = temp.0.join("outside/node_modules");
         fs::create_dir_all(project.join("packages/member")).unwrap();
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
-        fs::write(project.join(".tog/closures/node.json"), "{}").unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
+        fs::write(project.join(".greyward/closures/node.json"), "{}").unwrap();
         fs::create_dir_all(forest.join("node_modules")).unwrap();
         fs::create_dir_all(forest.join("workspaces/member/node_modules")).unwrap();
         fs::create_dir_all(&outside).unwrap();
@@ -951,11 +955,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new();
-        let old = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let old = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", temp.0.join("store"));
         let _guard = StoreEnv(old);
         let ctx = Context::open(Platform::host().unwrap()).unwrap();
-        for parent in [".tog", ".tog/closures"] {
+        for parent in [".greyward", ".greyward/closures"] {
             let dir = temp.0.join(parent.replace('/', "-"));
             let outside = temp.0.join(format!("outside-{}", parent.replace('/', "-")));
             fs::create_dir_all(&outside).unwrap();
@@ -981,13 +985,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new();
-        let old = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let old = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", temp.0.join("store"));
         let _guard = StoreEnv(old);
         let ctx = Context::open(Platform::host().unwrap()).unwrap();
         for ecosystem in ["go", "ruby", "elixir"] {
             let dir = temp.0.join(ecosystem);
-            fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+            fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
             let project = ProjectRoot::open(&dir).unwrap();
             let tailor = crate::tailors::by_id(ecosystem).unwrap();
             let mut command = Command::new("unused");
@@ -997,7 +1001,11 @@ mod tests {
                 .is_empty());
             assert_eq!(command.get_envs().count(), 0);
             for bytes in [b"{not JSON".as_slice(), b"\xff\xfe".as_slice()] {
-                fs::write(dir.join(format!(".tog/closures/{ecosystem}.json")), bytes).unwrap();
+                fs::write(
+                    dir.join(format!(".greyward/closures/{ecosystem}.json")),
+                    bytes,
+                )
+                .unwrap();
                 let mut command = Command::new("unused");
                 assert_eq!(
                     tailor
@@ -1028,8 +1036,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new();
-        let old = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let old = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", temp.0.join("store"));
         let _guard = StoreEnv(old);
         let ctx = Context::open(Platform::host().unwrap()).unwrap();
         let id = format!("{}-rust-1.96.1", "b".repeat(40));
@@ -1040,10 +1048,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         let dir = temp.0.join("project");
-        fs::create_dir_all(dir.join(".tog/cargo-home/bin")).unwrap();
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/cargo-home/bin")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         fs::write(
-            dir.join(".tog/closures/cargo.json"),
+            dir.join(".greyward/closures/cargo.json"),
             serde_json::to_vec(&json!({
                 "schema": "closure/1", "ecosystem": "cargo", "platform": ctx.platform.triple(),
                 "body": {"rust_object": {"id": id, "path": object}},
@@ -1056,7 +1064,7 @@ mod tests {
         fs::rename(&dir, &moved).unwrap();
         for replacement in [false, true] {
             if replacement {
-                fs::create_dir_all(dir.join(".tog/cargo-home")).unwrap();
+                fs::create_dir_all(dir.join(".greyward/cargo-home")).unwrap();
             }
             let mut command = Command::new("unused");
             let prefix = crate::tailors::by_id("cargo")
@@ -1065,7 +1073,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 prefix[0],
-                moved.join(".tog/cargo-home/bin").to_string_lossy()
+                moved.join(".greyward/cargo-home/bin").to_string_lossy()
             );
             let home = command
                 .get_envs()
@@ -1073,7 +1081,7 @@ mod tests {
                 .unwrap()
                 .1
                 .unwrap();
-            assert_eq!(Path::new(home), moved.join(".tog/cargo-home"));
+            assert_eq!(Path::new(home), moved.join(".greyward/cargo-home"));
         }
     }
 
@@ -1194,8 +1202,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = TempDir::new();
-        let old_store = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", temp.0.join("store"));
+        let old_store = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", temp.0.join("store"));
         let _store_env = StoreEnv(old_store);
         let store = Store::open().unwrap();
         let activity = &store
@@ -1232,7 +1240,7 @@ mod tests {
             closure_runtime(&store, activity, &ProjectRoot::open(&dir).unwrap()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "node closure predates runtime recording; run `tog`"
+            "node closure predates runtime recording; run `ward`"
         );
 
         // Leave the fixture removable.
@@ -1272,16 +1280,16 @@ mod tests {
         };
         let registry = out.iter().find(|c| c["name"] == "b").unwrap();
         assert_eq!(registry["purl"], "pkg:npm/b@1.0.0");
-        assert_eq!(property(registry, "tog:local"), None);
+        assert_eq!(property(registry, "greyward:local"), None);
         let local = out.iter().find(|c| c["name"] == "local").unwrap();
         assert!(local.get("purl").is_none(), "{local}");
         assert_eq!(local["version"], "2.1.0");
         assert_eq!(
-            property(local, "tog:local").as_deref(),
+            property(local, "greyward:local").as_deref(),
             Some("vendor/local")
         );
         assert_eq!(
-            property(local, "tog:integrity").as_deref(),
+            property(local, "greyward:integrity").as_deref(),
             Some("sha256-l")
         );
     }

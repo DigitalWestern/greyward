@@ -34,7 +34,7 @@
 # Linux OTP in src/tailors/elixir/catalog.toml needs glibc 2.43 (Fedora 44)
 # and ubuntu-22.04 has 2.35 (docs/human/LIMITATIONS.md "Unpinned host build
 # inputs"), so the `e2e` job skips its end-to-end test by name, the
-# `acceptance` job skips its step (TOG_ACCEPT_SKIP_ELIXIR), and the
+# `acceptance` job skips its step (GREYWARD_ACCEPT_SKIP_ELIXIR), and the
 # `elixir` job runs that test in a Fedora 44 container. An OTP built on an older baseline, which would end
 # the split, is #300.
 #
@@ -80,7 +80,7 @@ jobs:
           # tar extraction and downloads, the sandbox every build runs in,
           # the toolchain providers that extract real archives, the
           # catalogs that pin those archives, Cargo.lock (the decompression
-          # crates), and the heavy suite itself. The tailors and `tog
+          # crates), and the heavy suite itself. The tailors and `ward
           # self-update` extract too: each tailor keeps its archive, zip and
           # unzip calls in its own unpack.rs (or unpack/), which
           # tests/architecture.rs enforces against this regex, so those
@@ -181,7 +181,7 @@ jobs:
   # The ignored tests, in four shards on four runners at once: one runner
   # took about 50 minutes for them all. Within a shard, one test at a
   # time: tests that realize through a child hold
-  # supervise::SUPERVISION_TEST_LOCK, and tests that set TOG_STORE hold
+  # supervise::SUPERVISION_TEST_LOCK, and tests that set GREYWARD_STORE hold
   # store::STORE_ENV_LOCK. Separate runners share nothing, so the shards
   # need no lock between them. The lists are balanced on the 2026-10-03
   # green run's times (seconds per file in brackets).
@@ -213,7 +213,7 @@ jobs:
     timeout-minutes: 100
     env:
       # A sandbox check that cannot run fails instead of skipping.
-      TOG_SANDBOX_TESTS: required
+      GREYWARD_SANDBOX_TESTS: required
       # The test files each named shard runs. `other` runs every file in
       # tests/ not named here, so a new test file is never left out.
       # node: npm_scripts [538] npm_lock_import [10] electron_provision [4]
@@ -233,7 +233,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # zlib1g-dev is the host development package the Ruby host-fallback
       # test (tests/ruby_e2e.rs) builds a native gem against; without it
-      # that test has nothing to prove and fails under TOG_SANDBOX_TESTS.
+      # that test has nothing to prove and fails under GREYWARD_SANDBOX_TESTS.
       - name: Install the Linux sandbox and the host headers the suite needs
         run: sudo apt-get update && sudo apt-get install -y bubblewrap zlib1g-dev
       # One cache for the four shards and acceptance (#423). The key
@@ -243,15 +243,15 @@ jobs:
           shared-key: heavy
       - run: cargo build --locked
       # Every later step sees these. Scratch stores and toolchains go on
-      # the runner's disk rather than /tmp. TOG_STORE is the store for the
+      # the runner's disk rather than /tmp. GREYWARD_STORE is the store for the
       # native_libs suite, which opens it in-process and fails without it.
       # Most e2e suites make their own
       # store under TMPDIR. (Job-level `env` cannot read `runner.temp`.)
       - name: Scratch directory on the runner disk
         run: |
-          mkdir -p "$RUNNER_TEMP/tog/tmp"
-          echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
-          echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ward/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/ward/tmp" >> "$GITHUB_ENV"
+          echo "GREYWARD_STORE=$RUNNER_TEMP/ward/store" >> "$GITHUB_ENV"
       # --no-fail-fast so one red suite does not hide the ones after it.
       - name: Ignored end-to-end tests
         env:
@@ -291,7 +291,7 @@ jobs:
       # it. This shows how close a run came.
       - name: Disk after the run
         if: ${{ always() }}
-        run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/tog"/* 2>/dev/null || true
+        run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/ward"/* 2>/dev/null || true
 
   # tests/acceptance.sh, once, after every shard has finished. It runs
   # when a shard failed too, so one red suite does not hide the other.
@@ -311,9 +311,9 @@ jobs:
     # About 3 minutes on the runner (2026-10-03), plus the build.
     timeout-minutes: 60
     env:
-      TOG_SANDBOX_TESTS: required
+      GREYWARD_SANDBOX_TESTS: required
       # See the header: no Linux OTP runs on this glibc.
-      TOG_ACCEPT_SKIP_ELIXIR: "1"
+      GREYWARD_ACCEPT_SKIP_ELIXIR: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the Linux sandbox and the host headers the suite needs
@@ -326,14 +326,14 @@ jobs:
       - run: cargo build --locked
       - name: Scratch directory on the runner disk
         run: |
-          mkdir -p "$RUNNER_TEMP/tog/tmp"
-          echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
-          echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ward/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/ward/tmp" >> "$GITHUB_ENV"
+          echo "GREYWARD_STORE=$RUNNER_TEMP/ward/store" >> "$GITHUB_ENV"
       - name: Acceptance checklist
         run: bash tests/acceptance.sh
       - name: Disk after the run
         if: ${{ always() }}
-        run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/tog"/* 2>/dev/null || true
+        run: df -h "$RUNNER_TEMP" && du -sh "$RUNNER_TEMP/ward"/* 2>/dev/null || true
 
   # A PR the gate did not send to the whole suite, but which edits test
   # files: run the `#[ignore]` tests of just those files. Without this an
@@ -348,7 +348,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     env:
-      TOG_SANDBOX_TESTS: required
+      GREYWARD_SANDBOX_TESTS: required
       CHANGED: ${{ needs.gate.outputs.tests }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -376,9 +376,9 @@ jobs:
       - name: Scratch directory on the runner disk
         if: steps.pick.outputs.picked != ''
         run: |
-          mkdir -p "$RUNNER_TEMP/tog/tmp"
-          echo "TMPDIR=$RUNNER_TEMP/tog/tmp" >> "$GITHUB_ENV"
-          echo "TOG_STORE=$RUNNER_TEMP/tog/store" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ward/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/ward/tmp" >> "$GITHUB_ENV"
+          echo "GREYWARD_STORE=$RUNNER_TEMP/ward/store" >> "$GITHUB_ENV"
       # Every picked file runs even after one fails, like --no-fail-fast.
       # Elixir is skipped by name here for the reason in the header; the
       # `elixir` job runs it when tests/elixir_e2e.rs is among the files.
@@ -417,7 +417,7 @@ jobs:
     timeout-minutes: 90
     steps:
       # git first, so checkout clones rather than downloading an archive.
-      # The image is minimal: tar and the decompressors tog and the cache
+      # The image is minimal: tar and the decompressors ward and the cache
       # action call are not in it.
       - name: Install the compiler, the sandbox and the host tools
         run: dnf install -y gcc git tar gzip xz bzip2 unzip zstd findutils util-linux jq bubblewrap rustup
@@ -444,11 +444,11 @@ jobs:
             | jq -r 'select(.executable != null and (.target.kind | index("lib"))) | .executable')
           test -x "$libexe"
           useradd --create-home tester
-          scratch="$RUNNER_TEMP/tog-elixir"
+          scratch="$RUNNER_TEMP/ward-elixir"
           mkdir -p "$scratch"
           chown tester: "$scratch"
           runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
-            TOG_SANDBOX_TESTS=required "$exe" --ignored --test-threads=1
+            GREYWARD_SANDBOX_TESTS=required "$exe" --ignored --test-threads=1
           runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
-            TOG_SANDBOX_TESTS=required "$libexe" tailors::elixir::resolve::tests \
+            GREYWARD_SANDBOX_TESTS=required "$libexe" tailors::elixir::resolve::tests \
             --ignored --test-threads=2

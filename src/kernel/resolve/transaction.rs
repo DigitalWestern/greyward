@@ -8,11 +8,11 @@
 //!    then the receipt) is opened without following a symlink through the
 //!    held project directory. Its bytes are copied into an immutable store
 //!    object (the *originals*), rooted in the project's root record so
-//!    `tog gc` cannot collect it while a publication may still need it, and
+//!    `ward gc` cannot collect it while a publication may still need it, and
 //!    its sha256 becomes the pre-run digest. A target that does not exist
 //!    is recorded as `absent`.
-//!    A journal at `.tog/journal/<ecosystem>.json` (under `.tog/`, which
-//!    projects do not commit, and outside `.tog/resolution/`, which they
+//!    A journal at `.greyward/journal/<ecosystem>.json` (under `.greyward/`, which
+//!    projects do not commit, and outside `.greyward/resolution/`, which they
 //!    do) names the originals object before it is rooted, so a process
 //!    killed while the tool runs leaves nothing rooted that recovery cannot
 //!    find and release.
@@ -49,7 +49,7 @@
 //! gone the journal must name this store as the one that wrote it.
 //! Anything else is refused with the journal's path, and nothing is
 //! touched. Every holder of a project's journal also holds an `flock` on
-//! the project directory itself, so two tog processes using different
+//! the project directory itself, so two ward processes using different
 //! stores cannot undo each other's publication. Both decide by
 //! content: a target at its new digest is restored (by exchanging the
 //! displaced original back, or from the originals object), a target at its
@@ -81,10 +81,10 @@ use recovery::{
 pub use recovery::{has_pending_journal, recover_project};
 
 /// The project directory holding receipts.
-pub const RESOLUTION_DIR: &str = ".tog/resolution";
-/// The project directory holding publication journals: under `.tog/`, but
-/// not under `.tog/resolution/`, which projects commit.
-pub const JOURNAL_DIR: &str = ".tog/journal";
+pub const RESOLUTION_DIR: &str = ".greyward/resolution";
+/// The project directory holding publication journals: under `.greyward/`, but
+/// not under `.greyward/resolution/`, which projects commit.
+pub const JOURNAL_DIR: &str = ".greyward/journal";
 const JOURNAL_SCHEMA: &str = "resolution-journal/1";
 const ORIGINALS_KIND: &str = "resolution-originals";
 const ORIGINALS_SCHEMA: &str = "resolution-originals/1";
@@ -150,7 +150,7 @@ pub struct Transaction<'a> {
     targets: Vec<Held>,
     /// The originals object, named in the journal before it is rooted.
     originals: String,
-    /// `.tog` and `.tog/journal`, when this transaction created them.
+    /// `.greyward` and `.greyward/journal`, when this transaction created them.
     created_at_hold: Vec<String>,
     finished: bool,
 }
@@ -203,11 +203,11 @@ impl<'a> Transaction<'a> {
         let mut relatives: Vec<(PathBuf, bool)> = Vec::new();
         for output in spec.outputs {
             check_target(output)?;
-            if output.starts_with(".tog") {
+            if output.starts_with(".greyward") {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "{} is tog's own state, never a declared output",
+                        "{} is ward's own state, never a declared output",
                         output.display()
                     ),
                 ));
@@ -438,7 +438,7 @@ impl<'a> Transaction<'a> {
                                 format!(
                                     "{error}; the partial publication was undone, but \
                                      cleaning up after it failed ({cleanup}), so the journal \
-                                     {} was kept and the next tog command in this project \
+                                     {} was kept and the next ward command in this project \
                                      will finish it",
                                     self.root
                                         .path()
@@ -458,7 +458,7 @@ impl<'a> Transaction<'a> {
                             format!(
                                 "{error}; undoing the partial publication also failed \
                                  ({undo_error}), so the journal {} was kept and the next \
-                                 tog command in this project will finish undoing it",
+                                 ward command in this project will finish undoing it",
                                 self.root
                                     .path()
                                     .join(JOURNAL_DIR)
@@ -546,7 +546,7 @@ impl<'a> Transaction<'a> {
         Ok(plan)
     }
 
-    /// Create every missing parent of a planned target (`.tog/resolution`
+    /// Create every missing parent of a planned target (`.greyward/resolution`
     /// for the receipt), returning the directories created (outermost
     /// first).
     fn prepare_dirs(&self, plan: &[Planned]) -> io::Result<Vec<PathBuf>> {
@@ -804,7 +804,7 @@ fn read_journal(journals: &ProjectRoot, name: &str) -> io::Result<Journal> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "the resolution journal {} is {why}, so tog will not act on it. If no tog \
+                "the resolution journal {} is {why}, so ward will not act on it. If no ward \
                  command was interrupted in this project, delete {}; otherwise inspect the \
                  files it names first",
                 shown.display(),
@@ -905,7 +905,7 @@ fn path_text(path: &Path) -> io::Result<&str> {
     path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{} is not UTF-8; tog cannot journal it", path.display()),
+            format!("{} is not UTF-8; ward cannot journal it", path.display()),
         )
     })
 }
@@ -918,7 +918,7 @@ fn file_name(path: &Path) -> &OsStr {
 fn temp_beside(relative: &Path) -> io::Result<PathBuf> {
     let name = file_name(relative).to_string_lossy();
     let temp = format!(
-        ".{name}.tog-{}.tmp",
+        ".{name}.greyward-{}.tmp",
         hex::encode(crate::kernel::fsroot::urandom_bytes(8)?)
     );
     Ok(relative.with_file_name(temp))
@@ -1362,7 +1362,10 @@ mod tests {
     fn assert_original(fx: &Fixture, receipt: Option<&[u8]>) {
         assert_eq!(read(fx, "package.json").as_deref(), Some(OLD_MANIFEST));
         assert_eq!(read(fx, "package-lock.json"), None);
-        assert_eq!(read(fx, ".tog/resolution/npm.json").as_deref(), receipt);
+        assert_eq!(
+            read(fx, ".greyward/resolution/npm.json").as_deref(),
+            receipt
+        );
         assert_clean(fx);
     }
 
@@ -1370,7 +1373,7 @@ mod tests {
         assert_eq!(read(fx, "package.json").as_deref(), Some(NEW_MANIFEST));
         assert_eq!(read(fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
         assert_eq!(
-            read(fx, ".tog/resolution/npm.json").as_deref(),
+            read(fx, ".greyward/resolution/npm.json").as_deref(),
             Some(NEW_RECEIPT)
         );
         assert_clean(fx);
@@ -1449,7 +1452,7 @@ mod tests {
         assert_eq!(read(&fx, "package.json").as_deref(), Some(USER_EDIT));
         assert_eq!(read(&fx, "package-lock.json"), None);
         assert_eq!(
-            read(&fx, ".tog/resolution/npm.json").as_deref(),
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
             Some(OLD_RECEIPT)
         );
         assert_clean(&fx);
@@ -1478,7 +1481,7 @@ mod tests {
         assert_clean(&fx);
     }
 
-    /// Another `tog attest` rewrites the receipt while the door runs: the
+    /// Another `ward attest` rewrites the receipt while the door runs: the
     /// receipt swap catches it, and every output is undone.
     #[test]
     fn concurrent_receipt_edit_fails_and_undoes_every_output() {
@@ -1499,7 +1502,7 @@ mod tests {
         assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
         assert_eq!(read(&fx, "package-lock.json"), None);
         assert_eq!(
-            read(&fx, ".tog/resolution/npm.json").as_deref(),
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
             Some(USER_EDIT)
         );
         assert_clean(&fx);
@@ -1521,7 +1524,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("appeared"), "{error}");
         assert_eq!(
-            read(&fx, ".tog/resolution/npm.json").as_deref(),
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
             Some(USER_EDIT)
         );
         assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
@@ -1623,10 +1626,10 @@ mod tests {
         }
     }
 
-    /// A failed first publication takes back the `.tog/resolution` it
+    /// A failed first publication takes back the `.greyward/resolution` it
     /// created, after a crash as well as on the spot.
     #[test]
-    fn a_failed_first_publication_leaves_no_tog_directory() {
+    fn a_failed_first_publication_leaves_no_ward_directory() {
         for fault in [Fault::Fail, Fault::Crash] {
             let fx = fixture("first-fail", false);
             let _ = run_door(
@@ -1643,7 +1646,7 @@ mod tests {
             if fault == Fault::Crash {
                 recover(&fx);
             }
-            assert!(!fx.project.join(".tog").exists(), "{fault:?}");
+            assert!(!fx.project.join(".greyward").exists(), "{fault:?}");
             assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
             assert_clean(&fx);
         }
@@ -1784,7 +1787,7 @@ mod tests {
         assert_eq!(read(&fx, "package.json").as_deref(), Some(USER_EDIT));
         assert_eq!(read(&fx, "package-lock.json"), None);
         assert_eq!(
-            read(&fx, ".tog/resolution/npm.json").as_deref(),
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
             Some(OLD_RECEIPT)
         );
         assert_clean(&fx);
@@ -1901,8 +1904,8 @@ mod tests {
         recover_project(&fx.store, &activity, &fx.project).unwrap_err()
     }
 
-    /// The journal lives under `.tog/journal/`, never in
-    /// `.tog/resolution/`, which projects commit.
+    /// The journal lives under `.greyward/journal/`, never in
+    /// `.greyward/resolution/`, which projects commit.
     #[test]
     fn the_journal_is_outside_the_committed_resolution_directory() {
         let fx = fixture("journal-place", true);
@@ -1924,7 +1927,7 @@ mod tests {
         for forged in [
             "victim.txt",
             "../victim.txt",
-            ".victim.txt.tog-0123456789abcdef.tmp",
+            ".victim.txt.greyward-0123456789abcdef.tmp",
         ] {
             edit_journal(&fx, |journal| {
                 journal["targets"][0]["temp"] = forged.into();
@@ -1935,7 +1938,7 @@ mod tests {
                 "{forged}: {error}"
             );
             assert!(
-                error.to_string().contains(".tog/journal/npm.json"),
+                error.to_string().contains(".greyward/journal/npm.json"),
                 "{error}"
             );
             assert_eq!(read(&fx, "victim.txt").as_deref(), Some(&b"mine\n"[..]));
@@ -2096,7 +2099,7 @@ mod tests {
         }
     }
 
-    /// `tog gc` collecting an unrooted originals object.
+    /// `ward gc` collecting an unrooted originals object.
     fn collect_originals(fx: &Fixture, id: &str) {
         store::remove_tree(&fx.store.object_path(id)).unwrap();
         let _ = fs::remove_file(fx.store.root.join("meta").join(format!("{id}.json")));
@@ -2133,7 +2136,7 @@ mod tests {
 
     /// Killed after the release and before the journal was deleted: the
     /// finished journal is trusted without its originals rooted, even
-    /// once `tog gc` has collected them, and recovery deletes it.
+    /// once `ward gc` has collected them, and recovery deletes it.
     #[test]
     fn a_crash_after_the_release_is_finished_by_recovery() {
         for collected in [false, true] {
@@ -2230,7 +2233,7 @@ mod tests {
             edit_journal(&fx, |journal| journal["state"] = state.into());
             let error = recover_err(&elsewhere).to_string();
             assert!(error.contains("not in this store"), "{state}: {error}");
-            assert!(error.contains("TOG_STORE"), "{state}: {error}");
+            assert!(error.contains("GREYWARD_STORE"), "{state}: {error}");
             assert!(journal_path(&fx).is_file(), "{state}");
         }
         // A finished journal naming no store is refused too.
@@ -2393,7 +2396,7 @@ mod tests {
     }
 
     /// The project directory's own lock is held from hold to publish, so a
-    /// tog using another store cannot recover (or publish) meanwhile.
+    /// ward using another store cannot recover (or publish) meanwhile.
     #[test]
     fn a_transaction_holds_the_project_directory_lock() {
         let fx = fixture("dir-lock", true);

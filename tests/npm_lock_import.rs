@@ -5,12 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use greyward::kernel::platform::Platform;
 use sha2::{Digest, Sha256};
-use tog::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, text, tog, warm_store, TempDir};
+use common::{assert_ok, command, copy_tree, fixture, text, ward, warm_store, TempDir};
 
 /// The binary with its `TMPDIR` inside the scratch home, so whatever a
 /// sync stages there is removed with the scratch directory.
@@ -22,7 +22,7 @@ fn run(cwd: &Path, home: &Path, store: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// A Node project below a directory tog may search but not list (mode
+/// A Node project below a directory ward may search but not list (mode
 /// 0111) syncs and runs: every ancestor walk steps through that directory
 /// by descriptor instead of listing it (#480, #527).
 #[test]
@@ -79,7 +79,7 @@ fn pnpm_and_yarn_lockfiles_import_end_to_end() {
 
         let synced = run(&project, scratch, &store, &["sync"]);
         assert_ok(synced, &format!("sync {fixture}"));
-        let closure = fs::read_to_string(project.join(".tog/closures/node.json")).unwrap();
+        let closure = fs::read_to_string(project.join(".greyward/closures/node.json")).unwrap();
         let expected_source = if fixture == "proj-yarn1" {
             "yarn.lock"
         } else {
@@ -197,7 +197,7 @@ const SRI: &str =
     "sha512-m3HSJL1i83hdltRq0+o9czGb+8KJDKra4t/3JRXMui/CET1IEDrHK6nHYbdEaGL/uhPMbuF3AGkGxXTVpn3ETw==";
 
 fn node_version() -> &'static str {
-    tog::tailors::node::node_pin(Platform::X86_64UnknownLinuxGnu)
+    greyward::tailors::node::node_pin(Platform::X86_64UnknownLinuxGnu)
         .unwrap()
         .version
 }
@@ -257,10 +257,10 @@ snapshots:
   b@1.0.0: {{}}
 "#
     );
-    let plan = tog::tailors::node::lock_import::plan_pnpm(
+    let plan = greyward::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         &lock,
-        &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+        &greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
         node_version(),
     )
     .unwrap();
@@ -317,17 +317,17 @@ fn plan_local(
     name: &str,
     dirs: &[&str],
     lock: &str,
-) -> std::io::Result<tog::tailors::node::NpmPlan> {
+) -> std::io::Result<greyward::tailors::node::NpmPlan> {
     let temp = TempDir::new(name);
     let dir = temp.path();
     for sub in dirs {
         package_dir(&dir.join(sub));
     }
 
-    tog::tailors::node::lock_import::plan_pnpm(
+    greyward::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         lock,
-        &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+        &greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
         node_version(),
     )
 }
@@ -608,10 +608,10 @@ snapshots:
         )
     };
     let plan_for = |lock: &str| {
-        tog::tailors::node::lock_import::plan_pnpm(
+        greyward::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+            &greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
             node_version(),
         )
     };
@@ -669,10 +669,10 @@ snapshots:
         )
     };
     let plan_for = |lock: &str| {
-        tog::tailors::node::lock_import::plan_pnpm(
+        greyward::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+            &greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
             node_version(),
         )
     };
@@ -765,10 +765,10 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
     let rough = write_patch(dir, "roughjs.patch", b"diff --git a/rough.js b/rough.js\n");
     let rough_exact = write_patch(dir, "roughjs@4.6.6.patch", b"diff --git a/exact b/exact\n");
     let plan_for = |lock: &str| {
-        tog::tailors::node::lock_import::plan_pnpm(
+        greyward::tailors::node::lock_import::plan_pnpm(
             Platform::X86_64UnknownLinuxGnu,
             lock,
-            &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+            &greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
             node_version(),
         )
     };
@@ -802,8 +802,8 @@ fn pnpm_bare_name_and_range_patches_apply_where_pnpm_applied_them() {
         b"diff --git a/fastdom.js b/fastdom.js\n",
     );
 
-    // A snapshot that records a different patch than tog would select is a
-    // lock tog cannot honor faithfully.
+    // A snapshot that records a different patch than ward would select is a
+    // lock ward cannot honor faithfully.
     let other = "0".repeat(64);
     let error = plan_for(&patched_lock(&fastdom, &rough, &rough_exact, &other)).unwrap_err();
     assert!(
@@ -858,7 +858,7 @@ fn plan_refuses_a_lock_that_disagrees_with_package_json() {
         ("proj-yarn1", "package.json", "yarn.lock"),
     ] {
         let project = fixture_with_added_dependency(name, manifest);
-        let out = tog(project.path(), home.path(), &["plan"]);
+        let out = ward(project.path(), home.path(), &["plan"]);
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(4), "{name}: {stderr}");
         assert!(
@@ -885,7 +885,7 @@ fn yarn_manifest_additions_and_removals_report_stale_in_json() {
         }
         let manifest = fs::read(project.path().join("package.json")).unwrap();
         let lock = fs::read(project.path().join("yarn.lock")).unwrap();
-        let out = tog(project.path(), home.path(), &["plan", "--json"]);
+        let out = ward(project.path(), home.path(), &["plan", "--json"]);
         let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
             .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
         assert_eq!(out.status.code(), Some(4), "{failure}");
@@ -904,9 +904,11 @@ fn yarn_manifest_additions_and_removals_report_stale_in_json() {
             manifest
         );
         assert_eq!(fs::read(project.path().join("yarn.lock")).unwrap(), lock);
-        assert!(!project.path().join("tog-toolchain.toml").exists());
+        assert!(!project.path().join("greyward-toolchain.toml").exists());
         assert_eq!(
-            fs::read_dir(project.path().join(".tog")).unwrap().count(),
+            fs::read_dir(project.path().join(".greyward"))
+                .unwrap()
+                .count(),
             0
         );
     }
@@ -938,7 +940,7 @@ fn plan_refuses_an_npm_lock_that_disagrees_with_a_workspace_member() {
             "node_modules/lib":{"resolved":"packages/lib","link":true}}}"#,
     )
     .unwrap();
-    let out = tog(dir, home.path(), &["plan"]);
+    let out = ward(dir, home.path(), &["plan"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(
@@ -947,7 +949,7 @@ fn plan_refuses_an_npm_lock_that_disagrees_with_a_workspace_member() {
     );
 }
 
-/// A package.json tog cannot read or parse is an error naming it, never a
+/// A package.json ward cannot read or parse is an error naming it, never a
 /// plan made without it.
 #[test]
 fn plan_names_a_package_json_it_cannot_read() {
@@ -963,7 +965,7 @@ fn plan_names_a_package_json_it_cannot_read() {
             let project = TempDir::boundary(&format!("stale-{name}"));
             copy_tree(&fixture(name), project.path());
             fs::write(project.path().join("package.json"), contents).unwrap();
-            let out = tog(project.path(), home.path(), &["plan"]);
+            let out = ward(project.path(), home.path(), &["plan"]);
             let stderr = text(&out.stderr);
             assert_eq!(out.status.code(), Some(1), "{name}: {stderr}");
             assert!(stderr.contains(expected), "{name}: {stderr}");
@@ -979,7 +981,7 @@ fn plan_yarn_workspace(
     version: &str,
     field: &str,
     spec: &str,
-) -> std::io::Result<tog::tailors::node::NpmPlan> {
+) -> std::io::Result<greyward::tailors::node::NpmPlan> {
     let temp = TempDir::new("yarn-ws-range");
     let dir = temp.path();
     fs::create_dir_all(dir.join("packages/lib")).unwrap();
@@ -996,11 +998,11 @@ fn plan_yarn_workspace(
         serde_json::json!({"name": "lib", "version": version}).to_string(),
     )
     .unwrap();
-    tog::tailors::node::lock_import::plan_yarn(
+    greyward::tailors::node::lock_import::plan_yarn(
         Platform::X86_64UnknownLinuxGnu,
         "# yarn lockfile v1\n",
         &root,
-        &tog::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
+        &greyward::kernel::fsroot::ProjectRoot::open(dir).unwrap(),
         node_version(),
     )
 }
@@ -1076,21 +1078,21 @@ fn yarn_workspace_ranges_that_miss_the_member_do_not_link_it() {
     );
 }
 /// A lock `pnpm self-update` wrote holds two documents: a prelude for pnpm
-/// itself, then the project's lock. Workspace membership (read by `tog
+/// itself, then the project's lock. Workspace membership (read by `ward
 /// add`), the manifest check and the plan all read the project's.
 #[test]
 fn every_pnpm_reader_takes_the_project_document_of_a_two_document_lock() {
     let lock = fs::read_to_string(fixture("proj-pnpm-prelude").join("pnpm-lock.yaml")).unwrap();
     assert_eq!(
-        tog::tailors::node::lock_import::pnpm_lock_importers(&lock).unwrap(),
+        greyward::tailors::node::lock_import::pnpm_lock_importers(&lock).unwrap(),
         vec![".".to_string()]
     );
     let project = TempDir::boundary("pnpm-prelude");
     copy_tree(&fixture("proj-pnpm-prelude"), project.path());
-    let plan = tog::tailors::node::lock_import::plan_pnpm(
+    let plan = greyward::tailors::node::lock_import::plan_pnpm(
         Platform::X86_64UnknownLinuxGnu,
         &lock,
-        &tog::kernel::fsroot::ProjectRoot::open(project.path()).unwrap(),
+        &greyward::kernel::fsroot::ProjectRoot::open(project.path()).unwrap(),
         node_version(),
     )
     .unwrap();
@@ -1104,7 +1106,7 @@ fn every_pnpm_reader_takes_the_project_document_of_a_two_document_lock() {
 
     let home = TempDir::new("prelude-home");
     let stale = fixture_with_added_dependency("proj-pnpm-prelude", "package.json");
-    let out = tog(stale.path(), home.path(), &["plan"]);
+    let out = ward(stale.path(), home.path(), &["plan"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(4), "{stderr}");
     assert!(

@@ -1,8 +1,8 @@
-//! The body of `tog __resolution-relay`: the first process inside the
+//! The body of `ward __resolution-relay`: the first process inside the
 //! resolution door's sandbox (kernel layer).
 //!
-//! bubblewrap starts it as `/run/tog/tog __resolution-relay [--exec-log-fd
-//! <n>] /run/tog/proxy.sock 127.0.0.1:8119 -- <tool argv>` in a fresh
+//! bubblewrap starts it as `/run/ward/ward __resolution-relay [--exec-log-fd
+//! <n>] /run/ward/proxy.sock 127.0.0.1:8119 -- <tool argv>` in a fresh
 //! network and PID namespace. It is the only way out of that namespace:
 //!
 //! 1. It makes itself non-dumpable, so nothing of the same user can trace
@@ -38,12 +38,12 @@ use std::path::PathBuf;
 /// so every proxy URL a tool is given is the same from run to run.
 pub const LISTEN_ADDRESS: &str = "127.0.0.1:8119";
 /// Where the proxy's Unix socket is bound inside the sandbox.
-pub const PROXY_SOCKET: &str = "/run/tog/proxy.sock";
-/// Where the running tog executable is bound inside the sandbox.
-pub const TOG_EXECUTABLE: &str = "/run/tog/tog";
+pub const PROXY_SOCKET: &str = "/run/ward/proxy.sock";
+/// Where the running ward executable is bound inside the sandbox.
+pub const GREYWARD_EXECUTABLE: &str = "/run/ward/ward";
 /// Where an intercepting door binds the proxy's CA certificate (read-only)
 /// inside the sandbox: the file the tool is told to trust.
-pub const CA_FILE: &str = "/run/tog/ca.pem";
+pub const CA_FILE: &str = "/run/ward/ca.pem";
 /// The hidden verb.
 pub const VERB: &str = "__resolution-relay";
 /// The descriptor number the exec log arrives on inside the sandbox.
@@ -80,7 +80,7 @@ pub enum ToolStatus {
 }
 
 impl ToolStatus {
-    /// The exit code tog uses for a child everywhere: its code, or 128 + n
+    /// The exit code ward uses for a child everywhere: its code, or 128 + n
     /// for a signal `n`.
     pub fn exit_code(self) -> i32 {
         match self {
@@ -292,7 +292,7 @@ mod linux {
             Ok(RelayLog(Arc::new(Mutex::new(file))))
         }
 
-        /// Append one record. A failed write is dropped: tog has gone away,
+        /// Append one record. A failed write is dropped: ward has gone away,
         /// and the tool's outcome no longer has a reader.
         fn write(&self, record: &RelayRecord) {
             let Ok(mut line) = serde_json::to_vec(record) else {
@@ -380,7 +380,7 @@ mod linux {
 
     /// The proxy's socket, held open (`O_PATH`) from before the tool
     /// starts. Every connection goes through the held descriptor, so a
-    /// tool that renamed `/run/tog` or planted a symlink there could not
+    /// tool that renamed `/run/ward` or planted a symlink there could not
     /// steer the unfiltered relay at another socket.
     pub(super) struct ProxySocket {
         _held: OwnedFd,
@@ -492,7 +492,7 @@ mod linux {
         unsafe {
             command.pre_exec(move || {
                 // A fresh anonymous session keyring: the tool does not
-                // possess the one tog was started with. The filter then
+                // possess the one ward was started with. The filter then
                 // refuses every keyring call.
                 if libc::syscall(
                     libc::SYS_keyctl,
@@ -674,7 +674,8 @@ mod linux {
         fn the_proxy_socket_is_the_one_held_at_start() {
             let dir = crate::kernel::testutil::TempDir::named("relay-held");
             // A short path: sun_path is 108 bytes.
-            let short = std::path::PathBuf::from(format!("/tmp/tog-held-{}", std::process::id()));
+            let short =
+                std::path::PathBuf::from(format!("/tmp/greyward-held-{}", std::process::id()));
             let _ = std::fs::remove_file(&short);
             std::os::unix::fs::symlink(&dir.0, &short).unwrap();
             let real = std::os::unix::net::UnixListener::bind(short.join("p.sock")).unwrap();
@@ -757,7 +758,7 @@ mod tests {
     fn relay_arguments_are_checked() {
         let argv = vec!["/bin/true".to_string()];
         let parsed = parse_args(
-            "/run/tog/proxy.sock",
+            "/run/ward/proxy.sock",
             LISTEN_ADDRESS,
             Some(3),
             Some(4),

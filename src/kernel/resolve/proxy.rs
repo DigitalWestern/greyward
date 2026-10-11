@@ -1,12 +1,12 @@
 //! The proxy server: listeners, the worker pool, and the two dialects a
 //! tool speaks to it.
 //!
-//! One proxy per tog process ([`proxy`]), started on the first door. It
+//! One proxy per ward process ([`proxy`]), started on the first door. It
 //! owns the upstream client (one connection pool, the validating resolver)
 //! and a pool of at most 64 connection threads shared by every session.
 //! A listener takes a pool slot before it accepts, so a connection beyond
 //! the pool waits in the kernel's accept backlog instead of being refused
-//! (uv opens up to 50 downloads at once). Threads, not async: tog has no
+//! (uv opens up to 50 downloads at once). Threads, not async: ward has no
 //! async runtime.
 //!
 //! Sessions ([`Session`]) are per door run. Each has its own listeners,
@@ -261,7 +261,7 @@ impl Session {
         let thread = {
             let stop = stop.clone();
             std::thread::Builder::new()
-                .name("tog-proxy-accept".into())
+                .name("greyward-proxy-accept".into())
                 .spawn(move || accept_loop(listener, &stop, &context))?
         };
         self.listeners.push(Listening {
@@ -708,7 +708,7 @@ pub(super) fn next_request<T: Transport>(
     context.state.note_refusal(error.to_string());
     let mut headers = Headers::new();
     headers.set("Content-Type", "text/plain; charset=utf-8");
-    let body = format!("tog: {}\n", context.state.clean(&error.to_string()));
+    let body = format!("ward: {}\n", context.state.clean(&error.to_string()));
     let _ = http::write_response(
         reader.get_mut(),
         status,
@@ -811,7 +811,7 @@ fn authenticated(state: &State, headers: &Headers) -> bool {
 
 fn proxy_auth_challenge() -> Headers {
     let mut headers = Headers::new();
-    headers.set("Proxy-Authenticate", "Basic realm=\"tog\"");
+    headers.set("Proxy-Authenticate", "Basic realm=\"greyward\"");
     headers
 }
 
@@ -1119,7 +1119,7 @@ impl Pool {
         if state.jobs.len() > state.idle && state.spawned < self.max {
             let pool = self.clone();
             let spawned = std::thread::Builder::new()
-                .name("tog-proxy".into())
+                .name("greyward-proxy".into())
                 .spawn(move || pool.work());
             match spawned {
                 Ok(_) => state.spawned += 1,
@@ -1216,7 +1216,7 @@ mod tests {
         assert_eq!(bare.status, 407);
         assert_eq!(
             bare.headers.get("proxy-authenticate"),
-            Some("Basic realm=\"tog\"")
+            Some("Basic realm=\"greyward\"")
         );
         assert_eq!(
             connect(&first, "registry.npmjs.org:443", Some(second.token())).status,
@@ -1333,7 +1333,7 @@ mod tests {
         );
         let body = refused.text();
         assert!(
-            body.starts_with("tog: refused CONNECT evil.example:443"),
+            body.starts_with("ward: refused CONNECT evil.example:443"),
             "{body}"
         );
         assert!(

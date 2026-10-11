@@ -1,4 +1,4 @@
-//! `tog env`: the environment `tog run` gives a child, printed as lines a
+//! `ward env`: the environment `ward run` gives a child, printed as lines a
 //! shell can eval.
 //!
 //! Nothing here decides what a projection contributes — `shared::projected_env`
@@ -37,7 +37,7 @@ pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32>
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "no environment projected here, and no manifest to sync one from in {} (see 'tog \
+                "no environment projected here, and no manifest to sync one from in {} (see 'ward \
                  help inputs')",
                 dir.display()
             ),
@@ -48,12 +48,12 @@ pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32>
 }
 
 /// The variables the tailors set on `carrier`, in the order `Command`
-/// keeps them (sorted by name), so two runs of `tog env` over the same
+/// keeps them (sorted by name), so two runs of `ward env` over the same
 /// projection print the same bytes.
 ///
 /// PATH is dropped: it is printed from the prefix list instead, and `run`
 /// likewise overwrites whatever a tailor put there. A name or value that is
-/// not UTF-8 is dropped too — nothing tog sets is, and a lossy replacement
+/// not UTF-8 is dropped too — nothing ward sets is, and a lossy replacement
 /// character would have the shell export a value that is not the one asked
 /// for.
 fn variables(carrier: &std::process::Command) -> Vec<Variable> {
@@ -71,7 +71,7 @@ fn variables(carrier: &std::process::Command) -> Vec<Variable> {
 }
 
 /// The shell to print for when `--shell` did not say: what `$SHELL` names
-/// when tog speaks it, bash otherwise. bash is the default because its
+/// when ward speaks it, bash otherwise. bash is the default because its
 /// syntax is also what sh, dash and ksh read, so an unknown shell gets the
 /// form most likely to work rather than a refusal.
 fn shell_from_environment() -> Shell {
@@ -87,7 +87,7 @@ fn shell_from_environment() -> Shell {
 ///
 /// The inherited PATH is referenced rather than expanded (`"$PATH"`,
 /// `$PATH`), so the output does not freeze the PATH of the shell that ran
-/// `tog env` into the shell that evals it.
+/// `ward env` into the shell that evals it.
 fn render(shell: Shell, prefix: &[String], variables: &[Variable]) -> String {
     let mut out = String::new();
     let quote = |value: &str| quoted(shell, value);
@@ -119,7 +119,7 @@ fn render(shell: Shell, prefix: &[String], variables: &[Variable]) -> String {
 }
 
 /// A value as one shell word. Always quoted, even when nothing in it needs
-/// it: what a store path or a project path contains is not tog's to
+/// it: what a store path or a project path contains is not ward's to
 /// predict, and a quoting rule that only sometimes applies is a rule that
 /// eventually gets it wrong.
 ///
@@ -155,7 +155,7 @@ mod tests {
                 variable("VIRTUAL_ENV", Some("/proj/.venv")),
                 variable("PYTHONDONTWRITEBYTECODE", Some("1")),
                 // A path a person chose, with a quote in it.
-                variable("CARGO_HOME", Some("/it's/here/.tog/cargo-home")),
+                variable("CARGO_HOME", Some("/it's/here/.greyward/cargo-home")),
                 // A variable the projection removes.
                 variable("RUSTUP_TOOLCHAIN", None),
             ],
@@ -170,7 +170,7 @@ mod tests {
             "export PATH='/proj/.venv/bin:/store/objects/abc-node/bin':\"$PATH\"\n\
              export VIRTUAL_ENV='/proj/.venv'\n\
              export PYTHONDONTWRITEBYTECODE='1'\n\
-             export CARGO_HOME='/it'\\''s/here/.tog/cargo-home'\n\
+             export CARGO_HOME='/it'\\''s/here/.greyward/cargo-home'\n\
              unset RUSTUP_TOOLCHAIN\n"
         );
         // bash and zsh are the same POSIX sh syntax.
@@ -188,7 +188,7 @@ mod tests {
             "set -gx PATH '/proj/.venv/bin' '/store/objects/abc-node/bin' $PATH\n\
              set -gx VIRTUAL_ENV '/proj/.venv'\n\
              set -gx PYTHONDONTWRITEBYTECODE '1'\n\
-             set -gx CARGO_HOME '/it\\'s/here/.tog/cargo-home'\n\
+             set -gx CARGO_HOME '/it\\'s/here/.greyward/cargo-home'\n\
              set -e RUSTUP_TOOLCHAIN\n"
         );
         // A backslash is an escape inside fish's single quotes and nothing

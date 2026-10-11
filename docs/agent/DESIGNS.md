@@ -25,7 +25,7 @@ Flat paths map to folders: `src/python.rs`, `src/pyselect.rs`, `src/pypi.rs`,
 `src/project.rs` → `src/comforter/`; `src/main.rs`, `src/inspect.rs`,
 `src/deps.rs`, `src/xrun.rs` → `src/commands/`; `src/cli.rs` → `src/cli/`.
 Line numbers are stale; search for the symbol. "WP1…WP5" are the old plan's
-work-package names (WP1 is `tog fmt`, shipped) and "GC Package A–D"
+work-package names (WP1 is `ward fmt`, shipped) and "GC Package A–D"
 the shipped GC-safety work; both are kept because FOLLOW-UPS and commit
 history use them.
 
@@ -36,8 +36,8 @@ history use them.
 3. Daily-driver gaps (WP4 open items)
 4. The company layer (WP5)
 5. GC-safety leftovers (all shipped)
-6. The resolution proxy (#68): delegated tools confined to a tog-owned registry proxy
-7. A shared system store at `/opt/tog/store` (#69)
+6. The resolution proxy (#68): delegated tools confined to a greyward-owned registry proxy
+7. A shared system store at `/opt/greyward/store` (#69)
 8. Backlog
 
 ---
@@ -46,10 +46,10 @@ history use them.
 
 The toolchain lock shipped on Linux on 2026-09-21: exact selection, the
 shipped-table adapter and catalogs, the lock core, runtime propagation, and
-activation with `tog update --toolchain`. Its behavior is documented in
+activation with `ward update --toolchain`. Its behavior is documented in
 `docs/human/ARCHITECTURE.md` "Toolchain lock" (file, staleness rule,
 selection order, catalogs, `x/3` keys) and "Store
-concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `tog update
+concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `ward update
 --toolchain`), and `docs/human/LIMITATIONS.md` (one toolchain per lock
 root). The full reviewed design, with its reasoning, is in git history:
 `git show f2531aa:docs/agent/DESIGNS.md`, section 1. What follows is only
@@ -91,7 +91,7 @@ the executable bit only. PAX values are bytes; only `path`, `linkpath` and
 `size` are decoded, as UTF-8, and names are refused when a listing could
 not show them faithfully or when APFS would fold two of them into one. The
 Go toolchain, the optional Rust components and cross targets
-(`src/kernel/provider/rust_extras.rs`) and `tog update --self` use it. The
+(`src/kernel/provider/rust_extras.rs`) and `ward update --self` use it. The
 other toolchains, and npm, Hex, sdist and crate archives, still call
 `/usr/bin/tar` directly; #236 routes them through it. Extraction must stay
 byte-identical, because object ids depend on it.
@@ -149,7 +149,7 @@ explicit, reviewed catalog change (`tools/catalog.py --set-default`).
 **Scope.**
 - **Catalog, not just a release list.** Per ecosystem: usable distributions
   (python-build-standalone builds, nodejs.org, static.rust-lang, go.dev,
-  portable-ruby, erlef otp_builds plus tog-toolchains for Linux OTP,
+  portable-ruby, erlef otp_builds plus greyward-toolchains for Linux OTP,
   Microsoft release metadata), provider build revisions, platform requirements
   (glibc floor), extraction recipes, and companion tools that must move
   together: uv, bundled npm, Bundler, OTP-qualified Hex and rebar3,
@@ -157,7 +157,7 @@ explicit, reviewed catalog change (`tools/catalog.py --set-default`).
 - **Trust is a configured list, not a compiled-in constant** (owner direction,
   2026-09-09). "Which publishers count as real" must be data the user or the
   company sets, because an enterprise mirrors its toolchains internally and
-  will want tog pulling from its own repository, signed by its own key.
+  will want Greyward pulling from its own repository, signed by its own key.
   Do not hardcode a fixed set of upstream publishers and bolt private
   registries on later; the internal publisher is a first-class case from the
   first PR. See the trust-configuration rules below: this shares the source
@@ -182,7 +182,7 @@ invalid signature, revoked signer, malformed signed payload, or detected
 rollback fails hard; it must not enter the network-failure fallback path.
 Offline replay with cached artifacts and required proof succeeds with the
 network denied. TOFU sources are named as TOFU in
-the catalog entry and in `LIMITATIONS.md` (tog is TOFU today for
+the catalog entry and in `LIMITATIONS.md` (Greyward is TOFU today for
 python-build-standalone — the pins carry checksums verified at pin time, not
 signatures, `src/python.rs:10-13`).
 
@@ -214,7 +214,7 @@ therefore starts WP3 with an evidence step, not with an implementation.
   the publisher list configurable must not create a spelling of "trust
   anything"; an empty or unparseable list fails closed.
 - **Each catalog row records which publisher vouched for it,** so
-  `tog ls`, `tog sbom`, and an audit can answer "where did this
+  `ward ls`, `ward sbom`, and an audit can answer "where did this
   toolchain come from and who signed it" without re-fetching.
 - **Locked replay and cache hits recheck current policy.** A checksum copied
   into an attacker-editable lock is integrity data, not proof that an allowed
@@ -243,7 +243,7 @@ therefore starts WP3 with an evidence step, not with an implementation.
 **PR 0 — provider evidence spike (docs + fixtures only).** For each of the
 seven providers, fetch and record: the exact URL of any checksum file,
 signature, or attestation; its format; the key or trust root it chains to; and
-whether it covers the artifact tog actually downloads. Commit the captured
+whether it covers the artifact Greyward actually downloads. Commit the captured
 material as test fixtures under `tests/fixtures/catalog/<provider>/` and a
 table in this section. Providers with nothing verifiable are recorded as
 TOFU by construction with a `LIMITATIONS.md` row. **No provider is described
@@ -291,7 +291,7 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
 - **Provisional first provider: Go or Rust**, decided by PR 0's evidence —
   both have the smallest surface and already have toolchain-file resolution
   (`go.mod` `toolchain`, `rust-toolchain.toml`). Pick whichever PR 0 shows has
-  verifiable signing material covering the exact artifact tog downloads.
+  verifiable signing material covering the exact artifact Greyward downloads.
 - **Trusted key management: decided, see "Key and credential policy"
   below (#72).** The owner's standing direction (2026-09-09) still holds:
   the mechanism accommodates a company's own internal publisher, "one
@@ -310,7 +310,7 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
   `--policy` file can only narrow it. This is the shape the closure
   signing keys already have (the `[signing] trusted` list,
   `src/kernel/policy.rs`); publisher keys, including a company's own
-  internal publisher, use the same chain. No key is compiled into tog: the
+  internal publisher, use the same chain. No key is compiled into Greyward: the
   shipped upstream keys are default contents of that list.
 - **Rotation.** Rotating a key is a policy commit: add the new key, then
   remove the old one once nothing still needs it. (Derived, not in the
@@ -318,7 +318,7 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
   for a company is whoever manages that file.)
 - **Revocation.** Revoking a key is removing its entry from the list.
   From then on any record or catalog row that key signed is untrusted:
-  `tog audit` fails it, and a locked replay or cache hit refuses it with a
+  `ward audit` fails it, and a locked replay or cache hit refuses it with a
   trust error, distinct from stale project inputs. Removal takes effect
   against the local policy, offline included. Remove the key's entry,
   never the whole `[signing]` table: with no table, signatures are not
@@ -341,7 +341,7 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
 
 ## 3. Daily-driver gaps (WP4 open items)
 
-Shipped from this package: the `x` lifecycle (`tog x --clean`, per-root
+Shipped from this package: the `x` lifecycle (`ward x --clean`, per-root
 locks) and pnpm `add`/`remove`/`update`.
 
 Each of the following gets the full treatment when taken; the sketch here
@@ -425,7 +425,7 @@ run because the binaries are per-platform artifacts.
 ## 4. The company layer (WP5)
 
 **Objective.** Enforcement knobs for companies, entirely inside
-`.tog/policy.toml` and the machine-wide policy. Permissive stays the
+`.greyward/policy.toml` and the machine-wide policy. Permissive stays the
 default; nothing is ever loosened silently.
 
 **Prerequisites.** WP1, WP2, the authenticated WP3 foundation, GC safety,
@@ -441,7 +441,7 @@ must be a daily driver first.
   name/version allow and deny lists, with a defined story for what the user
   sees when each fires.
 - **Protected machine-wide policy — foundation delivered by WP3 PR 1.**
-  The current `TOG_POLICY` override can replace home-policy selection
+  The current `GREYWARD_POLICY` override can replace home-policy selection
   (`policy::load`); WP3 must correct the source/trust path before activation.
   WP5 extends the same unconditional loader to package/category rules and
   adds tests proving neither project nor environment can weaken them.
@@ -496,7 +496,7 @@ guarantees in ARCHITECTURE.md "Store concurrency" and LIMITATIONS.md
 ## 6. The resolution proxy (#68)
 
 Decided 2026-09-23 (owner, #68 option 1): the delegated-tool doors get a
-tog-owned registry proxy. No refusal behavior changes until the
+greyward-owned registry proxy. No refusal behavior changes until the
 implementation PRs below land. This section is the design; #61 (the
 `Tailor::edit_manifest` trait method) and #169 (moving the Corepack/pnpm
 delegate path into the Node tailor) are built from it. Revised after Codex
@@ -505,36 +505,36 @@ review is summarized in "Review round 1").
 
 ### In plain words
 
-tog verifies every byte it downloads itself. But in a handful of places it
-hands the job to the ecosystem's own tool: `tog add lodash` runs npm, a
+Greyward verifies every byte it downloads itself. But in a handful of places it
+hands the job to the ecosystem's own tool: `ward add lodash` runs npm, a
 project with no `Cargo.lock` runs `cargo generate-lockfile`, and so on.
 Those tools go to the internet on their own, with the user's full
-permissions, and tog sees none of it. Some of them also run project code
+permissions, and Greyward sees none of it. Some of them also run project code
 while they work (Bundler evaluates the Gemfile, uv may build a package to
-read its metadata, `dotnet restore` evaluates MSBuild). `tog audit` cannot
+read its metadata, `dotnet restore` evaluates MSBuild). `ward audit` cannot
 see any of it.
 
 The fix has three parts, and all three are needed:
 
 1. **A fence.** The tool runs in a sandbox, on a private copy of the
    project, and its only network destination is a small web server inside
-   the tog process (the proxy). Anything else it tries to reach fails, and
-   nothing it writes reaches the real project until tog has checked it.
+   the Greyward process (the proxy). Anything else it tries to reach fails, and
+   nothing it writes reaches the real project until Greyward has checked it.
 2. **A gatekeeper with a notebook.** The proxy fetches what the tool asks
    for from the real registry, checks it against policy, checks its
-   integrity where the registry published a digest, keeps a copy in tog's
+   integrity where the registry published a digest, keeps a copy in Greyward's
    cache, and writes one line per fetch into a ledger.
-3. **A signed receipt.** When the run passes, tog publishes the new
+3. **A signed receipt.** When the run passes, Greyward publishes the new
    manifest and lock together with a small record of what happened,
    signed with the same key that signs closures. The next sync copies the
-   receipt into the closure, so `tog audit` sees it. A lock without a
+   receipt into the closure, so `ward audit` sees it. A lock without a
    valid receipt is itself a finding a company can deny.
 
 ### The contract
 
 When this section is fully built:
 
-1. Every child process tog starts that resolves dependencies with network
+1. Every child process Greyward starts that resolves dependencies with network
    access, or evaluates project code to resolve (the census below), starts
    through one kernel type, the **resolution door**. No other code path can
    start one: a runtime tripwire and a clippy rule refuse it (see "Every
@@ -586,7 +586,7 @@ When this section is fully built:
 
 **What this does not claim.** It is cooperative hermeticity plus
 provenance, the same claim the build sandbox makes
-(`docs/human/LIMITATIONS.md`, "Tog's security claim is provenance").
+(`docs/human/LIMITATIONS.md`, "Greyward's security claim is provenance").
 Sandboxed code can still encode data in the request paths it sends to a
 permitted registry. No enforceable design closes that channel while the
 tool is allowed to name packages (a package name is attacker-chosen
@@ -595,7 +595,7 @@ only the permitted endpoints, and every such request is in the ledger.
 
 ### The doors (census, 2026-09-23)
 
-Every place tog runs an ecosystem tool that resolves with the network or
+Every place Greyward runs an ecosystem tool that resolves with the network or
 evaluates project code today. "Kind" is the door kind recorded in the
 ledger. "Runs code" is what the tool executes besides itself.
 
@@ -606,11 +606,11 @@ ledger. "Runs code" is what the tool executes besides itself.
 | `tailors/python/build.rs` `generate_cargo_lock` | `cargo generate-lockfile --manifest-path` for an sdist's Rust extension that ships no `Cargo.lock` (cached by sdist sha256 and Rust id) | yes | no | missing-lock (dependency) |
 | `tailors/python/edit.rs` `python_uv` | `uv add` / `remove` / `lock` | yes | sdist and project builds | edit |
 | `tailors/python/edit.rs` `uv_compile` | `uv pip compile` (requirements.in edits) | yes | sdist builds | edit |
-| `tailors/python/registry_tool.rs` | `uv pip compile` for `tog x` | yes | sdist builds | x |
+| `tailors/python/registry_tool.rs` | `uv pip compile` for `ward x` | yes | sdist builds | x |
 | `tailors/node/inputs.rs` | `npm install --package-lock-only --ignore-scripts` | yes | no | missing-lock |
 | `tailors/node/edit.rs` `npm_edit` | npm `install`/`uninstall`/`update --package-lock-only` | yes | no | edit |
 | `tailors/node/edit.rs` `pnpm_edit` | pinned pnpm edit (scripts off) | yes | no | edit |
-| `tailors/node/registry_tool.rs` | npm lock-only for `tog x` (also realizes pnpm for edits) | yes | no | x |
+| `tailors/node/registry_tool.rs` | npm lock-only for `ward x` (also realizes pnpm for edits) | yes | no | x |
 | `tailors/cargo/inputs.rs` `ensure_cargo_lock` | `cargo generate-lockfile` | yes | no | missing-lock |
 | `tailors/cargo/edit.rs` `edit_manifest` | `cargo add` / `remove` / `update` | yes | no | edit |
 | `tailors/go/mod.rs` | `go mod tidy -diff`, `go mod tidy`, `go mod download -json all` | yes | no | planner / missing-lock |
@@ -624,8 +624,8 @@ ledger. "Runs code" is what the tool executes besides itself.
 | `tailors/elixir/edit.rs` `edit_manifest` | `mix deps.update` | yes | mix.exs eval | edit |
 | `tailors/dotnet/mod.rs` `plan_dotnet` | `dotnet restore --use-lock-file` | yes | MSBuild eval | missing-lock |
 
-Not doors: tog's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
-`Tailor::registry_exists` check `tog add` makes) are tog code with tog
+Not doors: Greyward's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
+`Tailor::registry_exists` check `ward add` makes) are Greyward code with Greyward
 verification. Host-local helpers (`tar`, `getconf`, `id`,
 the Go module extraction
 `go mod download path@version...` with the full offline environment, the
@@ -652,7 +652,7 @@ The proxy speaks two dialects on one listener:
   `CONNECT host:443` carrying `Proxy-Authorization` with the session token.
   The proxy checks the token **once per tunnel**, binds the tunnel to that
   session, answers `200`, terminates TLS with a leaf certificate for
-  `host` signed by a per-process tog CA, reads the plain HTTP requests
+  `host` signed by a per-process Greyward CA, reads the plain HTTP requests
   inside, and fetches each one upstream itself over real TLS. Requests
   inside an authenticated tunnel carry no token and need none (standard
   clients never add proxy credentials to inner requests). A `CONNECT`
@@ -667,15 +667,15 @@ corrections (see "PR 0 evidence" below):
 
 | Ecosystem | Upstream traffic | Mechanism | Wiring | Lock effect |
 |---|---|---|---|---|
-| Python (uv) | `pypi.org/simple` (PEP 691 JSON / 503 HTML), `files.pythonhosted.org` (`.metadata` for resolution, wheels only for builds), git remotes plus GitHub's `api.github.com` commit lookup and `raw.githubusercontent.com` metadata read, direct-URL requirements, any `[[tool.uv.index]]` | CONNECT-MITM | `HTTPS_PROXY`/`HTTP_PROXY` = `http://tog:<token>@<proxy>`, `NO_PROXY` empty, `ALL_PROXY` removed, `SSL_CERT_FILE` = tog CA file (uv takes it as its whole root set, confirmed by PR 0), default index forced to `https://pypi.org/simple` on every uv invocation (`--index-url` for `pip compile`, `--default-index` for `add`/`remove`/`lock`, a behavior change scheduled in PR 7), and `--python <store python>` on every `uv pip compile` (PR 0: `pip compile` ignores `UV_PYTHON` and builds sdists with the first `python3` on `PATH`) | none: uv sees real URLs, so `uv.lock` and `requirements.lock.txt` record them |
-| Node (npm) | `registry.npmjs.org` packuments (full `application/json` in lock-only runs, measured) and tarballs, scoped registries from `.npmrc`, `https:` tarball deps, git deps (git CLI) | CONNECT-MITM | CLI flags (beat project `.npmrc`): `--proxy`, `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`, `--strict-ssl=true`, `--cafile=<tog CA>` (replaces the roots for npm's own requests, confirmed by PR 0), `--update-notifier=false` (PR 0: otherwise npm fetches the 2.4 MB `/npm` packument), `--no-audit` (PR 0: otherwise every install, update, and uninstall POSTs the resolved tree to `/-/npm/v1/security/advisories/bulk`, which is not resolution. The flag is npm's documented switch. PR 0 did not measure it, so the npm door's PR adds a fixture proving no audit request); `NODE_EXTRA_CA_CERTS` = tog CA for any other Node code (this **adds** to Node's built-in roots); `npm_config_*` stripped as today | none: `resolved` URLs are upstream |
-| Node (pnpm) | `registry.npmjs.org` abbreviated packuments (no audit, no tarballs in lock-only mode, measured), scoped registries, git deps | CONNECT-MITM | `--config.proxy`, `--config.https-proxy`, and `--config.noproxy=` (PR 0: pnpm 9.15.4 has no `--http-proxy` option, `pnpm remove` rejects `--proxy`, and the `--config.*` spelling works on every verb), `--config.cafile=<tog CA>` (replaces the roots, measured; a `cafile=` line in the XDG config is not read), `NODE_EXTRA_CA_CERTS`; the per-run HOME/XDG stage stays | none |
-| Rust (cargo) | `index.crates.io` sparse index (`config.json`, index files), `static.crates.io` crate downloads (the URL comes from `config.json`'s `dl`, so no `crates.io` redirect, measured), alternative registries in `.cargo/config.toml`, git deps plus GitHub's `api.github.com` commit lookup | CONNECT-MITM | `--config http.proxy=...`, `--config http.cainfo=<tog CA>` (PR 0: this **adds** to curl's roots, because curl keeps its default `CApath`; see "What the CA file does and does not prevent"), `--config net.git-fetch-with-cli=true` (so git goes through the git row), `CARGO_HOME` = scratch, `CARGO_NET_OFFLINE=false` | none: `Cargo.lock` records `registry+https://github.com/rust-lang/crates.io-index` whatever the transport |
+| Python (uv) | `pypi.org/simple` (PEP 691 JSON / 503 HTML), `files.pythonhosted.org` (`.metadata` for resolution, wheels only for builds), git remotes plus GitHub's `api.github.com` commit lookup and `raw.githubusercontent.com` metadata read, direct-URL requirements, any `[[tool.uv.index]]` | CONNECT-MITM | `HTTPS_PROXY`/`HTTP_PROXY` = `http://ward:<token>@<proxy>`, `NO_PROXY` empty, `ALL_PROXY` removed, `SSL_CERT_FILE` = Greyward CA file (uv takes it as its whole root set, confirmed by PR 0), default index forced to `https://pypi.org/simple` on every uv invocation (`--index-url` for `pip compile`, `--default-index` for `add`/`remove`/`lock`, a behavior change scheduled in PR 7), and `--python <store python>` on every `uv pip compile` (PR 0: `pip compile` ignores `UV_PYTHON` and builds sdists with the first `python3` on `PATH`) | none: uv sees real URLs, so `uv.lock` and `requirements.lock.txt` record them |
+| Node (npm) | `registry.npmjs.org` packuments (full `application/json` in lock-only runs, measured) and tarballs, scoped registries from `.npmrc`, `https:` tarball deps, git deps (git CLI) | CONNECT-MITM | CLI flags (beat project `.npmrc`): `--proxy`, `--https-proxy`, `--noproxy=`, `--registry=https://registry.npmjs.org/`, `--strict-ssl=true`, `--cafile=<ward CA>` (replaces the roots for npm's own requests, confirmed by PR 0), `--update-notifier=false` (PR 0: otherwise npm fetches the 2.4 MB `/npm` packument), `--no-audit` (PR 0: otherwise every install, update, and uninstall POSTs the resolved tree to `/-/npm/v1/security/advisories/bulk`, which is not resolution. The flag is npm's documented switch. PR 0 did not measure it, so the npm door's PR adds a fixture proving no audit request); `NODE_EXTRA_CA_CERTS` = Greyward CA for any other Node code (this **adds** to Node's built-in roots); `npm_config_*` stripped as today | none: `resolved` URLs are upstream |
+| Node (pnpm) | `registry.npmjs.org` abbreviated packuments (no audit, no tarballs in lock-only mode, measured), scoped registries, git deps | CONNECT-MITM | `--config.proxy`, `--config.https-proxy`, and `--config.noproxy=` (PR 0: pnpm 9.15.4 has no `--http-proxy` option, `pnpm remove` rejects `--proxy`, and the `--config.*` spelling works on every verb), `--config.cafile=<ward CA>` (replaces the roots, measured; a `cafile=` line in the XDG config is not read), `NODE_EXTRA_CA_CERTS`; the per-run HOME/XDG stage stays | none |
+| Rust (cargo) | `index.crates.io` sparse index (`config.json`, index files), `static.crates.io` crate downloads (the URL comes from `config.json`'s `dl`, so no `crates.io` redirect, measured), alternative registries in `.cargo/config.toml`, git deps plus GitHub's `api.github.com` commit lookup | CONNECT-MITM | `--config http.proxy=...`, `--config http.cainfo=<ward CA>` (PR 0: this **adds** to curl's roots, because curl keeps its default `CApath`; see "What the CA file does and does not prevent"), `--config net.git-fetch-with-cli=true` (so git goes through the git row), `CARGO_HOME` = scratch, `CARGO_NET_OFFLINE=false` | none: `Cargo.lock` records `registry+https://github.com/rust-lang/crates.io-index` whatever the transport |
 | Go | `proxy.golang.org` (`/@v/list`, `.info`, `.mod`, `.zip`, `/@latest`, and 404s for the import-path prefixes `go get` probes), `sum.golang.org` lookups and tiles | Registry mirror | `GOPROXY=http://127.0.0.1:<port>/<token>/go/` (no `,direct`), `GOSUMDB=sum.golang.org`. The go command asks `<proxy>/sumdb/sum.golang.org/supported` first. PR 0 found that both `proxy.golang.org` and `sum.golang.org` answer that path with 404, which sends go straight to `sum.golang.org` outside the proxy, so the proxy answers `supported` with 200 itself and forwards `/sumdb/sum.golang.org/<rest>` to `https://sum.golang.org/<rest>` byte-for-byte (go verifies the note signature itself). Also `GOVCS=*:off`, `GOTOOLCHAIN=local`, `GOENV=off`, `GOAUTH=off`, `GOPRIVATE`/`GONOPROXY`/`GONOSUMDB`/`GOINSECURE` empty as today | none: `go.sum` holds hashes only |
-| Ruby (Bundler) | `index.rubygems.org` compact index (`/versions`, `/info/<gem>`), `rubygems.org/gems/<name>-<ver>.gem` (only when Bundler installs), other `source` blocks, git gems | Registry mirror for rubygems.org (the route sends `/versions`, `/names`, and `/info/*` to `index.rubygems.org` and the rest to `rubygems.org`); forward proxy without interception (visible refusal) for everything else | the environment variable `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=http://127.0.0.1:<port>/<token>/rubygems/` (PR 0: a config file in `BUNDLE_APP_CONFIG` is ignored under tog's `BUNDLE_IGNORE_CONFIG=1`, which stays); `https_proxy`/`http_proxy` = proxy with token. Edits run lock-only: `bundle add <gem> --skip-install` and `bundle lock --update [<gems>]` replace today's `bundle add` and `bundle update`, which install every resolved gem (PR 0 saw the `.gem` downloads; an install builds native extensions, which is third-party code). Measured: both lock-only forms exit 0, download no `.gem`, and install nothing | none: `Gemfile.lock` keeps `remote: https://rubygems.org/` (mirrors are transparent by design, confirmed) |
+| Ruby (Bundler) | `index.rubygems.org` compact index (`/versions`, `/info/<gem>`), `rubygems.org/gems/<name>-<ver>.gem` (only when Bundler installs), other `source` blocks, git gems | Registry mirror for rubygems.org (the route sends `/versions`, `/names`, and `/info/*` to `index.rubygems.org` and the rest to `rubygems.org`); forward proxy without interception (visible refusal) for everything else | the environment variable `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/=http://127.0.0.1:<port>/<token>/rubygems/` (PR 0: a config file in `BUNDLE_APP_CONFIG` is ignored under Greyward's `BUNDLE_IGNORE_CONFIG=1`, which stays); `https_proxy`/`http_proxy` = proxy with token. Edits run lock-only: `bundle add <gem> --skip-install` and `bundle lock --update [<gems>]` replace today's `bundle add` and `bundle update`, which install every resolved gem (PR 0 saw the `.gem` downloads; an install builds native extensions, which is third-party code). Measured: both lock-only forms exit 0, download no `.gem`, and install nothing | none: `Gemfile.lock` keeps `remote: https://rubygems.org/` (mirrors are transparent by design, confirmed) |
 | Elixir (Hex, mix) | `repo.hex.pm` (`/packages/<name>` signed protobuf, `/tarballs/<name>-<ver>.tar`; `/names` and `/versions` were not fetched), Hex's update check (`/installs/hex-1.x.csv`, a 301 to `builds.hex.pm`), git deps | Registry mirror for Hex; CONNECT-MITM for git | `HEX_MIRROR=http://127.0.0.1:<port>/<token>/hex/`, `HEX_UNSAFE_REGISTRY` removed (Hex keeps verifying the registry signature with its public key), lowercase `http_proxy`/`https_proxy` = proxy with token (PR 0: Hex 2.5.1 has no `HEX_HTTP_PROXY`/`HEX_HTTPS_PROXY`), `MIX_DEPS_PATH` in scratch as today, `HEX_OFFLINE` as today. The update check's `CONNECT builds.hex.pm` is refused visibly, and Hex continues (measured) | none: `mix.lock` records the repo name `hexpm` |
-| .NET (NuGet) | `api.nuget.org/v3/index.json` service index, flat container (`index.json`, `.nupkg`), the NuGetAudit vulnerability files (`/v3/vulnerabilities/index.json`, `/v3-vulnerabilities/...`); registration pages exist in the protocol but restore did not read them; no revocation traffic on Linux | Registry mirror (the service index and any registration JSON are rewritten so resource URLs point at proxy routes, and the `RepositorySignatures/*` resources are dropped from the service index, because NuGet requires them over HTTPS and otherwise fails with NU1301); forward proxy without interception (visible refusal) for anything else | tog-written `nuget.config`: `<clear/>` plus one source `http://127.0.0.1:<port>/<token>/nuget/v3/index.json` with `allowInsecureConnections="true"` (confirmed; without it restore fails with NU1302); `NUGET_CERT_REVOCATION_MODE=offline` (harmless, kept for macOS); `HTTPS_PROXY` = proxy with token; `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `MSBUILDDISABLENODEREUSE=1`, `--disable-build-servers`, `-maxcpucount:1` (no MSBuild worker nodes, so no Unix-socket IPC; confirmed, see "Unix sockets") | none: `packages.lock.json` holds content hashes only. `obj/` output lands in the snapshot and is discarded (declared scratch) |
-| git (any ecosystem) | `https://` remotes (smart HTTP: `info/refs?service=git-upload-pack`, `POST git-upload-pack`), `ssh://` and scp-style remotes, `git://` | CONNECT-MITM for https; ssh rewritten to https; `git://` and `ext::` refused | `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, and every forced git setting (see "Forced program settings") carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, because the tools, not tog, start git: `http.proxy`, `http.sslCAInfo`, `url.https://<host>/.insteadOf` for `ssh://git@<host>/` and `git@<host>:` (confirmed), and the `protocol.*.allow` set with `protocol.file.allow=always` (uv clones git dependencies from its own local database with `file://`). git sends its first `CONNECT` without credentials, so the proxy's 407 carries `Proxy-Authenticate: Basic` | the commit id the tool locks |
+| .NET (NuGet) | `api.nuget.org/v3/index.json` service index, flat container (`index.json`, `.nupkg`), the NuGetAudit vulnerability files (`/v3/vulnerabilities/index.json`, `/v3-vulnerabilities/...`); registration pages exist in the protocol but restore did not read them; no revocation traffic on Linux | Registry mirror (the service index and any registration JSON are rewritten so resource URLs point at proxy routes, and the `RepositorySignatures/*` resources are dropped from the service index, because NuGet requires them over HTTPS and otherwise fails with NU1301); forward proxy without interception (visible refusal) for anything else | greyward-written `nuget.config`: `<clear/>` plus one source `http://127.0.0.1:<port>/<token>/nuget/v3/index.json` with `allowInsecureConnections="true"` (confirmed; without it restore fails with NU1302); `NUGET_CERT_REVOCATION_MODE=offline` (harmless, kept for macOS); `HTTPS_PROXY` = proxy with token; `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1`, `DOTNET_NOLOGO=1`, `DOTNET_EnableDiagnostics=0`, `MSBUILDDISABLENODEREUSE=1`, `--disable-build-servers`, `-maxcpucount:1` (no MSBuild worker nodes, so no Unix-socket IPC; confirmed, see "Unix sockets") | none: `packages.lock.json` holds content hashes only. `obj/` output lands in the snapshot and is discarded (declared scratch) |
+| git (any ecosystem) | `https://` remotes (smart HTTP: `info/refs?service=git-upload-pack`, `POST git-upload-pack`), `ssh://` and scp-style remotes, `git://` | CONNECT-MITM for https; ssh rewritten to https; `git://` and `ext::` refused | `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, and every forced git setting (see "Forced program settings") carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, because the tools, not Greyward, start git: `http.proxy`, `http.sslCAInfo`, `url.https://<host>/.insteadOf` for `ssh://git@<host>/` and `git@<host>:` (confirmed), and the `protocol.*.allow` set with `protocol.file.allow=always` (uv clones git dependencies from its own local database with `file://`). git sends its first `CONNECT` without credentials, so the proxy's 407 carries `Proxy-Authenticate: Basic` | the commit id the tool locks |
 
 #### Which tools cannot be fully proxied, and what happens then
 
@@ -684,7 +684,7 @@ has a concrete answer:
 
 - **Go and .NET on macOS cannot be taught a private CA.** Go on darwin
   verifies through the platform verifier and ignores `SSL_CERT_FILE`, and
-  .NET on macOS uses the Keychain. tog will not modify the user's Keychain.
+  .NET on macOS uses the Keychain. Greyward will not modify the user's Keychain.
   Answer: both use the registry-mirror dialect, which needs no TLS between
   tool and proxy, on both platforms (one mechanism per ecosystem, not per
   platform). Their only registry traffic goes through the mirror. Any
@@ -692,7 +692,7 @@ has a concrete answer:
   goes to the proxy as a `CONNECT`, because `HTTPS_PROXY` is set. The proxy
   refuses it with a ledger entry naming the host instead of letting it
   hang on a denied socket. If the tool fails because of that refusal,
-  tog's error names the host and the reason.
+  Greyward's error names the host and the reason.
 - **Ruby sources other than rubygems.org.** Sync already fails closed on
   them (LIMITATIONS, Ruby). The proxy agrees: Bundler reaches them through
   `CONNECT`, the proxy refuses without interception and records
@@ -731,12 +731,12 @@ mirror path. Each run is confined the way the door will be: bubblewrap
 (0.12.0) with `--unshare-net --unshare-pid --clearenv`, the host root
 read-only, fresh `/tmp` and `/run`, and an in-sandbox relay on
 `127.0.0.1:8119` spliced to the proxy's Unix socket at
-`/run/tog/proxy.sock`. The tool runs under `nounix.c`, a seccomp filter
+`/run/ward/proxy.sock`. The tool runs under `nounix.c`, a seccomp filter
 built to this section's rules: arch check (kill otherwise), x32 refused,
 `socket(AF_UNIX)` refused with `EAFNOSUPPORT`, `io_uring_*`, `ptrace`, and
 `process_vm_*` refused with `EPERM`. strace (7.2) counts every AF_UNIX
 attempt and `io_uring_setup` call. Host: Fedora 44, kernel 7.2.5, x86_64.
-Toolchains are tog-provisioned from a scratch store built by
+Toolchains are greyward-provisioned from a scratch store built by
 `cargo build --release`: uv 0.12.7 with CPython 3.12.14, Node 24.20.0 with
 npm 11.19.0, pnpm 9.15.4, cargo 1.96.1, go 1.27.0, Ruby 3.4.6 with Bundler
 2.6.9, OTP 29.0.5 with Elixir 1.20.4 and Hex 2.5.1, .NET SDK 9.0.317, and
@@ -819,23 +819,23 @@ layer 3 of "Unix sockets".
 | Claim | Result | Change made in this section |
 |---|---|---|
 | bwrap brings up the namespace's loopback | confirmed (`lo` is UP) | none |
-| uv: `SSL_CERT_FILE` is the whole root set, and the proxy path needs it | confirmed (a direct fetch with only the tog CA fails, the proxied fetch without it fails) | none |
+| uv: `SSL_CERT_FILE` is the whole root set, and the proxy path needs it | confirmed (a direct fetch with only the Greyward CA fails, the proxied fetch without it fails) | none |
 | uv: the `--no-build` error form | confirmed, two forms (below) | "resolution-build" step 2 names both |
 | uv: `--no-build-package <member>` exempts a workspace member | **refuted**: it forbids that build too | "resolution-build" step 3 uses a member-metadata pre-step instead |
 | npm: `--cafile` replaces the roots | confirmed | none |
 | pnpm: `--http-proxy`, `--https-proxy`, `--no-proxy`, and "pnpm ignores `--config.proxy`" | **refuted**: `--http-proxy` is an unknown option, `pnpm remove` rejects `--proxy`, and pnpm honors `--config.proxy`, `--config.https-proxy`, and `--config.noproxy` on every verb | pnpm row |
-| pnpm: `cafile` in the XDG config | **refuted**: a `cafile=` line there is not read. `--config.cafile=<tog CA>` works and replaces the roots. An inline `ca=` in the XDG config and `NODE_EXTRA_CA_CERTS` also work | pnpm row |
+| pnpm: `cafile` in the XDG config | **refuted**: a `cafile=` line there is not read. `--config.cafile=<ward CA>` works and replaces the roots. An inline `ca=` in the XDG config and `NODE_EXTRA_CA_CERTS` also work | pnpm row |
 | cargo: `http.cainfo` replaces curl's roots | **refuted**: curl keeps its default `CApath` (`/etc/pki/tls/certs` on Fedora), so a direct fetch still succeeds. It **adds**, like `NODE_EXTRA_CA_CERTS` | cargo row and "What the CA file does and does not prevent" |
 | git: `http.sslCAInfo` replaces the roots | confirmed | none |
 | Go: the proxy serves `/sumdb/sum.golang.org/...` | confirmed with a correction: the proxy must answer `supported` itself | Go row |
-| Bundler: the mirror in a config file in `BUNDLE_APP_CONFIG` | confirmed with a correction: tog's `BUNDLE_IGNORE_CONFIG=1` makes Bundler ignore that file. The environment variable `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/` works, and `Gemfile.lock` keeps `remote: https://rubygems.org/` | Ruby row |
+| Bundler: the mirror in a config file in `BUNDLE_APP_CONFIG` | confirmed with a correction: Greyward's `BUNDLE_IGNORE_CONFIG=1` makes Bundler ignore that file. The environment variable `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/` works, and `Gemfile.lock` keeps `remote: https://rubygems.org/` | Ruby row |
 | Hex: `HEX_MIRROR` | confirmed | none |
 | Hex: `HEX_HTTP_PROXY` and `HEX_HTTPS_PROXY` | **refuted**: Hex 2.5.1 has no such variables (its source names none). It reads lowercase `http_proxy` and `https_proxy`, and `HEX_CACERTS_PATH` for a CA | Elixir row |
 | NuGet: an `http://` source with `allowInsecureConnections="true"` | confirmed with a correction: the rewritten service index must also drop the `RepositorySignatures/*` resources, or restore fails with NU1301. Without the attribute restore fails with NU1302 | .NET row |
 | NuGet: `NUGET_CERT_REVOCATION_MODE=offline` | confirmed harmless. No revocation traffic appeared with or without it on Linux | none |
 | .NET: no Unix-socket IPC with the listed settings | confirmed. Restore also passes without them | none |
 | "No resolver in the census uses io_uring" | **refuted** for Node, harmless (above) | "Unix sockets" wording |
-| Lock checks for `tog attest` | confirmed for all eight (see "Attestation") | none |
+| Lock checks for `ward attest` | confirmed for all eight (see "Attestation") | none |
 | Ruby gate 1 needs no network | confirmed (helper check with no proxy settings: exit 0, no request) | census row |
 | Forced program settings | confirmed for npm, cargo, uv, go, Bundler, mix, dotnet. **Refuted** for pnpm (two more settings run programs) and git (a repository's `protocol.ext.allow=always` beats `protocol.allow=never`) | "Forced program settings" |
 | Seatbelt `localhost:<port>` rule and the Mach allow-list | **pending: needs a macOS host** | "Mach services" |
@@ -851,7 +851,7 @@ The three options:
    as the **refusal detector** for traffic an ecosystem should not produce
    (rows ".NET" and "Ruby" above): the tool announces the host, and the
    proxy says no with a reason.
-2. **Local HTTPS with a tog-generated CA (interception).** The proxy sees
+2. **Local HTTPS with a greyward-generated CA (interception).** The proxy sees
    full requests. The tool must trust the CA. Chosen for **uv, npm, pnpm,
    cargo, and git**. Their locks record upstream URLs (`resolved` in
    `package-lock.json`, `source`/`url` in `uv.lock`), and a mirror would
@@ -878,15 +878,15 @@ The three options:
    JSON carry absolute URLs), and those responses are unsigned JSON that
    never reaches a committed file.
 
-**The CA.** One per tog process, generated when the proxy starts (ECDSA
-P-256 through `ring`, which tog already links). The private key never
+**The CA.** One per Greyward process, generated when the proxy starts (ECDSA
+P-256 through `ring`, which Greyward already links). The private key never
 leaves memory. The certificate is written 0600 into the session
 directory and bound read-only into the sandbox. Leaf certificates are
 minted per SNI host on demand and cached in memory for the process. The
 system and user trust stores are never touched. New dependencies: `rcgen`
 (certificate building, `ring` backend) and the server half of `rustls`,
 which `ureq` already pulls in at 0.23. The proxy PR pins rustls's `ring`
-provider explicitly. Upstream TLS (proxy to registry) is tog's existing
+provider explicitly. Upstream TLS (proxy to registry) is Greyward's existing
 `ureq`/rustls client with webpki roots, plus WP3's company roots when
 WP3 PR 1 lands.
 
@@ -894,9 +894,9 @@ WP3 PR 1 lands.
 git (`http.sslCAInfo`), npm's own requests (`--cafile`), and pnpm's own
 requests (`--config.cafile`), the file **replaces** the root set, so those
 clients cannot complete a handshake with anything but the proxy (PR 0
-measured each: a direct fetch with only the tog CA fails). Cargo's
+measured each: a direct fetch with only the Greyward CA fails). Cargo's
 `http.cainfo` does not: PR 0 found that cargo's curl keeps its default
-`CApath` (`/etc/pki/tls/certs` on Fedora), so a direct fetch with the tog
+`CApath` (`/etc/pki/tls/certs` on Fedora), so a direct fetch with the Greyward
 CA still succeeds, and the file **adds**. `NODE_EXTRA_CA_CERTS` also
 **adds** to Node's built-in roots, so any other Node code (a script that
 ran anyway) can still make a directly trusted TLS connection. Cargo is in
@@ -987,7 +987,7 @@ classified by the spec:
 - **declared scratch** (per tool: .NET `obj/`, uv's `.venv` if created):
   discarded,
 - anything else, **including a new `.git`, a changed `.git/hooks/*`, or any
-  file under `.tog`**: the door fails, names the paths, and publishes
+  file under `.greyward`**: the door fails, names the paths, and publishes
   nothing.
 
 Because the real project was never mounted writable, "fails" means that
@@ -1017,12 +1017,12 @@ socket:
 1. The proxy listens on a Unix socket in a 0700 session directory under
    `$XDG_RUNTIME_DIR` (else the temp dir). The path is kept short, under
    the 108-byte `sun_path` limit.
-2. bwrap binds that one socket file at `/run/tog/proxy.sock`, and binds
-   the running tog executable (`/proc/self/exe`, resolved before the
-   sandbox starts) read-only at `/run/tog/tog`.
-3. The sandbox's first process is `tog __resolution-relay
-   /run/tog/proxy.sock 127.0.0.1:8119 -- <tool argv>`, a hidden
-   subcommand. It opens `/run/tog/proxy.sock` as an `O_PATH` descriptor
+2. bwrap binds that one socket file at `/run/ward/proxy.sock`, and binds
+   the running Greyward executable (`/proc/self/exe`, resolved before the
+   sandbox starts) read-only at `/run/ward/ward`.
+3. The sandbox's first process is `ward __resolution-relay
+   /run/ward/proxy.sock 127.0.0.1:8119 -- <tool argv>`, a hidden
+   subcommand. It opens `/run/ward/proxy.sock` as an `O_PATH` descriptor
    before the tool starts, listens on the fixed port inside the private
    namespace, connects the socket through that descriptor
    (`/proc/self/fd/<n>`) once per accepted TCP connection and splices
@@ -1033,7 +1033,7 @@ socket:
    `--die-with-parent` and the PID namespace end every descendant when the
    relay exits, so nothing outlives the door on Linux. After the last
    bind, `--remount-ro /` makes the sandbox's root tmpfs read-only (so the
-   tool cannot rename `/run/tog` or create `/etc/ld.so.preload`); the
+   tool cannot rename `/run/ward` or create `/etc/ld.so.preload`); the
    snapshot, scratch, `/tmp`, and `/dev` are mounts of their own and stay
    writable. `--disable-userns` is added when the installed bubblewrap
    has it (0.8 and later, probed from its help text), so the tool cannot
@@ -1043,7 +1043,7 @@ socket:
    URL uses a literal IP.
 
 **macOS (Seatbelt).** There is no network namespace. The proxy listens on
-`127.0.0.1:<ephemeral>`, bound by tog before the tool starts so nothing
+`127.0.0.1:<ephemeral>`, bound by Greyward before the tool starts so nothing
 else can hold the port. The profile keeps `(deny network*)` and adds
 `(allow network-outbound (remote ip "localhost:<port>"))`† (pending: needs a
 macOS host, measured by the same run as the Mach allow-list). Other local
@@ -1069,7 +1069,7 @@ every census invocation under a profile that logs denied lookups
 (`(deny mach-lookup (with report))`)† and then iterating to the smallest
 set that passes. **Pending: needs a macOS host.** It cannot be measured on
 Linux. The procedure is ready to run from the repository root on a Mac:
-`tools/proxy_spike/macos_mach.sh [work dir]` builds tog, provisions every
+`tools/proxy_spike/macos_mach.sh [work dir]` builds Greyward, provisions every
 census toolchain into a scratch store, installs mitmproxy in a venv, runs
 the census through `spike.py --engine seatbelt` (each run under
 `sandbox-exec` with the reporting profile from
@@ -1115,7 +1115,7 @@ Three layers close it on Linux:
    directory in them owned by another user that this user cannot list is
    skipped, because the tool runs as this user and cannot list it either
    (Fedora ships `/usr/share/empty.sshd` as root-owned 0711); every other
-   scan error refuses. `/run/tog` holds only tog's own socket, and `/tmp`
+   scan error refuses. `/run/ward` holds only Greyward's own socket, and `/tmp`
    and `/dev` are fresh.
 3. **A seccomp filter allows only network sockets.** The relay installs
    a filter in the tool's process before `exec`, inherited by every
@@ -1197,7 +1197,7 @@ whether or not it exists at scan time. The same two tests run there.
 #### Quiescence and the immutable output copy
 
 A process the tool started can outlive it (a daemon, a double fork) and
-keep writing the stage while tog diffs, hashes, signs, and publishes.
+keep writing the stage while Greyward diffs, hashes, signs, and publishes.
 Two measures close that window, on both platforms:
 
 1. **Stop the whole tree before validation.**
@@ -1212,7 +1212,7 @@ Two measures close that window, on both platforms:
      from inside, so the tool can neither take it over nor stall it. No process of the tree survives, and
      none can escape a PID namespace. The container backend gets the same
      result by removing the container.
-   - *macOS:* there is no PID namespace, and children stay in tog's
+   - *macOS:* there is no PID namespace, and children stay in Greyward's
      process group (§5, guarantee 4), so the door cannot kill a group it
      shares. It freezes and kills the tree instead. After the tool exits,
      or on timeout, it walks the descendants of the tool's pid with
@@ -1230,7 +1230,7 @@ Two measures close that window, on both platforms:
      it outside the sandbox.
 2. **Validate and publish from an immutable copy.** Once the tree is
    stopped, the door copies each declared output from the stage into a
-   store stage owned by tog. It opens each output relative to a held
+   store stage owned by Greyward. It opens each output relative to a held
    descriptor for the stage directory, never by a path string: on Linux
    with `openat2(stage_fd, rel, O_RDONLY|O_NOFOLLOW, RESOLVE_BENEATH |
    RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`, and on macOS by walking
@@ -1290,7 +1290,7 @@ The tiers, strongest first:
      container's entrypoint. The container has `--network none`, the
      snapshot and the tool's store objects bind-mounted at their real
      paths, the proxy socket bind-mounted, a read-only root from a
-     minimal tog-built image (the store's system-runtime subset, pinned
+     minimal greyward-built image (the store's system-runtime subset, pinned
      by digest), the same seccomp filter, and `--pids-limit`. Removing
      the container kills the tree. Everything else (snapshot, diff,
      transaction) is identical.
@@ -1298,21 +1298,21 @@ The tiers, strongest first:
    under a **per-run ephemeral identity**. There is no shared resolver
    account. A shared UID would let a surviving or concurrent malicious
    run reach another run's stage and change the outputs that the
-   developer's tog then signs. The identity comes from
-   **`tog-isolate`**, a small privileged helper (setuid root, or started
-   through one sudoers rule; `tog doctor --isolation` prints the install
+   developer's Greyward then signs. The identity comes from
+   **`greyward-isolate`**, a small privileged helper (setuid root, or started
+   through one sudoers rule; `ward doctor --isolation` prints the install
    steps). It does only this, per run:
    1. **Allocate a UID** from a reserved range configured in
-      `/etc/tog/isolate.toml` (default `2147000000–2147065535`, outside
+      `/etc/greyward/isolate.toml` (default `2147000000–2147065535`, outside
       `/etc/subuid` ranges and the system's login range). Allocation is an
-      exclusive lock file per UID under `/run/tog-isolate/`, so two
+      exclusive lock file per UID under `/run/greyward-isolate/`, so two
       concurrent sessions never share a UID. A UID is never reused while
       any process with it exists (checked through the cgroup below) or
       while any file owned by it remains in a place the helper does not
       wipe. The only writable places are the ones listed in step 3, and
       the helper wipes all of them.
    2. **Create a cgroup v2 leaf** for the run under a helper-owned subtree
-      (`/sys/fs/cgroup/tog-isolate/<run id>`, with `pids.max` and
+      (`/sys/fs/cgroup/greyward-isolate/<run id>`, with `pids.max` and
       `memory.max` set), and start the relay inside it. The run's UID owns
       neither that cgroup nor any other, so no process of the run can move
       itself out (moving a process needs write access to the destination
@@ -1336,7 +1336,7 @@ The tiers, strongest first:
       `cgroup.kill`, then wait until `cgroup.events` reports
       `populated 0`, with a bounded timeout. Timing out fails the door,
       and the UID stays allocated and the stage untouched until an
-      operator runs `tog-isolate --reap`. **The door never validates
+      operator runs `greyward-isolate --reap`. **The door never validates
       while the cgroup is populated.** Only then does the helper hand the
       stage to the developer, and the door proceeds to the immutable
       output copy. The hand-over runs as root over a tree the run's UID
@@ -1358,7 +1358,7 @@ The tiers, strongest first:
    6. **Release**: remove the stage and the cgroup leaf, and release the
       UID lock.
 
-   The signing key (0600, owned by the developer) and the developer's tog
+   The signing key (0600, owned by the developer) and the developer's Greyward
    process are unreachable across the UID boundary, and nothing of one
    run is visible to another: each has its own UID, 0700 stage, mount
    namespace, tmpfs, and cgroup. **macOS has no `isolated` tier.**
@@ -1368,7 +1368,7 @@ The tiers, strongest first:
    aarch64-linux tool rows with the tool told to resolve for the host
    platform (`bundle lock --add-platform arm64-darwin`, uv
    `--python-platform aarch64-apple-darwin`, and so on). That backend
-   depends on the `aarch64-unknown-linux-gnu` platform rows, which tog
+   depends on the `aarch64-unknown-linux-gnu` platform rows, which Greyward
    does not ship yet. Until they exist, a Mac without usable Seatbelt
    fails with the missing-capability message.
 
@@ -1376,27 +1376,27 @@ The rule: every tool, on every machine, with or without a signing key,
 runs `confined` or `isolated` (Linux), and fails when neither is
 available. Nothing depends on whether a key is configured, so there is
 no key-presence check to get wrong. (The earlier `none` rule hinged on
-"no signing key configured", which a check of `TOG_SIGNING_KEY` alone
+"no signing key configured", which a check of `GREYWARD_SIGNING_KEY` alone
 would misread: a key file can exist with the variable unset in this
 shell and set in the next.) The key is protected by the tiers instead:
-the door profile denies reads of the path `TOG_SIGNING_KEY` names, and
-of the default path `tog keygen` suggests, on both platforms, and the
+the door profile denies reads of the path `GREYWARD_SIGNING_KEY` names, and
+of the default path `ward keygen` suggests, on both platforms, and the
 `isolated` tier puts it across a UID boundary. On Linux there is no
 per-path read deny inside a bind mount, so "denies reads" means the door
 refuses to start when either key path lies under anything it would
 mount: a system root, a read root, a snapshot root (the snapshot would
-copy the key into the stage), the stage, or the tog executable. Both
-the path as given and its resolved spelling are compared. `tog keygen`
+copy the key into the stage), the stage, or the Greyward executable. Both
+the path as given and its resolved spelling are compared. `ward keygen`
 refuses a path under the sandbox's system read roots (`/usr`, `/etc`,
 `/opt`, `/private/etc`, `/Library`, `/System`), which every tier can
 read.
 
 The failure message names the tool, why it needs isolation, and each
-missing capability with its fix. For example: "tog add runs Bundler,
+missing capability with its fix. For example: "ward add runs Bundler,
 which evaluates the Gemfile, so it needs isolation. bubblewrap cannot
 create a user namespace here (AppArmor restrict_unprivileged_userns=1),
 no container engine is reachable (podman/docker not found), and the
-isolation helper is not installed (see `tog doctor --isolation`). Enable
+isolation helper is not installed (see `ward doctor --isolation`). Enable
 one of them." Until PR 3b ships those backends, the message names the
 native sandbox's real failure and says this build has no other isolation
 backend, rather than pointing at a command that does not exist yet. A sync that needs a missing-lock door fails the same way.
@@ -1429,7 +1429,7 @@ under the seccomp filter.
 | npm | `--git=/usr/bin/git` (the host git on the sandbox's read-only system roots; `/nonexistent/git` on a host without one, so only a git dependency fails; PR 6), `--script-shell=/bin/sh`, `--shell=/bin/sh` (the host shell, required), `--ignore-scripts`, `--node-options=`, `--node-gyp=` (a nonexistent path), `--editor`, `--browser`, and `--viewer` set to `false` | `git` (the lock-only install of a git dependency runs it). `script-shell`, `shell`, `node-gyp`, `editor`, `browser`, `viewer`, and `node-options` did not fire, and a git dependency's `prepare` script did not run under `--ignore-scripts` | no marker ran, exit 0 |
 | pnpm | `--config.script-shell=/bin/sh`, `--config.shell-emulator=false`, `--config.git-shallow-hosts=`, `--config.ignore-scripts=true` (PR 0 measured `--ignore-scripts` on `install`; `pnpm remove` rejects the flag, and the `--config.` spelling is the one every verb takes; PR 6), `--config.node-options=`, and **added by PR 0**: `--config.pnpmfile=.pnpmfile.cjs`, `--config.global-pnpmfile=`, `--config.manage-package-manager-versions=false` (the last from pnpm's docs: otherwise pnpm may download another pnpm named by `packageManager`). A `.pnpmfile.cjs` is project code pnpm runs by design, so it is left on (turning it off would change the lock) and the tier contains it | `pnpmfile` and `global-pnpmfile` (both name a JavaScript file pnpm loads). `script-shell` and `node-options` did not fire | only the by-design `.pnpmfile.cjs` ran, exit 0 |
 | cargo | `--config build.rustc=<store rustc>`, `build.rustc-wrapper=""`, `build.rustc-workspace-wrapper=""`, `build.rustdoc=<store rustdoc>`, `registry.global-credential-providers=["cargo:token"]`, `registry.credential-provider="cargo:token"` (crates.io's own slot), `registries.<name>.credential-provider="cargo:token"` for every registry in the config (strings, since PR 5: cargo concatenates a `--config` array with a config-file array, so an array let the project's provider run after ours; the global slot must stay a list, and a project that sets it, or a per-registry slot, as an array now stops cargo with a merge error, which fails closed), `net.git-fetch-with-cli=true` with the forced git below. `target.<triple>.runner` and `.linker` stay unset | `build.rustc`, `build.rustc-wrapper`, and `build.rustc-workspace-wrapper` in `cargo metadata` (it asks rustc for target info), not in `generate-lockfile`. Both credential-provider forms, against a registry whose `config.json` says `auth-required`. `build.rustdoc`, `runner`, and `linker` never fired (proved: resolution never reads them) | no marker ran. The authenticated registry then fails (exit 101, `cargo:token` has no token), which is the intended outcome. Without that dependency, exit 0 |
-| uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` (safe scalar resolver settings are not yet preserved, a review follow-up) | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so tog must still read those itself | no marker ran, exit 0 |
+| uv | `--keyring-provider disabled`, `--no-python-downloads`, `--python <store python>` (on both `lock` and `pip compile`, replacing `UV_PYTHON`, which `pip compile` ignores), `--no-config` (safe scalar resolver settings are not yet preserved, a review follow-up) | `keyring-provider = "subprocess"` in `[tool.uv]` (runs `keyring` from `PATH`), and `python = ...` in `[tool.uv.pip]` (runs the named interpreter). A `.python-version` naming a program did not fire. `--no-config` alone drops `[tool.uv]` settings but keeps `[[tool.uv.index]]` and `[tool.uv.sources]`, so Greyward must still read those itself | no marker ran, exit 0 |
 | git | carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE` (the tools start git, so `-c` flags cannot reach it): `credential.helper=`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.sshCommand=false` with `GIT_SSH_COMMAND` unset, `protocol.allow=never`, `protocol.https.allow=always`, `protocol.file.allow=always`, and **added by PR 0**: `protocol.ext.allow=never`, `protocol.ssh.allow=never`, `protocol.git.allow=never`, `protocol.http.allow=never`, `core.gitProxy=`; also `uploadpack.packObjectsHook=`, `core.askPass=false` with `GIT_ASKPASS` and `SSH_ASKPASS` unset, and `GIT_CONFIG_NOSYSTEM=1` with `GIT_CONFIG_GLOBAL=/dev/null` | `core.fsmonitor` (`status`), `core.sshCommand` (an `ssh://` remote), `core.gitProxy` (a `git://` remote), `credential.helper` and `core.askPass` (a 401 from an https remote), `core.hooksPath` (`commit`), and `protocol.ext.allow=always` (an `ext::` remote runs its command) | the design's set still ran the `ext::` marker: a repository's own `protocol.ext.allow=always` beats `protocol.allow=never`, which is only the default for unlisted protocols. With the per-protocol `never` entries above, no marker ran |
 | go | the census environment is built from empty: `GOFLAGS=-mod=mod`, `GOTOOLCHAIN=local`, `GOVCS=*:off` (modules come only through GOPROXY), `GOPROXY` the mirror with no `direct`, `GONOSUMDB=` and `GOPRIVATE=` unset, `CC` and `CXX` unset with `CGO_ENABLED=0`, and **added by PR 0**: `GOENV=off` (so a user `go.env` cannot set any of these), `GOAUTH=off`, `GOCACHEPROG` unset | `GOCACHEPROG` (go runs it as the build cache), `GOVCS` allowing git with `GOPROXY=direct` (runs `git` from `PATH`), and a `toolchain go1.99.0` line in `go.mod` under `GOTOOLCHAIN=auto` (requests `golang.org/toolchain/@v/v0.0.1-go1.99.0.linux-amd64.zip` from the mirror). `GOFLAGS=-toolexec=...`, `GOAUTH=command ...`, `CC`, and `CXX` did not fire in `go mod tidy`/`download` | no marker ran, no toolchain request, exit 0 |
 | Bundler, mix, dotnet | code-evaluating by design; the forced settings are the ones in their table rows (`BUNDLE_*` and `MIX_*` stripped, `BUNDLE_IGNORE_CONFIG=1`, `DOTNET_CLI_*` set, `--disable-build-servers`) and isolation is the control | Bundler: a `.bundle/config` naming another Gemfile fires without `BUNDLE_IGNORE_CONFIG=1` | the Gemfile, `mix.exs`, and an MSBuild `Exec` target in `Directory.Build.props` all ran, as designed, confined, exit 0 |
@@ -1501,14 +1501,14 @@ closure their sync (or `x` root) publishes.
 **Portable versus local evidence.** The signed record carries the ledger's
 object id and the sha256 of its portable bytes. Both are portable
 values, fixed by the portable evidence and identical on every machine.
-Verifying the record needs neither the object nor the store. `tog audit`
+Verifying the record needs neither the object nor the store. `ward audit`
 stays store-independent and judges the signed record's facts. The full
 ledger is evidence you can move between machines but do not need to:
 
-- `tog attest --ledger-export <ecosystem> <file>` writes the portable
+- `ward attest --ledger-export <ecosystem> <file>` writes the portable
   bytes of the ledger named by the project's current record. It fails if
   the object is not in the local store.
-- `tog attest --ledger-import <file>` reads portable bytes, recomputes
+- `ward attest --ledger-import <file>` reads portable bytes, recomputes
   their sha256 and object id, and accepts them only if they equal the
   `portable_sha256` and ledger id of an attesting record in the project.
   It then commits the object and roots it, and the next closure write
@@ -1517,7 +1517,7 @@ ledger is evidence you can move between machines but do not need to:
   artifact).
 - **Reconstruction by re-running** cannot give the same bytes (registry
   metadata changes over time), so it is not offered as a way to recover a
-  ledger. `tog attest` on CI produces a **new** record and ledger for the
+  ledger. `ward attest` on CI produces a **new** record and ledger for the
   same lock instead, which is the supported way for CI to hold its own
   evidence.
 
@@ -1534,7 +1534,7 @@ field pass through one redactor:
   to list them. Intercepted hosts without a protocol get all values
   redacted.
 - Redirect chains are redacted hop by hop the same way.
-- Command operands: the tog verb's operands and the tool argv are
+- Command operands: the Greyward verb's operands and the tool argv are
   scanned. URL-shaped operands are redacted as above. Values of
   credential-bearing flags (`--password`, `--token`, `--auth`, `-u`/
   `--user` with a colon, `--_authToken`, npm `//host/:_authToken=`, and
@@ -1551,8 +1551,8 @@ ledger test fails if a known secret shape survives.
 filter) receives each notification, reads the program path from the
 notifying process, appends `{pid, parent, path}` to the diagnostics, and
 lets the call continue. The log travels to the door on a pipe the door
-passes to bubblewrap as descriptor 3 (`tog __resolution-relay
---exec-log-fd 3 --env-fd 4 /run/tog/proxy.sock 127.0.0.1:8119 --
+passes to bubblewrap as descriptor 3 (`ward __resolution-relay
+--exec-log-fd 3 --env-fd 4 /run/ward/proxy.sock 127.0.0.1:8119 --
 <argv>`), never through a file in the sandbox, so the tool cannot read
 or rewrite it. The tool's environment travels the other way on
 descriptor 4 (NUL-ended `KEY=VALUE` records), and bubblewrap gets no
@@ -1565,13 +1565,13 @@ quiescence result (how many processes it killed), and the door treats a
 log without both as a failed run. This makes the kernel, not the tool, report every
 program the tool tree executed. It is diagnostics, and it cross-checks the
 build probe (below). macOS has no equivalent without Endpoint Security
-entitlements (Apple-granted; not available to tog) or disabling SIP for
+entitlements (Apple-granted; not available to Greyward) or disabling SIP for
 dtrace, so the policy-relevant build fact must not depend on it. See
 `resolution-build`.
 
 ### Attestation: the signed resolution record
 
-**The record** (`.tog/resolution/<ecosystem>.json`) is the portable,
+**The record** (`.greyward/resolution/<ecosystem>.json`) is the portable,
 committed receipt of one door that produced project outputs. It uses the
 **same envelope form as a signed closure**. The signature covers the
 canonical bytes of the whole record minus its top-level `signature`
@@ -1596,9 +1596,9 @@ produces and checks it unchanged:
 key-file and policy syntax). The record has no timestamps, port, token,
 platform, isolation engine, or store object ids other than the ledger's,
 and the ledger id is itself portable (see "Store identity"). The key is
-`TOG_SIGNING_KEY`, the same key that signs closures. The door loads it at
+`GREYWARD_SIGNING_KEY`, the same key that signs closures. The door loads it at
 preflight, as `sync` does, and that loading extends to `add`,
-`remove`, `update`, `x`, and the new `tog attest`. When `TOG_SIGNING_KEY`
+`remove`, `update`, `x`, and the new `ward attest`. When `GREYWARD_SIGNING_KEY`
 is unset in the running process, the record has no `signature` field (the
 unsigned closure convention). Such a record is honest but unattested.
 This is the only thing that depends on whether a key is present, and it
@@ -1634,7 +1634,7 @@ an ecosystem whose tailor declares a resolvable lock
 (`Tailor::resolution_outputs`, the files a door would produce, relative
 to the closure's project directory):
 
-1. Collect the **candidate records**: `.tog/resolution/<ecosystem>.json`
+1. Collect the **candidate records**: `.greyward/resolution/<ecosystem>.json`
    read through `ProjectRoot`, plus every file passed with
    `--resolution-record <file>` (the CI artifact flow below) whose
    top-level `ecosystem` string names this ecosystem. Each is read as raw
@@ -1657,17 +1657,17 @@ to the closure's project directory):
    anything else.** Read `schema`, `isolation`, and each exception `kind`
    as plain strings from the authenticated object:
    - `schema` of the form `resolution/<n>` with `n` greater than this
-     tog supports, or with any `n` it does not implement, is a **hard
+     Greyward supports, or with any `n` it does not implement, is a **hard
      failure under every policy**: "the resolution record uses schema
-     `resolution/2`, which this tog cannot read; upgrade tog".
+     `resolution/2`, which this Greyward cannot read; upgrade Greyward".
    - an `isolation` string outside `confined` and `isolated` is the
-     same hard failure ("... isolation tier `<value>` ..."). No tog ever
+     same hard failure ("... isolation tier `<value>` ..."). No Greyward ever
      signed `none` (the tier never shipped), so no compatibility case
      exists for it.
    - an exception `kind` not in `policy::KINDS` (through `canonical_kind`)
      is the same hard failure ("... exception kind `<kind>` ..."). This
      matters because `policy::record_with` itself accepts free-string
-     kinds. Without the check, an older tog would publish a closure from a
+     kinds. Without the check, an older Greyward would publish a closure from a
      newer signed record and silently drop a finding it cannot judge.
 
    These checks run on strings, before the typed `resolution/1` parser,
@@ -1704,7 +1704,7 @@ to the closure's project directory):
    every case: the join never deletes or rewrites a receipt. A stale
    receipt stays as forensic evidence of what was last resolved, and it
    is replaced only by the publication step of a later **successful**
-   resolution transaction (an edit, a missing-lock door, or `tog
+   resolution transaction (an edit, a missing-lock door, or `ward
    attest`). An unsigned or untrusted record likewise stays, since a
    machine that trusts its key can still attest it.
 6. Recording goes through `policy::record_with`, so a denied kind, whether
@@ -1725,18 +1725,18 @@ This is what makes the record enforceable rather than informational:
 Exceptions in a record affect policy only when the record attests.
 
 **Where provenance is required.** `unrecorded-resolution` is an ordinary
-policy kind. Permissive policy records it (so `tog status` and the
-exception summary show that a lock came from outside a tog door) and
+policy kind. Permissive policy records it (so `ward status` and the
+exception summary show that a lock came from outside a Greyward door) and
 continues. `docs/human/policy-company.toml` denies it, beside
-`unconfined-resolution`, with a comment. A company that uses `tog audit`
+`unconfined-resolution`, with a comment. A company that uses `ward audit`
 already has machine `[signing]` keys (`audit --signed` exits 2 without them), and
-that is the one prerequisite. From then on a lock must come through a tog
+that is the one prerequisite. From then on a lock must come through a Greyward
 door on a machine whose key the gate trusts. Which machines sign is the
 team's choice, and both options below use the same verification path
 (see "Decisions").
 
-**Existing locks: `tog attest [<eco>]`.** Every repository adopting that
-policy starts with locks that no door produced. `tog attest` runs a
+**Existing locks: `ward attest [<eco>]`.** Every repository adopting that
+policy starts with locks that no door produced. `ward attest` runs a
 **verification door** (door kind `attest`) per ecosystem: the tool's own
 lock-consistency check, confined through the proxy. Its declared outputs
 are the lock and manifest, and success requires that the diff leaves
@@ -1754,7 +1754,7 @@ rewrites the lock, so the byte diff is the check) when the manifest has
 drifted. Go needs both commands: after an edit that removes a module,
 `go mod tidy -diff` is what catches the stale `go.sum` lines.
 Tailors without a lock check refuse `attest` with the reason. With no
-ecosystem named, `tog attest` covers every detected ecosystem whose tailor
+ecosystem named, `ward attest` covers every detected ecosystem whose tailor
 declares resolution outputs, and refuses when there is none. It is
 all-or-nothing: every check runs before any record is written, so one
 failing ecosystem leaves no partial set. The receipts are then published
@@ -1764,36 +1764,36 @@ published by that run are put back as they were. All-or-nothing holds for
 failures, not for process death: each receipt is its own transaction, so
 a run killed between two publications leaves some receipts new and some
 old. Each one is still a valid record of its own lock, so a later sync
-judges every one correctly, and rerunning `tog attest` completes the set. It reads `tog-toolchain.toml` as
+judges every one correctly, and rerunning `ward attest` completes the set. It reads `greyward-toolchain.toml` as
 `--frozen` does and never writes it. Run on CI
 with the signing key, this converts a repository in one command. It is
 also the remedy the `unrecorded-resolution` refusal prints.
 
-**`--strict` (and `TOG_STRICT=1`, and `strict = true`).** Strict mode
+**`--strict` (and `GREYWARD_STRICT=1`, and `strict = true`).** Strict mode
 denies every exception kind (`policy::StrictSource`), so from PR 4, the
 PR that introduces the join, onward strict has these outcomes:
 
 - **Every lock needs an attesting record.** A sync under strict with a
   lock that has none refuses publication with `unrecorded-resolution`,
   and the refusal carries this remedy in place of the generic
-  "rerun without --strict": "`tog --strict` requires every lock to carry
+  "rerun without --strict": "`ward --strict` requires every lock to carry
   a signed resolution record. `<lock>` has none (`<reason>`). To create
-  one: run `tog keygen <path>`, set `TOG_SIGNING_KEY=<path>`, add the
+  one: run `ward keygen <path>`, set `GREYWARD_SIGNING_KEY=<path>`, add the
   printed public key to the `[signing] trusted` list in your machine
-  policy (`TOG_POLICY`, else `~/.tog/policy.toml`), then run `tog attest
+  policy (`GREYWARD_POLICY`, else `~/.greyward/policy.toml`), then run `ward attest
   <ecosystem>`. Or rerun without --strict." The reason is the join's
   (`missing`, `unsigned`, `untrusted-key`, `stale-inputs`, and so on),
   so a developer whose record is merely stale is told to run
-  `tog attest` and not to make a new key. As built, the text refines the
+  `ward attest` and not to make a new key. As built, the text refines the
   quote in three ways, because the literal version gave wrong advice in
   cases the quote did not cover. It names every existing listed output
   (`` `go.mod`, `go.sum` have none ``), since a record covers the lock and
   the manifest together. When the committed record authenticated (a
   trusted signature that is stale, incomplete or malformed), the steps
-  are only "run `tog attest <ecosystem>` with `TOG_SIGNING_KEY` set to a
+  are only "run `ward attest <ecosystem>` with `GREYWARD_SIGNING_KEY` set to a
   key your machine policy trusts": the key already exists. And the last
   sentence follows what denied the kind, as every other refusal does: the
-  flag ("rerun without --strict"), `unset TOG_STRICT`, the policy file
+  flag ("rerun without --strict"), `unset GREYWARD_STRICT`, the policy file
   that set `strict = true`, or, when a deny list named
   `unrecorded-resolution` (the company template), "remove
   'unrecorded-resolution' from the deny list in `<file>`". Supplied
@@ -1801,7 +1801,7 @@ PR that introduces the join, onward strict has these outcomes:
   `; supplied <path>: <reason>`, after the committed record's.
 - **Last-good metadata is refused.** `stale-resolution` is denied, so the
   proxy answers 504 where it would have served last-good, and the door
-  fails with: "`tog --strict` refuses stale metadata: `<url>` could not
+  fails with: "`ward --strict` refuses stale metadata: `<url>` could not
   be fetched (`<transport error or --offline>`) and the last-good copy
   from the cache was not used. Retry when `<host>` is reachable, or rerun
   without --strict." It names the first such URL and the reason the
@@ -1815,7 +1815,7 @@ The named tests are
 `strict_sync_with_stale_record_says_attest_not_keygen`,
 `strict_last_good_fetch_fails_naming_the_url_and_reason`, and
 `strict_refuses_the_isolated_tier_before_the_tool_starts`. PR 4 updates
-`docs/human/CLI.md`'s `--strict` and `TOG_STRICT` entries to say that
+`docs/human/CLI.md`'s `--strict` and `GREYWARD_STRICT` entries to say that
 strict requires a signed resolution record for every lock and names the
 remedy.
 
@@ -1824,12 +1824,12 @@ remedy.
 Project code runs only inside confined resolution tools there. Its records
 reach the keyless gate as a build artifact, so nothing is committed by a bot:
 
-- `tog attest [<eco>] --record-out <path>` runs the verification doors
+- `ward attest [<eco>] --record-out <path>` runs the verification doors
   as above but writes each signed record to `<path>` (a file when one
   ecosystem is named, else a directory holding `<eco>.json` per
-  ecosystem) instead of `.tog/resolution/`. The project checkout is left
+  ecosystem) instead of `.greyward/resolution/`. The project checkout is left
   unchanged.
-- `tog sync --frozen --resolution-record <path>` (repeatable; a file or
+- `ward sync --frozen --resolution-record <path>` (repeatable; a file or
   a directory of records) adds those records to the join's candidates
   (step 1 above). They are verified exactly like a committed record: the
   signature against the machine policy's trusted keys, then coverage and
@@ -1845,10 +1845,10 @@ outside the candidate checkout. Each fresh gate/test job reconstructs machine
 trust from an operator-owned public key and supplies the same receipts.
 
 The resolution gate is the fresh policy-enforced sync. That keyless sync
-writes unsigned closures, so adding `tog audit` under its trusted-key policy
+writes unsigned closures, so adding `ward audit` under its trusted-key policy
 would fail. Strict policy rejects every exception, including kinds the
 company template intentionally permits. Teams can use an operator-owned
-machine deny policy instead. `tog run` executes tests on the host in a separate
+machine deny policy instead. `ward run` executes tests on the host in a separate
 disposable job without signing credentials.
 
 The example uses manual candidate verification from the protected default
@@ -1860,9 +1860,9 @@ ordinary fork PR receives no signing secret, and its skipped dependent job
 is not a successful gate.
 
 **The bot-commit alternative.** A team that prefers committed records
-runs `tog attest` without `--record-out` in the same key-holding job and
-commits `.tog/resolution/` back to the branch (a bot commit). The gate
-is then `tog --strict sync --frozen` with no extra flag. Both flows go
+runs `ward attest` without `--record-out` in the same key-holding job and
+commits `.greyward/resolution/` back to the branch (a bot commit). The gate
+is then `ward --strict sync --frozen` with no extra flag. Both flows go
 through the same join, the same trust check, and the same named tests:
 `ci_record_artifact_attests_through_resolution_record_flag`,
 `supplied_record_for_another_project_is_incomplete_or_stale`,
@@ -1899,7 +1899,7 @@ on the thread that opened the attribution, records after the tool exits.
 | The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |
 | The door ran without a network fence (the `isolated` tier; see "Isolation tiers") | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
 | Metadata was served from last-good because the upstream was unreachable (offline or transport failure) | `stale-resolution` (**new**; subject = endpoint, detail = number of last-good responses) | the proxy answers 504 for any request it would otherwise serve last-good, so the door fails naming the first such URL | record; the entries are also marked `freshness: last-good` in the portable evidence, which the signature covers |
-| A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `tog attest` | record |
+| A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `ward attest` | record |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
 | Integrity mismatch (bytes differ from the claimed digest) | not an exception | always a hard failure: 502 to the tool, door fails, nothing cached | no permissive path |
 
@@ -1907,7 +1907,7 @@ on the thread that opened the attribution, records after the tool exits.
 proxy cannot see whether uv executed a build backend: fetching an sdist
 does not prove a build, and a build can happen without a fetch in that
 run. On Linux the exec log can see it, but macOS offers no equivalent
-tog can use. So the fact is established by construction on both
+Greyward can use. So the fact is established by construction on both
 platforms:
 
 1. Every uv door first runs with `--no-build` (the **probe**). With no
@@ -2069,7 +2069,7 @@ ecosystem when not frozen. With the door:
    attribution. For a missing-lock door that attribution is already the
    ecosystem's own scope, so no hand-off is needed.
 4. The tailor plans from the new lock exactly as today: every artifact is
-   fetched and verified by tog at realize time.
+   fetched and verified by Greyward at realize time.
 5. The closure writer joins the record. It attests, because the outputs
    were just published and signed (when a key is configured).
 
@@ -2079,7 +2079,7 @@ the same attribution. They declare no project outputs: a Go planner
 whose `go mod tidy` would change `go.mod` is the missing-lock door, not a
 planner. They write a ledger, retained through `ClosureRefs`, and no
 record. A refusal still fails the sync. Go's closure download keeps its
-"re-verify every artifact" rule. The proxy's cache and tog's
+"re-verify every artifact" rule. The proxy's cache and Greyward's
 `cache/sha256` are the same store, so the second copy costs nothing.
 
 ### `Tailor::edit_manifest` and the door API (#61, #169)
@@ -2123,7 +2123,7 @@ pub struct DelegateSpec<'s> {
     pub exclude: Vec<Glob>,               // not snapshotted (heavy build outputs)
     pub extra_roots: Vec<PathBuf>,        // project-side read roots, snapshotted
     pub store_reads: Vec<PathBuf>,        // store objects, scanned for sockets, read-only
-    pub env: Vec<(String, String)>,       // tog-forced values; the environment starts empty
+    pub env: Vec<(String, String)>,       // greyward-forced values; the environment starts empty
     pub routes: Vec<Route>,               // mirror routes: (&'static dyn RegistryProtocol, Endpoint)
     pub intercept: Intercept,             // Intercept::{Tls, RefuseVisibly}
     pub probe: Option<Probe>,             // uv's --no-build probe and its rerun args
@@ -2158,7 +2158,7 @@ pub struct ManifestEdit<'a> {
     pub project: &'a Path,
     pub specs: &'a [DepSpec],        // { name, text }, already validated by commands::deps::validate_spec
     pub dev: bool,
-    pub host: &'a dyn EditHost,      // toolchain() and the `tog x` cache (cached_tool()), asked
+    pub host: &'a dyn EditHost,      // toolchain() and the `ward x` cache (cached_tool()), asked
                                      // only once a tool will run, so a refusal never selects one
 }
 
@@ -2167,9 +2167,9 @@ pub struct EditOutcome {
     pub sync_root: PathBuf,          // where the following sync runs (pnpm workspace root)
 }
 
-/// `tog add` / `remove` / `update` for this ecosystem: edit the manifest
+/// `ward add` / `remove` / `update` for this ecosystem: edit the manifest
 /// and lock with the ecosystem's pinned tool. The tool runs only through
-/// `door`: on a staged snapshot, network limited to tog's resolution
+/// `door`: on a staged snapshot, network limited to ward's resolution
 /// proxy, outputs published with a signed resolution record. A tailor
 /// that cannot make an edit refuses with the exact command to run; the
 /// default refuses.
@@ -2182,7 +2182,7 @@ fn edit_manifest(
     Err(unsupported(self.id(), "add, remove, and update"))
 }
 
-/// `tog attest`: run this ecosystem's lock-consistency check through
+/// `ward attest`: run this ecosystem's lock-consistency check through
 /// `door` and return the record the door built. The default refuses.
 /// The command, not the tailor, signs and writes the record, so every
 /// ecosystem is checked before anything is written and `--record-out`
@@ -2209,7 +2209,7 @@ fn resolution_inputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
 becomes `door: &mut ResolutionDoor<'_>` (the door lends the attribution
 back through `door.attribution()`). `RegistryTool::realize` takes a door
 in place of its attribution too. An `x` door's lock root is the
-`~/.tog/x` cache root, and it writes a ledger but no resolution record,
+`~/.greyward/x` cache root, and it writes a ledger but no resolution record,
 since there is no project. Its npm/uv resolution is a door, and
 `realize_node_tool`, which realizes the pinned pnpm, becomes a Node tailor
 function used by the Node `edit_manifest` (#169, option 2). After this,
@@ -2242,7 +2242,7 @@ Contract 1 needs enforcement, not review alone:
   `npx`, `pnpm`, `yarn`, `corepack`, `node`, `cargo`, `rustup`, `go`,
   `bundle`, `bundler`, `gem`, `ruby`, `mix`, `elixir`, `iex`, `erl`,
   `rebar3`, `dotnet`, `git`). `RESOLVERS` names programs, not wrappers:
-  `sh -c`, `env`, `bwrap` and `sandbox-exec` pass by design (a `tog run`
+  `sh -c`, `env`, `bwrap` and `sandbox-exec` pass by design (a `ward run`
   script is `sh -c`). `rustup`, `uvx`, `corepack`, `node`, `yarn`,
   `rebar3`, `pip`, `bundler` and `iex` are listed although no call site
   runs them as a helper, because each can fetch or run project code and
@@ -2251,17 +2251,17 @@ Contract 1 needs enforcement, not review alone:
   reads names, and it catches call sites written the wrong way, not code
   hiding a resolver. A form binds the exact argv shape of its one call
   site, the program to a realized store object named by absolute path
-  (never a host shim or rustup proxy, never a bare name tog's own `PATH`
+  (never a host shim or rustup proxy, never a bare name Greyward's own `PATH`
   resolves while an `env_clear`ed child searches libc's default, and
   never a file under `<store>/tmp`, where unpacked packages land; the OTP
   probe alone runs a staged program), and the environment the child will
-  really see, meaning the command's explicit edits over tog's own
+  really see, meaning the command's explicit edits over Greyward's own
   environment. Each form also lists every variable its call site sets
   and admits no other, so a caller cannot add `LD_PRELOAD`,
   `LD_LIBRARY_PATH` or a tool setting outside the checked families. The Ruby and Elixir forms check the tailors' own scrub
   lists, which live in the tripwire and which the tailors alias. The
   forms (the Cargo tailor's `cargo locate-project` form was removed in
-  PR 5: tog finds the workspace root itself and no cargo runs on the
+  PR 5: Greyward finds the workspace root itself and no cargo runs on the
   host): `go mod
   download path@version...` with `GOROOT` the program's own toolchain,
   `GOPROXY`, `GOSUMDB`, `GOTOOLCHAIN`, `GOENV`, `GOWORK`, `GOVCS` and
@@ -2286,18 +2286,18 @@ Contract 1 needs enforcement, not review alone:
   edit one at a time and expects a refusal. `tar` never matches. Helpers that evaluate project files without needing the
   network (the Ruby gate-1 and gate-2 helpers, the Elixir `mix.lock`
   parser) go through a door with no routes, which means full network
-  denial. The door calls the unrestricted primitive. So do tog's own
+  denial. The door calls the unrestricted primitive. So do Greyward's own
   verified git fetches (`kernel::gitsrc`), and the two commands that run
-  the user's own program rather than a resolution (`tog run`'s command
-  and `tog x`'s installed tool). `sandbox` builds use `local_*`: their
+  the user's own program rather than a resolution (`ward run`'s command
+  and `ward x`'s installed tool). `sandbox` builds use `local_*`: their
   child is `bwrap` or `sandbox-exec`, never a resolver. Every other
   supervise caller moves to `local_*`. That includes
   `tailors/python/build.rs`: its sdist `cargo generate-lockfile` becomes a
   door in PR 1 (`Legacy`) and a proxied door in PR 5. It is not an
   offline-form exemption.
-- **Compile-time.** `clippy.toml` adds `tog::kernel::supervise::status`,
-  `tog::kernel::supervise::status_with_stderr`, and
-  `tog::kernel::supervise::output` to `disallowed-methods`, allowed only in
+- **Compile-time.** `clippy.toml` adds `greyward::kernel::supervise::status`,
+  `greyward::kernel::supervise::status_with_stderr`, and
+  `greyward::kernel::supervise::output` to `disallowed-methods`, allowed only in
   `kernel::resolve`, `kernel::gitsrc`, and `kernel::supervise` itself, and
   in the user-program launchers of `commands/run.rs` and `commands/x/`,
   each with its reason. That is three kernel sites and two command sites,
@@ -2324,9 +2324,9 @@ Contract 1 needs enforcement, not review alone:
 2. **Hold the originals.** Open the lock root through `ProjectRoot` and
    keep the directory descriptor for the whole run. The **held target
    set** is every declared output **plus the existing receipt**
-   `.tog/resolution/<ecosystem>.json` (the receipt is never a
+   `.greyward/resolution/<ecosystem>.json` (the receipt is never a
    `DelegateSpec` output, since the tool does not write it, but the
-   transaction replaces it). Open `.tog/resolution/` through the same
+   transaction replaces it). Open `.greyward/resolution/` through the same
    `ProjectRoot` walk, and keep that directory descriptor too. For each
    target that exists, open it `O_NOFOLLOW` through its directory
    descriptor, copy its bytes into an immutable store stage (the
@@ -2345,12 +2345,12 @@ Contract 1 needs enforcement, not review alone:
    journal's deletion does not leave a journal recovery refuses. The object is committed even when every target is absent,
    because recovery trusts a journal only through it. Before the object
    is rooted, a `held` journal (step 7's file, with no targets yet) names
-   its id, so a tog killed while the tool runs leaves a journal that
+   its id, so a Greyward killed while the tool runs leaves a journal that
    recovery finds and whose originals it releases; nothing rooted is
    ever left without one. The whole transaction holds the store's
    project lock and an `flock` on the project directory itself: the
-   store's lock is per store, the journal is per project, and two tog
-   processes with different `TOG_STORE`s must not undo each other.
+   store's lock is per store, the journal is per project, and two Greyward
+   processes with different `GREYWARD_STORE`s must not undo each other.
 3. **Snapshot** the lock root and extra roots (socket-free), with the
    baseline manifest. Scan store and system roots for sockets.
 4. **Run** the tool (probe first for uv) in its tier, through the proxy.
@@ -2364,15 +2364,15 @@ Contract 1 needs enforcement, not review alone:
    staged directory plus rename, as for every object), and register them
    in the project's root record. Build the record from the output copy's
    digests and sign it.
-7. **Journal.** Write `.tog/journal/<ecosystem>.json` through
+7. **Journal.** Write `.greyward/journal/<ecosystem>.json` through
    the held descriptor, with `fsync` of the file and the directory. It
-   lives under `.tog/` (which projects ignore) and outside
-   `.tog/resolution/` (which projects commit, PR 10), so a journal is
+   lives under `.greyward/` (which projects ignore) and outside
+   `.greyward/resolution/` (which projects commit, PR 10), so a journal is
    never committed, pushed, or cloned into another checkout. It
    lists, per target (each output, then the record), the target name,
    the temporary name, the original copy's store path and pre-run digest
    (or "absent"), the new digest, and a state (`pending`). The journal's
-   presence means "publication may be incomplete". Every tog command that
+   presence means "publication may be incomplete". Every Greyward command that
    writes this project (sync, `add`/`remove`/`update`, `attest`) runs
    recovery before anything else when it finds one. The journal's
    root-record entry keeps the original copies alive until recovery or
@@ -2393,7 +2393,7 @@ Contract 1 needs enforcement, not review alone:
    each target, mark it `swapped` in the journal and `fsync`. The
    receipt is the last target and gets the same swap-then-compare as
    every output. A receipt edited or replaced during the run (another
-   `tog attest`, a `git checkout`, a hand edit) is detected, swapped
+   `ward attest`, a `git checkout`, a hand edit) is detected, swapped
    back, and the door fails. A receipt is therefore replaced only here,
    inside a successful transaction, and only if it is still the one held
    at step 2.
@@ -2401,10 +2401,10 @@ Contract 1 needs enforcement, not review alone:
    `committed`, `fsync`, delete the displaced temporaries, mark it
    `finished`, release the original copies, and delete the journal. The resolution is now published. A failure while cleaning up
    after this point is not a failed door: the outputs, the receipt, and
-   the ledger's roots stay, tog warns, and the committed (or finished)
+   the ledger's roots stay, Greyward warns, and the committed (or finished)
    journal is left for the next recovery to finish.
 10. **On any failure before step 8**, nothing has touched the project:
-    remove the temporaries and unroot the ledger and sidecar for `tog gc`.
+    remove the temporaries and unroot the ledger and sidecar for `ward gc`.
     **On failure during step 8**, undo every `swapped` target in reverse
     order, by exchanging the displaced original back (or removing a
     created file), then mark the journal `finished`, release the original
@@ -2419,13 +2419,13 @@ recovered by the next transaction there). It never walks to ancestors: a
 journal planted in a parent directory must not steer a command in a
 project below it. It takes the store's project lock and the project
 directory's `flock`. A journal is acted on only when it describes a
-publication tog made in this project with this store: its originals
+publication Greyward made in this project with this store: its originals
 object is in the active store, is rooted to this project, and its
 identity lists exactly the journal's targets and pre-run digests; every
 target is a project path of the kind a transaction holds (relative, no
-`..`, no `.tog/` state but the receipt, reached through the held
+`..`, no `.greyward/` state but the receipt, reached through the held
 descriptor without following a symlink); and every temporary is named
-exactly `.<target name>.tog-<16 hex>.tmp` beside its target. Anything
+exactly `.<target name>.greyward-<16 hex>.tmp` beside its target. Anything
 else, and a journal that does not parse, is refused with the journal's
 path and what to do, and nothing is touched; it blocks only commands
 that write that project. A `held` or `finished` journal only releases
@@ -2464,7 +2464,7 @@ there before (if any) still describes them.
 | A Mach lookup outside the tool's allow-list (macOS) | Seatbelt denies it; the tool usually fails, and the denial is in the sandbox log the door prints |
 | A descendant outlives the tool | the tree is stopped before validation; contents are read only from the immutable output copy |
 | Socket found in a mounted root at preflight | door refuses, naming the path |
-| Request matches no route and is not interceptable | 403 with a tog body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
+| Request matches no route and is not interceptable | 403 with a Greyward body, ledger `refused`; the door fails if the refusal was a policy denial, even when the tool exits 0 (npm tolerates failed optional fetches) |
 | `CONNECT` or mirror request without the session token | 407/403, diagnostics entry (capped, counted); never forwarded. Not a ledger entry: the portable ledger is signed evidence of the tool's traffic, and a request without the token is not the tool's session (anything on the machine can send one) |
 | Upstream bytes do not match the claimed digest | 502 to the tool, nothing cached, the door fails with both digests named; no stale fallback |
 | Redirect to a non-permitted origin | refused; credentials never follow a redirect to another origin |
@@ -2472,22 +2472,22 @@ there before (if any) still describes them.
 | Transport failure | last-good metadata marked `last-good`; otherwise 504 |
 | Relay or proxy thread dies | the tool sees connection refused and fails; the door reports the proxy error first |
 | Tool exits non-zero | nothing published; the tool's stderr is shown after any proxy refusal, which is usually the real cause |
-| Undeclared change in the snapshot (source files, `.github/`, a new `.git`, `.git/hooks/*`, `.tog/*`) | nothing published; the paths are named |
+| Undeclared change in the snapshot (source files, `.github/`, a new `.git`, `.git/hooks/*`, `.greyward/*`) | nothing published; the paths are named |
 | An output contains the session token, the proxy address, or the stage path | nothing published |
 | A real output changed during the run, at any moment up to its swap | the post-swap compare sees it, the swap is reversed, and nothing stays published; the user's edit is kept byte-for-byte |
 | Ledger commit, sidecar commit, record signing, or any swap fails | the transaction rolls back (step 10); the project is unchanged |
-| tog is killed mid-run | before step 8 the project is unchanged; after that, the next writing command recovers from the journal |
+| Greyward is killed mid-run | before step 8 the project is unchanged; after that, the next writing command recovers from the journal |
 | Record names an unknown exception kind, isolation value, or schema | hard failure at the join under every policy |
 | Record does not cover an existing lock or manifest, or has empty `outputs` | `unrecorded-resolution` (`incomplete` or `malformed`) |
 
 ### Performance and caching
 
-- **One proxy per tog process**, started lazily on the first door
+- **One proxy per Greyward process**, started lazily on the first door
   (`OnceLock` in `kernel::resolve`). Startup cost: bind, P-256 keygen, and
   a self-signed CA, well under 10 ms. Sessions are per door run, each with
   its own token and ledger, so concurrent doors in one process stay
   separate.
-- **Threads, not async.** tog has no async runtime, and this does not add
+- **Threads, not async.** Greyward has no async runtime, and this does not add
   one. Each accepted connection gets a thread from a bounded pool (64).
   Connections beyond that wait in the accept backlog rather than being
   refused, because uv opens up to 50 concurrent downloads by default.
@@ -2524,9 +2524,9 @@ there before (if any) still describes them.
   shared across projects is a poisoning path (uv caches wheels it built
   from sdists, and a hostile build could plant one), and it would let a
   cached build hide from the `resolution-build` probe. The proxy cache is
-  tog-verified and makes cold tool caches cheap. Go's planner module cache
+  greyward-verified and makes cold tool caches cheap. Go's planner module cache
   stays persistent as today: no third-party code runs in Go resolution,
-  and tog re-verifies every module it keeps.
+  and Greyward re-verifies every module it keeps.
 - **Snapshot cost:** see "The staged snapshot". The content-digest
   diff hashes the snapshot twice (the baseline while copying, and the
   post-run walk). SHA-256 runs at roughly 1 to 2 GB/s per core on
@@ -2535,7 +2535,7 @@ there before (if any) still describes them.
   the tens of milliseconds. The post-run walk hashes every file and never
   skips one by timestamp, since a skip would bring back the timestamp
   problem. The budget below includes it.
-- **Budget.** A warm `tog add` through the door within 1.2x of today's
+- **Budget.** A warm `ward add` through the door within 1.2x of today's
   wall time, and a cold one within 1.5x, measured from PR 4 onward on the
   hit-rate projects and reported in each PR. HTTP/1.1 fallback is the
   likely cost for cargo's sparse index, and the snapshot copy on ext4 for
@@ -2622,7 +2622,7 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
   edits the target between step 2 and its swap)
 - `user_edit_after_hold_is_never_copied_into_a_backup`
 - `concurrent_receipt_edit_is_swapped_back_and_fails_the_door` (a test
-  hook rewrites `.tog/resolution/<eco>.json` between step 2 and its
+  hook rewrites `.greyward/resolution/<eco>.json` between step 2 and its
   swap)
 - `receipt_appearing_during_the_run_fails_noreplace`
 - `crash_during_receipt_swap_recovers_the_original_receipt` (kills the
@@ -2642,7 +2642,7 @@ Snapshot, sockets, and transaction (`src/kernel/resolve/door.rs`):
 - `output_containing_the_token_fails`
 - `unconfined_resolution_is_refused_when_denied_and_recorded_otherwise`
 - `no_tool_runs_unisolated_when_no_tier_is_available` (every census
-  tool, with and without `TOG_SIGNING_KEY` set, and with a key file on
+  tool, with and without `GREYWARD_SIGNING_KEY` set, and with a key file on
   disk but the variable unset: the command fails naming the missing
   capability)
 - `npm_forced_settings_never_run_the_project_git_or_script_shell` (a
@@ -2741,7 +2741,7 @@ Attestation, join, and audit (`tests/cli.rs` and `src/comforter/`):
 - `record_signature_key_is_bare_hex_and_verifies_with_kernel_signing`
 - `unattested_record_exceptions_are_ignored`
 - `company_policy_denies_unrecorded_resolution_under_frozen_sync`
-- `tog_attest_signs_an_unchanged_lock_and_refuses_a_changed_one`
+- `ward_attest_signs_an_unchanged_lock_and_refuses_a_changed_one`
 - `joined_exceptions_are_not_duplicated_by_sync`
 - `attribution_claim_removes_exact_duplicates`
 - `audit_denies_unconfined_resolution_under_company_policy`
@@ -2790,7 +2790,7 @@ Per ecosystem, offline against fixtures (one per migration PR):
 
 Network (`--ignored`, run on Linux and the Mac): the ten existing
 `deps_e2e` round trips, unchanged in expectations, now running through the
-door, plus one live missing-lock generation and one `tog attest` per
+door, plus one live missing-lock generation and one `ward attest` per
 ecosystem.
 
 ### Implementation plan (PRs, in order)
@@ -2800,7 +2800,7 @@ census invocations through a logging interception proxy and record every
 request (host, path, method, redirect chain) in a table in this section.
 Confirm each † claim: the pnpm proxy flags, npm `--cafile`, uv's
 `SSL_CERT_FILE`, `--no-build` error form and `--no-build-package`, every
-tool's lock check for `tog attest`, every census tool running under
+tool's lock check for `ward attest`, every census tool running under
 the AF_UNIX seccomp filter (with `io_uring_setup` denied), each tool's
 **program-naming settings** (the "Forced program settings" table, from
 the tool's documentation and source, each proven with a marker-program
@@ -2922,7 +2922,7 @@ the flexible option:
   production, the fixture CA in tests) and pins rustls's ring provider.
   `rcgen` is a dev-dependency until interception needs it at run time.
 - **The metadata cache** stores one file per key (a JSON header line,
-  then the body), written by rename and verified by sha256 on read. `tog
+  then the body), written by rename and verified by sha256 on read. `ward
   gc` sweeps entries unused for `keep_days`, and the sidecar index
   entries whose sidecar is gone.
 
@@ -2938,7 +2938,7 @@ the regular-file rule for declared outputs (`openat2` with
 `O_NOFOLLOW` on macOS), the forced program settings for every tool row,
 the tier rule (native sandbox only in this PR; no unisolated tier, so a
 host without it fails with the missing-capability message until PR 3b),
-the signing-key read deny and the `tog keygen` path check, the
+the signing-key read deny and the `ward keygen` path check, the
 `unconfined-resolution` kind, and the sandbox, quiescence, and
 transaction tests. On the Mac: the Seatbelt rules, the deny-by-default
 Mach profile with the per-tool allow-lists from PR 0, and the same
@@ -2972,8 +2972,8 @@ wiring the transaction into `ResolutionDoor`, each the flexible option:
   sha256, the isolation and engine, the recorded exceptions, and each
   input's pre-run digest from the snapshot baseline. With no producer
   there is no receipt target. Signing belongs to the producer.
-  `Target::Detached` (planner, `tog x`, an unpacked sdist) holds nothing
-  and writes accepted outputs back into its tog-owned lock root one file
+  `Target::Detached` (planner, `ward x`, an unpacked sdist) holds nothing
+  and writes accepted outputs back into its greyward-owned lock root one file
   at a time; its ledger is committed but not rooted, and the caller
   roots the ids `DelegateReport::ledger` returns before its lease ends.
 - **Order of checks.** A session failure (hard failure, policy refusal,
@@ -2990,21 +2990,21 @@ wiring the transaction into `ResolutionDoor`, each the flexible option:
   same portable evidence again is a cache hit on an id an earlier run
   may already have rooted; unrooting it would orphan that run's record.
   The door reads the root record under the held project lock first.
-- **The session directory** is `tog-door-<16 hex>`, `0700`, under the
+- **The session directory** is `greyward-door-<16 hex>`, `0700`, under the
   first of `$XDG_RUNTIME_DIR`, the temp dir, and `/tmp` whose socket
   path fits `sun_path`, and is removed once the session finishes.
 - **Preflight order.** The tier, the signing-key check, and the forced
   settings are refused before anything is held, since they touch no
   project state. Recovery then runs inside `Transaction::hold`, under the
-  project lock. `tog add`/`remove`/`update` also recover at their start,
-  right after the policy loads, as `tog sync` does.
+  project lock. `ward add`/`remove`/`update` also recover at their start,
+  right after the policy loads, as `ward sync` does.
 - **Diagnostics** gain `isolation`, the exec log (`execs`), and the
   count of processes quiescence killed; `tools` lists the store objects
   the tool ran from.
 - **Tests.** The door's tests live in `kernel::resolve::door::tests`,
   in-crate so they can use the fixture upstream and the ledger's
-  commit-fault hook. They bind the `tog` binary cargo built beside the
-  test binary as the relay, and skip unless `TOG_SANDBOX_TESTS` is set
+  commit-fault hook. They bind the `ward` binary cargo built beside the
+  test binary as the relay, and skip unless `GREYWARD_SANDBOX_TESTS` is set
   (then a missing sandbox or binary fails them). The tier override
   changes only what the probe reports; the run itself is still
   bubblewrap. `npm_forced_settings_never_run_the_project_git_or_script_shell`
@@ -3014,10 +3014,10 @@ wiring the transaction into `ResolutionDoor`, each the flexible option:
 
 **PR 3b: the other isolation backends.** The Linux container backend
 (podman/docker, the pinned minimal image, `--network none`, the same
-relay and seccomp filter) and the Linux `tog-isolate` helper (per-run UID
+relay and seccomp filter) and the Linux `greyward-isolate` helper (per-run UID
 allocation, cgroup v2 leaf with `cgroup.kill` and the `populated 0`
 gate, private mount and network namespaces, 0700 per-run stages, release
-and `--reap`, `tog doctor --isolation`), with the survivor and
+and `--reap`, `ward doctor --isolation`), with the survivor and
 concurrent-session tests. The macOS VM backend follows the
 `aarch64-unknown-linux-gnu` platform rows and is not in this PR. Until it lands, a host without the native
 sandbox fails with the missing-capability message, which is the
@@ -3032,17 +3032,17 @@ record in the closure envelope format (bare-hex key), key loading for the
 edit verbs, the join in `write_closure_inner` (kind, isolation, and
 schema validation with hard failure on unknowns; stale receipts left
 untouched), `ClosureRefs` retention only for locally present ledgers,
-`tog attest --ledger-export` and `--ledger-import`,
+`ward attest --ledger-export` and `--ledger-import`,
 `unrecorded-resolution`, `stale-resolution`,
 `Tailor::resolution_outputs` and `Tailor::resolution_inputs` with the
 join's coverage rule (every existing output covered, empty `outputs`
-malformed, `inputs` digests checked), `tog attest` with Go's lock check,
-`tog attest --record-out` and `tog sync --resolution-record` (the CI
+malformed, `inputs` digests checked), `ward attest` with Go's lock check,
+`ward attest --record-out` and `ward sync --resolution-record` (the CI
 artifact flow) beside the committed-record bot flow, both with their
 named tests, the `--strict` outcomes (the `unrecorded-resolution` remedy
-text naming `tog keygen` and `tog attest`, and the precise last-good
+text naming `ward keygen` and `ward attest`, and the precise last-good
 refusal) with their tests, the `docs/human/CLI.md` update for
-`--strict`, `TOG_STRICT`, `--record-out`, and `--resolution-record`, the
+`--strict`, `GREYWARD_STRICT`, `--record-out`, and `--resolution-record`, the
 per-developer key path (a laptop key in the machine `[signing]` set
 attests a record exactly as a CI key does, with
 `developer_key_record_attests_when_trusted` and
@@ -3135,7 +3135,7 @@ interception and the cargo switch, each the flexible option:
   runs `cargo generate-lockfile` confined, `Detached`, in a reopened
   missing-lock door. Its ledger is kept on the door
   (`ResolutionDoor::keep_ledger`) and the Python sync roots it under the
-  project. `tog plan`'s sdist ledgers stay unrooted (no sync to root
+  project. `ward plan`'s sdist ledgers stay unrooted (no sync to root
   them), and the Python closure does not list them in `ClosureRefs` yet.
 - **Contract 8 is tested.** `cargo_lock_through_interception_matches_direct_run`
   generates the same lock through the door and through a blind CONNECT
@@ -3153,7 +3153,7 @@ interception and the cargo switch, each the flexible option:
     repository) and a `CARGO_HOME` config that `include`s the key both
     passed it, and cargo quoted the key in its TOML error. The fix
     removes the reader instead of guarding it:
-    - `inputs::locate_cargo_root` is tog's own walk of the manifests,
+    - `inputs::locate_cargo_root` is Greyward's own walk of the manifests,
       cargo's algorithm (the nearest `Cargo.toml`, then the root its
       `package.workspace` names, else itself if it holds `[workspace]`,
       else the nearest ancestor whose `[workspace]` does not exclude it
@@ -3169,7 +3169,7 @@ interception and the cargo switch, each the flexible option:
       manifest walk, and the door's stage, where `Snapshot::build`
       checks every copied file's inode (any depth, hidden directories
       included) and refuses the run before the tool starts.
-    - `tog fmt` runs `cargo-fmt` in the workspace itself, in a sandbox
+    - `ward fmt` runs `cargo-fmt` in the workspace itself, in a sandbox
       that mounts the workspace and the store objects only (the user's
       home is not there, `CARGO_HOME` is scratch). Before it starts,
       `confine::refuse_key_links_under` walks the whole workspace it
@@ -3179,7 +3179,7 @@ interception and the cargo switch, each the flexible option:
       includes followed) is read through a `Bound`, so a config that is
       the key or leads out of the workspace is refused by name.
     - As a last layer, the key's secret is replaced
-      (`confine::scrub_signing_key`) in the cargo stderr tog relays
+      (`confine::scrub_signing_key`) in the cargo stderr Greyward relays
       (`run_cargo_checked`, attest's refusal, the sdist lock), in
       everything `ui` prints (errors, warnings, notes, and panics, which
       go through the error channel in every mode), and in every byte a
@@ -3191,8 +3191,8 @@ interception and the cargo switch, each the flexible option:
       and its gutter (spaces, tabs, `|`) skipped, so a secret cut across
       reads or split across two lines goes in both parts whatever their
       length. The secret is read once per process. A probe found
-      tog's own parsers quoting it too: a `rust-toolchain.toml`,
-      `rust-toolchain`, `tog-toolchain.toml` or `.tog/policy.toml` that
+      Greyward's own parsers quoting it too: a `rust-toolchain.toml`,
+      `rust-toolchain`, `greyward-toolchain.toml` or `.greyward/policy.toml` that
       is a hard link to the key printed it from sync, attest, add and
       fmt. The scrub covers those; `project_files_hard_linked_to_the_signing_key_never_echo_it`
       holds it.
@@ -3203,13 +3203,13 @@ interception and the cargo switch, each the flexible option:
     out-of-root path dependencies, which a hard link cannot exploit). A
     member through a symlinked directory is staged as the symlink and
     its target is not mounted, so the confined cargo cannot read it; it
-    would resolve without the member (a probe showed `tog add` publishing
+    would resolve without the member (a probe showed `ward add` publishing
     such a lock), so every confined run on that workspace (lock
     generation, edits, attest, the sdist lock) refuses it by name, and a
     sync from the committed lock, which runs no cargo, still works.
-    `tog build` and `tog run` still run the
+    `ward build` and `ward run` still run the
     project's cargo (they execute the project anyway, sandboxed for
-    build) and are left as they are. A TOML error in tog's own cargo
+    build) and are left as they are. A TOML error in Greyward's own cargo
     readers names a line and column only (`Cargo.lock` too). Other
     parsers (policy, Python manifests, the toolchain files) still quote
     the line they fail on, which the scrub catches for the key; making
@@ -3230,7 +3230,7 @@ interception and the cargo switch, each the flexible option:
       `.git` search), so its tests do not depend on a `.git` above the
       temporary directory.
     - *The confidentiality tests reach what they test.* The offline CLI
-      test covers the files tog parses before any download and asserts
+      test covers the files Greyward parses before any download and asserts
       the redaction marker. Everything that needs the toolchain (the
       symlinked config, the `target/key` alias, the `CARGO_HOME`
       include, the toolchain files for `add`, the hidden-deep and
@@ -3276,14 +3276,14 @@ interception and the cargo switch, each the flexible option:
       the same boundary (inside the repository, not hidden, not containing
       the root) and becomes a read root of the confined doors, which
       publish without a receipt (`unrecorded-resolution` at sync). A sync
-      from the committed lock works. `tog attest` refuses it by name. It
+      from the committed lock works. `ward attest` refuses it by name. It
       is not an output, since a record names files inside the workspace
       only. An entry whose `..` would take off a wildcard (only the disk
       could resolve that) is refused by name before any cargo runs.
       Before, all of these entries vanished from the outputs silently.
       `an_external_workspace_member_is_read_like_an_external_path_dependency`
       runs it with the real toolchain.
-    - *Deferred.* tog canonicalizes the project root, and an entry is
+    - *Deferred.* Greyward canonicalizes the project root, and an entry is
       placed against that path. An absolute member written through
       another spelling of the root (a symlinked home, say) is therefore
       taken as outside the root, so attest refuses it and the doors
@@ -3294,7 +3294,7 @@ interception and the cargo switch, each the flexible option:
       hand-written matcher to avoid a dependency. It refused `[**]`, which
       cargo reads as a class holding `*`. Each name part is now a
       `glob::Pattern` (rust-lang/glob 0.3, cargo's own) matched with
-      cargo's options. The walk stays tog's and follows no symlink. The
+      cargo's options. The walk stays Greyward's and follows no symlink. The
       repo has no cargo-deny or audit config to update.
     - *The e2e test asserts every step.* No result is ignored. The
       linked member's committed-lock sync must succeed. The deep
@@ -3333,7 +3333,7 @@ interception and the cargo switch, each the flexible option:
       is.
   - *Sixth Sol pass (2026-10-03): the superset rule.* The literal-path
     fallback above was the third glob-fidelity gap in a row: with
-    `members = ["crates/a[1]/"]`, a file `crates/a1` made tog count a
+    `members = ["crates/a[1]/"]`, a file `crates/a1` made Greyward count a
     match, while cargo's trailing slash keeps it to directories, so cargo
     fell back to the literal member and the receipt missed it. cargo takes
     the literal path when the glob's unfiltered result is empty, and it
@@ -3414,7 +3414,7 @@ Node doors, each the flexible option that still fails closed:
   `FUND`, and `UPDATE_NOTIFIER` off for the child npm pacote starts.
 - **The forced git and shell are the host's.** The forced table's
   `@GIT@` and `@SH@` are `/usr/bin/git` and `/bin/sh` on the sandbox's
-  read-only system roots: tog provisions no git or shell, and cargo's row
+  read-only system roots: Greyward provisions no git or shell, and cargo's row
   already starts the host git through `PATH`. The shell is required (a
   host without it refuses by name); a host without git gets
   `/nonexistent/git` as the forced git, so registry-only projects still
@@ -3428,7 +3428,7 @@ Node doors, each the flexible option that still fails closed:
   `--ignore-scripts`, and the confine test accepts a bare flag's
   `--config.<name>=true` spelling, because a fixture edit wakes the heavy
   suite for no behavior change.
-- **The pinned pnpm runs from the store.** The `tog x` cache root is a
+- **The pinned pnpm runs from the store.** The `ward x` cache root is a
   projection (`node_modules` links into a forest that links into the
   environment object), so the door mounts the Node object and the
   environment object the cache root's closure names, and runs
@@ -3451,7 +3451,7 @@ Node doors, each the flexible option that still fails closed:
   from the registry (review). The pnpm side had the same hole for a
   first lock: membership is read from `pnpm-lock.yaml`'s `importers`,
   so a root with `pnpm-workspace.yaml` and no lock yet was walked past.
-  Until pnpm writes a lock, that file's `packages` list (the one tog
+  Until pnpm writes a lock, that file's `packages` list (the one Greyward
   reads, a settings-only file naming nobody) places the member at the
   root. A sync run in a member that has no lock of
   its own (npm or pnpm) is refused in preflight naming the root, before
@@ -3466,7 +3466,7 @@ Node doors, each the flexible option that still fails closed:
   `importers`, or the npm lock's root `workspaces` name. PR 5's superset
   rule: coverage is never smaller than the tool's member set, and an
   extra manifest is only an extra output. A member named outside the
-  project, or a members list tog cannot read (an anchored
+  project, or a members list Greyward cannot read (an anchored
   `pnpm-workspace.yaml`), is an error rather than a gap, raised in
   `Tailor::preflight` and before any door realizes a tool, not when the
   closure is written (review round 1). Inputs are
@@ -3488,14 +3488,14 @@ Node doors, each the flexible option that still fails closed:
   tailor. A scoped registry in `.npmrc` and a direct-URL tarball are
   fetched through interception and recorded as `unattested-index`, as
   the policy table says.
-- **`tog attest node`.** npm's `install --package-lock-only` with the
+- **`ward attest node`.** npm's `install --package-lock-only` with the
   kernel's byte-unchanged rule (npm exits 0 either way), pnpm's `install
   --lockfile-only --frozen-lockfile`, each captured so the refusal quotes
   the tool. A pnpm workspace member is refused naming the root, a
   `yarn.lock` is refused (yarn is not a pinned tool), and a project with
-  no lock is told to run `tog` first. `Tailor::attest_lock` gained the
+  no lock is told to run `ward` first. `Tailor::attest_lock` gained the
   `EditHost` an edit borrows from its command, since the pinned pnpm
-  lives in the `tog x` cache; the host is `commands::shared::CommandHost`
+  lives in the `ward x` cache; the host is `commands::shared::CommandHost`
   for both `add` and `attest`.
 - **The closure's `resolution_basis` is taken at plan time.** As built
   first, it was read from disk when the closure was written, after
@@ -3503,21 +3503,21 @@ Node doors, each the flexible option that still fails closed:
   become the basis of a closure planned from the old one (the case the
   join's basis check exists for). `inputs::load_npm_plan_with_basis` now
   takes the basis from the lock bytes the plan read, with the other
-  resolution files at that moment, as Cargo and Go do, and `tog x` passes
+  resolution files at that moment, as Cargo and Go do, and `ward x` passes
   the basis of the lock its door just wrote (review round 1). `yarn.lock`
   is no door's output and no record names it, so it is not part of the
   basis or the record: a yarn project's basis is its manifests alone
   (review round 2, which found the first form made every yarn sync fail
   the basis check).
-- **A `tog x` cache root joins nothing.** `commands::x` marks the root
+- **A `ward x` cache root joins nothing.** `commands::x` marks the root
   (`comforter::mark_cache_root`, by canonical path, in a process-level
-  set) right before it realizes a tool there, from `tog x` and from the
-  cached-tool path an edit or `tog attest` takes, and the join compares
+  set) right before it realizes a tool there, from `ward x` and from the
+  cached-tool path an edit or `ward attest` takes, and the join compares
   the closure's directory with that set exactly. Without this the pinned
   pnpm realized inside an edit, whose process has the resolution-files
   lookup installed, recorded `unrecorded-resolution` against the cache
   root's own lock, which no `x` door can attest (review round 2). The
-  first form keyed on the request record `.tog/x.json` being present,
+  first form keyed on the request record `.greyward/x.json` being present,
   which a project could commit to opt out of the join; round 3 replaced
   it with the mark, which no project content can forge.
 - **npm keeps its errors.** The resolve-only form passes
@@ -3525,11 +3525,11 @@ Node doors, each the flexible option that still fails closed:
   git, `npm error syscall spawn /nonexistent/git`) reaches the user's
   terminal (review round 3). The log level does not touch the lock; the
   contract 8 test's direct run uses the same flag. The missing-git line
-  in tog's error is decided from the host, not by reading npm's words:
-  the edit, missing-lock and `x` runs inherit stderr, so tog never sees
+  in Greyward's error is decided from the host, not by reading npm's words:
+  the edit, missing-lock and `x` runs inherit stderr, so Greyward never sees
   them (review round 4). On a host without git, any failed Node run adds
   that a git dependency is the likely cause.
-- **`tog x` is a detached door.** The cache root is the lock root, the
+- **`ward x` is a detached door.** The cache root is the lock root, the
   accepted `package-lock.json` is written back into it, and the ledger is
   rooted under the cache root (`ledger::root`), so GC keeps it with the
   root. The x closure's `ClosureRefs` do not list it yet.
@@ -3586,15 +3586,15 @@ uv rows onto the door:
 - **The compiled lock's header.** `uv pip compile` writes its own
   command line into the lock, which names the store interpreter (a path
   that differs per machine) and the probe's `--no-build`. Every compile
-  passes `--custom-compile-command tog`, so the bytes are the same
+  passes `--custom-compile-command ward`, so the bytes are the same
   everywhere and an attest rerun can leave them unchanged. A lock with
   another header is refused by attest. Retain `requirements.txt` and run
-  `tog update` for a pip-compile pair. Delete only `requirements.lock.txt`
-  and run `tog` for generated locks.
+  `ward update` for a pip-compile pair. Delete only `requirements.lock.txt`
+  and run `ward` for generated locks.
 - **Attest.** `uv lock --locked` for `uv.lock`. For
   `requirements.lock.txt`, the same compile planning runs, from the
   input planning picks (`inputs::lock_compile_input`, which writes the
-  generated `.tog` input afresh), with `require_unchanged`. For a
+  generated `.greyward` input afresh), with `require_unchanged`. For a
   pip-compile pair, `requirements.in` to `requirements.txt`. A
   hand-pinned `requirements.txt` has no check and is refused.
 - **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,
@@ -3609,7 +3609,7 @@ uv rows onto the door:
   `[tool.uv.workspace]` lists is edited at the workspace root with uv run
   in the member, and syncs at the root (`Tailor::edit_root`).
 - **Detached doors.** The build-requirements planner runs in its store
-  scratch and keeps its ledger for the sync to root; `tog x` runs at the
+  scratch and keeps its ledger for the sync to root; `ward x` runs at the
   cache root and roots its ledger there.
 - **raw.githubusercontent.com.** uv reads a GitHub dependency's
   `pyproject.toml` at a commit before cloning. `intercept::git_fetch`
@@ -3656,12 +3656,12 @@ Bundler and mix onto the door:
   redirects to builds.hex.pm, which no route permits, so it fails closed
   and Hex carries on. The registry is signed protobuf Hex verifies
   itself, so the route claims nothing: a tarball streams through hashed,
-  and tog verifies both checksums from mix.lock when it realizes the
+  and Greyward verifies both checksums from mix.lock when it realizes the
   deps. No `http_proxy` is set, for the same reason as Bundler's.
   `MIX_DEPS_PATH`, `MIX_HOME` and `HEX_HOME` are the run's scratch;
   the planner gate also gets a fresh Hex home. The proxy caches registry
   responses without sharing executable Hex configuration between projects.
-  The mix forced row now unsets only `MIX_EXS`: it unset tog's own
+  The mix forced row now unsets only `MIX_EXS`: it unset Greyward's own
   `MIX_ARCHIVES` too, which left mix without Hex.
 - **The planner.** Ruby's two helper modes (`check`, `plan`) and
   Elixir's lock parse run with no route and `HEX_OFFLINE=1`. Elixir's
@@ -3674,10 +3674,10 @@ Bundler and mix onto the door:
   Elixir: outputs `mix.exs`, `mix.lock`, with the same conservative input
   coverage. This includes `eval_gemfile`, umbrella app manifests, nested
   configuration and data loaded by project code. The snapshot excludes
-  `.git`, `.tog` and each tailor's dependency/build caches. Symlinked inputs
+  `.git`, `.greyward` and each tailor's dependency/build caches. Symlinked inputs
   cannot be represented by regular-file digests and are refused. Precise
   discovery is a separate follow-up.
-- **Edits.** Every Bundler run of `tog add`/`remove`/`update` publishes
+- **Edits.** Every Bundler run of `ward add`/`remove`/`update` publishes
   through the edit door with its own record, and `mix deps.update` does
   the same.
 - **Tests.** `tailors/ruby/resolve.rs`
@@ -3708,12 +3708,12 @@ restore onto the door:
   `NUGET_PACKAGES`, `DOTNET_CLI_HOME` and the XDG homes are the scratch.
   `obj` and `bin` are excluded from the snapshot.
 - **Doors.** A missing lock (`restore --use-lock-file`) publishes the lock
-  with its record. `tog attest` runs `restore --locked-mode` with
+  with its record. `ward attest` runs `restore --locked-mode` with
   `require_unchanged`. Planning reads the lock alone, so a sync roots no
   ledger.
 - **Resolution files.** Outputs: the project's one `.csproj` and
   `packages.lock.json`. Inputs: every other regular project file visible to
-  the snapshot, excluding `obj/`, `bin/`, `.git/` and `.tog/`. The captured
+  the snapshot, excluding `obj/`, `bin/`, `.git/` and `.greyward/`. The captured
   generation is checked against the immutable stage and carried from
   preflight into the closure join. Symlinks are refused. Resolver files
   have mode 0644 and directories 0755, with empty directories omitted.
@@ -3722,7 +3722,7 @@ restore onto the door:
   including UTF-16/32 imported XML.
 - **Tests.** `tailors/dotnet/resolve.rs`
   `dotnet_restore_attest_without_unix_sockets_through_nuget_mirror`, against the
-  recorded rows plus a served unsigned `Tog.Fixture` package and an empty
+  recorded rows plus a served unsigned `Greyward.Fixture` package and an empty
   vulnerability base (the recording kept neither body): a missing lock,
   an unchanged lock attested, a drifted csproj refused.
 
@@ -3756,41 +3756,41 @@ podman only. Decisions:
   client and reaches checked `podman rm --force --time 0 --ignore` outside
   the supervisor. Removal is bounded to ten seconds. A failed removal
   refuses outputs before descriptor joins. Descriptor draining is also
-  bounded. Drop is only a fallback for early errors. SIGKILL of Tog itself
+  bounded. Drop is only a fallback for early errors. SIGKILL of Greyward itself
   or a machine crash needs operator recovery until a reviewed recovery
   mechanism exists.
 - **The tier.** Podman is probed only when bubblewrap's preflight fails,
   by running the actual relay, both descriptors and a harmless shell
   environment check under the same fence, once per process.
 - **Not built.** Docker has no `--preserve-fds`, so the relay's
-  descriptors cannot reach it. `tog-isolate` is setuid root and needs an
-  install under `/etc` and `/run` to test. `tog doctor --isolation` says
+  descriptors cannot reach it. `greyward-isolate` is setuid root and needs an
+  install under `/etc` and `/run` to test. `ward doctor --isolation` says
   the helper is not in this build.
 - **Tests.** `door.rs` `podman_door_publishes_a_fetched_output_as_confined`,
   `podman_door_kills_a_surviving_descendant` (the survivor test) and
   `podman_door_denies_user_namespaces_and_the_network`, which force the
-  podman tier and skip unless podman works (`TOG_PODMAN_TESTS` makes the
-  skip a failure). The concurrent-session test belongs to `tog-isolate`'s
+  podman tier and skip unless podman works (`GREYWARD_PODMAN_TESTS` makes the
+  skip a failure). The concurrent-session test belongs to `greyward-isolate`'s
   UID allocation and waits with it.
 
 **PR 10: remove `Legacy`.** Delete the mode. The company template denies
 `unconfined-resolution` and `unrecorded-resolution`, lists
 `resolution-build` and `stale-resolution` as deliberately not denied with
-their reasons, and its comment names `tog attest` as the migration step.
-The README documents both signing setups: `tog attest` in a separate CI
+their reasons, and its comment names `ward attest` as the migration step.
+The README documents both signing setups: `ward attest` in a separate CI
 job, the default, and per-developer keys in the machine `[signing]`
 set. The CI setup is the worked GitHub Actions example from
 "Attestation" (an `attest` job that holds the key and uploads
 `--record-out` records as an artifact, a keyless `gate` job running
-`tog --strict sync --frozen --resolution-record`, and a separate `test`
+`ward --strict sync --frozen --resolution-record`, and a separate `test`
 job), with the bot-commit flow as the documented alternative. ARCHITECTURE gains a "Resolution
 doors" section with the census as a covered/not-covered table (WP5's
 "state which doors are covered"). LIMITATIONS rows are rewritten: the
 `add`/`remove`/`update` row, "Delegated planning runs unsandboxed", the
 audit paragraph's "does not cover the doors" sentence, and the .NET
-restore row. CLI.md documents `tog attest`, the new notes, and the new
-errors. The README `.gitignore` stanza gains `!**/.tog/resolution/`
-(receipts only: journals live in `.tog/journal/`, which stays ignored).
+restore row. CLI.md documents `ward attest`, the new notes, and the new
+errors. The README `.gitignore` stanza gains `!**/.greyward/resolution/`
+(receipts only: journals live in `.greyward/journal/`, which stays ignored).
 FOLLOW-UPS "Delegated-tool doors" is deleted and #68 closed.
 
 **PR 10 as built (2026-10-09, #208).** `Mode`, `Legacy`,
@@ -3799,9 +3799,9 @@ production caller was left after PR 9. The company template already
 denied both kinds and listed the two non-denied ones, so only its
 `unconfined-resolution` fix gained podman. The README has the signing
 setups ("Signing locks: who attests") with the worked Actions example,
-the per-developer alternative and the `!**/.tog/resolution/` line.
+the per-developer alternative and the `!**/.greyward/resolution/` line.
 ARCHITECTURE has "Resolution doors" with the census. CLI.md already
-documented `tog attest`. #68 closes with this PR; what is left of the
+documented `ward attest`. #68 closes with this PR; what is left of the
 isolation backends stays on #201.
 
 Each PR from 3 on runs its ecosystem's `--ignored` tests on the Mac
@@ -3916,7 +3916,7 @@ where the design above closes each:
     under-reports. Fixed: the `--no-build` probe establishes it by
     construction on both platforms, with per-run caches and the Linux
     exec log as a cross-check (review 9).
-17. *Wrong pnpm flags, a per-request token inside tunnels, and "the tog CA
+17. *Wrong pnpm flags, a per-request token inside tunnels, and "the Greyward CA
     alone prevents direct TLS" for Node.* Fixed in the wiring table and
     in "What the CA file does and does not prevent" (review 10).
 18. *Stale metadata masks a yanked or security release.* Stale serving
@@ -3928,21 +3928,21 @@ where the design above closes each:
     fetched during resolution. See Performance.
 20. *Cross-project poisoning through a shared tool cache.* Fixed: tool
     caches are per run.
-21. *A lingering descendant writes after tog's checks.* Superseded by item
+21. *A lingering descendant writes after Greyward's checks.* Superseded by item
     27: the tree is stopped first, and only the immutable copy is read.
 22. *#61 lands before the proxy and bakes in an unconfined signature.*
     Fixed by ordering: PR 1 puts the door type in the signature from day
     one, in `Legacy` mode, so no later PR changes the trait.
 23. *`--no-sync` edits never join.* The signed record persists in
-    `.tog/resolution/`, and the ledger is rooted from commit, so the next
+    `.greyward/resolution/`, and the ledger is rooted from commit, so the next
     sync joins it if the outputs are unchanged.
 24. *Credentials in the project `.npmrc` (`//registry.npmjs.org/:_authToken`)
     reach the proxy.* They are stripped and never forwarded. Redaction
     keeps them out of the ledger, and private registries use WP5
-    credential references held by tog.
+    credential references held by Greyward.
 25. *The unconfined fallback runs a hostile Gemfile, `mix.exs`, or MSBuild
     project as the user.* It could edit the real repository outside the
-    transaction, read `~/.tog` signing keys, and forge a clean receipt.
+    transaction, read `~/.greyward` signing keys, and forge a clean receipt.
     Fixed: code-evaluating tools never run without filesystem isolation
     (container/VM backend or, on Linux, the per-run isolation helper as
     fallbacks, otherwise a failure naming what is missing). Since round
@@ -3968,7 +3968,7 @@ where the design above closes each:
     `100.64.0.0/10` and benchmarking `198.18.0.0/15`. Fixed: everything
     the IANA special-purpose registries do not mark globally reachable
     is refused, with a test per range (review 2.6).
-31. *An older tog silently accepts unknown kinds from a newer signed
+31. *An older Greyward silently accepts unknown kinds from a newer signed
     record*, because `record_with` takes free strings. Fixed: the join
     validates every kind against `policy::KINDS` and fails hard on
     unknowns (review 2.7).
@@ -3980,7 +3980,7 @@ where the design above closes each:
     writes and verifies (review 2.9).
 
 34. *A shared resolver UID lets one run tamper with another*, and a
-    survivor outlives quiescence, so the developer's tog signs outputs a
+    survivor outlives quiescence, so the developer's Greyward signs outputs a
     different run changed. Fixed: per-run ephemeral UIDs from a reserved
     range, 0700 per-run stages, private mount namespaces, and a cgroup v2
     leaf killed and checked for `populated 0` before validation. macOS has
@@ -4029,12 +4029,12 @@ where the design above closes each:
     `record_not_covering_the_lock_is_unrecorded` (review 4.4).
 42. *`--strict` became unusable without saying why*, since it denies
     `unrecorded-resolution` and `stale-resolution` from PR 4 on. Fixed:
-    the refusal names the remedy (`tog keygen`, `TOG_SIGNING_KEY`, the
-    trusted list, `tog attest`), a stale record is told to re-attest, the
+    the refusal names the remedy (`ward keygen`, `GREYWARD_SIGNING_KEY`, the
+    trusted list, `ward attest`), a stale record is told to re-attest, the
     last-good refusal names the URL and why the fetch failed, and CLI.md
     says so in PR 4 (review 4.5).
-43. *The CI flow required a bot commit.* Fixed: `tog attest --record-out`
-    writes records to a CI artifact and `tog sync --resolution-record`
+43. *The CI flow required a bot commit.* Fixed: `ward attest --record-out`
+    writes records to a CI artifact and `ward sync --resolution-record`
     feeds them to the same join. The bot-commit flow stays as an
     alternative through the same verification. A worked GitHub Actions
     example is in "Attestation" and goes to the README in PR 10
@@ -4122,15 +4122,15 @@ Owner decisions, 2026-09-23, choosing the flexible option each time:
   504 instead of serving last-good, and the door fails naming the URL.
   Everyone else gets the resilience. Rollout: PR 2 (serving, marking,
   and the deny switch) and PR 4 (the kind, joined through the record).
-- **Signing: `tog attest` on CI is the documented default, and
+- **Signing: `ward attest` on CI is the documented default, and
   per-developer keys are also supported.** Both go through the same
   verification: a record attests when its key is in the machine policy's
-  `[signing] trusted` set. A team either runs `tog attest` in CI, which
+  `[signing] trusted` set. A team either runs `ward attest` in CI, which
   keeps signing keys off laptops, or distributes per-developer keys into
-  the machine `[signing]` set, so a laptop `tog add` attests directly.
+  the machine `[signing]` set, so a laptop `ward add` attests directly.
   The standing rule holds either way: a job that runs untrusted project
   code must not hold a signing key, so CI attests in a separate job from
-  the one that runs the project's tests. (The key stays in the tog
+  the one that runs the project's tests. (The key stays in the Greyward
   process and is never in a sandbox read root, but the test job runs the
   project's code outside any sandbox.) Rollout: PR 4 (both paths and
   their tests) and PR 10 (the README's two setups).
@@ -4138,7 +4138,7 @@ Owner decisions, 2026-09-23, choosing the flexible option each time:
 
 ---
 
-## 7. A shared system store at `/opt/tog/store` (#69)
+## 7. A shared system store at `/opt/greyward/store` (#69)
 
 Decided 2026-09-23 (owner, #69): a full design round, not a deferral. This
 is that design, written 2026-10-05 and not yet independently reviewed. No
@@ -4147,30 +4147,30 @@ subsection here, as §6 does).
 
 ### In plain words
 
-Today every user has their own store (`~/.tog/store`). Ten developers on
+Today every user has their own store (`~/.greyward/store`). Ten developers on
 one build box download and build the same CPython ten times. A shared store
-lets them share that work. The catch is trust: tog trusts a store object
+lets them share that work. The catch is trust: Greyward trusts a store object
 because nobody but its owner can write it, and "its owner" is the user
-running tog. If the store were simply group-writable, any one developer
+running Greyward. If the store were simply group-writable, any one developer
 could replace an object that every other developer then runs. One account
 compromised would mean every account compromised.
 
 So the shared store is not a writable common directory. It is a read-only
 lower layer, like `/usr` on a Linux box: one service account owns it and
 writes it, and every user reads it. Each user keeps their own store on top
-for everything the shared one lacks. A user's tog looks in its own store
+for everything the shared one lacks. A user's Greyward looks in its own store
 first, then in the system store, and builds into its own store on a miss.
 The users trust the service account the way they already trust root for
 `/usr/bin/python3`.
 
 ### Rejected shapes
 
-- **A group-writable store** (every user in a `tog` group writes it). It
+- **A group-writable store** (every user in a `ward` group writes it). It
   turns the existing "same-user replacement is undetected" limit into
   "any-group-member replacement is undetected": cross-user code execution
   for the price of one compromised account. Refused outright.
 - **Content verification on every use instead of ownership.** Hashing every
-  file of a 2 GB environment at each `tog run` costs seconds, and objects are
+  file of a 2 GB environment at each `ward run` costs seconds, and objects are
   input-addressed (the id hashes the inputs, not the bytes), so no stored
   digest to compare against exists yet. Recording a content digest per
   object is still worth having (backlog row "Store-object content
@@ -4180,23 +4180,23 @@ The users trust the service account the way they already trust root for
 ### Layout and configuration
 
 - **Where.** A new admin-owned file names the system store, nothing else
-  does: `[store] system = "/opt/tog/store"` and `owner = "tog"` in
-  `/etc/tog/store.toml`. This file does not exist today and is part of
+  does: `[store] system = "/opt/greyward/store"` and `owner = "greyward"` in
+  `/etc/greyward/store.toml`. This file does not exist today and is part of
   PR 1. It cannot be the "machine" policy file `policy::load` reads now:
-  that is `$TOG_POLICY` or `$HOME/.tog/policy.toml`, both chosen and
+  that is `$GREYWARD_POLICY` or `$HOME/.greyward/policy.toml`, both chosen and
   writable by the user, so naming the store there would let any user (or
-  anything that can write their HOME) point their tog at a directory they
-  control. tog reads `/etc/tog/store.toml` only at that fixed path (no
+  anything that can write their HOME) point their Greyward at a directory they
+  control. Greyward reads `/etc/greyward/store.toml` only at that fixed path (no
   variable overrides it), and only if it and every ancestor are owned by
   root and not group- or other-writable. A project file, an environment
   variable or a flag cannot name the store either: a repository must not
-  be able to point every user's tog at a directory of its choosing.
-  `TOG_STORE` keeps naming the per-user store.
-- **Who owns it.** A dedicated account (`tog` on Linux, `_tog` on macOS).
+  be able to point every user's Greyward at a directory of its choosing.
+  `GREYWARD_STORE` keeps naming the per-user store.
+- **Who owns it.** A dedicated account (`ward` on Linux, `_ward` on macOS).
   The root directory and everything under `objects/`, `meta/`, `records/`
   and `cache/` are owned by that account and are not group- or
   other-writable. The marker file gains a second line, `shared <uid>`. The
-  trusted uid comes from `/etc/tog/store.toml`'s `owner`, never from the
+  trusted uid comes from `/etc/greyward/store.toml`'s `owner`, never from the
   store: a directory an attacker owns can carry a marker naming the
   attacker's uid and pass a marker-versus-`st_uid` comparison. The marker
   line must agree with the configured owner and the directory's `st_uid`;
@@ -4205,22 +4205,22 @@ The users trust the service account the way they already trust root for
   `records/`, `cache/`. Never `forests/`, `run-homes/`, `roots/`,
   `root-locks/` or project transaction locks: those are per-user state and
   stay in each user's store, which is a normal format-1 store as today.
-- **Format.** Still `tog-store 1`. A per-user store does not change at all.
-  A tog that predates this design and is pointed at a system store through
-  `TOG_STORE` finds `shared <uid>` on the marker's second line and refuses
+- **Format.** Still `greyward-store 1`. A per-user store does not change at all.
+  A Greyward that predates this design and is pointed at a system store through
+  `GREYWARD_STORE` finds `shared <uid>` on the marker's second line and refuses
   it as an unknown marker, which is the safe outcome.
 
 ### Who writes it
 
 Two writers, built in this order.
 
-1. **The service account runs tog itself.** `sudo -u tog tog sync -C <dir>`
+1. **The service account runs Greyward itself.** `sudo -u ward ward sync -C <dir>`
    (or a systemd timer over a list of directories) realizes into the system
-   store exactly as a user's tog realizes into its own: the service account's
+   store exactly as a user's Greyward realizes into its own: the service account's
    per-user store *is* the system store. Nothing new in the write path. This
    is enough for a build box that pre-warms a known set of projects.
-2. **A broker for user-initiated writes** (`tog store serve`, a socket under
-   `/run/tog/`, running as the service account). A user's tog that misses
+2. **A broker for user-initiated writes** (`ward store serve`, a socket under
+   `/run/ward/`, running as the service account). A user's Greyward that misses
    in both layers may ask the broker to realize the object instead of
    building it locally. The request carries only the *plan*: what the
    project's lock asks for. The broker re-derives the identity, fetches and
@@ -4229,31 +4229,31 @@ Two writers, built in this order.
    client. A plan it cannot re-derive (an unlocked manifest, a delegated
    door) is refused, and the user builds into their own store instead, so
    the broker is never on the critical path. This is the Nix daemon model
-   with tog's existing realization code on the server side.
+   with Greyward's existing realization code on the server side.
 
 Exceptions: an object whose realization records an object exception
 (`object_exceptions()`: install-script-failed, git-dependency, ...) still
-records it in `meta/<id>.json` as today. A user's tog checks a system
+records it in `meta/<id>.json` as today. A user's Greyward checks a system
 object's recorded exceptions against *that user's* policy chain through
 `check_cached_with_activity`, the same check a cached object gets now, so a
 shared object never smuggles a waived exception past a stricter user.
 
 ### Reading it: the trust check
 
-Before a user's tog uses anything from the system store, it proves, through
+Before a user's Greyward uses anything from the system store, it proves, through
 descriptors (`fsroot`-style, `O_NOFOLLOW` from the held root):
 
-1. The root is owned by the uid `/etc/tog/store.toml` names (and the
+1. The root is owned by the uid `/etc/greyward/store.toml` names (and the
    marker's `shared` line agrees), and neither the root nor any ancestor up
    to `/` is writable by anyone but root or that uid. This ancestor walk is
    new code: the walk `policy::load` does over project policy files checks
    names (`check_still_named`), not ownership or writability.
 2. Each object directory, its `meta/<id>.json`, and the cache entries it
    names are owned by that uid and not group- or other-writable. Objects
-   are already committed read-only, and the check reads the modes tog
+   are already committed read-only, and the check reads the modes Greyward
    already sets.
 
-A store that fails either check is not used, and the user's tog says why
+A store that fails either check is not used, and the user's Greyward says why
 once (`ui::warning`, with the fix: the path and mode to correct) and works
 from its own store alone. A failed trust check never fails a sync: the
 per-user layer is always a complete fallback.
@@ -4285,17 +4285,17 @@ The system store cannot see users' roots: those live in each user's store.
 So users publish **claims**.
 
 - `<system>/claims/` is a sticky, world-writable directory (mode `1777`,
-  like `/tmp`). Each user's tog keeps one file there, `claims/<uid>`, owned
+  like `/tmp`). Each user's Greyward keeps one file there, `claims/<uid>`, owned
   by that uid, listing every system object id that user's registered roots
   reach (directly or through user objects that depend on system objects).
   It is rewritten atomically (temp file in the same directory, rename),
-  whenever the user's tog registers a root that reaches the system store
+  whenever the user's Greyward registers a root that reaches the system store
   and at the end of every user GC.
 - The system GC (run by the service account) adds every claimed id to its
   retained set. A claim file whose owner does not match its name, that is
   writable by others, or that does not parse blocks the sweep. The sweep
   refuses with every blocked reason at once, as `meta/` records do today
-  (`gc::validate`). `tog gc --forget-claims <uid>` (service account only)
+  (`gc::validate`). `ward gc --forget-claims <uid>` (service account only)
   drops one, for a user who left the machine.
 - What a hostile user can do with a claim: keep system objects alive (disk
   use), block the system sweep with a malformed file until the admin
@@ -4306,19 +4306,19 @@ So users publish **claims**.
   an `O_CREAT` open of it. The victim's claims then never land, and the
   system GC may delete objects the victim uses. None of these reaches
   another user's code, but the squat breaks the GC protocol, so the flat
-  `1777` layout, and what a user's tog does when its claim rename fails,
-  are open questions below. `tog store claims` (any
+  `1777` layout, and what a user's Greyward does when its claim rename fails,
+  are open questions below. `ward store claims` (any
   user) lists the claim files with their size and age, so the admin sees
   who holds what.
 
 ### The activity lease across uids
 
-The race to close: user A's tog decides to use system object X, the system
+The race to close: user A's Greyward decides to use system object X, the system
 GC deletes X, and A's claim naming X is written too late.
 
 - The system store's `activity.lock` is created by the service account with
   mode `0644`, not `0600` as `activity::open_lock` creates it now. A user's
-  tog opens it read-only and takes `LOCK_SH`. `flock` works on a read-only
+  Greyward opens it read-only and takes `LOCK_SH`. `flock` works on a read-only
   descriptor, and a lock taken by one uid is honored by every other.
 - Lock order gains one step, first in the existing chain: system activity
   (shared), then user activity, then the rest as today. A user operation
@@ -4327,8 +4327,8 @@ GC deletes X, and A's claim naming X is written too late.
 - The system GC takes `LOCK_EX` without waiting, as the user GC does today.
   If any user holds the shared lease, it skips and says so. A user who holds
   the lease forever can starve system GC. That is a disk-use problem, and the
-  skip message plus `tog store claims` show it.
-- `tog gc --reset` of the system store is the service account's alone (it
+  skip message plus `ward store claims` show it.
+- `ward gc --reset` of the system store is the service account's alone (it
   needs the root lock and write permission). A user's reset never touches
   the system store, only the user layer.
 
@@ -4346,12 +4346,12 @@ own activity lease. Nothing changes for it.
 | Ownership or mode check fails | Warning naming the path and mode, per-user store only. |
 | The system store is mid-reset (no marker) | Treated as absent for that run. |
 | The broker is down or refuses a plan | Build in the user store, no warning beyond one `note`. |
-| A system object referenced by a user object is gone (GC ran with a stale claim) | The user's project reads as `projection-missing` / stale, and the next `tog` rebuilds. The claim protocol makes this a bug, not a mode. |
+| A system object referenced by a user object is gone (GC ran with a stale claim) | The user's project reads as `projection-missing` / stale, and the next `ward` rebuilds. The claim protocol makes this a bug, not a mode. |
 | A malformed claim file | System GC refuses and names the file and the `--forget-claims` fix. |
 
 ### Implementation plan (PRs, in order)
 
-1. **Read-only layer.** The root-owned `/etc/tog/store.toml` and its
+1. **Read-only layer.** The root-owned `/etc/greyward/store.toml` and its
    ownership check, the marker's `shared` line, the ownership/ancestor check, two-layer `has()` and object
    lookup, `check_cached_with_activity` on system objects, and the warning
    fallback. Tests: a fixture system store owned by the test uid with a
@@ -4361,12 +4361,12 @@ own activity lease. Nothing changes for it.
    the extra lock-order step (with a new `tests/architecture.rs`
    lock-order test; none exists today),
    claim writing on root registration and user GC, the system GC reading
-   claims, `--forget-claims`, and `tog store claims`.
-3. **Admin path.** `tog store init-system <path>` (creates the root, marker
+   claims, `--forget-claims`, and `ward store claims`.
+3. **Admin path.** `ward store init-system <path>` (creates the root, marker
    with `shared <uid>`, `claims/` with `1777`), documented as the
-   `sudo -u tog` flow in `docs/human/CLI.md`, plus LIMITATIONS and
+   `sudo -u ward` flow in `docs/human/CLI.md`, plus LIMITATIONS and
    ARCHITECTURE "Store format" updates.
-4. **The broker** (`tog store serve`): the plan-only request protocol, the
+4. **The broker** (`ward store serve`): the plan-only request protocol, the
    identity re-derivation on the server side, and the client fallback.
    Its own review round first: it is the one new trusted process.
 
@@ -4378,7 +4378,7 @@ needs `sudo` (heavy CI has it).
 ### Open questions for the review round
 
 - Should `claims/` hold one file per uid or one per (uid, user-store root)?
-  One user with two `TOG_STORE`s would overwrite their own claim. Current
+  One user with two `GREYWARD_STORE`s would overwrite their own claim. Current
   pick: per (uid, sha1 of the user store root), named `<uid>-<hash>`.
 - How are claims kept from being squatted (see "GC across users")?
   Options: (a) per-uid subdirectories `claims/<uid>/`, created by the

@@ -38,7 +38,7 @@ pub use uv::*;
 /// The setup.py metadata cache, project-relative. Both read and written
 /// through the held project descriptor: a hit chooses the requirements the
 /// plan is built from, so a tampered one is a refusal, not a miss.
-const SETUP_CACHE: &str = ".tog/egg-info.json";
+const SETUP_CACHE: &str = ".greyward/egg-info.json";
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
@@ -171,7 +171,7 @@ impl Manifest {
         // rather than a miss. A cache hit decides the requirements this plan
         // is built from, and `setup_cache_matches` gates only on the tree
         // hash, platform, interpreter and toolchain fingerprint — all of
-        // them computable by whoever planted a symlinked `.tog`. An
+        // them computable by whoever planted a symlinked `.greyward`. An
         // unreadable or malformed regular file is still a plain miss.
         let cached = match project.read_file(Path::new(SETUP_CACHE)) {
             Ok(cached) => cached,
@@ -258,7 +258,7 @@ impl Manifest {
             platform: platform.triple().to_string(),
             build_toolchain: build::derivation_fingerprint(),
         };
-        // Through the held project descriptor: a symlinked `.tog` must not
+        // Through the held project descriptor: a symlinked `.greyward` must not
         // carry this cache outside the project.
         project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
         let _ = fs::remove_dir_all(&scratch);
@@ -283,7 +283,7 @@ fn unreadable(path: &Path, error: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "cannot read {}: {error}; the manifest is broken, or this is a tog bug",
+            "cannot read {}: {error}; the manifest is broken, or this is a ward bug",
             path.display()
         ),
     )
@@ -316,7 +316,7 @@ pub(crate) fn held_relative(project: &ProjectRoot, path: &Path) -> Option<PathBu
 /// The bytes of a project file, read through the held descriptor when
 /// `path` lies under the project root, so a project directory renamed or
 /// replaced mid-command cannot substitute another project's manifest. A
-/// path outside the project (an absolute `tog.toml` requirements path, an
+/// path outside the project (an absolute `greyward.toml` requirements path, an
 /// include that climbs out, a symlink pointing out) is read by pathname,
 /// once per command ([`ProjectRoot::read_external`]).
 pub(crate) fn read_project_file(project: &ProjectRoot, path: &Path) -> io::Result<Vec<u8>> {
@@ -344,7 +344,7 @@ pub(crate) fn canonical_project_path(project: &ProjectRoot, path: &Path) -> io::
 /// when the project's `uv.lock` names no kernel marker (`platform_release`,
 /// `platform_version`). Those two change with the running kernel and no
 /// project file changes with them, so the closure records this beside its
-/// inputs and `tog status` compares it. The check is on the lock's text,
+/// inputs and `ward status` compares it. The check is on the lock's text,
 /// so a lock that only mentions a name elsewhere is recorded too: one
 /// re-sync after a kernel update, never a stale environment.
 pub(crate) fn kernel_marker_record(project: &ProjectRoot) -> io::Result<Option<serde_json::Value>> {
@@ -402,7 +402,7 @@ fn parse_toml(path: &Path, text: &str) -> io::Result<toml::Value> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{}; the manifest is broken, or this is a tog bug",
+                "{}; the manifest is broken, or this is a ward bug",
                 crate::kernel::tomlerr::describe(&path.display().to_string(), text, &e)
             ),
         )
@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn a_setup_cache_behind_a_symlinked_tog_is_refused_not_honoured() {
+    fn a_setup_cache_behind_a_symlinked_ward_is_refused_not_honoured() {
         let root = temp_project("egg-info-symlink");
         let dir = root.0.join("project");
         let outside = root.0.join("outside");
@@ -606,7 +606,7 @@ mod tests {
             serde_json::to_vec_pretty(&planted).unwrap(),
         )
         .unwrap();
-        std::os::unix::fs::symlink(&outside, dir.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join(".greyward")).unwrap();
 
         let project = ProjectRoot::open(&dir).unwrap();
         let mut manifest = discover(platform, &project, python_version).unwrap();
@@ -1161,7 +1161,7 @@ files = [{ file = "pytest.whl", hash = "sha256:ccccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1212,7 +1212,7 @@ files = [{ file = "vendored.whl", hash = "sha256:ccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1252,7 +1252,7 @@ files = []
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap_err();
@@ -1341,12 +1341,12 @@ files = []
         fs::write(dir.0.join("requirements/cuda.txt"), "numpy==1.0\n").unwrap();
         let default = requirements_directory_candidate(
             &ProjectRoot::open(&dir.0).unwrap(),
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
         )
         .unwrap()
         .unwrap();
         assert_eq!(default.file_name().unwrap(), "cpu.txt");
-        let override_cfg = TogPythonConfig {
+        let override_cfg = GreywardPythonConfig {
             requirements: Some("requirements/cuda.txt".into()),
             extras: BTreeSet::new(),
         };
@@ -1477,8 +1477,8 @@ files = []
         )
         .unwrap();
         fs::write(dir.0.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
-        fs::create_dir_all(dir.0.join(".tog")).unwrap();
-        fs::write(dir.0.join(".tog/lock-source.hash"), "stale\n").unwrap();
+        fs::create_dir_all(dir.0.join(".greyward")).unwrap();
+        fs::write(dir.0.join(".greyward/lock-source.hash"), "stale\n").unwrap();
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
@@ -1566,7 +1566,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
 "#,
         )
         .unwrap();
-        let cfg = TogPythonConfig::default();
+        let cfg = GreywardPythonConfig::default();
         let old = poetry_lock_requirements(
             Platform::X86_64UnknownLinuxGnu,
             &project,
@@ -1625,7 +1625,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1886,7 +1886,7 @@ files = [{ file = "install-dep.whl", hash = "sha256:cccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1930,7 +1930,7 @@ files = [{ file = "bar-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -1978,7 +1978,7 @@ files = [{ file = "colorama.whl", hash = "sha256:ccccccccccccccccccccccccccccccc
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -2028,7 +2028,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             Platform::X86_64UnknownLinuxGnu,
             &project,
             &lock,
-            &TogPythonConfig::default(),
+            &GreywardPythonConfig::default(),
             "3.12.14",
         )
         .unwrap();
@@ -2198,7 +2198,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         let error = is_project_file(&project, &external).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
         fs::write(
-            project_dir.join("tog.toml"),
+            project_dir.join("greyward.toml"),
             format!("[python]\nrequirements = \"{}\"\n", external.display()),
         )
         .unwrap();
@@ -2443,14 +2443,14 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         fs::write(dir.0.join("setup.py"), "from deps import requirements\n").unwrap();
         fs::write(dir.0.join("deps.py"), "requirements = ['six']\n").unwrap();
         fs::write(dir.0.join("requirements.lock.txt"), "stale\n").unwrap();
-        fs::create_dir_all(dir.0.join(".tog")).unwrap();
-        fs::write(dir.0.join(".tog/egg-info.json"), "cache\n").unwrap();
+        fs::create_dir_all(dir.0.join(".greyward")).unwrap();
+        fs::write(dir.0.join(".greyward/egg-info.json"), "cache\n").unwrap();
         let old = setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
         fs::write(dir.0.join("deps.py"), "requirements = ['idna']\n").unwrap();
         let changed = setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap();
         assert_ne!(old, changed);
         fs::write(dir.0.join("requirements.lock.txt"), "different\n").unwrap();
-        fs::write(dir.0.join(".tog/egg-info.json"), "different\n").unwrap();
+        fs::write(dir.0.join(".greyward/egg-info.json"), "different\n").unwrap();
         assert_eq!(
             changed,
             setup_tree_hash(&ProjectRoot::open(&dir.0).unwrap()).unwrap()

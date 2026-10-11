@@ -7,20 +7,20 @@
 #
 # Resolution fence, the same way: the unrestricted supervise primitives
 # start any program, so only the reviewed kernel sites call them (the door
-# in `kernel::resolve`, tog's own git fetches in `kernel::gitsrc`, and
+# in `kernel::resolve`, ward's own git fetches in `kernel::gitsrc`, and
 # `supervise` itself), plus the two commands that run the user's own
-# program (`tog run`, `tog x`). Every other child, sandboxed builds
+# program (`ward run`, `ward x`). Every other child, sandboxed builds
 # included, goes through `supervise::local_*`, which refuse a dependency
 # tool at run time.
 disallowed-methods = [
     { path = "std::process::Command::spawn", reason = "run store children through kernel::supervise with the caller's &StoreActivity" },
     { path = "std::process::Command::status", reason = "run store children through kernel::supervise with the caller's &StoreActivity" },
     { path = "std::process::Command::output", reason = "run store children through kernel::supervise with the caller's &StoreActivity" },
-    { path = "tog::kernel::store::Store::activity", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
-    { path = "tog::kernel::store::Store::try_activity_exclusive", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
-    { path = "tog::kernel::activity::StoreActivity::acquire", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
-    { path = "tog::kernel::activity::StoreActivity::try_exclusive", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
-    { path = "tog::kernel::supervise::status", reason = "a dependency tool starts through kernel::resolve's door; a host-local helper uses supervise::local_status" },
-    { path = "tog::kernel::supervise::status_with_stderr", reason = "a dependency tool starts through kernel::resolve's door; a host-local helper uses supervise::local_status_with_stderr" },
-    { path = "tog::kernel::supervise::output", reason = "a dependency tool starts through kernel::resolve's door; a host-local helper uses supervise::local_output" },
+    { path = "greyward::kernel::store::Store::activity", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "greyward::kernel::store::Store::try_activity_exclusive", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "greyward::kernel::activity::StoreActivity::acquire", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "greyward::kernel::activity::StoreActivity::try_exclusive", reason = "borrow the caller's &StoreActivity; only reviewed operation boundaries take a lease" },
+    { path = "greyward::kernel::supervise::status", reason = "a dependency tool starts through kernel::resolve's door; a host-local helper uses supervise::local_status" },
+    { path = "greyward::kernel::supervise::status_with_stderr", reason = "a dependency tool starts through kernel::resolve's door; a host-local helper uses supervise::local_status_with_stderr" },
+    { path = "greyward::kernel::supervise::output", reason = "a dependency tool starts through kernel::resolve's door; a host-local helper uses supervise::local_output" },
 ]

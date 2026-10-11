@@ -1,5 +1,5 @@
-//! `tog update --self`: replace this binary with the newest GitHub release,
-//! and the `version` row `tog doctor` prints.
+//! `ward update --self`: replace this binary with the newest GitHub release,
+//! and the `version` row `ward doctor` prints.
 //!
 //! The release is whatever GitHub calls the latest release of the
 //! repository, read from its releases API (one request, JSON). The asset
@@ -8,8 +8,8 @@
 //! script installed and one this verb installed are the same bytes at the
 //! same path. Nothing here opens the store or reads a project.
 //!
-//! `TOG_RELEASE_MANIFEST` names another manifest URL (a `file://` path in
-//! the tests) and is the only way tog talks to anything but GitHub here.
+//! `GREYWARD_RELEASE_MANIFEST` names another manifest URL (a `file://` path in
+//! the tests) and is the only way ward talks to anything but GitHub here.
 
 use crate::cli;
 use crate::commands::inspect::{Check, Level};
@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-const RELEASES_API: &str = "https://api.github.com/repos/DigitalWestern/tog/releases/latest";
-const RELEASES_PAGE: &str = "https://github.com/DigitalWestern/tog/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/DigitalWestern/greyward/releases/latest";
+const RELEASES_PAGE: &str = "https://github.com/DigitalWestern/greyward/releases";
 /// How long the one-shot lookup may take. `doctor` runs it on every
 /// invocation, so a slow or black-holed network must cost seconds, not
 /// minutes; the download that follows a real update is not bounded.
@@ -33,7 +33,7 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the latest-release manifest is read from.
 pub fn manifest_url() -> String {
-    std::env::var("TOG_RELEASE_MANIFEST")
+    std::env::var("GREYWARD_RELEASE_MANIFEST")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| RELEASES_API.to_string())
@@ -45,7 +45,7 @@ pub struct Version(u64, u64, u64);
 
 impl Version {
     /// Accepts `0.2.0` and `v0.2.0`; refuses anything else, including a
-    /// pre-release suffix, because a tag tog cannot order is not one it
+    /// pre-release suffix, because a tag ward cannot order is not one it
     /// should offer to install.
     pub fn parse(text: &str) -> Option<Version> {
         let text = text.trim().strip_prefix('v').unwrap_or(text.trim());
@@ -158,7 +158,7 @@ impl Release {
 /// The archive `install.sh` and `update --self` take for `platform`, and
 /// the checksum file next to it.
 fn asset_names(platform: Platform) -> (String, String) {
-    let asset = format!("tog-{}.tar.gz", platform.triple());
+    let asset = format!("greyward-{}.tar.gz", platform.triple());
     let checksum = format!("{asset}.sha256");
     (asset, checksum)
 }
@@ -186,8 +186,8 @@ fn no_release_found(url: &str, error: io::Error) -> io::Error {
     }
 }
 
-/// The `version` row of `tog doctor`: this build, and whether a newer
-/// release exists. Offline, or with a manifest tog cannot read, the row
+/// The `version` row of `ward doctor`: this build, and whether a newer
+/// release exists. Offline, or with a manifest ward cannot read, the row
 /// says the check did not happen and stays `ok`: a laptop on a plane is
 /// not unhealthy, and a CI job must not fail on GitHub's rate limit.
 ///
@@ -237,7 +237,7 @@ pub fn doctor_check() -> Check {
 }
 
 /// The `version` row when `release` is newer. A release with no build for
-/// this machine, or a host tog has no build for at all, is not something
+/// this machine, or a host ward has no build for at all, is not something
 /// `update --self` can act on, so it is `ok`, not a warning.
 fn newer_release(running: &str, release: &Release, host: io::Result<Platform>) -> Check {
     let machine = match host {
@@ -246,7 +246,7 @@ fn newer_release(running: &str, release: &Release, host: io::Result<Platform>) -
                 name: "version",
                 level: Level::Warn,
                 detail: format!(
-                    "{running}; {} is out (run 'tog update --self')",
+                    "{running}; {} is out (run 'ward update --self')",
                     release.tag
                 ),
             }
@@ -265,14 +265,14 @@ fn newer_release(running: &str, release: &Release, host: io::Result<Platform>) -
 }
 
 /// The file to replace: the running binary with every symlink followed.
-/// `~/.local/bin/tog -> ~/src/tog/target/release/tog` gets a new file at
+/// `~/.local/bin/ward -> ~/src/ward/target/release/ward` gets a new file at
 /// the target, which the final line names, so nobody is surprised. (Linux
 /// already reports the resolved path; macOS may report the link.)
 fn running_binary() -> io::Result<PathBuf> {
     let exe = std::env::current_exe().map_err(|error| {
         io::Error::new(
             error.kind(),
-            format!("cannot locate the running tog: {error}"),
+            format!("cannot locate the running ward: {error}"),
         )
     })?;
     fs::canonicalize(&exe).map_err(|error| {
@@ -300,7 +300,7 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> io::Result<Scratch> {
         use std::os::unix::fs::DirBuilderExt;
-        let path = std::env::temp_dir().join(format!("tog-update-{}", unique_suffix()?));
+        let path = std::env::temp_dir().join(format!("greyward-update-{}", unique_suffix()?));
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
@@ -335,7 +335,7 @@ impl Stage {
         let dir = target.parent().ok_or_else(|| {
             io::Error::other(format!("{} has no parent directory", target.display()))
         })?;
-        let path = dir.join(format!(".tog.update.{}", unique_suffix()?));
+        let path = dir.join(format!(".greyward.update.{}", unique_suffix()?));
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -346,9 +346,9 @@ impl Stage {
             Err(error) => Err(io::Error::new(
                 error.kind(),
                 format!(
-                    "cannot write to {} ({error}); tog is installed there. Make that directory \
+                    "cannot write to {} ({error}); ward is installed there. Make that directory \
                      writable, or install a copy you own:\n  curl -fsSL \
-                     https://raw.githubusercontent.com/DigitalWestern/tog/main/install.sh | sh",
+                     https://raw.githubusercontent.com/DigitalWestern/greyward/main/install.sh | sh",
                     dir.display()
                 ),
             )),
@@ -396,7 +396,7 @@ fn parse_sha256(text: &str, asset: &str) -> io::Result<String> {
 /// `<binary> --version`, so a download that does not run on this machine,
 /// or that is not the release it was published as, is refused before it
 /// replaces a binary that works.
-// Reviewed site (tests/architecture.rs): runs the downloaded tog before it is installed; no store.
+// Reviewed site (tests/architecture.rs): runs the downloaded ward before it is installed; no store.
 #[allow(clippy::disallowed_methods)]
 fn smoke_test(binary: &Path, expected: Version) -> io::Result<String> {
     let output = Command::new(binary)
@@ -406,15 +406,15 @@ fn smoke_test(binary: &Path, expected: Version) -> io::Result<String> {
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("the downloaded tog does not run on this machine ({error})"),
+                format!("the downloaded ward does not run on this machine ({error})"),
             )
         })?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output.status.success() || !text.starts_with("tog ") {
+    if !output.status.success() || !text.starts_with("ward ") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "the downloaded tog does not identify itself ({}; printed {text:?}); the current binary is untouched",
+                "the downloaded ward does not identify itself ({}; printed {text:?}); the current binary is untouched",
                 output.status
             ),
         ));
@@ -424,7 +424,7 @@ fn smoke_test(binary: &Path, expected: Version) -> io::Result<String> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "the downloaded tog says it is {}, not {expected} (printed {text:?}); the release's asset does not match its tag, and the current binary is untouched",
+                "the downloaded ward says it is {}, not {expected} (printed {text:?}); the release's asset does not match its tag, and the current binary is untouched",
                 reported.map_or_else(|| "no version".to_string(), |v| v.to_string())
             ),
         ));
@@ -485,11 +485,11 @@ pub fn run(platform: Platform) -> io::Result<i32> {
             &archive::ExtractOptions::platform_build(0),
             Compression::Gzip,
         )?;
-        let binary = scratch.0.join("tog");
+        let binary = scratch.0.join("ward");
         if !binary.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{asset} did not contain a 'tog' binary"),
+                format!("{asset} did not contain a 'ward' binary"),
             ));
         }
         // Written through the handle `create_new` opened, so the bytes go
@@ -576,8 +576,8 @@ mod tests {
     fn manifest_reads_tag_and_assets() {
         let release = Release::parse(
             r#"{"tag_name": "v0.2.0", "assets": [
-                {"name": "tog-x86_64-unknown-linux-gnu.tar.gz", "browser_download_url": "https://example/a"},
-                {"name": "tog-x86_64-unknown-linux-gnu.tar.gz.sha256", "browser_download_url": "https://example/b"},
+                {"name": "greyward-x86_64-unknown-linux-gnu.tar.gz", "browser_download_url": "https://example/a"},
+                {"name": "greyward-x86_64-unknown-linux-gnu.tar.gz.sha256", "browser_download_url": "https://example/b"},
                 {"name": "notes.txt"}
             ]}"#,
         )
@@ -585,7 +585,7 @@ mod tests {
         assert_eq!(release.tag, "v0.2.0");
         assert_eq!(release.version, Version(0, 2, 0));
         assert_eq!(
-            release.asset("tog-x86_64-unknown-linux-gnu.tar.gz.sha256"),
+            release.asset("greyward-x86_64-unknown-linux-gnu.tar.gz.sha256"),
             Some("https://example/b")
         );
         assert_eq!(release.asset("notes.txt"), None);
@@ -604,7 +604,7 @@ mod tests {
     }
 
     /// Issue #403. A newer release is a warning only when `update --self`
-    /// could install it: the release has a build for this host, and tog
+    /// could install it: the release has a build for this host, and ward
     /// has a build for this host at all.
     #[test]
     fn a_newer_release_warns_only_when_this_machine_has_a_build() {
@@ -616,30 +616,30 @@ mod tests {
             assets: vec![(asset, "https://example/a".to_string())],
         };
         // The archive without its checksum is no build.
-        let row = newer_release("tog 0.1.0", &release, Ok(platform));
+        let row = newer_release("ward 0.1.0", &release, Ok(platform));
         assert_eq!(row.level, Level::Ok);
         assert_eq!(
             row.detail,
-            "tog 0.1.0; v99.0.0 is out, with no build for this machine (x86_64-unknown-linux-gnu)"
+            "ward 0.1.0; v99.0.0 is out, with no build for this machine (x86_64-unknown-linux-gnu)"
         );
         release
             .assets
             .push((checksum, "https://example/b".to_string()));
-        let row = newer_release("tog 0.1.0", &release, Ok(platform));
+        let row = newer_release("ward 0.1.0", &release, Ok(platform));
         assert_eq!(row.level, Level::Warn);
         assert!(
-            row.detail.contains("run 'tog update --self'"),
+            row.detail.contains("run 'ward update --self'"),
             "{}",
             row.detail
         );
         // An unsupported host has no build in any release.
         let unsupported = io::Error::new(io::ErrorKind::Unsupported, "unsupported host");
-        let row = newer_release("tog 0.1.0", &release, Err(unsupported));
+        let row = newer_release("ward 0.1.0", &release, Err(unsupported));
         assert_eq!(row.level, Level::Ok);
         assert_eq!(
             row.detail,
             format!(
-                "tog 0.1.0; v99.0.0 is out, with no build for this machine ({}/{})",
+                "ward 0.1.0; v99.0.0 is out, with no build for this machine ({}/{})",
                 std::env::consts::OS,
                 std::env::consts::ARCH
             )
@@ -650,7 +650,7 @@ mod tests {
     fn checksum_file_first_token_only() {
         let hex = "a".repeat(64);
         assert_eq!(
-            parse_sha256(&format!("{hex}  tog-x.tar.gz\n"), "x").unwrap(),
+            parse_sha256(&format!("{hex}  greyward-x.tar.gz\n"), "x").unwrap(),
             hex
         );
         assert_eq!(parse_sha256(&format!("{hex}\r\n"), "x").unwrap(), hex);

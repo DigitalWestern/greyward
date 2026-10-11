@@ -1,4 +1,4 @@
-//! The Hex repository protocol, as tog's resolution proxy serves it to mix.
+//! The Hex repository protocol, as ward's resolution proxy serves it to mix.
 //!
 //! Hex reaches repo.hex.pm through a mirror, not interception: `HEX_MIRROR`
 //! names the session's route, and mix.lock records no repository URL, so
@@ -13,10 +13,10 @@
 //!   fails closed and mix carries on with the Hex it has.
 //!
 //! Anything else is refused: a query string, an organization's
-//! `/repos/<org>/...` (private packages need a key tog does not hand to a
+//! `/repos/<org>/...` (private packages need a key ward does not hand to a
 //! resolver), `/docs/`, and any name outside Hex's package grammar. The
 //! registry bodies are signed protobufs Hex verifies itself, so the route
-//! makes no claim; tog verifies each tarball's checksums from mix.lock when
+//! makes no claim; ward verifies each tarball's checksums from mix.lock when
 //! it realizes the dependencies.
 
 use crate::kernel::resolve::routes::{

@@ -36,7 +36,7 @@
 //!
 //! Where the bytes come from: a component the selected release bundle
 //! already carries (rustfmt) is taken from the bundle's own row, the same
-//! row `tog fmt` realizes, so the lock stays the one source of truth for
+//! row `ward fmt` realizes, so the lock stays the one source of truth for
 //! it. Everything else comes from the manifest. Before either is used, the
 //! manifest is checked against every row of the bundle for this host, so a
 //! manifest and a lock that disagree about any byte refuse to assemble.
@@ -83,7 +83,7 @@ const INSTALLER_MANIFEST: &str = "manifest.in";
 /// A profile is a named component set the manifest defines. It is expanded
 /// against the manifest when the toolchain is planned, so it never enters an
 /// identity: `profile = "default"` and the same components listed by name
-/// are one toolchain. No profile means tog's base (rustc, cargo and the
+/// are one toolchain. No profile means ward's base (rustc, cargo and the
 /// host's rust-std, which is rustup's `minimal`), as it always has; rustup
 /// itself would install its configured default there.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -129,7 +129,7 @@ impl Extras {
     /// The part of the request the base object does not already answer:
     /// the base's own components by name, the host's own target, and the
     /// `minimal` profile, which is exactly the base (rustc, cargo and the
-    /// host std on every platform tog supports). What is left empty needs
+    /// host std on every platform ward supports). What is left empty needs
     /// no channel manifest, so it is never fetched.
     fn beyond_base(&self, platform: Platform) -> Extras {
         Extras {
@@ -378,7 +378,7 @@ fn check_bundle_against_manifest(
         if listed.digest != row.digest {
             return Err(err(format!(
                 "the pinned channel manifest for Rust {} lists {} for {} as sha256:{}, but the \
-                 toolchain selection names {}:{}; run `tog update --toolchain rust`",
+                 toolchain selection names {}:{}; run `ward update --toolchain rust`",
                 manifest.version(),
                 listed.package,
                 platform.triple(),
@@ -876,7 +876,7 @@ mod tests {
         let error = check_bundle_against_manifest(LINUX, &drifted, &manifest).unwrap_err();
         assert!(error.to_string().contains("rustfmt-preview"), "{error}");
         assert!(
-            error.to_string().contains("tog update --toolchain rust"),
+            error.to_string().contains("ward update --toolchain rust"),
             "{error}"
         );
         // Every shipped release pins its manifest, on every platform.
@@ -911,9 +911,12 @@ mod tests {
             for (source, named) in [
                 (
                     crate::kernel::toolchain::Source::Shipped,
-                    "this tog's shipped toolchain catalog",
+                    "this ward's shipped toolchain catalog",
                 ),
-                (crate::kernel::toolchain::Source::Lock, "tog-toolchain.toml"),
+                (
+                    crate::kernel::toolchain::Source::Lock,
+                    "greyward-toolchain.toml",
+                ),
             ] {
                 selected.source = source;
                 let error = if component == "rustc" {
@@ -925,7 +928,7 @@ mod tests {
                 assert_eq!(
                     error.to_string(),
                     format!(
-                        "cargo: recipe {recipe}9 in {named} is not known to this tog; upgrade tog"
+                        "cargo: recipe {recipe}9 in {named} is not known to this ward; upgrade ward"
                     ),
                     "{component} {source:?}"
                 );

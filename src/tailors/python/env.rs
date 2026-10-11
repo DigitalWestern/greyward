@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 /// project and tests use this; a project sync uses `realize_env_with`
 /// (reached directly, or through `realize_env_for`).
 ///
-/// An sdist whose build requirements or Rust lock tog must resolve runs its
+/// An sdist whose build requirements or Rust lock ward must resolve runs its
 /// resolver through `door`, as every realization below does.
 pub fn realize_env(door: &mut ResolutionDoor<'_>, plan: &Plan) -> io::Result<PathBuf> {
     let shipped = python::shipped_selection(&plan.python_version)?;
@@ -542,7 +542,7 @@ fn realize_artifacts<'p>(
     })
 }
 
-/// The closure record `tog status`, `tog ls` and `tog gc` read. The
+/// The closure record `ward status`, `ward ls` and `ward gc` read. The
 /// toolchain entries are present exactly when the caller held a selection:
 /// which bundle this environment was built from, and the interpreter object
 /// realized from it.
@@ -619,9 +619,9 @@ pub fn project_env_with_inputs(
 }
 
 /// Project an env into a project directory (`.venv` symlink, atomic swap,
-/// plus closure-envelope provenance in `.tog/closures/python.json`) and
+/// plus closure-envelope provenance in `.greyward/closures/python.json`) and
 /// retain the exact interpreter constraint that led to the selected pin.
-/// `tog x` uses this: it has a selection but no recorded input files.
+/// `ward x` uses this: it has a selection but no recorded input files.
 pub fn project_env_with_selection(
     activity: &StoreActivity,
     project: &ProjectRoot,
@@ -658,7 +658,7 @@ pub(super) fn project_env_inner(
     helpers: &serde_json::Value,
     ledgers: &[LedgerObjects],
     // The resolution files the plan was built from, by digest (the
-    // closure's `resolution_basis`); `None` for a `tog x` cache root,
+    // closure's `resolution_basis`); `None` for a `ward x` cache root,
     // which joins nothing.
     basis: Option<&crate::comforter::join::Digests>,
     attribution: &mut crate::kernel::policy::Attribution,
@@ -667,7 +667,7 @@ pub(super) fn project_env_inner(
     // project descriptor, never through the project's path.
     let venv = Path::new(".venv");
     let store = store_from_object_path(env_obj)
-        .ok_or_else(|| io::Error::other("environment object is not in a Tog store"))?;
+        .ok_or_else(|| io::Error::other("environment object is not in a Greyward store"))?;
     let env_obj = env_obj.canonicalize()?;
     let project_lock = store.project_lock_in(project)?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
@@ -853,9 +853,9 @@ mod tests {
             let env_id = store.publish_bare_test("env", "0");
             let temp = TempDir::named("python-refused-projection");
             fs::create_dir_all(temp.0.join(".venv")).unwrap();
-            fs::create_dir_all(temp.0.join(".tog/closures")).unwrap();
+            fs::create_dir_all(temp.0.join(".greyward/closures")).unwrap();
             fs::write(temp.0.join(".venv/sentinel"), "old environment").unwrap();
-            fs::write(temp.0.join(".tog/closures/python.json"), "old closure").unwrap();
+            fs::write(temp.0.join(".greyward/closures/python.json"), "old closure").unwrap();
             fs::write(temp.0.join("requirements.lock.txt"), "generation A").unwrap();
             let project = ProjectRoot::open(&temp.0).unwrap();
             let basis = super::super::resolve::resolution_basis(&project).unwrap();
@@ -900,7 +900,7 @@ mod tests {
                 "old environment"
             );
             assert_eq!(
-                fs::read_to_string(temp.0.join(".tog/closures/python.json")).unwrap(),
+                fs::read_to_string(temp.0.join(".greyward/closures/python.json")).unwrap(),
                 "old closure"
             );
             assert!(!temp

@@ -45,7 +45,7 @@ pub use crate::kernel::provider::cpython::{
 };
 
 /// The error for a failed store-uv run: `what` failed, then the tail of
-/// what uv said, so the reason travels with tog's own error line instead
+/// what uv said, so the reason travels with ward's own error line instead
 /// of scrolling past above it (#216). Empty `stderr` (a verbose run whose
 /// output the user already watched) says so.
 pub(crate) fn uv_failure(what: &str, status: std::process::ExitStatus, stderr: &[u8]) -> io::Error {
@@ -419,7 +419,7 @@ mod toolchain_tests {
         cpython_identity_of, row, uv_identity_of, CPYTHON_RECIPE, UV_RECIPE,
     };
 
-    /// A selection whose CPython row names a layout this tog does not
+    /// A selection whose CPython row names a layout this ward does not
     /// implement: the bytes it locked are not the bytes this code would
     /// produce, so realization refuses instead of guessing.
     fn with_recipe(platform: Platform, component: &str, recipe: &str) -> Selected {
@@ -434,7 +434,7 @@ mod toolchain_tests {
 
     #[test]
     fn realization_refuses_an_unknown_recipe_and_another_ecosystem() {
-        let store = Store::for_test(std::env::temp_dir().join("tog-python-recipe-refusal"));
+        let store = Store::for_test(std::env::temp_dir().join("greyward-python-recipe-refusal"));
         let lease = crate::kernel::testutil::detached_lease();
         let activity = &lease.1;
         // The row check is per platform; realization can only run for the
@@ -449,7 +449,7 @@ mod toolchain_tests {
             .unwrap_err()
             .to_string();
             assert!(error.contains("recipe cpython/2"), "{error}");
-            assert!(error.contains("upgrade tog"), "{error}");
+            assert!(error.contains("upgrade ward"), "{error}");
         }
         let platform = Platform::host().unwrap();
         let error = realize_runtime(
@@ -461,7 +461,7 @@ mod toolchain_tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("recipe cpython/2"), "{error}");
-        assert!(error.contains("upgrade tog"), "{error}");
+        assert!(error.contains("upgrade ward"), "{error}");
         let error = realize_uv(
             &store,
             activity,
@@ -526,7 +526,7 @@ mod toolchain_tests {
         }
     }
 
-    /// A lock naming a version this tog has no build for is refused by the
+    /// A lock naming a version this ward has no build for is refused by the
     /// planner, naming the file and the command that rewrites it.
     #[test]
     fn a_version_with_no_pinned_build_is_refused_by_the_planner() {
@@ -535,7 +535,7 @@ mod toolchain_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("3.9.1"), "{error}");
-        assert!(error.contains("tog-toolchain.toml"), "{error}");
-        assert!(error.contains("tog update --toolchain python"), "{error}");
+        assert!(error.contains("greyward-toolchain.toml"), "{error}");
+        assert!(error.contains("ward update --toolchain python"), "{error}");
     }
 }

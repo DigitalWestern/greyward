@@ -167,7 +167,7 @@ impl Tailor for Ruby {
 
     /// A lone script runs on the interpreter alone, with no gems: an
     /// empty gem home in the store's run home for this directory, and the
-    /// host's RUBYOPT, GEM_PATH and Bundler settings removed as `tog run`
+    /// host's RUBYOPT, GEM_PATH and Bundler settings removed as `ward run`
     /// removes them.
     fn lone_file(
         &self,

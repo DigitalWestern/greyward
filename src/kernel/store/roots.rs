@@ -230,11 +230,14 @@ impl Store {
     /// byte-for-byte unchanged.
     pub fn root_record_from_project(&self, project_dir: &Path) -> io::Result<RootRecord> {
         let project_dir = project_dir.canonicalize()?;
-        let closures = project_dir.join(".tog/closures");
+        let closures = project_dir.join(".greyward/closures");
         if !closures.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("{} has no .tog/closures directory", project_dir.display()),
+                format!(
+                    "{} has no .greyward/closures directory",
+                    project_dir.display()
+                ),
             ));
         }
         let key = root_key(&project_dir);
@@ -282,8 +285,8 @@ impl Store {
                 String::new()
             } else {
                 format!(
-                    ": {} is a retired record an older tog wrote, which nothing reads; run \
-                     `tog sync` in the project to write current ones",
+                    ": {} is a retired record an older ward wrote, which nothing reads; run \
+                     `ward sync` in the project to write current ones",
                     retired.join(", ")
                 )
             };
@@ -308,7 +311,7 @@ impl Store {
     }
 
     /// Read the roots registry without validating whether projects still
-    /// exist. `tog store roots` is an inspection command; GC validates
+    /// exist. `ward store roots` is an inspection command; GC validates
     /// each path before sweeping and never drops stale records implicitly.
     ///
     /// Every key-named entry is reported, including the ones that cannot be
@@ -618,7 +621,7 @@ impl Store {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
-                        "unknown root key {key}; `tog store roots` lists the keys this \
+                        "unknown root key {key}; `ward store roots` lists the keys this \
                          store holds"
                     ),
                 ))
@@ -709,7 +712,7 @@ impl Store {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "invalid root key '{key}': expected 40 hex characters (`tog store \
+                    "invalid root key '{key}': expected 40 hex characters (`ward store \
                      roots` prints keys)"
                 ),
             ))
@@ -747,7 +750,7 @@ impl Store {
     }
 
     /// Whether a project could be registered at all, without writing
-    /// anything. A project tog cannot record is a project it cannot
+    /// anything. A project ward cannot record is a project it cannot
     /// protect from its own GC, so the work refuses up front instead of
     /// discovering it after an environment has been realized and projected.
     pub fn check_registrable(project_dir: &Path) -> io::Result<()> {
@@ -976,7 +979,7 @@ pub(super) fn parse_root_entry(
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run 'tog' in that project"
+                    "parse root registry entry {key}: {error}; use `ward gc --forget {key}` to drop the record, then re-run 'ward' in that project"
                 ),
             )
         })?;
@@ -993,7 +996,7 @@ pub(super) fn parse_root_entry(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "root registry entry {key} has unknown schema {schema}; this store was written by a newer Tog, or the record is damaged — upgrade Tog, or use `tog gc --forget {key}`"
+                    "root registry entry {key} has unknown schema {schema}; this store was written by a newer Greyward, or the record is damaged — upgrade Greyward, or use `ward gc --forget {key}`"
                 ),
             ));
         }
@@ -1001,7 +1004,7 @@ pub(super) fn parse_root_entry(
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "parse root registry entry {key}: {error}; use `tog gc --forget {key}` to drop the record, then re-run 'tog' in that project"
+                    "parse root registry entry {key}: {error}; use `ward gc --forget {key}` to drop the record, then re-run 'ward' in that project"
                 ),
             )
         })?;
@@ -1022,7 +1025,7 @@ pub(super) fn parse_root_entry(
         ));
     }
     // A pathname-only record (a project path and nothing else) is the form
-    // before root/2. No tog that writes the store format marker writes one,
+    // before root/2. No ward that writes the store format marker writes one,
     // so the entry is unusable: it names no objects, and a sweep cannot
     // tell what the project needs. It still occupies its key, so it stops
     // every sweep until it is forgotten or the project is registered again
@@ -1035,7 +1038,7 @@ pub(super) fn parse_root_entry(
             io::ErrorKind::InvalidData,
             format!(
                 "root registry entry {key} is padded or spans lines, so it cannot be read \
-                 back exactly; use `tog gc --forget {key}` to drop the record"
+                 back exactly; use `ward gc --forget {key}` to drop the record"
             ),
         ));
     }
@@ -1044,7 +1047,7 @@ pub(super) fn parse_root_entry(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "root registry entry {key} is not an absolute path; use `tog gc --forget {key}` \
+                "root registry entry {key} is not an absolute path; use `ward gc --forget {key}` \
                  to drop the record"
             ),
         ));
@@ -1053,8 +1056,8 @@ pub(super) fn parse_root_entry(
         key: key.into(),
         unusable: Some(format!(
             "a pathname-only record for {}, the form before root/2, which names no store \
-             objects; run `tog gc --register <project>` to record what the project holds, or \
-             `tog gc --forget {key}` to drop it",
+             objects; run `ward gc --register <project>` to record what the project holds, or \
+             `ward gc --forget {key}` to drop it",
             project_path.display()
         )),
         path: project_path,
@@ -1261,8 +1264,8 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to register {}: the path is not valid UTF-8, so a registry record \
-                 cannot name it exactly. A project tog cannot record is a project it \
-                 cannot protect from `tog gc`",
+                 cannot name it exactly. A project ward cannot record is a project it \
+                 cannot protect from `ward gc`",
                 project_dir.display()
             ),
         )
@@ -1272,8 +1275,8 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
             io::ErrorKind::InvalidInput,
             format!(
                 "refusing to register '{text}': the path is padded with whitespace or spans \
-                 lines, so a registry record cannot name it exactly. A project tog \
-                 cannot record is a project it cannot protect from `tog gc`"
+                 lines, so a registry record cannot name it exactly. A project ward \
+                 cannot record is a project it cannot protect from `ward gc`"
             ),
         ));
     }
@@ -1312,7 +1315,7 @@ mod tests {
         let temp = TempDir::named("damaged-root");
         let store = Store::open_at(&temp.0.join("store")).unwrap();
         let project = temp.0.join("project");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         let key = Store::root_key(&project).unwrap();
         let record = temp.0.join("store/roots").join(&key);
         fs::create_dir_all(record.parent().unwrap()).unwrap();
@@ -1322,7 +1325,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("tog gc --forget {key}")),
+                    .contains(&format!("ward gc --forget {key}")),
                 "{bytes:?}: {error}"
             );
             assert_eq!(fs::read(&record).unwrap(), bytes);

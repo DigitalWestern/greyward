@@ -2,7 +2,7 @@
 //!
 //! These are the supervision cases that need a real process tree: a supervisor in its own process, a real child, and real
 //! signal delivery. This binary re-executes itself with
-//! `TOG_SUPERVISE_SCENARIO` set; the ignored `supervisor_harness` test
+//! `GREYWARD_SUPERVISE_SCENARIO` set; the ignored `supervisor_harness` test
 //! below then plays the supervisor and prints markers the cases wait for.
 //!
 //! No case uses a sleep to synchronise with an unobserved event. Progress is
@@ -25,9 +25,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use tog::kernel::activity::{ActivityMode, StoreActivity};
-use tog::kernel::store::Store;
-use tog::kernel::supervise;
+use greyward::kernel::activity::{ActivityMode, StoreActivity};
+use greyward::kernel::store::Store;
+use greyward::kernel::supervise;
 
 mod common;
 
@@ -41,8 +41,8 @@ const TICK: Duration = Duration::from_millis(2);
 
 // ---------------------------------------------------------------- utilities
 
-/// A disposable store. Never point `TOG_STORE` at a real store. Its
-/// scratch root is also the home and working directory of the nested tog
+/// A disposable store. Never point `GREYWARD_STORE` at a real store. Its
+/// scratch root is also the home and working directory of the nested ward
 /// runs and holds the case's FIFOs, so everything goes when the case does.
 struct TempStore {
     temp: TempDir,
@@ -448,16 +448,16 @@ fn spawn_harness_with(
     };
     command
         .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-        .env("TOG_SUPERVISE_SCENARIO", scenario)
-        .env("TOG_SUPERVISE_STORE", &store.root)
-        .env("TOG_SUPERVISE_HOME", store.home())
+        .env("GREYWARD_SUPERVISE_SCENARIO", scenario)
+        .env("GREYWARD_SUPERVISE_STORE", &store.root)
+        .env("GREYWARD_SUPERVISE_HOME", store.home())
         .env("RUST_BACKTRACE", "1")
-        .env_remove("TOG_STORE");
+        .env_remove("GREYWARD_STORE");
     if let Some(inner) = inner {
-        command.env("TOG_SUPERVISE_INNER", inner);
+        command.env("GREYWARD_SUPERVISE_INNER", inner);
     }
     if let Some(fifo) = fifo {
-        command.env("TOG_SUPERVISE_FIFO", fifo);
+        command.env("GREYWARD_SUPERVISE_FIFO", fifo);
     }
 
     let markers = match pty {
@@ -599,7 +599,7 @@ impl Drop for Pty {
 #[test]
 #[ignore = "re-executed as the supervisor for the cases in this file"]
 fn supervisor_harness() {
-    let Ok(scenario) = std::env::var("TOG_SUPERVISE_SCENARIO") else {
+    let Ok(scenario) = std::env::var("GREYWARD_SUPERVISE_SCENARIO") else {
         return;
     };
     // A probe run as a supervised child, not a supervisor: it reports the
@@ -627,7 +627,7 @@ fn supervisor_harness() {
         }
         std::process::exit(0);
     }
-    let root = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
+    let root = PathBuf::from(std::env::var_os("GREYWARD_SUPERVISE_STORE").unwrap());
     let store = Store::open_at(&root).unwrap();
     let activity = store.activity(ActivityMode::Shared).unwrap();
     let code = run_scenario(&scenario, &activity);
@@ -797,9 +797,9 @@ fn set_sigchld_nocldwait() {
 }
 
 /// The binary, run from the case's scratch home against the case's store.
-fn tog_command(args: &[&str]) -> Command {
-    let home = PathBuf::from(std::env::var_os("TOG_SUPERVISE_HOME").unwrap());
-    let store = PathBuf::from(std::env::var_os("TOG_SUPERVISE_STORE").unwrap());
+fn ward_command(args: &[&str]) -> Command {
+    let home = PathBuf::from(std::env::var_os("GREYWARD_SUPERVISE_HOME").unwrap());
+    let store = PathBuf::from(std::env::var_os("GREYWARD_SUPERVISE_STORE").unwrap());
     let mut command = command(&home, &home, &store);
     command.args(args);
     command
@@ -812,7 +812,7 @@ extern "C" fn record_one(_: libc::c_int) {
 }
 
 /// Install a handler that only counts `number`, as code that ran before
-/// tog's first session might.
+/// ward's first session might.
 fn record_signal(number: libc::c_int) {
     // SAFETY: zeroed is followed by sigemptyset; the handler only touches
     // an atomic.
@@ -857,12 +857,12 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say("DONE");
             0
         }
-        // A child that never starts: with TOG_SUPERVISE_FAILPOINT
+        // A child that never starts: with GREYWARD_SUPERVISE_FAILPOINT
         // `before-spawn` a signal arrives just before the spawn, which then
         // fails. The session ends without concluding, and a wrapped error
         // from the command still names the signal.
         "signal-then-spawn-fail" => {
-            let mut command = Command::new("/nonexistent/tog-supervise-missing-program");
+            let mut command = Command::new("/nonexistent/greyward-supervise-missing-program");
             match supervise::status(&mut command, activity) {
                 Ok(status) => say(&format!("SPAWN_OK {}", code_of(status))),
                 Err(error) => say(&format!("SPAWN_ERR {:?}", error.kind())),
@@ -873,7 +873,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             0
         }
         "blocked-orphan" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let result = supervise::output(&mut drained_child(&fifo), activity);
             assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
             let next = supervise::status(&mut shell("printf 'UNEXPECTED_CHILD\\n'"), activity);
@@ -963,7 +963,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // Announces its pid, traps TERM, and blocks inside the trap on a FIFO
         // so the case can inspect the world mid-termination.
         "term-during-wait" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let mut command = shell(&format!(
                 r#"trap 'printf "CHILD_TERM\n"; read line < "{fifo}"; exit 45' TERM
                    printf "CHILDPID %d\nREADY\n" $$
@@ -991,7 +991,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                .env("TOG_SUPERVISE_SCENARIO", "term-counter");
+                .env("GREYWARD_SUPERVISE_SCENARIO", "term-counter");
             report(supervise::status(&mut command, activity))
         }
         // A child that never sees the signal: INT sent to the supervisor
@@ -999,7 +999,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // once the FIFO releases it and the supervisor still reports the
         // interrupt.
         "int-to-supervisor" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let mut command = shell(&format!(
                 r#"printf "CHILDPID %d\nREADY\n" $$
                    read line < "{fifo}"
@@ -1029,7 +1029,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // started, so both are provably running together; each exits with
         // its own code.
         "concurrent" => {
-            let dir = std::env::var("TOG_SUPERVISE_HOME").unwrap();
+            let dir = std::env::var("GREYWARD_SUPERVISE_HOME").unwrap();
             let child = |me: &str, other: &str, code: i32| {
                 shell(&format!(
                     r#"touch "{dir}/{me}"
@@ -1078,7 +1078,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // A's child is inside its TERM trap when B registers; B's child
         // must not inherit that TERM.
         "late-session" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let gate = format!("{fifo}-gate");
             std::thread::scope(|scope| {
                 let a = scope.spawn(|| {
@@ -1099,13 +1099,13 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say("DONE");
             0
         }
-        // How a signal acts once no session is live. TOG_SUPERVISE_INNER is
+        // How a signal acts once no session is live. GREYWARD_SUPERVISE_INNER is
         // `<TERM|INT|HUP|QUIT>-<default|handler>`: with `handler` the
         // supervisor installs a recording handler before its first session
         // and then signals itself; with `default` it waits for the case to
         // signal it, and should die of it.
         "inherited-after" => {
-            let inner = std::env::var("TOG_SUPERVISE_INNER").unwrap();
+            let inner = std::env::var("GREYWARD_SUPERVISE_INNER").unwrap();
             let (name, mode) = inner.split_once('-').unwrap();
             let number = signal_named(name);
             if mode == "handler" {
@@ -1137,7 +1137,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // pipe open, so `output` keeps draining after the reap. Its pid goes
         // to `<fifo>.pid` so the case can tell when it has been reaped.
         "term-after-reap" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let mut command = drained_child(&fifo);
             let result = supervise::output(&mut command, activity);
             say(&format!(
@@ -1150,10 +1150,10 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             0
         }
         // A as in `term-after-reap` (its TERM can only be orphaned), B with
-        // a live child that traps TERM. TOG_SUPERVISE_INNER says nothing;
+        // a live child that traps TERM. GREYWARD_SUPERVISE_INNER says nothing;
         // the case decides which session ends first.
         "orphan-two" => {
-            let base = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let base = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let fifo_a = format!("{base}-a");
             let fifo_b = format!("{base}-b");
             std::thread::scope(|scope| {
@@ -1184,10 +1184,10 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say("DONE");
             0
         }
-        // A sees TOG_SUPERVISE_INNER (INT, HUP or QUIT) and ends; then an
+        // A sees GREYWARD_SUPERVISE_INNER (INT, HUP or QUIT) and ends; then an
         // unrelated child exit, and B, which must spawn normally.
         "old-signal" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
             let mut command = shell(&format!(
                 r#"printf "CHILDPID %d\nREADY\n" $$
                    read line < "{fifo}"
@@ -1267,7 +1267,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                         let mut probe = Command::new(std::env::current_exe().unwrap());
                         probe
                             .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                            .env("TOG_SUPERVISE_SCENARIO", "report-fds");
+                            .env("GREYWARD_SUPERVISE_SCENARIO", "report-fds");
                         let listing = supervise::output(&mut probe, activity).unwrap();
                         for line in String::from_utf8_lossy(&listing.stdout).lines() {
                             let Some((fd, target)) = line.split_once(' ') else {
@@ -1290,15 +1290,15 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             say("DONE");
             0
         }
-        // The first install fails (TOG_SUPERVISE_FAILPOINT); with
-        // TOG_SUPERVISE_INNER `session` a second session follows. Then the
+        // The first install fails (GREYWARD_SUPERVISE_FAILPOINT); with
+        // GREYWARD_SUPERVISE_INNER `session` a second session follows. Then the
         // supervisor waits for the case's TERM.
         "install-fail" => {
             match supervise::status(&mut shell("exit 0"), activity) {
                 Ok(status) => say(&format!("FIRST_OK {}", code_of(status))),
                 Err(error) => say(&format!("FIRST_ERR {error}")),
             }
-            if std::env::var("TOG_SUPERVISE_INNER").as_deref() == Ok("session") {
+            if std::env::var("GREYWARD_SUPERVISE_INNER").as_deref() == Ok("session") {
                 let second = supervise::status(&mut shell("exit 7"), activity).unwrap();
                 say(&format!("SECOND {}", code_of(second)));
             }
@@ -1308,7 +1308,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             }
         }
         // The first install pauses after one of its `sigaction` calls
-        // (TOG_SUPERVISE_FAILPOINT); the case sends TERM then.
+        // (GREYWARD_SUPERVISE_FAILPOINT); the case sends TERM then.
         "install-pause" => {
             let status = supervise::status(&mut shell("exit 0"), activity).unwrap();
             say(&format!("SURVIVED {}", code_of(status)));
@@ -1320,7 +1320,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
                 let mut command = Command::new(std::env::current_exe().unwrap());
                 command
                     .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                    .env("TOG_SUPERVISE_SCENARIO", "int-counter");
+                    .env("GREYWARD_SUPERVISE_SCENARIO", "int-counter");
                 command
             };
             let (a, b) = std::thread::scope(|scope| {
@@ -1367,8 +1367,8 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // A failed spawn must not leave a session installed: the next child
         // still runs, and a later TERM still kills the supervisor normally.
         "spawn-fail" => {
-            let fifo = std::env::var("TOG_SUPERVISE_FIFO").unwrap();
-            let mut missing = Command::new("/nonexistent/tog-supervise-probe");
+            let fifo = std::env::var("GREYWARD_SUPERVISE_FIFO").unwrap();
+            let mut missing = Command::new("/nonexistent/greyward-supervise-probe");
             match supervise::status(&mut missing, activity) {
                 Ok(status) => say(&format!("UNEXPECTED {}", code_of(status))),
                 Err(error) => say(&format!("ERR {:?}", error.kind())),
@@ -1434,7 +1434,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                .env("TOG_SUPERVISE_SCENARIO", "int-counter");
+                .env("GREYWARD_SUPERVISE_SCENARIO", "int-counter");
             report(supervise::status(&mut command, activity))
         }
         // A job-control shell: its own session owns the terminal, and the
@@ -1442,12 +1442,12 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // this layer the supervisor's group would be orphaned and the kernel
         // would discard terminal stop signals instead of delivering them.
         "shell" => {
-            let inner = std::env::var("TOG_SUPERVISE_INNER").unwrap();
+            let inner = std::env::var("GREYWARD_SUPERVISE_INNER").unwrap();
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                .env("TOG_SUPERVISE_SCENARIO", inner)
-                .env_remove("TOG_SUPERVISE_INNER");
+                .env("GREYWARD_SUPERVISE_SCENARIO", inner)
+                .env_remove("GREYWARD_SUPERVISE_INNER");
             // SAFETY: setpgid only touches the post-fork child.
             unsafe {
                 command.pre_exec(|| {
@@ -1506,7 +1506,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         // A nested exclusive command must report busy rather than wait for a
         // lease its own parent holds.
         "nested-gc" => {
-            let mut command = tog_command(&["gc", "--dry-run"]);
+            let mut command = ward_command(&["gc", "--dry-run"]);
             // gc narrates on stderr (CLI.md: stdout is for documents), and
             // this harness's marker stream is its stdout, so the busy line
             // is folded into it here.
@@ -1517,7 +1517,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
         }
         // A nested read-only command must simply finish.
         "nested-roots" => {
-            let mut command = tog_command(&["store", "roots"]);
+            let mut command = ward_command(&["store", "roots"]);
             let status = supervise::status(&mut command, activity).unwrap();
             say(&format!("NESTED {}", code_of(status)));
             code_of(status)
@@ -1546,7 +1546,7 @@ fn run_scenario(scenario: &str, activity: &StoreActivity) -> i32 {
             let mut probe = Command::new(std::env::current_exe().unwrap());
             probe
                 .args(["--exact", "supervisor_harness", "--ignored", "--nocapture"])
-                .env("TOG_SUPERVISE_SCENARIO", "report-sigchld");
+                .env("GREYWARD_SUPERVISE_SCENARIO", "report-sigchld");
             match supervise::status(&mut probe, activity) {
                 Ok(status) => say(&format!("PROBE {}", code_of(status))),
                 Err(error) => say(&format!("PROBE_ERR {error}")),
@@ -1682,7 +1682,7 @@ fn repeated_parent_term_is_forwarded_every_time() {
 /// Sequential children through one lease each get their own wait status
 /// back from `supervise::status`: a numeric exit as its code, and a
 /// signalled child as "signalled", with no code. The 128 + signal mapping
-/// at the command boundary is not exercised here: it lives in `tog run`,
+/// at the command boundary is not exercised here: it lives in `ward run`,
 /// which needs a synced environment. Session reset across those children is
 /// covered by `spawn_failure_restores_dispositions`, which is the case that
 /// actually distinguishes an installed session from an absent one.
@@ -1713,7 +1713,7 @@ fn a_child_exit_wakes_the_supervisor_without_waiting_for_a_poll_tick() {
     let store = TempStore::new("reap-latency");
     // A one-minute tick: only the signal's own wake can meet the bound.
     let mut harness = spawn_harness_with("reap-latency", &store, None, None, |command| {
-        command.env("TOG_SUPERVISE_TICK_MS", "60000");
+        command.env("GREYWARD_SUPERVISE_TICK_MS", "60000");
     });
     harness.markers.wait_for("DONE");
     let text = harness.markers.text();
@@ -1785,13 +1785,13 @@ fn children_do_not_inherit_the_activity_descriptor() {
     let text = harness.markers.text();
     assert!(
         !text.contains(".lock"),
-        "a child inherited a Tog lock descriptor:\n{text}"
+        "a child inherited a Greyward lock descriptor:\n{text}"
     );
     store.wait_until_free();
 }
 
 /// SIGPIPE is characterised, not "fixed". The child gets the
-/// toolchain's default disposition rather than Tog's inherited ignore.
+/// toolchain's default disposition rather than Greyward's inherited ignore.
 #[test]
 fn sigpipe_reaches_the_child_with_the_toolchain_default() {
     let store = TempStore::new("sigpipe");
@@ -1982,7 +1982,7 @@ fn a_nested_exclusive_command_reports_busy() {
     harness.markers.settle();
     let text = harness.markers.text();
     assert!(
-        text.contains("cleanup skipped: a Tog job is using this store"),
+        text.contains("cleanup skipped: a Greyward job is using this store"),
         "nested gc did not report busy:\n{text}"
     );
     assert!(
@@ -2006,7 +2006,7 @@ fn a_nested_read_only_command_completes() {
 /// status. POSIX lets the kernel reap the children of a process that
 /// ignores SIGCHLD, so without the session's own handler `try_wait` finds no
 /// child (ECHILD) and the status is lost. The child still execs with the
-/// SIG_IGN tog inherited.
+/// SIG_IGN ward inherited.
 #[test]
 fn inherited_sigchld_ignore_still_reports_the_exit_status() {
     let store = TempStore::new("sigchld-ignored");
@@ -2033,7 +2033,7 @@ fn inherited_sigchld_ignore_still_reports_the_exit_status() {
     );
     assert!(text.contains("PROBE 0"), "{text}");
     // The handler stays once installed (supervision never uninstalls it),
-    // so tog's later unsupervised children keep their exit status too.
+    // so ward's later unsupervised children keep their exit status too.
     assert!(text.contains("AFTER handler"), "{text}");
     assert_eq!(harness.finish().code(), Some(0));
     store.wait_until_free();
@@ -2114,8 +2114,8 @@ fn a_session_registered_after_term_does_not_inherit_it() {
 }
 
 /// After a session ends, each of TERM/INT/HUP/QUIT acts as the disposition
-/// tog inherited: the default kills tog, and a handler installed before
-/// the first session runs once and tog carries on.
+/// ward inherited: the default kills ward, and a handler installed before
+/// the first session runs once and ward carries on.
 #[test]
 fn dispositions_act_as_inherited_whenever_no_session_is_live() {
     for name in ["TERM", "INT", "HUP", "QUIT"] {
@@ -2155,7 +2155,7 @@ fn dispositions_act_as_inherited_whenever_no_session_is_live() {
 
 /// A TERM that arrives after the child is reaped but while `output` still
 /// drains its pipes reaches no child, so it is re-raised when the session
-/// ends and tog dies of it, as it would with no session at all.
+/// ends and ward dies of it, as it would with no session at all.
 #[test]
 fn term_after_reap_but_before_the_pipes_close_is_not_swallowed() {
     let store = TempStore::new("term-after-reap");
@@ -2181,7 +2181,7 @@ fn term_after_reap_but_before_the_pipes_close_is_not_swallowed() {
 
 /// One TERM while two sessions are live: B forwards it to its child, A's
 /// child was already reaped. A's copy is an orphan, so whichever session
-/// ends last re-raises it and tog dies of TERM, in either order.
+/// ends last re-raises it and ward dies of TERM, in either order.
 #[test]
 fn a_term_orphaned_by_one_session_reraises_though_another_consumed_it() {
     for a_first in [true, false] {
@@ -2225,8 +2225,8 @@ fn a_term_during_departure_is_not_lost_by_a_nonfinal_session() {
     let gate = store.fifo("departure");
     let mut harness = spawn_harness_with("orphan-two", &store, None, Some(&base), |command| {
         command
-            .env("TOG_SUPERVISE_FAILPOINT", "before-deregister")
-            .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate);
+            .env("GREYWARD_SUPERVISE_FAILPOINT", "before-deregister")
+            .env("GREYWARD_SUPERVISE_FAILPOINT_FIFO", &gate);
     });
     wait_until_reaped(&fifo_a);
     harness.markers.wait_for("B READY");
@@ -2252,9 +2252,9 @@ fn interrupts_at_registration_and_departure_are_reported() {
             let gate = store.fifo("boundary");
             let mut harness = spawn_harness_with("boundary", &store, None, None, |command| {
                 command
-                    .env("TOG_SUPERVISE_FAILPOINT", boundary)
-                    .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate)
-                    .env("TOG_SUPERVISE_BOUNDARY_SIGNAL", name);
+                    .env("GREYWARD_SUPERVISE_FAILPOINT", boundary)
+                    .env("GREYWARD_SUPERVISE_FAILPOINT_FIFO", &gate)
+                    .env("GREYWARD_SUPERVISE_BOUNDARY_SIGNAL", name);
             });
             harness
                 .markers
@@ -2288,9 +2288,9 @@ fn a_signal_before_a_failed_spawn_is_still_recorded() {
         let mut harness =
             spawn_harness_with("signal-then-spawn-fail", &store, None, None, |command| {
                 command
-                    .env("TOG_SUPERVISE_FAILPOINT", "before-spawn")
-                    .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate)
-                    .env("TOG_SUPERVISE_BOUNDARY_SIGNAL", name);
+                    .env("GREYWARD_SUPERVISE_FAILPOINT", "before-spawn")
+                    .env("GREYWARD_SUPERVISE_FAILPOINT_FIFO", &gate)
+                    .env("GREYWARD_SUPERVISE_BOUNDARY_SIGNAL", name);
             });
         harness.markers.wait_for("FAILPOINT PAUSED before-spawn");
         release_fifo(&gate);
@@ -2314,8 +2314,8 @@ fn a_blocked_orphaned_term_closes_admission_until_inherited_delivery() {
     let gate = store.fifo("reraise");
     let mut harness = spawn_harness_with("blocked-orphan", &store, None, Some(&fifo), |command| {
         command
-            .env("TOG_SUPERVISE_FAILPOINT", "before-reraise")
-            .env("TOG_SUPERVISE_FAILPOINT_FIFO", &gate);
+            .env("GREYWARD_SUPERVISE_FAILPOINT", "before-reraise")
+            .env("GREYWARD_SUPERVISE_FAILPOINT_FIFO", &gate);
     });
     wait_until_reaped(&fifo);
     signal(harness.pid(), libc::SIGTERM);
@@ -2458,7 +2458,10 @@ fn a_failed_first_install_leaves_signals_behaving_as_inherited() {
                 None,
                 None,
                 |command| {
-                    command.env("TOG_SUPERVISE_FAILPOINT", format!("fail-sigaction-{call}"));
+                    command.env(
+                        "GREYWARD_SUPERVISE_FAILPOINT",
+                        format!("fail-sigaction-{call}"),
+                    );
                 },
             );
             harness.markers.wait_for("READY");
@@ -2480,7 +2483,7 @@ fn a_failed_first_install_leaves_signals_behaving_as_inherited() {
 }
 
 /// A TERM that arrives part-way through the first install, with no session
-/// registered yet, acts as inherited: tog dies of it.
+/// registered yet, acts as inherited: ward dies of it.
 #[test]
 fn a_term_during_first_install_acts_as_inherited() {
     for call in 1..=5 {
@@ -2489,10 +2492,10 @@ fn a_term_during_first_install_acts_as_inherited() {
         let mut harness = spawn_harness_with("install-pause", &store, None, None, |command| {
             command
                 .env(
-                    "TOG_SUPERVISE_FAILPOINT",
+                    "GREYWARD_SUPERVISE_FAILPOINT",
                     format!("pause-after-sigaction-{call}"),
                 )
-                .env("TOG_SUPERVISE_FAILPOINT_FIFO", &fifo);
+                .env("GREYWARD_SUPERVISE_FAILPOINT_FIFO", &fifo);
         });
         harness
             .markers

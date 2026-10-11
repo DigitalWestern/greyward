@@ -90,8 +90,8 @@ pub(crate) enum ImportMode {
 }
 
 /// Import the closures a project already has, read through the held
-/// project with the strict no-follow walk: a symlinked `.tog`,
-/// `.tog/closures`, or closure file is refused rather than read through, so
+/// project with the strict no-follow walk: a symlinked `.greyward`,
+/// `.greyward/closures`, or closure file is refused rather than read through, so
 /// a swapped entry cannot make this record protect another project's
 /// objects. An absent closures directory imports nothing; a subdirectory
 /// in it is skipped, as the pathname importer skipped it.
@@ -101,7 +101,7 @@ pub(super) fn import_existing_project_closures(
     record: &mut RootRecord,
     mode: ImportMode,
 ) -> io::Result<()> {
-    let closures = Path::new(".tog/closures");
+    let closures = Path::new(".greyward/closures");
     let Some(names) = project.read_dir(closures)? else {
         return Ok(());
     };
@@ -342,7 +342,7 @@ mod tests {
     /// writes is refused.
     #[test]
     fn a_closure_of_every_registered_ecosystem_is_imported() {
-        let path = Path::new(".tog/closures/x.json");
+        let path = Path::new(".greyward/closures/x.json");
         let envelope =
             |name: &str| serde_json::json!({"schema": "closure/1", "ecosystem": name, "body": {}});
         for tailor in crate::tailors::registry() {

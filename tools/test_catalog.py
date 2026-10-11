@@ -256,10 +256,10 @@ class Elixir(Base):
             "tag_name": f"OTP-{self.OTP}", "prerelease": False,
             "assets": [asset("otp-aarch64-apple-darwin.tar.gz", darwin)],
         }])
-        github_releases(net, catalog.TOG_TOOLCHAINS, [{
+        github_releases(net, catalog.GREYWARD_TOOLCHAINS, [{
             "tag_name": ltag, "prerelease": False, "assets": [asset(lname, linux)],
         }])
-        net.bodies[f"https://github.com/{catalog.TOG_TOOLCHAINS}/releases/download/{ltag}/{lname}.sha256"] = (
+        net.bodies[f"https://github.com/{catalog.GREYWARD_TOOLCHAINS}/releases/download/{ltag}/{lname}.sha256"] = (
             f"{sha256(linux)}  {lname}\n")
         github_releases(net, catalog.ELIXIR, [{
             "tag_name": f"v{self.ELIXIR}", "prerelease": False, "draft": False,
@@ -329,8 +329,8 @@ class Elixir(Base):
     def test_an_asset_github_records_no_digest_for_is_named_in_the_notes(self):
         lname = f"OTP-{self.OTP}-{LINUX}-fedora44.tar.gz"
         cases = [
-            (catalog.TOG_TOOLCHAINS, lname,
-             f"tog-toolchains {lname}: GitHub records no digest, so its .sha256 is its only check"),
+            (catalog.GREYWARD_TOOLCHAINS, lname,
+             f"greyward-toolchains {lname}: GitHub records no digest, so its .sha256 is its only check"),
             (catalog.ELIXIR, "elixir-otp-29.zip",
              f"elixir {self.ELIXIR} elixir-otp-29.zip: GitHub records no digest, "
              "so its .sha256sum is its only check"),

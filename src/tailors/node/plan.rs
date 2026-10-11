@@ -48,7 +48,7 @@ pub(crate) fn is_github_archive_url(url: &str) -> bool {
             .is_some_and(|path| archive(path, "archive"))
 }
 
-/// Why tog will not fetch a locked tarball URL as written. Each importer
+/// Why ward will not fetch a locked tarball URL as written. Each importer
 /// words `NotHttps` its own way; `Credentials` never echoes the URL, since a
 /// `user:pass@` authority would copy the secret into the plan and into
 /// fetch errors.
@@ -59,7 +59,7 @@ pub(crate) enum TarballUrlRefusal {
 }
 
 pub(crate) const TARBALL_URL_CREDENTIALS: &str =
-    "tarball URL carries credentials (user:pass@ before its host); tog will not record them";
+    "tarball URL carries credentials (user:pass@ before its host); ward will not record them";
 
 /// A locked URL parsed the way the fetcher parses it, so the check here and
 /// the download there read one URL: `https:///u:p@host` has credentials to
@@ -68,7 +68,7 @@ fn fetcher_url(url: &str) -> Option<url::Url> {
     crate::kernel::fetch::request_url(url)
 }
 
-/// The refusal for a locked tarball URL, if any: tog never fetches from a
+/// The refusal for a locked tarball URL, if any: ward never fetches from a
 /// URL with userinfo, and fetches https only. Credentials are checked
 /// first, so a credentialed http URL is refused without being echoed.
 pub(crate) fn tarball_url_refusal(url: &str) -> Option<TarballUrlRefusal> {
@@ -164,7 +164,7 @@ fn url_credentials_refusal_at(source: &str, path: &str, text: &str) -> io::Error
         path => format!("{path}: "),
     };
     err(format!(
-        "{source}: {at}{} carries URL credentials (user:pass@ before its host); tog will not \
+        "{source}: {at}{} carries URL credentials (user:pass@ before its host); ward will not \
          read a file that holds them",
         redact_url_userinfo(text)
     ))
@@ -181,7 +181,7 @@ pub(crate) fn refuse_json_url_credentials(
     refuse_json_url_credentials_at(source, &mut String::new(), value)
 }
 
-/// The fields of a package.json that become dependencies, fetches or tog
+/// The fields of a package.json that become dependencies, fetches or ward
 /// settings. Only these are held to [`url_credentials`]: a `scripts` entry
 /// naming `https://$TOKEN@host` or a username-only `repository` clone URL
 /// holds no secret and never reaches a plan.
@@ -193,7 +193,7 @@ const PACKAGE_JSON_PLANNED_FIELDS: [&str; 8] = [
     "resolutions",
     "overrides",
     "workspaces",
-    "tog",
+    "greyward",
 ];
 
 /// [`refuse_json_url_credentials`] for a package.json `source` (the
@@ -426,7 +426,7 @@ pub(super) fn npm_list_compatible(values: &[&str], ours: &str) -> bool {
 ///
 /// This is the one platform filter: package-lock.json, pnpm-lock.yaml and
 /// both hosts read restrictions through it, with npm's list semantics, which
-/// pnpm shares. `libc` is judged on Linux only: tog's Linux is glibc, and
+/// pnpm shares. `libc` is judged on Linux only: ward's Linux is glibc, and
 /// on macOS the field is ignored (npm itself refuses any `libc` list there,
 /// a case no lock for a macOS package has been seen to carry).
 pub(super) fn unsupported_restriction(
@@ -882,7 +882,7 @@ mod lock_shape_tests {
     fn sha1_integrity_is_accepted_and_recorded_inside_an_attribution() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        // An explicit permissive policy: TOG_STRICT=1 in the environment
+        // An explicit permissive policy: GREYWARD_STRICT=1 in the environment
         // would otherwise refuse the exception this test expects recorded.
         let permissive = crate::kernel::policy::Policy::default();
         let shipped = crate::tailors::node::shipped_selection().unwrap();
@@ -1033,7 +1033,7 @@ mod lock_shape_tests {
             assert!(
                 message.starts_with("package-lock.json: ")
                     && message.ends_with(
-                        " carries URL credentials (user:pass@ before its host); tog will not \
+                        " carries URL credentials (user:pass@ before its host); ward will not \
                          read a file that holds them"
                     ),
                 "{resolved}: {message}"
@@ -1077,7 +1077,7 @@ mod lock_shape_tests {
         assert_eq!(
             error.to_string(),
             "package-lock.json: packages[\"node_modules/a\"].resolved: <URL withheld: it may \
-             carry credentials> carries URL credentials (user:pass@ before its host); tog will \
+             carry credentials> carries URL credentials (user:pass@ before its host); ward will \
              not read a file that holds them"
         );
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

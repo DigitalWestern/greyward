@@ -1,5 +1,5 @@
 //! Host platform detection (kernel layer): the only place that knows what
-//! machine tog is running on. Everything else takes an explicit `Platform`.
+//! machine ward is running on. Everything else takes an explicit `Platform`.
 
 use std::env::consts::{ARCH, OS};
 use std::io;
@@ -22,11 +22,11 @@ impl Platform {
                 if Path::new("/lib64/ld-linux-x86-64.so.2").exists() {
                     Ok(Platform::X86_64UnknownLinuxGnu)
                 } else {
-                    Err("unsupported host: Linux x86_64 without glibc (musl?) — tog pins glibc toolchains (unsupported platform)".to_string())
+                    Err("unsupported host: Linux x86_64 without glibc (musl?) — ward pins glibc toolchains (unsupported platform)".to_string())
                 }
             }
             _ => Err(format!(
-                "unsupported host platform {OS}/{ARCH}: tog is pinned for aarch64-apple-darwin and x86_64-unknown-linux-gnu (unsupported platform)"
+                "unsupported host platform {OS}/{ARCH}: ward is pinned for aarch64-apple-darwin and x86_64-unknown-linux-gnu (unsupported platform)"
             )),
         }) {
             Ok(platform) => Ok(*platform),
@@ -44,7 +44,7 @@ impl Platform {
         }
     }
 
-    /// The platform a recorded triple names, if tog supports it.
+    /// The platform a recorded triple names, if ward supports it.
     pub fn from_triple(triple: &str) -> Option<Platform> {
         Platform::ALL.iter().copied().find(|p| p.triple() == triple)
     }
@@ -120,7 +120,7 @@ pub fn require_host(platform: Platform, what: &str) -> io::Result<()> {
     ))
 }
 
-/// A set of host packages tog's native paths need but does not provide.
+/// A set of host packages ward's native paths need but does not provide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostPackages {
     /// The compiler, linker, and helpers native builds link against.
@@ -205,8 +205,8 @@ pub fn install_hint(platform: Platform, packages: HostPackages) -> String {
 mod tests {
     use super::*;
 
-    /// Every distro tog claims to run on gets its own command, and a host
-    /// whose package manager tog does not recognize gets all of them rather
+    /// Every distro ward claims to run on gets its own command, and a host
+    /// whose package manager ward does not recognize gets all of them rather
     /// than Fedora's.
     #[test]
     fn install_hints_are_per_distro_and_fall_back_to_every_distro() {

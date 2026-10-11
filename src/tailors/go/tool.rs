@@ -13,7 +13,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The store go with tog's forced environment, its output captured.
+/// The store go with ward's forced environment, its output captured.
 pub(super) fn go_spec(
     go_obj: &Path,
     cwd: &Path,
@@ -52,7 +52,7 @@ pub(crate) enum GoPublish<'a> {
 /// One confined run of the store go.
 pub(crate) struct GoRun<'a> {
     pub go_obj: &'a Path,
-    /// The directory go runs in: the project, or a tog-owned work copy.
+    /// The directory go runs in: the project, or a greyward-owned work copy.
     pub lock_root: &'a Path,
     /// The persistent planner module cache, bound read-write.
     pub modcache: &'a Path,
@@ -164,7 +164,7 @@ pub(super) fn offline_command(
 }
 
 /// The store go with the module proxy off (`GOPROXY=off`): an extraction
-/// from a module cache tog staged, a host-local helper.
+/// from a module cache ward staged, a host-local helper.
 pub(super) fn run_go_offline(
     activity: &StoreActivity,
     go_obj: &Path,
@@ -182,7 +182,7 @@ pub(super) fn run_go_offline(
 /// `XDG_CONFIG_HOME`, Go's config directory is `home/.config`). A fresh
 /// `HOME` has no mode file, and Go would otherwise start its telemetry
 /// child on every run, which can outlive the run and write into a
-/// directory tog is about to remove.
+/// directory ward is about to remove.
 fn telemetry_off(home: &Path) -> io::Result<()> {
     let dir = home.join(".config/go/telemetry");
     std::fs::create_dir_all(&dir)?;

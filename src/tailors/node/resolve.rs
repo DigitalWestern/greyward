@@ -1,5 +1,5 @@
 //! The Node resolution doors (node tailor): a missing `package-lock.json`,
-//! `tog attest`'s lock checks, and what every Node door's record covers,
+//! `ward attest`'s lock checks, and what every Node door's record covers,
 //! each the store npm or the pinned pnpm confined through the tailor's door
 //! ([`super::door`]: TLS interception, the npm route, the git row).
 //!
@@ -61,7 +61,7 @@ pub(crate) fn resolution_inputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
 /// not plain and inside the project is an error, as a member's would be: a
 /// record names files inside the project only, and the confined pnpm
 /// could not read it anyway. (pnpm 10 also takes the setting in
-/// `pnpm-workspace.yaml`; tog reads that file's `packages` alone.)
+/// `pnpm-workspace.yaml`; ward reads that file's `packages` alone.)
 fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let Some(text) = root.read_input_string(Path::new("package.json"))? else {
         return Ok(Vec::new());
@@ -108,7 +108,7 @@ fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
 /// `package-lock.json` records. The union: receipt coverage is never
 /// smaller than the tool's own member set, and an extra manifest is only
 /// an extra output. A member named by a path that is not plain and
-/// relative, or a members list tog cannot read, is an error: a member
+/// relative, or a members list ward cannot read, is an error: a member
 /// left out would leave the record attesting a manifest it never covered.
 pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut members: Vec<PathBuf> = Vec::new();
@@ -154,7 +154,7 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
         None => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "pnpm-workspace.yaml: packages is not a list tog can read, so the workspace's \
+                "pnpm-workspace.yaml: packages is not a list ward can read, so the workspace's \
                  members cannot be named in a resolution record; write it as a plain list of \
                  patterns",
             ))
@@ -188,7 +188,7 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
 }
 
 /// `Tailor::preflight`'s share: the workspace members can be named, so a
-/// `pnpm-workspace.yaml` tog cannot read refuses the sync before anything
+/// `pnpm-workspace.yaml` ward cannot read refuses the sync before anything
 /// is realized rather than when the closure is written.
 pub(crate) fn check_members_readable(root: &ProjectRoot) -> io::Result<()> {
     workspace_members(root).map(drop)
@@ -481,7 +481,7 @@ fn path_spec_target(spec: &str) -> Option<&str> {
     None
 }
 
-/// A `package.json` with no lock tog can import: the store npm writes
+/// A `package.json` with no lock ward can import: the store npm writes
 /// `package-lock.json` through `door` (a missing-lock door), published
 /// with the signed resolution record.
 pub(crate) fn generate_lock(
@@ -534,11 +534,11 @@ pub(crate) fn npm_resolve_args(verb: &str, extra: &[&str]) -> Vec<String> {
     args
 }
 
-/// `tog attest` for Node: npm's `install --package-lock-only` (npm exits 0
+/// `ward attest` for Node: npm's `install --package-lock-only` (npm exits 0
 /// either way, so the byte-unchanged rule is the check) or pnpm's
 /// `install --lockfile-only --frozen-lockfile` at the lock root through
 /// `door`'s transaction with the record's producer. The check publishes
-/// nothing, not even the receipt: `tog attest` publishes every record
+/// nothing, not even the receipt: `ward attest` publishes every record
 /// only once every check passed.
 pub(crate) fn attest_project(
     door: &mut ResolutionDoor<'_>,
@@ -566,7 +566,7 @@ pub(crate) fn attest_project(
     };
     if !project.is_input_file(Path::new(&lock_name)) {
         return Err(err(format!(
-            "{} has no lock to attest; run `tog` first to write package-lock.json",
+            "{} has no lock to attest; run `ward` first to write package-lock.json",
             project.path().display()
         )));
     }
@@ -574,7 +574,7 @@ pub(crate) fn attest_project(
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "{} is locked by yarn (yarn.lock), and yarn is not a pinned tool, so tog has no \
+                "{} is locked by yarn (yarn.lock), and yarn is not a pinned tool, so ward has no \
                  lock check to run for it; convert with 'npm install --package-lock-only' or \
                  'pnpm install --lockfile-only', then attest",
                 project.path().display()
@@ -648,7 +648,7 @@ pub(crate) fn attest_project(
     if !report.status.success() {
         return Err(err(format!(
             "{lock_name} in {} is not what the lock check accepts, so it is not attested; run \
-             `tog` to bring it up to date and commit the result\n{}",
+             `ward` to bring it up to date and commit the result\n{}",
             project.path().display(),
             crate::kernel::resolve::confine::scrub_signing_key(
                 String::from_utf8_lossy(&report.stderr).trim()
@@ -659,7 +659,7 @@ pub(crate) fn attest_project(
     signed.ok_or_else(|| err("the Node lock check published no record".into()))
 }
 
-/// The ledger of a `tog x` resolution, rooted under the cache root it
+/// The ledger of a `ward x` resolution, rooted under the cache root it
 /// resolved into, the way a planner door's ledger is rooted under its
 /// project, so GC keeps it with the root.
 pub(crate) fn root_x_ledger(
@@ -831,7 +831,7 @@ mod tests {
             error.contains("../elsewhere") && error.contains("not a plain path"),
             "{error}"
         );
-        // A members list tog cannot read fails closed.
+        // A members list ward cannot read fails closed.
         write(&root, "package.json", r#"{"workspaces":"packages/*"}"#);
         assert!(resolution_outputs(&held).is_err());
         write(&root, "package.json", "{}");

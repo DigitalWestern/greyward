@@ -2,7 +2,7 @@
 
 ## License
 
-tog is licensed under the Apache License 2.0 ([LICENSE](LICENSE)). Every
+Greyward is licensed under the Apache License 2.0 ([LICENSE](LICENSE)). Every
 contribution is accepted under that license, as section 5 of the license
 says; there is no separate contributor license agreement to sign.
 

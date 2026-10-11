@@ -151,7 +151,7 @@ impl PortableLedger {
 
     // Kept beside `len`, as clippy's len_without_is_empty asks, though
     // nothing calls it yet.
-    #[cfg_attr(tog_dead_code, allow(dead_code))]
+    #[cfg_attr(ward_dead_code, allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

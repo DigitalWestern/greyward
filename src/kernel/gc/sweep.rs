@@ -84,8 +84,8 @@ pub(super) fn execute<W: Write>(
                     io::Error::new(
                         error.kind(),
                         format!(
-                            "{error}; the record meta/{meta_name} is orphaned: the next `tog \
-                             gc` removes it, or drop it now with `tog gc --drop-object {stray}`"
+                            "{error}; the record meta/{meta_name} is orphaned: the next `ward \
+                             gc` removes it, or drop it now with `ward gc --drop-object {stray}`"
                         ),
                     )
                 })?;

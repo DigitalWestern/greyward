@@ -97,7 +97,7 @@ pub(super) fn requirements_manifest(
 
 pub(super) fn requirements_directory_candidate(
     project: &ProjectRoot,
-    cfg: &TogPythonConfig,
+    cfg: &GreywardPythonConfig,
 ) -> io::Result<Option<PathBuf>> {
     let dir = project.path();
     let requirements = dir.join("requirements");
@@ -115,7 +115,7 @@ pub(super) fn requirements_directory_candidate(
         }
         return Err(unreadable(
             &path,
-            "tog.toml [python].requirements points to a missing file",
+            "greyward.toml [python].requirements points to a missing file",
         ));
     }
     for hardware in ["cpu.txt", "cuda.txt", "rocm.txt", "xpu.txt"] {

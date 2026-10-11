@@ -20,14 +20,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const PLANNER_SCHEMA: &str = "python-planner/3";
-const PLAN_CACHE: &str = ".tog/plan.json";
-const MANIFEST_REQUIREMENTS: &str = ".tog/manifest-requirements.txt";
-const MANIFEST_CONSTRAINTS: &str = ".tog/manifest-constraints.txt";
+const PLAN_CACHE: &str = ".greyward/plan.json";
+const MANIFEST_REQUIREMENTS: &str = ".greyward/manifest-requirements.txt";
+const MANIFEST_CONSTRAINTS: &str = ".greyward/manifest-constraints.txt";
 /// How the generated requirements name the constraints beside them: uv reads
 /// a `-c` path relative to the file that names it, so it is the held
 /// project's file (#499).
 const MANIFEST_CONSTRAINTS_NAME: &str = "manifest-constraints.txt";
-const LOCK_STAMP: &str = ".tog/lock-source.hash";
+const LOCK_STAMP: &str = ".greyward/lock-source.hash";
 
 pub fn planner_input_hash(
     platform: Platform,
@@ -63,7 +63,7 @@ pub type PythonPlan = (
 );
 
 /// Candidate input files for the status record: the manifest that won, the
-/// interpreter request, and every lock tog reads or writes, hashed through
+/// interpreter request, and every lock ward reads or writes, hashed through
 /// the held project descriptor by `comforter::input_records`.
 pub fn python_input_records(
     project: &ProjectRoot,
@@ -94,8 +94,8 @@ pub fn python_input_records(
 /// file instead (it names the same requirements). A file outside the
 /// project never is, and nor is one whose includes reach outside it: uv
 /// would read the external file again by path, and by then the path may
-/// name another file (#501). uv compiles the flattened text tog read
-/// instead, written under `.tog` by `read_plan`.
+/// name another file (#501). uv compiles the flattened text ward read
+/// instead, written under `.greyward` by `read_plan`.
 fn resolver_input(project: &ProjectRoot, manifest: &manifest::Manifest) -> (String, bool) {
     let external = manifest
         .source_path
@@ -115,10 +115,10 @@ fn resolver_input(project: &ProjectRoot, manifest: &manifest::Manifest) -> (Stri
 /// `setup.py egg_info`, so the selection is made here and handed back to the
 /// caller: planning, realization and the closure all use this one value.
 ///
-/// Planning hits PyPI, so successful plans are cached in `.tog/plan.json`
+/// Planning hits PyPI, so successful plans are cached in `.greyward/plan.json`
 /// keyed by a hash of the inputs; an unchanged lock replans offline.
 ///
-/// The project is read, and `.tog` written, through the held descriptor;
+/// The project is read, and `.greyward` written, through the held descriptor;
 /// its path only names files to uv and to the messages.
 pub fn read_plan(
     project: &ProjectRoot,
@@ -140,7 +140,7 @@ pub fn read_plan(
             // (`unreadable` in the manifest layer hardcodes it, and it
             // wraps the sandboxed egg_info probe), so the kind cannot
             // tell a descriptor refusal from a probe that did not work.
-            // Fall back on both: a symlinked `.tog` is still refused a
+            // Fall back on both: a symlinked `.greyward` is still refused a
             // few lines below, at the first write through the project
             // descriptor.
             if !dynamic_dependencies {
@@ -170,7 +170,7 @@ pub fn read_plan(
                     "setup.py metadata probe failed; using the requirements directory \
                      convention: {reason}"
                 ),
-                "tog run python setup.py egg_info",
+                "ward run python setup.py egg_info",
             );
             fallback.python = manifest.python.clone();
             manifest = fallback;
@@ -270,7 +270,7 @@ pub fn read_plan(
         )?
     };
 
-    // These are project-local .tog caches, not store identities; one
+    // These are project-local .greyward caches, not store identities; one
     // re-plan after moving a project between platforms is acceptable.
     let glibc = if matches!(platform, Platform::X86_64UnknownLinuxGnu) {
         pypi::host_glibc()?
@@ -371,7 +371,7 @@ pub fn is_fully_pinned(text: &str) -> bool {
     any
 }
 
-/// The requirements text tog writes under `.tog` for uv to compile, when
+/// The requirements text ward writes under `.greyward` for uv to compile, when
 /// the manifest is not a requirements file uv can read as it is (a
 /// pyproject or setup.cfg, an external include): its path, or `None` when
 /// uv compiles the manifest's own file.
@@ -386,8 +386,8 @@ fn generated_compile_input(
     if as_is && (input.starts_with("requirements") || is_fully_pinned(source)) {
         return Ok(None);
     }
-    // The compile input is named to uv by pathname, but tog writes it
-    // through the held project descriptor so a symlinked `.tog` is
+    // The compile input is named to uv by pathname, but ward writes it
+    // through the held project descriptor so a symlinked `.greyward` is
     // refused rather than followed.
     let mut text = if manifest.has_constraints() {
         project.write_file(
@@ -409,7 +409,7 @@ fn generated_compile_input(
 }
 
 /// The file uv compiles a project's `requirements.lock.txt` from, relative
-/// to the project, as planning names it: `tog attest` reruns that compile.
+/// to the project, as planning names it: `ward attest` reruns that compile.
 /// A generated input is written afresh, as planning would.
 pub(crate) fn lock_compile_input(
     project: &ProjectRoot,
@@ -434,7 +434,7 @@ pub(crate) fn lock_compile_input(
 /// input: relative to the project, so a directory swapped in at the
 /// project's path is never the one read (#499). An external requirements
 /// file never reaches here: planning hands uv the flattened text under
-/// `.tog` instead (#501).
+/// `.greyward` instead (#501).
 fn compile_name(project: &ProjectRoot, path: Option<&Path>, input: &str) -> String {
     path.map(|path| path.strip_prefix(project.path()).unwrap_or(path))
         .and_then(Path::to_str)
@@ -462,7 +462,7 @@ pub fn locked_requirements(
     let source_hash = if compile_path.is_some_and(|path| {
         !path
             .components()
-            .any(|component| component.as_os_str() == ".tog")
+            .any(|component| component.as_os_str() == ".greyward")
     }) {
         let path = compile_path.expect("checked above");
         let tree_hash = manifest::requirements_tree_hash(project, path)?;
@@ -470,7 +470,7 @@ pub fn locked_requirements(
     } else {
         lock_source_hash(pyver, source)
     };
-    // The stamp is tog's own state (strict no-follow read); the lock is a
+    // The stamp is ward's own state (strict no-follow read); the lock is a
     // project input. Anything unreadable is a miss, as before.
     if let (Ok(Some(stamp)), Ok(Some(lock))) = (
         project.read_file(Path::new(LOCK_STAMP)),
@@ -483,7 +483,7 @@ pub fn locked_requirements(
     ui::note(&format!(
         "{input} is not hash-pinned; resolving with the store uv..."
     ));
-    // Store-pinned uv, not host uv: a bare machine needs only tog. It runs
+    // Store-pinned uv, not host uv: a bare machine needs only ward. It runs
     // confined through a missing-lock door, and the lock is published with
     // its signed record (none when an include lies outside the project).
     let compile_input = compile_name(project, compile_path, input);
@@ -519,7 +519,7 @@ pub fn locked_requirements(
                 slot: Default::default(),
             },
             builds: Builds::Probe,
-            // Quiet on success; on failure its words go into tog's error.
+            // Quiet on success; on failure its words go into ward's error.
             capture: !ui::verbose(),
             policy: None,
         },
@@ -527,8 +527,8 @@ pub fn locked_requirements(
     )?;
     drop(missing_lock);
     project.regenerated_input(lock_path);
-    // The stamp is the only file tog writes here, and it goes through the
-    // held project descriptor, so a `.tog` swapped for a symlink is refused
+    // The stamp is the only file ward writes here, and it goes through the
+    // held project descriptor, so a `.greyward` swapped for a symlink is refused
     // rather than followed. `requirements.lock.txt` beside it is the door's
     // publication.
     project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())?;
@@ -545,7 +545,7 @@ pub fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
 }
 
 /// Stamp deciding whether `uv pip compile` must re-run. Deliberately NOT
-/// platform-qualified: `.tog/lock-source.hash` is per-machine state and
+/// platform-qualified: `.greyward/lock-source.hash` is per-machine state and
 /// the format is byte-identical to the pre-port one, so existing darwin
 /// stamps stay valid after the Linux port (platform lives in
 /// `planner_input_hash`, which keys the plan cache).
@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_cache_behind_a_symlinked_tog_is_refused() {
+    fn plan_cache_behind_a_symlinked_ward_is_refused() {
         let temp = crate::kernel::testutil::TempDir::new();
         let project = temp.0.join("proj");
         std::fs::create_dir_all(&project).unwrap();
@@ -655,8 +655,8 @@ mod tests {
         )
         .unwrap();
         let outside = temp.0.join("outside");
-        std::fs::create_dir_all(outside.join(".tog")).unwrap();
-        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        std::fs::create_dir_all(outside.join(".greyward")).unwrap();
+        std::os::unix::fs::symlink(outside.join(".greyward"), project.join(".greyward")).unwrap();
         let store = store::Store::for_test(temp.0.join("absent-store"));
         let root = ProjectRoot::open(&project).unwrap();
         let e = read_plan(
@@ -674,11 +674,11 @@ mod tests {
         assert!(e.contains("not a real directory"), "{e}");
         assert!(!store.root.exists(), "a refused cache touched the store");
         assert!(
-            std::fs::read_dir(outside.join(".tog"))
+            std::fs::read_dir(outside.join(".greyward"))
                 .unwrap()
                 .next()
                 .is_none(),
-            "wrote through the symlinked .tog"
+            "wrote through the symlinked .greyward"
         );
     }
 
@@ -772,8 +772,8 @@ mod tests {
     }
 
     #[test]
-    fn lock_stamp_behind_a_symlinked_tog_is_refused() {
-        let Some(_relay) = stub_relay("lock_stamp_behind_a_symlinked_tog_is_refused") else {
+    fn lock_stamp_behind_a_symlinked_ward_is_refused() {
+        let Some(_relay) = stub_relay("lock_stamp_behind_a_symlinked_ward_is_refused") else {
             return;
         };
         let temp = crate::kernel::testutil::TempDir::new();
@@ -783,7 +783,7 @@ mod tests {
         std::fs::write(project_dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
         let outside = temp.0.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".greyward")).unwrap();
         let store = store_with_stub_uv(&temp.0.join("store"));
 
         let project = ProjectRoot::open(&project_dir).unwrap();
@@ -800,12 +800,12 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("not a real directory"), "{error}");
-        // The door's transaction journals under `.tog`, so it refuses the
+        // The door's transaction journals under `.greyward`, so it refuses the
         // whole publication: not even uv's lock lands.
         assert!(!project_dir.join("requirements.lock.txt").exists());
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
-            "wrote the lock stamp through the symlinked .tog"
+            "wrote the lock stamp through the symlinked .greyward"
         );
     }
 
@@ -841,7 +841,7 @@ mod tests {
         drop(result);
         let args = stub_args(&held);
         assert!(args.starts_with("pip compile requirements.txt "), "{args}");
-        // uv builds any sdist on tog's CPython, named explicitly by the
+        // uv builds any sdist on ward's CPython, named explicitly by the
         // forced row: `uv pip compile` ignores UV_PYTHON (#210). The probe
         // forbids every build, and the index is PyPI's.
         let python = store
@@ -863,7 +863,7 @@ mod tests {
         assert!(!project_dir.join("requirements.lock.txt").exists());
     }
 
-    /// A project whose `tog.toml` names a requirements file outside it.
+    /// A project whose `greyward.toml` names a requirements file outside it.
     fn external_requirements_project(temp: &Path) -> (PathBuf, PathBuf) {
         let project_dir = temp.join("proj");
         std::fs::create_dir_all(project_dir.join("requirements")).unwrap();
@@ -871,7 +871,7 @@ mod tests {
         std::fs::create_dir_all(external.parent().unwrap()).unwrap();
         std::fs::write(&external, "six==1.17.0\n").unwrap();
         std::fs::write(
-            project_dir.join("tog.toml"),
+            project_dir.join("greyward.toml"),
             format!("[python]\nrequirements = \"{}\"\n", external.display()),
         )
         .unwrap();
@@ -918,10 +918,10 @@ mod tests {
     }
 
     /// uv is never handed the external path, which it would reopen: it
-    /// compiles the text tog read, written under `.tog` (#501).
+    /// compiles the text ward read, written under `.greyward` (#501).
     #[test]
-    fn uv_compiles_the_external_requirements_tog_read() {
-        let Some(_relay) = stub_relay("uv_compiles_the_external_requirements_tog_read") else {
+    fn uv_compiles_the_external_requirements_ward_read() {
+        let Some(_relay) = stub_relay("uv_compiles_the_external_requirements_ward_read") else {
             return;
         };
         let temp = crate::kernel::testutil::TempDir::new();
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_snapshots_behind_a_symlinked_tog_are_refused() {
+    fn manifest_snapshots_behind_a_symlinked_ward_are_refused() {
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -1089,7 +1089,7 @@ mod tests {
         .unwrap();
         let outside = temp.0.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, project_dir.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&outside, project_dir.join(".greyward")).unwrap();
         let store = store::Store::for_test(temp.0.join("absent-store"));
 
         let project = ProjectRoot::open(&project_dir).unwrap();
@@ -1109,7 +1109,7 @@ mod tests {
         assert!(!store.root.exists(), "a refused snapshot touched the store");
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
-            "wrote a manifest snapshot through the symlinked .tog"
+            "wrote a manifest snapshot through the symlinked .greyward"
         );
     }
 

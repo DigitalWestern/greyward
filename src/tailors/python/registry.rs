@@ -1,4 +1,4 @@
-//! The PyPI protocol (python tailor), as tog's resolution proxy serves it to
+//! The PyPI protocol (python tailor), as ward's resolution proxy serves it to
 //! uv.
 //!
 //! uv reaches PyPI through TLS interception, not a mirror: `uv.lock` and
@@ -243,7 +243,7 @@ fn hash_pair(text: &str) -> Option<(String, String)> {
     Some((algo.to_ascii_lowercase(), hex.to_string()))
 }
 
-/// The claim of the strongest algorithm tog reads among `hashes`: sha512,
+/// The claim of the strongest algorithm ward reads among `hashes`: sha512,
 /// then sha256, then sha1 (weak). An md5 alone claims nothing, so its
 /// artifact is unclaimed and `weak-integrity`.
 fn strongest(hashes: &[(String, String)]) -> Option<Claim> {

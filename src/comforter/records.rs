@@ -1,4 +1,4 @@
-//! The closure records a project committed under `.tog/closures`, read as
+//! The closure records a project committed under `.greyward/closures`, read as
 //! they are: the envelope, its body, and the exceptions it carries. Nothing
 //! here judges freshness, which asks the tailors (`commands::inspect`).
 
@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// One `.tog/closures/<ecosystem>.json`, envelope fields lifted out.
+/// One `.greyward/closures/<ecosystem>.json`, envelope fields lifted out.
 #[derive(Debug, Clone)]
 pub struct ClosureFile {
     pub ecosystem: String,
@@ -28,13 +28,13 @@ pub struct ClosureFile {
 }
 
 /// Every closure record in `project`, in directory order: the listing and
-/// every record are read through its descriptor, tog state read strictly
+/// every record are read through its descriptor, ward state read strictly
 /// (a symlinked record is refused, never followed). Foreign-platform
 /// closures are included (the caller decides what they mean), unlike
 /// [`super::read_closure`], which refuses them.
 pub fn closure_files(project: &ProjectRoot) -> io::Result<Vec<ClosureFile>> {
     let mut out = Vec::new();
-    let dir = Path::new(".tog/closures");
+    let dir = Path::new(".greyward/closures");
     let Some(names) = project.read_dir(dir)? else {
         return Ok(out);
     };
@@ -89,7 +89,7 @@ fn closure_file(name: &str, path: PathBuf, bytes: &[u8]) -> io::Result<ClosureFi
     let value: Value = serde_json::from_slice(bytes).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{:?}: {error}; run 'tog'", path.to_string_lossy()),
+            format!("{:?}: {error}; run 'ward'", path.to_string_lossy()),
         )
     })?;
     Ok(ClosureFile {
@@ -114,7 +114,7 @@ pub fn recorded_exceptions(closure: &ClosureFile) -> io::Result<Option<Vec<Excep
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "{:?}: malformed exception record: {error}; run 'tog'",
+                        "{:?}: malformed exception record: {error}; run 'ward'",
                         closure.path.to_string_lossy()
                     ),
                 )
@@ -132,7 +132,7 @@ pub fn optional_groups_skipped(closure: &ClosureFile) -> io::Result<Vec<Optional
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{:?}: malformed optional_groups_skipped: {error}; run 'tog'",
+                    "{:?}: malformed optional_groups_skipped: {error}; run 'ward'",
                     closure.path.to_string_lossy()
                 ),
             )
@@ -148,7 +148,7 @@ pub fn resolution_exceptions(closure: &ClosureFile) -> io::Result<Vec<Exception>
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{:?}: malformed resolution record: {what}; run 'tog'",
+                "{:?}: malformed resolution record: {what}; run 'ward'",
                 closure.path.to_string_lossy()
             ),
         )

@@ -136,7 +136,7 @@ fn strip_cpython_prefix(line: &str) -> &str {
     line
 }
 
-/// Why a `.python-version` line names no CPython tog can select.
+/// Why a `.python-version` line names no CPython ward can select.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PythonVersionRefusal {
     /// Another interpreter or build: PyPy, conda, GraalPy, `system`, a
@@ -415,7 +415,7 @@ pub const RUST_TOOLCHAIN_REQUESTS: [(&str, &str); 3] = [
 
 /// `[toolchain] path`, and the input field it is recorded under: a toolchain
 /// that is a directory on this machine, as rustup reads it, instead of a
-/// channel tog provisions.
+/// channel ward provisions.
 pub const RUST_TOOLCHAIN_PATH: (&str, &str) = ("path", "toolchain.path");
 
 /// `[toolchain] path` as written, when present. rustup refuses a path next

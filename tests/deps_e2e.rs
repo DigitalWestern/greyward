@@ -16,7 +16,7 @@ mod common;
 
 use common::{add_git_dependency, assert_ok, child, command, copy_tree, fixture, TempDir};
 
-/// A scratch directory that is the project, with `home/` for tog's home and
+/// A scratch directory that is the project, with `home/` for ward's home and
 /// `tmp/` for the child's `TMPDIR`, so neither lands among the project's
 /// files.
 fn scratch(label: &str) -> TempDir {
@@ -28,39 +28,39 @@ fn scratch(label: &str) -> TempDir {
 
 /// Run the binary in `project` with the scratch directory's `home/` and
 /// `tmp/`. A sandbox that cannot start fails the test instead of skipping
-/// it, and the developer's `PNPM_HOME` cannot steer the pnpm tog runs.
+/// it, and the developer's `PNPM_HOME` cannot steer the pnpm ward runs.
 fn run(project: &Path, store: &Path, args: &[&str], temp: &Path) -> Output {
     command(project, &temp.join("home"), store)
         .env("TMPDIR", temp.join("tmp"))
-        .env("TOG_SANDBOX_TESTS", "required")
+        .env("GREYWARD_SANDBOX_TESTS", "required")
         .env_remove("PNPM_HOME")
         .args(args)
         .output()
-        .expect("spawn tog")
+        .expect("spawn ward")
 }
 
-/// `tog attest node` with a key the machine policy trusts: the record is
+/// `ward attest node` with a key the machine policy trusts: the record is
 /// written and the lock is left byte for byte as it was.
 fn attest_node(project: &Path, store: &Path, temp: &Path, lock: &str) {
     let home = temp.join("home");
     let key = home.join("signing.key");
-    let public = tog::kernel::signing::generate(&key).unwrap();
-    std::fs::create_dir_all(home.join(".tog")).unwrap();
+    let public = greyward::kernel::signing::generate(&key).unwrap();
+    std::fs::create_dir_all(home.join(".greyward")).unwrap();
     std::fs::write(
-        home.join(".tog/policy.toml"),
+        home.join(".greyward/policy.toml"),
         format!("deny = []\n\n[signing]\ntrusted = [\"{public}\"]\n"),
     )
     .unwrap();
     let before = std::fs::read(project.join(lock)).unwrap();
     let attest = command(project, &home, store)
         .env("TMPDIR", temp.join("tmp"))
-        .env("TOG_SANDBOX_TESTS", "required")
-        .env("TOG_SIGNING_KEY", &key)
+        .env("GREYWARD_SANDBOX_TESTS", "required")
+        .env("GREYWARD_SIGNING_KEY", &key)
         .args(["attest", "node"])
         .output()
         .unwrap();
     assert_ok(attest, "attest node");
-    assert!(project.join(".tog/resolution/node.json").is_file());
+    assert!(project.join(".greyward/resolution/node.json").is_file());
     assert_eq!(
         std::fs::read(project.join(lock)).unwrap(),
         before,
@@ -215,16 +215,16 @@ fn python_foreign_header_pair_recovers_with_update() {
         source
     );
     let lock = std::fs::read(project.join("requirements.txt")).unwrap();
-    assert!(String::from_utf8_lossy(&lock).contains("#    tog"));
+    assert!(String::from_utf8_lossy(&lock).contains("#    ward"));
     let key = temp.0.join("home/signing.key");
-    let public = tog::kernel::signing::generate(&key).unwrap();
+    let public = greyward::kernel::signing::generate(&key).unwrap();
     let policy = temp.0.join("policy.toml");
     std::fs::write(&policy, format!("[signing]\ntrusted = ['{public}']\n")).unwrap();
     let attest = command(&project, &temp.0.join("home"), &store)
         .env("TMPDIR", temp.0.join("tmp"))
-        .env("TOG_SANDBOX_TESTS", "required")
-        .env("TOG_SIGNING_KEY", key)
-        .env("TOG_POLICY", policy)
+        .env("GREYWARD_SANDBOX_TESTS", "required")
+        .env("GREYWARD_SIGNING_KEY", key)
+        .env("GREYWARD_POLICY", policy)
         .args(["attest", "python"])
         .output()
         .unwrap();
@@ -233,7 +233,7 @@ fn python_foreign_header_pair_recovers_with_update() {
         std::fs::read(project.join("requirements.txt")).unwrap(),
         lock
     );
-    assert!(project.join(".tog/resolution/python.json").is_file());
+    assert!(project.join(".greyward/resolution/python.json").is_file());
 }
 
 #[test]
@@ -299,7 +299,7 @@ fn python_requirements_add_update_remove_roundtrip() {
 }
 
 /// Requirements that name a constraints file are compiled by the real uv
-/// from the input tog generates under `.tog`, which names the constraints
+/// from the input ward generates under `.greyward`, which names the constraints
 /// beside it by a relative path. uv reads a `-c` path relative to the file
 /// that names it, so it reads the held project's copy (#499). The unit
 /// test proves that with a stub uv; this proves the real one resolves it
@@ -321,8 +321,8 @@ fn python_constraints_beside_the_generated_input_resolve_with_real_uv() {
     .unwrap();
     std::fs::write(project.join("constraints.txt"), "six==1.16.0\n").unwrap();
     assert_ok(run(project, &store, &["plan"], &temp.0), "plan");
-    let generated = std::fs::read_to_string(project.join(".tog/manifest-requirements.txt"))
-        .expect("tog generated the compile input");
+    let generated = std::fs::read_to_string(project.join(".greyward/manifest-requirements.txt"))
+        .expect("ward generated the compile input");
     assert!(
         generated.contains("-c manifest-constraints.txt"),
         "{generated}"
@@ -478,7 +478,7 @@ fn pnpm_add_update_remove_roundtrip() {
     // wrote, through the same door.
     attest_node(project, &store, &temp.0, "pnpm-lock.yaml");
 
-    let x_root = temp.0.join("home/.tog/x");
+    let x_root = temp.0.join("home/.greyward/x");
     let x_root = std::fs::read_dir(&x_root)
         .unwrap()
         .find_map(|entry| {
@@ -489,7 +489,7 @@ fn pnpm_add_update_remove_roundtrip() {
     let x_lock = x_root.join("package-lock.json");
     let x_lock_mtime = std::fs::metadata(&x_lock).unwrap().modified().unwrap();
     let closure: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(x_root.join(".tog/closures/node.json")).unwrap(),
+        &std::fs::read_to_string(x_root.join(".greyward/closures/node.json")).unwrap(),
     )
     .unwrap();
     let pnpm = closure["body"]["packages"]
@@ -498,7 +498,8 @@ fn pnpm_add_update_remove_roundtrip() {
         .iter()
         .find(|package| package["path"] == "node_modules/pnpm")
         .unwrap();
-    let digest = tog::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
+    let digest =
+        greyward::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
     let tarball =
         std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
     let corepack_sha224 = hex::encode(Sha224::digest(&tarball));
@@ -518,11 +519,11 @@ fn pnpm_add_update_remove_roundtrip() {
         "warm pnpm invocation re-resolved the tool"
     );
     assert_eq!(node_env_object_count(&store), first_env_count);
-    assert!(temp.0.join("home/.tog/x").is_dir());
+    assert!(temp.0.join("home/.greyward/x").is_dir());
 
     // Issue #413. A root whose request record is gone is never reused: the
     // delegated pnpm is realized again, and the root ends up `ready`.
-    let record = x_root.join(".tog/x.json");
+    let record = x_root.join(".greyward/x.json");
     std::fs::remove_file(&record).unwrap();
     assert_ok(
         run(
@@ -606,7 +607,7 @@ fn pnpm_add_update_remove_roundtrip() {
         lock_before_wrong
     );
 
-    // An algorithm tog cannot verify names itself, never the version.
+    // An algorithm ward cannot verify names itself, never the version.
     set_package_manager(
         project,
         &format!("pnpm@9.12.3+sha1.{}", &corepack_sha224[..40]),
@@ -655,7 +656,7 @@ fn pnpm_add_update_remove_roundtrip() {
 
 /// A pnpm edit beside a Cargo project: the Cargo sync's exception (a git
 /// dependency) is published on the Cargo closure and on no Node closure,
-/// the project's or `tog x`'s.
+/// the project's or `ward x`'s.
 #[test]
 #[ignore]
 fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
@@ -688,7 +689,7 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     // door reports as `unrecorded-resolution`; it is set apart so the git
     // exception is the one traced.
     let (unrecorded, cargo_exceptions): (Vec<_>, Vec<_>) =
-        closure_exceptions(&project.join(".tog/closures/cargo.json"))
+        closure_exceptions(&project.join(".greyward/closures/cargo.json"))
             .into_iter()
             .partition(|exception| exception["kind"] == "unrecorded-resolution");
     assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
@@ -700,7 +701,7 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     assert_eq!(cargo_exceptions[0]["kind"], "git-dependency");
     assert_eq!(cargo_exceptions[0]["subject"], "gitdep@1.0.0");
 
-    let pnpm_exceptions = closure_exceptions(&project.join(".tog/closures/node.json"));
+    let pnpm_exceptions = closure_exceptions(&project.join(".greyward/closures/node.json"));
     assert!(
         pnpm_exceptions
             .iter()
@@ -709,7 +710,11 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
     );
 
     let mut x_closures = Vec::new();
-    find_files(&temp.0.join("home/.tog/x"), "node.json", &mut x_closures);
+    find_files(
+        &temp.0.join("home/.greyward/x"),
+        "node.json",
+        &mut x_closures,
+    );
     assert_eq!(x_closures.len(), 1, "Node x closures: {x_closures:?}");
     let x_exceptions = closure_exceptions(&x_closures[0]);
     assert!(
@@ -766,11 +771,11 @@ fn without_npm_config(mut command: Command) -> Command {
 }
 
 /// Run the store pnpm's real `install` in `project` from a home of its own,
-/// the way the user would after a `tog` edit realized the tool:
-/// `node_modules/.modules.yaml` then names a store tog is never given,
+/// the way the user would after a `ward` edit realized the tool:
+/// `node_modules/.modules.yaml` then names a store ward is never given,
 /// which is the starting state every later edit must survive.
 fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
-    let x_root = std::fs::read_dir(temp.0.join("home/.tog/x"))
+    let x_root = std::fs::read_dir(temp.0.join("home/.greyward/x"))
         .unwrap()
         .find_map(|entry| {
             let path = entry.ok()?.path();
@@ -825,7 +830,7 @@ fn install_with_store_pnpm(temp: &TempDir, project: &Path, store: &Path) {
 /// is rewritten. An already-installed project — the common starting state,
 /// with `.modules.yaml` naming the user's own store — must therefore be
 /// edited without touching anything under `node_modules`, without leaving a
-/// tog-internal path in the project, and without any lifecycle script
+/// greyward-internal path in the project, and without any lifecycle script
 /// running, `remove` included.
 #[test]
 #[ignore]
@@ -880,8 +885,8 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
     );
 
     // Install the project for real with the store's own pnpm, the way the
-    // user would, from a home that is not tog's: `.modules.yaml` now
-    // names a store tog will never be given.
+    // user would, from a home that is not ward's: `.modules.yaml` now
+    // names a store ward will never be given.
     install_with_store_pnpm(&temp, project, &store);
     let modules_yaml = project.join("node_modules/.modules.yaml");
     let recorded = std::fs::read_to_string(&modules_yaml).unwrap();
@@ -916,7 +921,7 @@ fn pnpm_edits_leave_an_installed_project_untouched() {
             let text = std::fs::read_to_string(project.join(file)).unwrap();
             assert!(
                 !text.contains("stage-") && !text.contains(&store.display().to_string()),
-                "pnpm {label} left a tog-internal path in {file}:\n{text}"
+                "pnpm {label} left a greyward-internal path in {file}:\n{text}"
             );
         }
         let leftover: Vec<_> = std::fs::read_dir(store.join("tmp"))
@@ -1039,7 +1044,7 @@ fn pnpm_workspace_member_and_root_roundtrip() {
         "pnpm workspace root remove",
     );
     installed_unchanged("workspace root remove");
-    // `tog` projects its own node_modules over the user's install
+    // `ward` projects its own node_modules over the user's install
     // (moving the existing directory aside, and saying so); that is sync's
     // documented behaviour, not the delegate's, so the snapshot ends here.
     assert_ok(
@@ -1090,7 +1095,7 @@ fn nested_independent_npm_project_does_not_use_ancestor_pnpm_lock() {
 }
 
 /// An npm workspace: the root `package.json` lists `packages/*`, and
-/// `packages/app` depends on its sibling `@acme/util`. `tog add` and
+/// `packages/app` depends on its sibling `@acme/util`. `ward add` and
 /// `remove` in the member edit the member's manifest and the root's lock
 /// (the first one, and then the existing one) through the confined npm,
 /// which sees the whole workspace: the sibling resolves as a workspace
@@ -1144,8 +1149,8 @@ fn pnpm_workspace_member_edit_writes_the_first_root_lock() {
     );
     assert!(
         !member.join("pnpm-lock.yaml").exists()
-            && !member.join(".tog").exists()
-            && project.join(".tog/resolution/node.json").is_file(),
+            && !member.join(".greyward").exists()
+            && project.join(".greyward/resolution/node.json").is_file(),
         "the lock and the record belong to the root"
     );
     assert!(
@@ -1227,7 +1232,7 @@ fn npm_workspace_member_edit_writes_the_root_lock() {
         "packages/util"
     );
     assert!(
-        root.join(".tog/resolution/node.json").is_file() && !app.join(".tog").exists(),
+        root.join(".greyward/resolution/node.json").is_file() && !app.join(".greyward").exists(),
         "the record is the root's"
     );
 

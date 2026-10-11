@@ -1,4 +1,4 @@
-//! `tog add` / `remove` / `update` for Cargo (`Tailor::edit_manifest`):
+//! `ward add` / `remove` / `update` for Cargo (`Tailor::edit_manifest`):
 //! the store cargo edits Cargo.toml and Cargo.lock, confined through the
 //! edit door, which publishes them with the signed resolution record.
 
@@ -8,7 +8,7 @@ use crate::kernel::resolve::{record, ResolutionDoor};
 use crate::tailors::edit::{registry_latest, EditOutcome, EditVerb, ManifestEdit, PackageRegistry};
 use std::io;
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "cargo",
     name: "crates.io",
@@ -40,7 +40,7 @@ pub(crate) fn edit_manifest(
     // follows.
     let selected = edit.host.toolchain(project, "cargo")?;
     // The lock, the record, and the closure belong to the workspace root;
-    // an edit in a member names the member's manifest from there. tog's
+    // an edit in a member names the member's manifest from there. ward's
     // own walk finds it, before anything is realized.
     let held = ProjectRoot::open(project)?;
     let (root, workspace) = super::inputs::locate_held_cargo_root(&held)?;
@@ -120,7 +120,7 @@ fn member_manifest(workspace: &ProjectRoot, member: &ProjectRoot) -> io::Result<
         None => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "{} is a member of the Cargo workspace at {} but lies outside it; tog edits a \
+                "{} is a member of the Cargo workspace at {} but lies outside it; ward edits a \
                  workspace with a confined cargo at its root, which sees the workspace's own \
                  files only, so it cannot edit this member. Run cargo in {} directly (for \
                  example `cargo add`), or move the member inside the workspace",

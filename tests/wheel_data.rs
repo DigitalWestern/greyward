@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, tog_at, warm_store, TempDir};
+use common::{assert_ok, copy_tree, fixture, ward_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -18,11 +18,12 @@ fn greenlet_headers_are_installed_and_importable() {
     copy_tree(&fixture("proj-greenlet"), &project);
     let store = warm_store(&temp);
 
-    assert_ok(tog_at(&project, &temp.0, &store, &["sync"]), "sync alias");
+    assert_ok(ward_at(&project, &temp.0, &store, &["sync"]), "sync alias");
 
-    let closure: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(project.join(".tog/closures/python.json")).unwrap())
-            .unwrap();
+    let closure: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(".greyward/closures/python.json")).unwrap(),
+    )
+    .unwrap();
     let env = PathBuf::from(closure["body"]["env_object"].as_str().unwrap());
     assert!(
         env.is_dir(),
@@ -37,7 +38,7 @@ fn greenlet_headers_are_installed_and_importable() {
     );
 
     let output = assert_ok(
-        tog_at(
+        ward_at(
             &project,
             &temp.0,
             &store,
@@ -49,7 +50,7 @@ fn greenlet_headers_are_installed_and_importable() {
             ]
             .as_slice(),
         ),
-        "tog run python",
+        "ward run python",
     );
     assert_eq!(output.trim(), "3.5.5");
 }

@@ -1,11 +1,11 @@
 # Editors
 
-An editor sees a tog project through two things: the interpreter path inside
+An editor sees a Greyward project through two things: the interpreter path inside
 `.venv`, and whether the shell it was launched from has the projected
-environment. Nothing else needs configuring, and nothing tog does is
+environment. Nothing else needs configuring, and nothing Greyward does is
 editor-specific.
 
-Sync first (`tog`), so `.venv` and `node_modules` exist to point at.
+Sync first (`ward`), so `.venv` and `node_modules` exist to point at.
 
 ## Python interpreter
 
@@ -22,7 +22,7 @@ the workspace root and offers it as the interpreter. If it does not, run
 **PyCharm**: Settings → Project → Python Interpreter → Add Interpreter →
 Add Local Interpreter → Existing, then pick `<project>/.venv/bin/python`.
 Do not let PyCharm create a new virtualenv for the project — it would write
-its own `.venv` over the projection, and the next `tog status` would report
+its own `.venv` over the projection, and the next `ward status` would report
 it as a real directory written over one.
 
 The interpreter behind that path is a symlink into the immutable store, so
@@ -37,7 +37,7 @@ look for their binaries, and the projection puts them exactly there, so
 those extensions work with no configuration.
 
 The `node` binary itself is a different matter: it lives in the store, not
-on the system PATH, because tog provisions the runtime the closure recorded
+on the system PATH, because Greyward provisions the runtime the closure recorded
 rather than whatever Node the machine has. An editor's integrated terminal
 and task runner inherit the environment of the process that launched the
 editor, so give them the projection one of two ways:
@@ -46,7 +46,7 @@ editor, so give them the projection one of two ways:
 
   ```sh
   cd your-project
-  eval "$(tog env)"
+  eval "$(ward env)"
   code .          # or: pycharm .
   ```
 
@@ -54,12 +54,12 @@ editor, so give them the projection one of two ways:
   directory is enough:
 
   ```sh
-  echo 'eval "$(tog env)"' > .envrc && direnv allow
+  echo 'eval "$(ward env)"' > .envrc && direnv allow
   ```
 
-`tog env` prints the same PATH and variables `tog run` gives a child; see
+`ward env` prints the same PATH and variables `ward run` gives a child; see
 [CLI.md](CLI.md) for the syntax and the `--shell` rule. Without either, use
-`tog run` inside the terminal (`tog run npm test`, `tog run pytest`), which
+`ward run` inside the terminal (`ward run npm test`, `ward run pytest`), which
 needs no setup at all.
 
 ## The buttons that will not work
@@ -74,14 +74,14 @@ so nothing can be installed into it. The editor features that try are:
 - PyCharm's offer to create a virtualenv or install `requirements.txt`.
 
 They fail — some with a permissions error, some by silently replacing the
-projection with a real directory. Use tog instead:
+projection with a real directory. Use Greyward instead:
 
 ```sh
-tog add requests        # edits the manifest, re-locks, syncs
-tog remove requests
-tog update              # re-lock within the manifest's constraints
+ward add requests        # edits the manifest, re-locks, syncs
+ward remove requests
+ward update              # re-lock within the manifest's constraints
 ```
 
-`tog status` reports a projection something has written over, and the next
+`ward status` reports a projection something has written over, and the next
 sync moves it aside — saying where it went — and re-projects, so a
 misfired button is recoverable.

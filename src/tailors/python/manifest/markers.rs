@@ -5,7 +5,7 @@
 //! is evaluated, so a keyword without surrounding spaces
 //! (`sys_platform=="linux"or ...`), an operator inside a quoted value, or an
 //! empty group is read the way `packaging` reads it, or refused. A marker
-//! tog cannot evaluate is an error, never a guess.
+//! ward cannot evaluate is an error, never a guess.
 
 use super::*;
 
@@ -78,7 +78,7 @@ const COMPARISONS: &[&str] = &["===", "==", "!=", "<=", ">=", "~=", "<", ">"];
 
 /// A value runs to the next quote of the kind that opened it. `packaging`
 /// reads a value as a Python string literal, so `'lin\x75x'` is `linux`
-/// there; tog refuses backslashes and control characters rather than
+/// there; ward refuses backslashes and control characters rather than
 /// decode them. Only spaces and tabs separate tokens, as in `packaging`.
 fn tokenize(expression: &str) -> Result<Vec<Token<'_>>, String> {
     let bytes = expression.as_bytes();
@@ -232,7 +232,7 @@ struct Environment<'a> {
 impl Environment<'_> {
     fn eval(&self, tree: &Tree) -> io::Result<bool> {
         match tree {
-            // Both sides are evaluated, so a marker tog cannot read is an
+            // Both sides are evaluated, so a marker ward cannot read is an
             // error even where the other side already decides the answer.
             Tree::Or(left, right) => Ok(self.eval(left)? | self.eval(right)?),
             Tree::And(left, right) => Ok(self.eval(left)? & self.eval(right)?),
@@ -297,7 +297,7 @@ impl Environment<'_> {
             // match the extra `1`. `packaging` compares them as versions
             // here; uv, which writes the lock, compares names and ignores
             // any other operator with a warning, `in` and `not in` included.
-            // Tog refuses those: ignoring one could install what the marker
+            // Greyward refuses those: ignoring one could install what the marker
             // excludes, and `packaging`'s substring rule disagrees with uv.
             "==" if extra => return Ok(left_value == right_value),
             "!=" if extra => return Ok(left_value != right_value),
@@ -474,8 +474,8 @@ fn marker_value(
 
 /// The marker grammar decides which locked packages install on this host,
 /// so a wrong answer installs or drops a dependency silently. Each case
-/// below is one rule of the subset tog evaluates; the refusals name the
-/// part tog does not understand instead of guessing.
+/// below is one rule of the subset ward evaluates; the refusals name the
+/// part ward does not understand instead of guessing.
 #[cfg(test)]
 mod marker_tests {
     use super::*;
@@ -632,7 +632,7 @@ mod marker_tests {
     }
 
     #[test]
-    fn markers_tog_does_not_understand_are_refused() {
+    fn markers_ward_does_not_understand_are_refused() {
         let syntax = [
             ("sys_platform", "expected a comparison"),
             ("()", "expected a value, found `)`"),
@@ -690,7 +690,7 @@ mod marker_tests {
             "unsupported environment marker operand `platform_kernel`"
         );
         // Ordering needs a version on the right; `packaging` would compare
-        // these as strings, tog refuses.
+        // these as strings, ward refuses.
         for (marker, value) in [
             ("sys_platform ~= 'linux'", "linux"),
             ("sys_platform < 'linux'", "linux"),
@@ -910,7 +910,7 @@ mod marker_tests {
         assert!(!eval("'01' == extra", LINUX, Some("1")));
         assert!(!eval("extra == '018446744073709551616'", LINUX, Some("1")));
         // Only `==` and `!=` compare extras: uv ignores every other
-        // operator, `in` and `not in` included, and tog refuses them.
+        // operator, `in` and `not in` included, and ward refuses them.
         for marker in [
             "extra < '1'".to_string(),
             "extra <= '1'".into(),

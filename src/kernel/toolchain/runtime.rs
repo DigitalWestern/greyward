@@ -1,7 +1,7 @@
 //! The selected toolchain, as every operation downstream of selection reads
 //! it: one resolved bundle per ecosystem plus where it came from.
 //!
-//! Selection happens once, at lock creation or `tog update --toolchain`. A
+//! Selection happens once, at lock creation or `ward update --toolchain`. A
 //! [`Selected`] is the result carried through sync, run, build and `x`, so
 //! nothing after this point reopens a catalog or re-decides a version.
 
@@ -17,11 +17,11 @@ use std::io;
 /// used: a `Lock` selection is honored, a `Created` one is published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// Read from the committed `tog-toolchain.toml`.
+    /// Read from the committed `greyward-toolchain.toml`.
     Lock,
     /// Selected now for a project that has no lock; a lock is pending.
     Created,
-    /// Re-selected by `tog update --toolchain`.
+    /// Re-selected by `ward update --toolchain`.
     Updated,
     /// The shipped default, for work with no project lock to honor.
     Shipped,
@@ -62,15 +62,15 @@ pub struct ArtifactSpec {
 }
 
 impl ArtifactSpec {
-    /// Refuse a row this tog cannot realize: a `recipe` it does not know, or
+    /// Refuse a row this ward cannot realize: a `recipe` it does not know, or
     /// a digest of another algorithm than `algo`, the one the publisher
     /// signs with. `ecosystem` names the selection in the message.
     pub fn check(&self, ecosystem: &str, recipe: &str, algo: &str) -> io::Result<()> {
-        self.check_from(ecosystem, recipe, algo, "tog-toolchain.toml")
+        self.check_from(ecosystem, recipe, algo, "greyward-toolchain.toml")
     }
 
     /// `check`, for a row read from `source` (where a refusal says the
-    /// row came from) rather than the project's `tog-toolchain.toml`.
+    /// row came from) rather than the project's `greyward-toolchain.toml`.
     pub fn check_from(
         &self,
         ecosystem: &str,
@@ -80,7 +80,7 @@ impl ArtifactSpec {
     ) -> io::Result<()> {
         if self.recipe != recipe {
             return Err(invalid(format!(
-                "{ecosystem}: recipe {} in {source} is not known to this tog; upgrade tog",
+                "{ecosystem}: recipe {} in {source} is not known to this ward; upgrade ward",
                 self.recipe
             )));
         }
@@ -118,9 +118,9 @@ impl Selected {
     /// from.
     pub fn row_source(&self) -> &'static str {
         match self.source {
-            Source::Lock => "tog-toolchain.toml",
+            Source::Lock => "greyward-toolchain.toml",
             Source::Created | Source::Updated => "the toolchain catalog",
-            Source::Shipped => "this tog's shipped toolchain catalog",
+            Source::Shipped => "this ward's shipped toolchain catalog",
         }
     }
 
@@ -258,19 +258,19 @@ mod tests {
                 "cargo",
                 "rust-channel-manifest/1",
                 "sha256",
-                "this tog's shipped Rust catalog",
+                "this ward's shipped Rust catalog",
             )
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "cargo: recipe rust-channel-manifest/9 in this tog's shipped Rust catalog is not \
-             known to this tog; upgrade tog"
+            "cargo: recipe rust-channel-manifest/9 in this ward's shipped Rust catalog is not \
+             known to this ward; upgrade ward"
         );
         let error = row
             .check("cargo", "rust-channel-manifest/1", "sha256")
             .unwrap_err();
         assert!(
-            error.to_string().contains("in tog-toolchain.toml"),
+            error.to_string().contains("in greyward-toolchain.toml"),
             "{error}"
         );
     }
@@ -291,10 +291,10 @@ mod tests {
         .unwrap();
         let mut selected = shipped(&catalog).unwrap();
         for (source, named) in [
-            (Source::Lock, "tog-toolchain.toml"),
+            (Source::Lock, "greyward-toolchain.toml"),
             (Source::Created, "the toolchain catalog"),
             (Source::Updated, "the toolchain catalog"),
-            (Source::Shipped, "this tog's shipped toolchain catalog"),
+            (Source::Shipped, "this ward's shipped toolchain catalog"),
         ] {
             selected.source = source;
             assert_eq!(selected.row_source(), named);
@@ -304,7 +304,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "python: recipe example/1 in {named} is not known to this tog; upgrade tog"
+                    "python: recipe example/1 in {named} is not known to this ward; upgrade ward"
                 ),
                 "{source:?}"
             );

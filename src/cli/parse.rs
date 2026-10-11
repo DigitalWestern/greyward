@@ -28,7 +28,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
         return parse_relay(&args[1..]).map(Parsed::Relay);
     }
     let mut options = Options::default();
-    // `--frozen`, `--fresh` and `--strict` belong to the bare `tog`, so
+    // `--frozen`, `--fresh` and `--strict` belong to the bare `ward`, so
     // they are read here, ahead of any verb. Past a verb other than the
     // hidden `sync`, `--fresh` is refused (it stays bare-only) while
     // `--frozen` and `--strict` move into the global options, where they
@@ -39,7 +39,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
     let mut index = 0;
     while let Some(arg) = args.get(index).map(String::as_str) {
         if HELP_WORDS.contains(&arg) {
-            // `tog --frozen --help` asks about the bare form's flags.
+            // `ward --frozen --help` asks about the bare form's flags.
             let topic = args.get(index + 1).map(String::as_str);
             let topic = topic.or_else(|| (!setup.is_empty()).then_some("setup"));
             return help_topic(topic).map(Parsed::Print);
@@ -52,7 +52,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             continue;
         }
         // The bare form's one value-taking flag: the value travels with
-        // it, so `tog --resolution-record ci/ --frozen` reads like `tog
+        // it, so `ward --resolution-record ci/ --frozen` reads like `ward
         // sync --resolution-record ci/ --frozen`.
         if arg == RESOLUTION_RECORD {
             let value = separate_value(args, index, arg, Some("sync"), RECORD_PATH)?;
@@ -185,7 +185,7 @@ fn setup_flags_to_options(
     // and move into the options, where they govern the verb's sync.
     if let Some(flag) = setup.iter().find(|flag| *flag == "--fresh") {
         return Err(UsageError::new(
-            format!("{flag} belongs to the bare 'tog'; run 'tog {flag}' on its own"),
+            format!("{flag} belongs to the bare 'ward'; run 'ward {flag}' on its own"),
             None,
         ));
     }
@@ -198,8 +198,8 @@ fn setup_flags_to_options(
     {
         return Err(UsageError::new(
             format!(
-                "{RESOLUTION_RECORD} belongs to the bare 'tog'; run 'tog {RESOLUTION_RECORD} \
-                 <path>' on its own, then 'tog {word}'"
+                "{RESOLUTION_RECORD} belongs to the bare 'ward'; run 'ward {RESOLUTION_RECORD} \
+                 <path>' on its own, then 'ward {word}'"
             ),
             None,
         ));
@@ -219,7 +219,7 @@ fn setup_flags_to_options(
 /// `add`, `remove` and `update` sync after their edit and take `--strict`
 /// for that sync, but refuse `--frozen`: they exist to write the lock that
 /// `--frozen` only checks. Asked only once the verb's own arguments have
-/// parsed, so `tog --frozen status -h` still prints the help.
+/// parsed, so `ward --frozen status -h` still prints the help.
 fn refuse_unused_sync_flags(
     command: &Command,
     name: &'static str,
@@ -239,7 +239,7 @@ fn refuse_unused_sync_flags(
     if !takes_sync_flags(verb) {
         return Err(UsageError::new(
             format!(
-                "{flag} governs a sync, and '{verb}' never syncs; run 'tog {verb}' without {flag}"
+                "{flag} governs a sync, and '{verb}' never syncs; run 'ward {verb}' without {flag}"
             ),
             Some(name),
         ));
@@ -248,7 +248,7 @@ fn refuse_unused_sync_flags(
         return Err(UsageError::new(
             format!(
                 "--frozen checks the lock without writing it, and '{name}' exists to \
-                 write it; run 'tog {name}' without --frozen"
+                 write it; run 'ward {name}' without --frozen"
             ),
             Some(name),
         ));
@@ -258,7 +258,7 @@ fn refuse_unused_sync_flags(
     if sync.frozen && name == "attest" {
         return Err(UsageError::new(
             "--frozen checks the lock without writing anything, and 'attest' exists to \
-             write a signed record for it; run 'tog attest' without --frozen",
+             write a signed record for it; run 'ward attest' without --frozen",
             Some(name),
         ));
     }
@@ -267,7 +267,7 @@ fn refuse_unused_sync_flags(
     if sync.frozen && name == "x" {
         return Err(UsageError::new(
             "--frozen checks a project's lock, and 'x' resolves its tool from a registry \
-             with no lock to check; run 'tog x' without --frozen",
+             with no lock to check; run 'ward x' without --frozen",
             Some(name),
         ));
     }
@@ -433,7 +433,7 @@ fn help_topic(topic: Option<&str>) -> Result<String, UsageError> {
         Some(name) => spec(name).map(help).ok_or_else(|| {
             UsageError::new(
                 with_suggestion(
-                    format!("no help for '{name}': not a tog command"),
+                    format!("no help for '{name}': not a ward command"),
                     name,
                     listed()
                         .map(|spec| spec.name)
@@ -475,9 +475,9 @@ fn parse_sync(args: &[String], options: &mut Options) -> Result<Option<Command>,
                 return Err(UsageError::new(sync_takes_no_package(other), Some("sync")))
             }
             // The bare form's hidden names (`sync`, `install`, `i`) are not
-            // taught anymore, so an unknown option names no verb: `tog
-            // install --fersh` reads like `tog --fersh`. The hint still
-            // points at `tog help setup` via `Some("sync")`.
+            // taught anymore, so an unknown option names no verb: `ward
+            // install --fersh` reads like `ward --fersh`. The hint still
+            // points at `ward help setup` via `Some("sync")`.
             other => {
                 let spec = spec("sync").expect("the bare form's entry");
                 return Err(UsageError::new(
@@ -500,13 +500,13 @@ fn parse_sync(args: &[String], options: &mut Options) -> Result<Option<Command>,
 const RESOLUTION_RECORD: &str = "--resolution-record";
 const RECORD_PATH: &str = "a record file or a directory of records";
 
-/// `tog install requests` is the first thing a pip or npm user types, and
-/// `install` is a hidden alias of the bare `tog`, which takes no package.
+/// `ward install requests` is the first thing a pip or npm user types, and
+/// `install` is a hidden alias of the bare `ward`, which takes no package.
 /// Name the verb that does instead of rejecting the word.
 fn sync_takes_no_package(package: &str) -> String {
     format!(
-        "unexpected argument '{package}'; 'tog' sets up what the project already declares \
-         — to add a dependency run 'tog add {package}'"
+        "unexpected argument '{package}'; 'ward' sets up what the project already declares \
+         — to add a dependency run 'ward add {package}'"
     )
 }
 
@@ -563,7 +563,7 @@ fn parse_fmt(args: &[String]) -> Result<Option<Command>, UsageError> {
             return Err(UsageError::new(
                 with_suggestion(
                     format!(
-                        "fmt: --eco {word}: tog fmt formats {}",
+                        "fmt: --eco {word}: ward fmt formats {}",
                         fmt_words().collect::<Vec<_>>().join(", ")
                     ),
                     word,
@@ -701,14 +701,14 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
         Some("-h" | "--help") => return Ok(None),
         Some("--") => &args[1..],
         // An ecosystem that does not build is a mistake, not an argument
-        // for the one that does: `tog build python` in a Cargo project.
+        // for the one that does: `ward build python` in a Cargo project.
         Some(word)
             if name == "build" && LS_WORDS.contains(&word) && !BUILD_WORDS.contains(&word) =>
         {
             return Err(UsageError::new(
                 format!(
-                    "build: {word} does not build; tog build takes {}. To pass {word} to \
-                     the build tool as an argument, use `tog build -- {word}`",
+                    "build: {word} does not build; ward build takes {}. To pass {word} to \
+                     the build tool as an argument, use `ward build -- {word}`",
                     BUILD_WORDS.join(", ")
                 ),
                 Some("build"),
@@ -765,7 +765,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
         }
     }
     if self_update {
-        // `--self` updates tog itself and nothing in the project, so a
+        // `--self` updates ward itself and nothing in the project, so a
         // package, `--toolchain`, or `--no-sync` beside it has no meaning.
         let stray = if toolchain {
             Some("--toolchain".to_string())
@@ -777,7 +777,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
         if let Some(stray) = stray {
             return Err(UsageError::new(
                 format!(
-                    "update --self replaces the tog binary and takes nothing else; drop {stray}"
+                    "update --self replaces the ward binary and takes nothing else; drop {stray}"
                 ),
                 Some("update"),
             ));
@@ -790,7 +790,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
 
     match name {
         "add" if positional.is_empty() => Err(UsageError::new(
-            "add: no package given (e.g. 'tog add requests', 'tog add npm:react@18')",
+            "add: no package given (e.g. 'ward add requests', 'ward add npm:react@18')",
             Some("add"),
         )),
         "add" => Ok(Some(Command::Add {
@@ -1032,7 +1032,7 @@ fn gc_combination(gc: &GcArgs) -> Result<(), UsageError> {
     if gc.dry_run && !gc.register.is_empty() {
         return refuse(
             "--dry-run cannot be combined with --register: registering writes a record and \
-             a dry run writes nothing. Register the project, then preview with `tog gc \
+             a dry run writes nothing. Register the project, then preview with `ward gc \
              --dry-run`",
         );
     }
@@ -1070,7 +1070,7 @@ fn valid_root_key(value: &str) -> Result<String, UsageError> {
     } else {
         Err(UsageError::new(
             format!(
-                "'{value}' is not a root key: expected 40 hex characters (`tog store \
+                "'{value}' is not a root key: expected 40 hex characters (`ward store \
                  roots` prints keys)"
             ),
             Some("gc"),
@@ -1138,7 +1138,7 @@ fn parse_store(args: &[String]) -> Result<Option<Command>, UsageError> {
 }
 
 /// One shell vocabulary for the two commands that take one, so
-/// `tog completions <shell>` and `tog env --shell <shell>` cannot come to
+/// `ward completions <shell>` and `ward env --shell <shell>` cannot come to
 /// disagree about what a shell is or how a typo is answered.
 fn named_shell(word: &str, command: &'static str) -> Result<Shell, UsageError> {
     match word {
@@ -1203,7 +1203,7 @@ fn parse_completions(args: &[String]) -> Result<Option<Command>, UsageError> {
 
 /// The value of a value-taking flag written as a separate word. One rule
 /// for all of them: the value must be there, must not be empty, and must not
-/// start with `-`, so `tog sbom -o --json` is the mistyped flag it looks like
+/// start with `-`, so `ward sbom -o --json` is the mistyped flag it looks like
 /// rather than a file named `--json`. A value that really does start with a
 /// dash is given inline instead, as `--output=-x`.
 pub(super) fn separate_value<'a>(
@@ -1345,7 +1345,7 @@ pub(super) fn all_command_words() -> Vec<&'static str> {
         .collect()
 }
 
-/// What `tog help <word>` completes: every listed command and the topics.
+/// What `ward help <word>` completes: every listed command and the topics.
 pub(super) fn help_words() -> Vec<&'static str> {
     listed()
         .map(|spec| spec.name)
@@ -1353,7 +1353,7 @@ pub(super) fn help_words() -> Vec<&'static str> {
         .collect()
 }
 
-/// The bare `tog`'s own flags; see `Group::Bare`.
+/// The bare `ward`'s own flags; see `Group::Bare`.
 pub(super) const SETUP_FLAGS: &[&str] = &["--frozen", "--fresh", "--strict", RESOLUTION_RECORD];
 
 /// Does this verb take `--frozen` and `--strict`? The verbs that sync (the
@@ -1404,7 +1404,7 @@ fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
     let usage = || {
         UsageError::new(
             format!(
-                "usage: tog {RELAY_VERB} [--exec-log-fd <n>] [--env-fd <n>] [--deny-userns] <socket> \
+                "usage: ward {RELAY_VERB} [--exec-log-fd <n>] [--env-fd <n>] [--deny-userns] <socket> \
                  <address> -- <tool>..."
             ),
             None,
@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(message(&["deploy"]), "unknown command 'deploy'");
         assert_eq!(
             render_usage_error("unknown command 'deploy'", None),
-            "tog: error: unknown command 'deploy'\nRun 'tog --help' for usage.\n"
+            "ward: error: unknown command 'deploy'\nRun 'ward --help' for usage.\n"
         );
         assert_eq!(
             message(&["--frsh"]),
@@ -1575,7 +1575,7 @@ mod tests {
             assert_eq!(printed(&[spec.name, "-h"]), help(spec), "{} -h", spec.name);
         }
         let bare = help(spec("sync").unwrap());
-        assert!(bare.starts_with("tog — "), "{bare}");
+        assert!(bare.starts_with("ward — "), "{bare}");
         assert_eq!(printed(&["help", "setup"]), bare);
         assert_eq!(printed(&["help", "install"]), bare);
         assert_eq!(printed(&["i", "--help"]), bare);
@@ -1651,7 +1651,7 @@ mod tests {
             message(&["i", "--strict=1"]),
             "unknown option '--strict=1'; did you mean '--strict'?"
         );
-        // A positional is almost always a package name: `tog install
+        // A positional is almost always a package name: `ward install
         // requests` from a pip or npm habit. Name the verb that takes one.
         for argv_words in [
             ["install", "requests"],
@@ -1660,20 +1660,20 @@ mod tests {
         ] {
             let message = message(&argv_words);
             assert!(
-                message.contains("tog add requests"),
+                message.contains("ward add requests"),
                 "{argv_words:?}: {message}"
             );
         }
         assert_eq!(
             parse(&argv(&["sync", "now"])).unwrap_err().render(),
             format!(
-                "tog: error: {}\nRun 'tog help setup' for usage.\n",
+                "ward: error: {}\nRun 'ward help setup' for usage.\n",
                 sync_takes_no_package("now")
             )
         );
     }
 
-    /// The bare `tog` with a setup flag is a sync command rather than the
+    /// The bare `ward` with a setup flag is a sync command rather than the
     /// implicit form, so no footer follows it and a directory with no project
     /// fails like any sync. `--frozen` and `--strict` are also global
     /// options on every other verb; `--fresh` stays bare-only.
@@ -1756,7 +1756,7 @@ mod tests {
         let error = parse(&argv(&["--fresh", "run", "pytest"])).unwrap_err();
         assert_eq!(
             error.message,
-            "--fresh belongs to the bare 'tog'; run 'tog --fresh' on its own"
+            "--fresh belongs to the bare 'ward'; run 'ward --fresh' on its own"
         );
         assert_eq!(error.command, None);
     }
@@ -1814,14 +1814,14 @@ mod tests {
                 error.message,
                 format!(
                     "--frozen checks the lock without writing it, and '{verb}' exists to write \
-                     it; run 'tog {verb}' without --frozen"
+                     it; run 'ward {verb}' without --frozen"
                 ),
                 "{words:?}"
             );
             assert_eq!(error.command, Some(*verb), "{words:?}");
         }
         // The help still prints under it.
-        assert!(printed(&["--frozen", "add", "--help"]).starts_with("tog add"));
+        assert!(printed(&["--frozen", "add", "--help"]).starts_with("ward add"));
     }
 
     /// `x` takes `--strict` (its tool is judged under that policy) but has
@@ -1843,7 +1843,7 @@ mod tests {
             assert_eq!(
                 error.message,
                 "--frozen checks a project's lock, and 'x' resolves its tool from a registry \
-                 with no lock to check; run 'tog x' without --frozen",
+                 with no lock to check; run 'ward x' without --frozen",
                 "{words:?}"
             );
             assert_eq!(error.command, Some("x"), "{words:?}");
@@ -1894,7 +1894,7 @@ mod tests {
             let error = parse(&argv(words)).unwrap_err();
             assert_eq!(
                 error.message,
-                format!("{flag} governs a sync, and '{verb}' never syncs; run 'tog {verb}' without {flag}"),
+                format!("{flag} governs a sync, and '{verb}' never syncs; run 'ward {verb}' without {flag}"),
                 "{words:?}"
             );
             assert_eq!(error.command, Some(hint), "{words:?}");
@@ -1941,7 +1941,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt_grammar_separates_tog_flags_from_tool_args() {
+    fn fmt_grammar_separates_ward_flags_from_tool_args() {
         assert_eq!(
             command(&["fmt"]),
             Command::Fmt {
@@ -2108,14 +2108,14 @@ mod tests {
         // side of the verb rather than accepting and ignoring them.
         assert_eq!(
             message(&["audit", "--strict"]),
-            "--strict governs a sync, and 'audit' never syncs; run 'tog audit' without --strict"
+            "--strict governs a sync, and 'audit' never syncs; run 'ward audit' without --strict"
         );
         assert_eq!(
             message(&["audit", "python"]),
             "audit: unexpected argument 'python'"
         );
         assert!(printed(&["audit", "-h"])
-            .contains("tog audit [--policy <file>] [--signed | --allow-unsigned] [--json]"));
+            .contains("ward audit [--policy <file>] [--signed | --allow-unsigned] [--json]"));
         assert_eq!(
             command(&["doctor", "--json"]),
             Command::Doctor {
@@ -2144,7 +2144,7 @@ mod tests {
                 json: true
             }
         );
-        // `tog fmt` writes no closure, so `ls` has no row for it to filter.
+        // `ward fmt` writes no closure, so `ls` has no row for it to filter.
         assert_eq!(
             message(&["ls", "rustfmt"]),
             "ls: unknown ecosystem 'rustfmt' (one of: python, node, cargo, go, ruby, elixir, dotnet)"
@@ -2255,7 +2255,7 @@ mod tests {
         ] {
             let text = message(words);
             assert!(
-                text.contains("update --self replaces the tog binary") && text.contains(stray),
+                text.contains("update --self replaces the ward binary") && text.contains(stray),
                 "{words:?}: {text}"
             );
         }
@@ -2582,11 +2582,11 @@ mod tests {
     fn fmt_eco_and_build_words_are_checked_from_argv() {
         assert_eq!(
             message(&["fmt", "--eco", "python"]),
-            "fmt: --eco python: tog fmt formats rust"
+            "fmt: --eco python: ward fmt formats rust"
         );
         assert_eq!(
             message(&["fmt", "--eco=rsut"]),
-            "fmt: --eco rsut: tog fmt formats rust; did you mean 'rust'?"
+            "fmt: --eco rsut: ward fmt formats rust; did you mean 'rust'?"
         );
         assert!(matches!(
             command(&["fmt", "--eco", "rust"]),
@@ -2594,8 +2594,8 @@ mod tests {
         ));
         assert_eq!(
             message(&["build", "python", "--release"]),
-            "build: python does not build; tog build takes cargo, go, elixir, dotnet. To pass \
-             python to the build tool as an argument, use `tog build -- python`"
+            "build: python does not build; ward build takes cargo, go, elixir, dotnet. To pass \
+             python to the build tool as an argument, use `ward build -- python`"
         );
         assert_eq!(
             command(&["build", "cargo", "--release"]),
@@ -2694,7 +2694,7 @@ mod tests {
         );
         assert_eq!(
             message(&["gc", "--forget", "nope"]),
-            "'nope' is not a root key: expected 40 hex characters (`tog store roots` \
+            "'nope' is not a root key: expected 40 hex characters (`ward store roots` \
              prints keys)"
         );
         let object = format!("{}-cpython-3.11.9", "a".repeat(40));
@@ -2793,7 +2793,7 @@ mod tests {
             message(&["env", "--shel", "fish"]),
             "env: unknown option '--shel'; did you mean '--shell'?"
         );
-        assert!(printed(&["env", "-h"]).starts_with("tog env — "));
+        assert!(printed(&["env", "-h"]).starts_with("ward env — "));
         assert_eq!(printed(&["env", "--help"]), printed(&["help", "env"]));
         // Not a pass-through verb: a global option works on either side.
         for words in [&["-q", "env"][..], &["env", "-q"]] {
@@ -3102,7 +3102,7 @@ mod tests {
             "3",
             "--env-fd",
             "4",
-            "/run/tog/proxy.sock",
+            "/run/ward/proxy.sock",
             "127.0.0.1:8119",
             "--",
             "/store/npm",
@@ -3114,7 +3114,7 @@ mod tests {
         assert_eq!(
             relay,
             super::super::RelayInvocation {
-                socket: "/run/tog/proxy.sock".into(),
+                socket: "/run/ward/proxy.sock".into(),
                 listen: "127.0.0.1:8119".into(),
                 exec_log_fd: Some(3),
                 env_fd: Some(4),

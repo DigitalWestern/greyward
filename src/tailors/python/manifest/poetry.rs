@@ -8,7 +8,7 @@ pub(super) fn poetry_manifest(
     project: &ProjectRoot,
     value: &toml::Value,
     _source: &str,
-    cfg: &TogPythonConfig,
+    cfg: &GreywardPythonConfig,
     python_version: &str,
 ) -> io::Result<Manifest> {
     let dir = project.path();
@@ -413,7 +413,7 @@ pub(super) fn poetry_lock_requirements(
     platform: Platform,
     pyproject: &toml::Value,
     lock: &toml::Value,
-    cfg: &TogPythonConfig,
+    cfg: &GreywardPythonConfig,
     python_version: &str,
 ) -> io::Result<Vec<String>> {
     let packages = lock
@@ -1249,7 +1249,7 @@ pub(super) fn check_poetry_content_hash(
             "poetry.lock",
             &format!(
                 "content-hash {expected} != computed {actual}; lock preferred; \
-                 'tog x poetry lock' rewrites it"
+                 'ward x poetry lock' rewrites it"
             ),
         )?;
     }

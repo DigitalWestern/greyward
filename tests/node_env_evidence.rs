@@ -2,7 +2,7 @@
 //! its realization read.
 //!
 //! Regression for microsoft/playwright (#51): electron 42 ships no install
-//! script, so tog never provisions its release zip, yet the zip's sha256 is
+//! script, so ward never provisions its release zip, yet the zip's sha256 is
 //! still an identity input. The commit used to claim that digest as a cache
 //! dependency and then refuse its own publication because the file was
 //! absent. The consumed side is covered too: a provisioned zip and a planted
@@ -16,13 +16,13 @@
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use greyward::kernel::fetch::Digest;
+use greyward::kernel::platform::Platform;
+use greyward::kernel::policy;
+use greyward::kernel::store::Store;
+use greyward::tailors::node::{self, DeclaredArtifact, NpmPackage, NpmPlan};
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
 use std::path::Path;
-use tog::kernel::fetch::Digest;
-use tog::kernel::platform::Platform;
-use tog::kernel::policy;
-use tog::kernel::store::Store;
-use tog::tailors::node::{self, DeclaredArtifact, NpmPackage, NpmPlan};
 
 mod common;
 
@@ -117,9 +117,10 @@ fn seed_electron_shasums(store: &Store, platform: Platform, version: &str, zip_s
         Platform::X86_64UnknownLinuxGnu => ("linux", "x64"),
     };
     let release_url = format!("https://github.com/electron/electron/releases/download/v{version}");
-    let dir = store.root.join("cache/electron-shasums").join(
-        tog::kernel::provider::artifacts::electron_cache_directory(&release_url),
-    );
+    let dir = store
+        .root
+        .join("cache/electron-shasums")
+        .join(greyward::kernel::provider::artifacts::electron_cache_directory(&release_url));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("SHASUMS256.txt"),
@@ -128,7 +129,7 @@ fn seed_electron_shasums(store: &Store, platform: Platform, version: &str, zip_s
     .unwrap();
 }
 
-fn plan_of(selected: &tog::kernel::toolchain::Selected, package: NpmPackage) -> NpmPlan {
+fn plan_of(selected: &greyward::kernel::toolchain::Selected, package: NpmPackage) -> NpmPlan {
     NpmPlan {
         node_version: selected.version("node").unwrap().to_string(),
         packages: vec![package],
@@ -165,7 +166,7 @@ fn realize_scriptless_electron(artifacts: &[DeclaredArtifact]) -> (Vec<String>, 
     let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let version = "42.5.0";
     let selected = stub_node_selection(&dir.0, &store, activity, platform);
@@ -245,7 +246,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let lease = store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let activity = &lease;
     let version = "42.5.0";
@@ -255,7 +256,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     // provisioning is a cache hit and never reaches GitHub.
     let zip = dir.0.join("electron.zip");
     std::fs::write(&zip, b"not really a zip").unwrap();
-    let (zip_sha256, _) = tog::kernel::fetch::cache_insert(&store, activity, &zip).unwrap();
+    let (zip_sha256, _) = greyward::kernel::fetch::cache_insert(&store, activity, &zip).unwrap();
     seed_electron_shasums(&store, platform, version, &zip_sha256);
     let declared = dir.0.join("declared.bin");
     std::fs::write(&declared, b"declared artifact bytes").unwrap();
@@ -268,7 +269,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     let unreferenced = dir.0.join("unreferenced.bin");
     std::fs::write(&unreferenced, b"nobody names this").unwrap();
     let (unreferenced_sha256, _) =
-        tog::kernel::fetch::cache_insert(&store, activity, &unreferenced).unwrap();
+        greyward::kernel::fetch::cache_insert(&store, activity, &unreferenced).unwrap();
     // The script proves both inputs were really handed to it.
     let script = "test -f \"$electron_config_cache\"/*/electron-v*.zip && test -f \"$HOME/.cache/declared.bin\"";
     let electron = electron_package(&dir.0, version, Some(script));
@@ -312,7 +313,7 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
     // Registration takes the exclusive lease; end this one first.
     drop(lease);
     store
-        .register_root_record(tog::kernel::store::RootRecord {
+        .register_root_record(greyward::kernel::store::RootRecord {
             key: Store::root_key(&project).unwrap(),
             project_path: project,
             objects: [env.file_name().unwrap().to_str().unwrap().to_string()].into(),
@@ -321,9 +322,9 @@ fn consumed_artifacts_are_recorded_and_survive_a_sweep() {
         })
         .unwrap();
     let mut out = Vec::new();
-    tog::kernel::gc::collect(
+    greyward::kernel::gc::collect(
         &store,
-        tog::kernel::gc::Options {
+        greyward::kernel::gc::Options {
             keep_days: 0,
             ..Default::default()
         },
@@ -357,7 +358,7 @@ fn a_failed_provisioning_publishes_no_environment() {
     let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let version = "42.5.0";
     let selected = stub_node_selection(&dir.0, &store, activity, platform);
@@ -365,7 +366,7 @@ fn a_failed_provisioning_publishes_no_environment() {
     seed_gyp_python(&store, platform);
     seed_electron_shasums(&store, platform, version, &"0".repeat(64));
     let cache = store.root.join("cache/sha256");
-    tog::kernel::store::remove_tree(&cache).unwrap();
+    greyward::kernel::store::remove_tree(&cache).unwrap();
     std::fs::write(&cache, b"").unwrap();
     let electron = electron_package(&dir.0, version, Some("true"));
     let objects_before: Vec<_> = std::fs::read_dir(store.root.join("objects"))
@@ -462,13 +463,13 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     let dir = TempDir::new("node-env-evidence");
     let store = store_at(&dir.0);
     let lease = store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let activity = &lease;
     let selected = stub_node_selection(&dir.0, &store, activity, platform);
     seed_gyp_python(&store, platform);
     let gyp_python = node::shipped_gyp_python().unwrap();
-    let python_id = tog::tailors::python::runtime_object_id(platform, &gyp_python).unwrap();
+    let python_id = greyward::tailors::python::runtime_object_id(platform, &gyp_python).unwrap();
 
     let linker = script_package(&dir.0, "links-python", "ln -s \"$PYTHON\" python-link");
     let env = node::realize_node_env_for(
@@ -540,7 +541,7 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
     // Registration takes the exclusive lease; end this one first.
     drop(lease);
     store
-        .register_root_record(tog::kernel::store::RootRecord {
+        .register_root_record(greyward::kernel::store::RootRecord {
             key: Store::root_key(&project).unwrap(),
             project_path: project,
             objects: [env.file_name().unwrap().to_str().unwrap().to_string()].into(),
@@ -549,9 +550,9 @@ fn a_lifecycle_reference_to_the_gyp_python_survives_a_sweep() {
         })
         .unwrap();
     let mut out = Vec::new();
-    tog::kernel::gc::collect(
+    greyward::kernel::gc::collect(
         &store,
-        tog::kernel::gc::Options {
+        greyward::kernel::gc::Options {
             keep_days: 0,
             ..Default::default()
         },

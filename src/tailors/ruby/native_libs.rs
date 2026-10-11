@@ -1,4 +1,4 @@
-//! tog's pinned native library set (`kernel::provider::nativelibs`) in
+//! ward's pinned native library set (`kernel::provider::nativelibs`) in
 //! Linux gem builds (#329). A gem whose gemspec declares native extensions
 //! builds with the set mounted and on every search path its extconf can
 //! use: pkg-config, gcc's own `CPATH` and `LIBRARY_PATH`, and mkmf's

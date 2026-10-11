@@ -1,4 +1,4 @@
-//! Go's module proxy protocol, as tog's resolution proxy serves it.
+//! Go's module proxy protocol, as ward's resolution proxy serves it.
 //!
 //! The store go is pointed at the proxy with
 //! `GOPROXY=http://<relay>/<token>/go/` (no `direct`) and
@@ -161,7 +161,7 @@ fn check_module(module: &str) -> Result<(), String> {
     }
     if module == "golang.org/toolchain" || module.starts_with("golang.org/toolchain/") {
         return Err(
-            "a Go toolchain download; tog forces GOTOOLCHAIN=local and provides go itself".into(),
+            "a Go toolchain download; ward forces GOTOOLCHAIN=local and provides go itself".into(),
         );
     }
     Ok(())

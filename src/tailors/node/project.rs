@@ -22,10 +22,10 @@ pub(super) fn workspace_set(plan: &NpmPlan) -> Vec<String> {
     workspaces.into_keys().collect()
 }
 
-/// The workspaces the previous closure recorded, read from tog's own state
+/// The workspaces the previous closure recorded, read from ward's own state
 /// through the held project descriptor.
 pub(super) fn previous_workspace_set(project: &ProjectRoot) -> Vec<String> {
-    let Ok(Some(bytes)) = project.read_file(Path::new(".tog/closures/node.json")) else {
+    let Ok(Some(bytes)) = project.read_file(Path::new(".greyward/closures/node.json")) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
@@ -166,7 +166,7 @@ fn managed_target(
     target.starts_with(home.join("forests"))
         || store_root.is_some_and(|root| target.starts_with(root.join("forests")))
         || target.starts_with(home.join("store"))
-        || target.starts_with(project_dir.join(".tog/nm"))
+        || target.starts_with(project_dir.join(".greyward/nm"))
 }
 
 pub(super) fn relative_path(from: &Path, to: &Path) -> io::Result<PathBuf> {
@@ -296,7 +296,7 @@ fn projection_project_lock(
 /// package-local dependencies) while its old managed projection remains in the
 /// source tree. Reconcile the previous closure before projecting the new set.
 /// Real directories are user state and retain backup_real_dir semantics; only
-/// symlinks proven to target tog-owned roots are removed automatically.
+/// symlinks proven to target greyward-owned roots are removed automatically.
 ///
 /// A workspace member's node_modules that git tracks (`tracked`) is left
 /// where it is: it is the user's source, not npm's output.
@@ -332,7 +332,7 @@ fn reserve_projection_backups(
         }
     }
     // A real (npm-made) node_modules is moved aside automatically so
-    // pointing tog at an existing project is one command. Workspace
+    // pointing ward at an existing project is one command. Workspace
     // importers get the same treatment in their source directories.
     if let Some(backup) = crate::comforter::reserve_backup_real_dir_for_store(project, nm, store)? {
         pending_backups.push((nm.to_path_buf(), backup.clone()));
@@ -384,8 +384,8 @@ fn git_tracked_node_modules(
     if tracked.iter().any(|path| path == "node_modules") {
         return Err(err(
             "node_modules holds files git tracks (git ls-files node_modules), and \
-             tog will not move committed source aside to project dependencies \
-             there; untrack them (git rm -r --cached node_modules) and run `tog` again",
+             ward will not move committed source aside to project dependencies \
+             there; untrack them (git rm -r --cached node_modules) and run `ward` again",
         ));
     }
     let mut members = Vec::new();
@@ -397,7 +397,7 @@ fn git_tracked_node_modules(
         if workspaces.contains(&member) {
             crate::kernel::ui::warning_next(
                 &format!(
-                    "{path} holds files git tracks, so tog left it in place and did not \
+                    "{path} holds files git tracks, so ward left it in place and did not \
                      project workspace {member}'s dependencies"
                 ),
                 &crate::kernel::ui::shell_line(&["git", "ls-files", &path]),
@@ -511,7 +511,7 @@ fn record_clone_reasons<'a>(
         attribution.record(
             crate::kernel::policy::UNATTESTED_MUTABLE_STATE,
             dependent,
-            "depends on a workspace package, which Node only finds from a real path inside the project, so node_modules is projected as a writable copy that tog does not attest",
+            "depends on a workspace package, which Node only finds from a real path inside the project, so node_modules is projected as a writable copy that ward does not attest",
         )?;
     }
     Ok(CloneReasons {
@@ -577,7 +577,7 @@ fn forest_paths(
 }
 
 /// Managed projections of workspaces that have left the lockfile: only
-/// symlinks proven to target tog-owned roots are removed automatically.
+/// symlinks proven to target greyward-owned roots are removed automatically.
 fn remove_stale_workspace_links(
     project: &ProjectRoot,
     store: &Store,
@@ -692,7 +692,7 @@ fn link_workspace_sources(
         // Every directory between the forest root and the link must be the
         // forest's own. A symlink on the way is a package's store object (or
         // a source directory): creating the link through it would write
-        // into content tog must never modify.
+        // into content ward must never modify.
         let mut walked = link_root.clone();
         for component in Path::new(rel)
             .parent()
@@ -741,7 +741,7 @@ fn link_workspace_sources(
 
 /// iCloud/Drive-synced folders resurrect each replaced symlink as a
 /// "node_modules 2"-style duplicate. Ones that are symlinks into
-/// tog-owned paths are ours from earlier projections: remove them (test
+/// greyward-owned paths are ours from earlier projections: remove them (test
 /// runners crawl through them otherwise). Anything else is only warned
 /// about — never delete what we didn't create.
 ///
@@ -758,7 +758,7 @@ fn remove_sync_duplicate_links(project: &ProjectRoot, store: &Store, home: &Path
             continue;
         }
         let p = project_dir.join(&file_name);
-        // Only targets under tog-owned roots count as ours — never
+        // Only targets under greyward-owned roots count as ours — never
         // delete a user's own symlink on a loose match.
         let is_ours = project
             .read_link(Path::new(&file_name))
@@ -768,7 +768,7 @@ fn remove_sync_duplicate_links(project: &ProjectRoot, store: &Store, home: &Path
                 t.starts_with(home.join("forests"))
                     || t.starts_with(store.root.join("forests"))
                     || t.starts_with(home.join("store"))
-                    || t.starts_with(project_dir.join(".tog/nm"))
+                    || t.starts_with(project_dir.join(".greyward/nm"))
             })
             .unwrap_or(false);
         if is_ours {
@@ -783,7 +783,7 @@ fn remove_sync_duplicate_links(project: &ProjectRoot, store: &Store, home: &Path
     }
 }
 
-/// The closure record `tog status` and `tog gc` read.
+/// The closure record `ward status` and `ward gc` read.
 #[allow(clippy::too_many_arguments)]
 fn node_closure_body(
     env_obj: &Path,
@@ -836,7 +836,7 @@ fn node_closure_body(
         "inputs": inputs,
         "packages": plan.packages.iter().map(|p| {
             let mut row = serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity});
-            // A `file:` directory package names its source, so `tog status`
+            // A `file:` directory package names its source, so `ward status`
             // can pack it again and compare.
             if let Some(dir) = super::local_package::source_dir(p) {
                 row["local"] = dir.into();
@@ -846,7 +846,7 @@ fn node_closure_body(
     })
 }
 
-/// `project_node_env` plus the input files recorded for `tog status`
+/// `project_node_env` plus the input files recorded for `ward status`
 /// (package.json and the lockfile the plan came from).
 #[allow(clippy::too_many_arguments)]
 pub fn project_node_env_recorded(
@@ -881,7 +881,7 @@ pub fn project_node_env_recorded(
     validate_workspace_parents(project_dir, &previous_workspaces, &workspaces)?;
     let tracked = git_tracked_node_modules(project, &previous_workspaces, &workspaces, activity)?;
     let store = crate::comforter::store_from_object_path(env_obj)
-        .ok_or_else(|| err("environment object is not in a Tog store"))?;
+        .ok_or_else(|| err("environment object is not in a Greyward store"))?;
     let env_obj = env_obj.canonicalize()?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let native_id = native_reference_id(&native_reference)?;
@@ -897,7 +897,7 @@ pub fn project_node_env_recorded(
     let home = store
         .root
         .parent()
-        .ok_or_else(|| err("cannot locate tog home for legacy forests"))?;
+        .ok_or_else(|| err("cannot locate ward home for legacy forests"))?;
     let (backup_paths, pending_backups) = reserve_projection_backups(
         project,
         nm,
@@ -945,8 +945,8 @@ pub fn project_node_env_recorded(
         &project_lock,
     )?;
     for (source, backup) in pending_backups {
-        // Reaching here means the path was a real directory, not tog's
-        // symlink: either a project tog has never synced, or one where an
+        // Reaching here means the path was a real directory, not ward's
+        // symlink: either a project ward has never synced, or one where an
         // `npm install` overwrote the projection. `move_reserved_backup`
         // says so once the move has happened, with where the packages went.
         crate::comforter::move_reserved_backup(project, &source, &backup)?;
@@ -964,7 +964,7 @@ pub fn project_node_env_recorded(
     link_workspace_sources(project_dir, plan, proj_dir, forest)?;
     // Old forests are deliberately NOT pruned here: a dev server may still
     // be running from one, and pruning would break it mid-session. They are
-    // cheap symlink trees; explicit `tog gc` with liveness checks is the
+    // cheap symlink trees; explicit `ward gc` with liveness checks is the
     // collection path.
     remove_sync_duplicate_links(project, &store, home);
 
@@ -983,7 +983,7 @@ pub fn project_node_env_recorded(
         )?;
     }
 
-    project.create_dir_all(Path::new(".tog"))?;
+    project.create_dir_all(Path::new(".greyward"))?;
     let mut body = node_closure_body(
         &env_obj,
         &native_reference,
@@ -1323,9 +1323,9 @@ mod tests {
                 fs::write(project.join(".git/index"), "corrupt index").unwrap();
             }
             if shape == "departed-submodule" {
-                fs::create_dir_all(project.join(".tog/closures")).unwrap();
+                fs::create_dir_all(project.join(".greyward/closures")).unwrap();
                 fs::write(
-                    project.join(".tog/closures/node.json"),
+                    project.join(".greyward/closures/node.json"),
                     serde_json::json!({
                         "schema": "closure/1", "ecosystem": "node",
                         "body": {"workspaces": [workspace]}

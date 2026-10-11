@@ -1,12 +1,12 @@
 # Hit rate
 
-How often a bare `tog` works with zero configuration on popular real
+How often a bare `ward` works with zero configuration on popular real
 repositories. It is a measurement, not a gate, but run it before merging
 anything that touches npm projection or the store's real-directory checks.
 
 **Method.** `python3 tools/hitrate.py --repos tools/hitrate/hitrate-repos.lock`
 takes 30 top-starred Python and 30 top-starred npm repositories pinned to
-fixed commits, shallow-clones each, and runs `tog sync` (the bare form's hidden alias,
+fixed commits, shallow-clones each, and runs `ward sync` (the bare form's hidden alias,
 so no help screen lands in the log) against a
 throwaway store with a 600 s cap. Each failure is classified by the
 `RULES` regexes in `tools/hitrate.py`. Raw results are dated CSVs under
@@ -49,7 +49,7 @@ gpt_academic), `unattested-index` (autoresearch) and
 `artifact-not-provisioned` (django). npm gains one: ECC's only exceptions
 were seven `skipped_optional` records from its `pyproject.toml`.
 
-## Linux x86_64 — 2026-09-23 (m6-fedora, tog 4720e12, pinned 60)
+## Linux x86_64 — 2026-09-23 (m6-fedora, Greyward 4720e12, pinned 60)
 
 Same command and method as 2026-09-11 below. Raw data:
 `tools/hitrate/hitrate-linux-2026-09-23.csv`.
@@ -81,7 +81,7 @@ Rust and fails on the next known row.
 | tailwindlabs/tailwindcss | other → npm_platform_required | Rust 1.95.0, then a required darwin-only devDependency | Rust fixed by #213; platform row is #214 |
 
 **2026-10-03, one repo re-run (not a new column).** tailwindcss at its
-pinned commit, on the branch that closes #214: `tog sync` exits 0 for both
+pinned commit, on the branch that closes #214: `ward sync` exits 0 for both
 of its ecosystems (node, 443 packages; cargo). It took two changes. The
 required foreign-platform packages are placed and recorded
 (`foreign-platform-package`, 10 of them). Three registry plugins
@@ -92,7 +92,7 @@ records `unattested-mutable-state`, so tailwindcss is a permissive ok and
 not a company-policy ok. `bun`'s postinstall still fails in the sandbox
 (`install-script-failed`, as before). The full 60 were not re-run.
 
-## Linux x86_64 — 2026-09-11 (m6-fedora, tog fb8b1d6, pinned 60)
+## Linux x86_64 — 2026-09-11 (m6-fedora, Greyward fb8b1d6, pinned 60)
 
 Command: `cargo build --release`, then `python3 tools/hitrate.py --repos
 tools/hitrate/hitrate-repos.lock --work … --out … --timeout 600 --keep`,
@@ -133,7 +133,7 @@ company-policy column ignores both; its two denials are autoresearch
 ### npm: 21 → 20, and what moved
 
 Eight npm oks became misses since 2026-09-05 at the same pinned commits;
-five of the eight are tog regressions, not repo changes:
+five of the eight are Greyward regressions, not repo changes:
 
 | repo | class | reason | status |
 |---|---|---|---|
@@ -161,7 +161,7 @@ ant-design), `install-script-failed` (gstack, uptime-kuma, tabby),
 ### Re-measurement of the three fixed repos
 
 Re-run of gemini-cli, create-react-app and pi at their pinned commits with
-a release build of this branch (`TOG_BIN=…/target-fixed/release/tog`,
+a release build of this branch (`GREYWARD_BIN=…/target-fixed/release/ward`,
 throwaway store), permissive and `--strict`:
 
 | repo | permissive | strict | note |
@@ -171,7 +171,7 @@ throwaway store), permissive and `--strict`:
 | earendil-works/pi | ok, 90 s, 2 exceptions (`built_from_source` canvas@3.2.3, `install-script-failed`) | policy_denied (`built_from_source`) | `packages/agent/node_modules` workspace-local packages now present; company-policy miss (`install-script-failed`) |
 
 A second create-react-app sync with a fresh store confirmed that the 435
-exceptions printed to stderr are exactly the 435 in `.tog/closures/node.json`:
+exceptions printed to stderr are exactly the 435 in `.greyward/closures/node.json`:
 the closure is a truthful record of what strict would refuse.
 
 The literal `--strict` pass over all 60 with the unfixed binary: **python

@@ -106,7 +106,7 @@ enum ScriptsOutcome {
     /// they were built against.
     Built(Option<String>),
     /// The sync stops here: the policy refused the fallback, the host
-    /// changed under the retry, the sandbox could not be set up, or tog was
+    /// changed under the retry, the sandbox could not be set up, or ward was
     /// asked to stop.
     Stop(io::Error),
     /// The scripts failed in every view they were allowed to run in: an
@@ -168,7 +168,7 @@ fn scripts_in_view(
 /// tell the user to try.
 const ARTIFACTS_HINT: &str =
     "If this package downloads files at install time, declare them as verified inputs in package.json — \
-     \"tog\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
+     \"greyward\": {\"artifacts\": [{\"url\", \"sha256\", \"path\"}]} — \
      placed where the package's downloader caches them (see README).";
 
 /// How much of a script failure's message the exception detail keeps.

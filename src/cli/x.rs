@@ -1,4 +1,4 @@
-//! `tog x`'s grammar: the tool, its registry, its version, and the
+//! `ward x`'s grammar: the tool, its registry, its version, and the
 //! arguments handed to it.
 
 use super::parse::{non_empty, reject, separate_value};
@@ -66,7 +66,7 @@ pub(super) fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
             }));
         }
         return Err(UsageError::new(
-            "x: no tool given (e.g. 'tog x ruff check .', 'tog x npm:prettier --write .')",
+            "x: no tool given (e.g. 'ward x ruff check .', 'ward x npm:prettier --write .')",
             Some("x"),
         ));
     };

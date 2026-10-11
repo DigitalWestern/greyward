@@ -1,7 +1,7 @@
-//! The NuGet v3 protocol, as tog's resolution proxy serves it to restore.
+//! The NuGet v3 protocol, as ward's resolution proxy serves it to restore.
 //!
 //! NuGet reaches api.nuget.org through a mirror, not interception: a
-//! tog-written `nuget.config` names one source, the session's route, and
+//! greyward-written `nuget.config` names one source, the session's route, and
 //! packages.lock.json records no source URL, so a mirror leaves the lock as
 //! it would be. Restore asks the mirror for these paths, each mapped to the
 //! same path on `https://api.nuget.org`:

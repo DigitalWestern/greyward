@@ -3,7 +3,7 @@
 //! copy-on-write, four-artifact BEAM toolchain.
 //!
 //! mix.lock is CODE (an Elixir term literal) and Mix itself evals it, so
-//! tog's planning parses it with a strict AST
+//! ward's planning parses it with a strict AST
 //! grammar under the pinned toolchain (exact 8-field :hex tuples only —
 //! atoms/strings/lists/tuples of literals, nothing callable); the Elixir
 //! release zip has neither Hex nor rebar3, so both are separately pinned;
@@ -50,14 +50,14 @@ use tool::run_hexmark;
 // Linux relocation recipe revision: an identity input of the Linux toolchain
 // object and of the Linux BEAM fingerprint. Bump it whenever the Install
 // invocation, what gets embedded, or the verification changes, so hex-deps
-// objects and `_build/tog-*` roots re-derive. Darwin never sees it.
+// objects and `_build/greyward-*` roots re-derive. Darwin never sees it.
 const LINUX_RELOCATION_SCHEMA: &str = "otp-install-cross-minimal/1";
 
 /// The shipped BEAM catalog, generated and verified by
 /// `tools/catalog.py elixir`: one release bundle per `(otp, elixir)` pair,
 /// the pair primary and compared OTP first. OTP is a per-platform build:
 /// erlef/otp_builds on Darwin (Install already run, bin/erl at the root),
-/// and on Linux our own source build in DigitalWestern/tog-toolchains
+/// and on Linux our own source build in DigitalWestern/greyward-toolchains
 /// (hex.pm bob's Ubuntu build needs OpenSSL SM4 symbols Fedora omits), a
 /// `make release` tree that is uninstalled until the relocation recipe runs
 /// `Install`, with a provenance manifest alongside the asset. An OTP
@@ -108,9 +108,9 @@ struct BeamSpec {
     rebar3_sha512: String,
 }
 
-/// The selected BEAM's four rows for `platform`, refused unless this tog
+/// The selected BEAM's four rows for `platform`, refused unless this ward
 /// knows every recipe involved. OTP's recipe is per platform: Darwin ships
-/// an already-installed tree, Linux a make-release tree this tog relocates,
+/// an already-installed tree, Linux a make-release tree this ward relocates,
 /// and the relocation recipe is an identity input.
 fn beam_spec(platform: Platform, selected: &Selected) -> io::Result<BeamSpec> {
     selected.require("elixir", "otp")?;
@@ -267,7 +267,7 @@ pub(crate) fn fingerprint_of_joined(joined: &str) -> String {
 //   without -cross   ERL_ROOT = TARGET_ERL_ROOT = <ROOT>   (physical == embedded)
 //   with -cross      ERL_ROOT = `pwd`, TARGET_ERL_ROOT = <ROOT>
 // i.e. -cross is the artifact's own separation between the physical tree
-// being written and the prefix baked into text. Tog stages under
+// being written and the prefix baked into text. Greyward stages under
 // <store>/tmp/stage-*/otp and publishes by rename, so it runs Install with
 // cwd = staging otp and <ROOT> = the final object path computed from the
 // identity (<store>/objects/<id>/otp). Nothing is rewritten afterwards; the
@@ -948,7 +948,7 @@ pub fn realize_runtime(
     result
 }
 
-/// The forced environment for every tog-controlled mix/elixir run: ERL_LIBS-
+/// The forced environment for every greyward-controlled mix/elixir run: ERL_LIBS-
 /// class vars inject code paths or emulator args before Mix's own controls
 /// apply. The lists live with the host-local tripwire, which checks by them.
 const ENV_REMOVE_PREFIXES: &[&str] = crate::kernel::resolve::tripwire::ELIXIR_ENV_REMOVE_PREFIXES;
@@ -1007,7 +1007,7 @@ fn homed_env(beam_obj: &Path, deps_path: &Path, scratch_home: &Path) -> Vec<(Str
     set
 }
 
-/// Env for a lone script (`tog t.exs` with no Elixir project): the scrub
+/// Env for a lone script (`ward t.exs` with no Elixir project): the scrub
 /// of [`run_env`] with no deps and no build root. `HEX_OFFLINE=1` and the
 /// scratch Mix and Hex homes mean a `Mix.install` in the script cannot
 /// fetch, and finds nothing the host installed.
@@ -1019,7 +1019,7 @@ pub fn lone_env(beam_obj: &Path, scratch_home: &Path) -> crate::tailors::EnvScru
     )
 }
 
-/// Env for `tog run` (MIX_ENV passes through from the user's shell —
+/// Env for `ward run` (MIX_ENV passes through from the user's shell —
 /// it's on the remove-prefix list, so re-set it when present).
 pub fn run_env(
     beam_obj: &Path,
@@ -1214,7 +1214,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 }
 
 /// Realize the immutable deps-source object (kind "hex-deps"): every
-/// tarball dual-checksum-verified by tog (outer = sha256 of the .tar,
+/// tarball dual-checksum-verified by ward (outer = sha256 of the .tar,
 /// inner = sha256(VERSION ++ metadata.config ++ contents.tar.gz)).
 pub fn realize_deps(
     store: &Store,
@@ -1305,7 +1305,7 @@ pub fn expected_projection(
 }
 
 /// The Elixir closure body: the projection's objects and plan, the
-/// toolchain fingerprint `tog run` reconstructs the build root from, and
+/// toolchain fingerprint `ward run` reconstructs the build root from, and
 /// the toolchain record that says which selection realized them. The BEAM
 /// object is this ecosystem's runtime, and `project_elixir_env` already
 /// holds it as a direct ref, so GC keeps it alive by the recorded id.
@@ -1341,7 +1341,7 @@ pub fn build_root_at(project_dir: &Path, fingerprint: &str) -> PathBuf {
 
 /// The build root of one BEAM fingerprint, relative to the project.
 fn build_root_relative(fingerprint: &str) -> PathBuf {
-    PathBuf::from(format!("_build/tog-{fingerprint}"))
+    PathBuf::from(format!("_build/greyward-{fingerprint}"))
 }
 
 /// The build root of the selected toolchain.
@@ -1387,7 +1387,7 @@ pub fn build_sandboxed(
     for arg in args {
         let norm = arg.trim_start_matches('-');
         if norm.starts_with("deps-path") || norm.starts_with("build-path") {
-            return Err(err(format!("{arg}: this flag is managed by tog")));
+            return Err(err(format!("{arg}: this flag is managed by ward")));
         }
     }
     let project_dir = project.path().to_path_buf();
@@ -1716,7 +1716,7 @@ mod tests {
         let linux = otp_pin(LINUX).unwrap();
         assert_eq!(
             linux.url,
-            "https://github.com/DigitalWestern/tog-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
+            "https://github.com/DigitalWestern/greyward-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
         );
         assert_eq!(
             linux.digest.hex(),
@@ -1738,13 +1738,13 @@ mod tests {
 
     #[test]
     fn linux_identity_is_separate_and_tracks_recipe_and_store_root() {
-        let root = Path::new("/srv/tog/store");
+        let root = Path::new("/srv/ward/store");
         let linux = beam_identity(&pin_spec(LINUX), root).unwrap();
         let darwin = beam_identity(&pin_spec(DARWIN), root).unwrap();
         assert_ne!(linux.object_id(), darwin.object_id());
         assert_eq!(linux.inputs["platform"], "x86_64-unknown-linux-gnu");
         assert_eq!(linux.inputs["relocation_schema"], LINUX_RELOCATION_SCHEMA);
-        assert_eq!(linux.inputs["store_root"], "/srv/tog/store");
+        assert_eq!(linux.inputs["store_root"], "/srv/ward/store");
         for key in ["otp_sha256", "elixir_sha256", "hex_sha512", "rebar3_sha512"] {
             assert!(linux.inputs.contains_key(key), "{key}");
         }
@@ -1773,11 +1773,11 @@ mod tests {
         let darwin_root = build_root_at(Path::new("/p"), &beam_fingerprint_for(&pin_spec(DARWIN)));
         assert_eq!(
             linux_root,
-            Path::new("/p").join(format!("_build/tog-{linux}"))
+            Path::new("/p").join(format!("_build/greyward-{linux}"))
         );
         assert_eq!(
             darwin_root,
-            Path::new("/p").join(format!("_build/tog-{DARWIN_FINGERPRINT}"))
+            Path::new("/p").join(format!("_build/greyward-{DARWIN_FINGERPRINT}"))
         );
         assert_ne!(linux_root, darwin_root);
     }
@@ -2270,7 +2270,7 @@ exit 0
     fn build_root_is_beam_qualified() {
         let spec = pin_spec(DARWIN);
         let root = build_root_at(Path::new("/p"), &beam_fingerprint_for(&spec));
-        assert!(root.display().to_string().contains("_build/tog-"));
+        assert!(root.display().to_string().contains("_build/greyward-"));
         assert_eq!(beam_fingerprint_for(&spec).len(), 16);
         // Both routes to the build root agree for the shipped selection.
         assert_eq!(
@@ -2317,7 +2317,7 @@ exit 0
     #[test]
     fn a_selected_row_and_the_pins_build_the_same_identity() {
         let selected = shipped_selection().unwrap();
-        let root = Path::new("/srv/tog/store");
+        let root = Path::new("/srv/ward/store");
         for platform in Platform::ALL {
             let from_lock = beam_spec(*platform, &selected).unwrap();
             let from_pin = pin_spec(*platform);
@@ -2343,7 +2343,7 @@ exit 0
     #[test]
     fn an_unknown_recipe_and_a_foreign_selection_are_both_refused() {
         // The Linux OTP row's recipe is the relocation recipe: an unknown
-        // one means an install procedure this tog does not implement.
+        // one means an install procedure this ward does not implement.
         let mut selected = shipped_selection().unwrap();
         for row in &mut selected.bundle.artifacts {
             if row.component == "otp" {
@@ -2352,7 +2352,7 @@ exit 0
         }
         let error = beam_spec(LINUX, &selected).unwrap_err().to_string();
         assert!(error.contains("otp-install-cross-minimal/99"), "{error}");
-        assert!(error.contains("upgrade tog"), "{error}");
+        assert!(error.contains("upgrade ward"), "{error}");
 
         // A platform-neutral row is refused the same way.
         let mut hex_moved = shipped_selection().unwrap();
@@ -2381,8 +2381,8 @@ exit 0
     }
 
     /// Every closure this tailor writes carries which bundle realized it and
-    /// which store object that bundle became: `tog status` compares the one,
-    /// `tog run` resolves the other, and `tog run` rebuilds the build root
+    /// which store object that bundle became: `ward status` compares the one,
+    /// `ward run` resolves the other, and `ward run` rebuilds the build root
     /// from the recorded fingerprint.
     #[test]
     fn the_closure_body_records_the_bundle_and_the_runtime_object() {
@@ -2525,10 +2525,14 @@ exit 0
             store.publish_bare_test("beam", &format!("{OTP_VERSION}-elixir{ELIXIR_VERSION}"));
         let deps = store.publish_bare_test("deps", "0");
         let dir = temp.0.join("project");
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         fs::write(dir.join("mix.exs"), "manifest A").unwrap();
         fs::write(dir.join("mix.lock"), "lock A").unwrap();
-        fs::write(dir.join(".tog/closures/elixir.json"), "previous closure").unwrap();
+        fs::write(
+            dir.join(".greyward/closures/elixir.json"),
+            "previous closure",
+        )
+        .unwrap();
         let held = ProjectRoot::open(&dir).unwrap();
         let forest = expected_projection(&store, &dir, &store.object_path(&deps)).unwrap();
         fs::create_dir_all(forest.join("jason")).unwrap();
@@ -2576,7 +2580,7 @@ exit 0
                 b"previous compiled code"
             );
             assert_eq!(
-                fs::read(dir.join(".tog/closures/elixir.json")).unwrap(),
+                fs::read(dir.join(".greyward/closures/elixir.json")).unwrap(),
                 b"previous closure"
             );
             attribution.discard();

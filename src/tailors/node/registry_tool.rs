@@ -1,4 +1,4 @@
-//! The Node tailor's `RegistryTool`: how `tog x` resolves one npm package
+//! The Node tailor's `RegistryTool`: how `ward x` resolves one npm package
 //! with the store npm (confined through the `x` door, see `super::door`),
 //! realizes it as an ordinary node env object, and projects it as
 //! `node_modules` in the command's cache directory.
@@ -97,7 +97,7 @@ impl RegistryTool for NodeTool {
         let project_key = Store::forest_project_key(&root.canonicalize()?);
         // New projections are owned by the originating store. Keep a
         // read-only compatibility candidate for pre-root/2 x records, whose
-        // forest lived beside the store under tog home.
+        // forest lived beside the store under ward home.
         let mut forest_bases = vec![store.root.join("forests")];
         if let Some(home) = store.root.parent() {
             let legacy = home.join("forests");
@@ -141,7 +141,7 @@ impl RegistryTool for NodeTool {
     }
 
     fn clean_note(&self) -> Option<&'static str> {
-        Some("'tog gc --project' also reclaims the node_modules forest each removed node environment used")
+        Some("'ward gc --project' also reclaims the node_modules forest each removed node environment used")
     }
 
     fn realize(
@@ -156,7 +156,7 @@ impl RegistryTool for NodeTool {
         let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         fs::create_dir_all(root)?;
         let manifest = serde_json::json!({
-            "name": "tog-x",
+            "name": "greyward-x",
             "private": true,
             "dependencies": { package: version.unwrap_or("latest") },
         });
@@ -172,7 +172,7 @@ impl RegistryTool for NodeTool {
         // still has the last run's `node_modules` projection, a symlink
         // into a store env object. npm would read that tree and write its
         // store paths into the new lock, which the plan then refuses. The
-        // projection is tog's own and realization below replaces it.
+        // projection is ward's own and realization below replaces it.
         let projection = root.join("node_modules");
         if fs::symlink_metadata(&projection).is_ok_and(|stat| stat.file_type().is_symlink()) {
             fs::remove_file(&projection)?;
@@ -183,11 +183,11 @@ impl RegistryTool for NodeTool {
         ));
         let node_obj = node::realize_runtime(store, activity, platform, toolchain)?;
         // The resolution runs confined through the `x` door, detached: the
-        // lock root is tog's own cache root, so the accepted lock is written
+        // lock root is ward's own cache root, so the accepted lock is written
         // back into it and the ledger is rooted under it. npm's output is
         // captured: the command's stdout is the tool's, and npm's own
         // summary ("up to date in 3ms") is not what a caller piping
-        // `tog x <tool>` asked for; on a failure npm's words come back in
+        // `ward x <tool>` asked for; on a failure npm's words come back in
         // the error.
         let report = door::run_node_checked(
             door,

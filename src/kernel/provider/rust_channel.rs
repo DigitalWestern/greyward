@@ -130,7 +130,7 @@ impl ChannelManifest {
         })?;
         if parsed.manifest_version != "2" {
             return Err(invalid(format!(
-                "channel manifest for Rust {version} is manifest-version {}; this tog reads version 2",
+                "channel manifest for Rust {version} is manifest-version {}; this ward reads version 2",
                 parsed.manifest_version
             )));
         }
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_this_tog_cannot_read_is_refused() {
+    fn a_manifest_this_ward_cannot_read_is_refused() {
         let error = ChannelManifest::parse("1.96.1", "manifest-version = \"3\"\n").unwrap_err();
         assert!(error.to_string().contains("manifest-version 3"), "{error}");
         let error = ChannelManifest::parse("1.96.1", "not toml [").unwrap_err();

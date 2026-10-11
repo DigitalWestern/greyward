@@ -27,7 +27,7 @@ use crate::kernel::ui;
 /// Which edit: the tailors' own `EditVerb`.
 pub(crate) use crate::commands::shared::EditVerb as Verb;
 
-/// An ecosystem `tog add` can choose: a tailor with a public package
+/// An ecosystem `ward add` can choose: a tailor with a public package
 /// registry (`Tailor::package_registry`).
 #[derive(Clone, Copy)]
 pub struct Eco {
@@ -50,7 +50,7 @@ impl fmt::Debug for Eco {
 }
 
 impl Eco {
-    /// Every ecosystem `tog add` can choose, in registry order.
+    /// Every ecosystem `ward add` can choose, in registry order.
     pub fn all() -> Vec<Eco> {
         edit_tailors()
             .into_iter()
@@ -220,7 +220,7 @@ pub fn shape(name: &str) -> Option<Eco> {
 /// The nearest directory from `cwd` upward that holds any project input
 /// (`shared::nearest_manifest`). An edit goes to the manifest nearest the
 /// user, not to the marked root `shared::project_for` answers with: from
-/// a member of a synced workspace, `tog add` edits the member.
+/// a member of a synced workspace, `ward add` edits the member.
 pub fn nearest_project(cwd: &Path) -> io::Result<(PathBuf, Vec<Eco>)> {
     if let Some(location) = crate::commands::shared::nearest_manifest(cwd)? {
         let present: Vec<Eco> = location
@@ -328,7 +328,7 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
     let mut stderr = io::stderr();
     writeln!(
         stderr,
-        "tog: '{name}' exists on {}. Which one?",
+        "ward: '{name}' exists on {}. Which one?",
         described.join(" and ")
     )?;
     for (index, (eco, version)) in known.iter().enumerate() {
@@ -342,7 +342,7 @@ pub fn ask_human(name: &str, known: &[(Eco, String)]) -> io::Result<Eco> {
     }
     let stdin = io::stdin();
     loop {
-        write!(stderr, "tog: [1-{}] ", known.len())?;
+        write!(stderr, "ward: [1-{}] ", known.len())?;
         stderr.flush()?;
         let mut line = String::new();
         if stdin.lock().read_line(&mut line)? == 0 {
@@ -497,7 +497,7 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
         ui::note(line);
     }
     if no_sync {
-        ui::note("--no-sync: review the change, then run 'tog'");
+        ui::note("--no-sync: review the change, then run 'ward'");
         edit_attribution.discard();
         return Ok(());
     }

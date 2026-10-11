@@ -323,7 +323,7 @@ impl Tailor for Go {
                 eco,
             );
             push_hash(&mut c, "SHA-256", &required(eco, &p, "zip_sha256")?);
-            push_property(&mut c, "tog:go:h1", &required(eco, &p, "h1")?);
+            push_property(&mut c, "greyward:go:h1", &required(eco, &p, "h1")?);
             out.push(c);
         }
         out.push(toolchain_component(
@@ -371,7 +371,7 @@ fn go_status(platform: Platform, project: &ProjectRoot, body: &Value) -> io::Res
         State::Unchecked(reason) if changed.is_empty() => {
             if recorded_version.is_empty() {
                 return Ok(State::Unchecked(format!(
-                    "{reason}; recorded Go version is missing; run 'tog' once to record the selected toolchain"
+                    "{reason}; recorded Go version is missing; run 'ward' once to record the selected toolchain"
                 )));
             }
             return Ok(State::Unchecked(reason));
@@ -384,7 +384,7 @@ fn go_status(platform: Platform, project: &ProjectRoot, body: &Value) -> io::Res
     }
     if recorded_version.is_empty() {
         return Ok(State::Unchecked(
-            "recorded Go version is missing; run 'tog' once to record the selected toolchain"
+            "recorded Go version is missing; run 'ward' once to record the selected toolchain"
                 .into(),
         ));
     }

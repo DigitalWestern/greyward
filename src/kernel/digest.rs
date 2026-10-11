@@ -121,7 +121,7 @@ pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<Stri
     })
 }
 
-/// Every entry of the strongest algorithm tog supports in an SRI list such
+/// Every entry of the strongest algorithm ward supports in an SRI list such
 /// as `"sha512-... sha1-..."` (npm, pnpm and yarn all write lists), as one
 /// canonical list: sorted, without duplicates, space-separated. A list may
 /// carry several hashes of that algorithm, and the bytes are allowed when
@@ -148,7 +148,7 @@ pub fn strongest_sri(list: &str) -> Option<String> {
 /// (see [`strongest_sri`]), parsed, sorted and without duplicates. Never a
 /// weaker one: bytes that match only a weaker entry are refused. A
 /// malformed entry of the strongest algorithm is an error, not skipped: a
-/// lock that names a hash tog cannot read was not written by the tool it
+/// lock that names a hash ward cannot read was not written by the tool it
 /// claims. A list with no supported entry is the error `from_sri` gives
 /// for it.
 pub fn sri_candidates(list: &str) -> io::Result<Vec<Digest>> {

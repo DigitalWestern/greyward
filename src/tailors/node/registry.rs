@@ -1,4 +1,4 @@
-//! The npm registry protocol (node tailor), as tog's resolution proxy
+//! The npm registry protocol (node tailor), as ward's resolution proxy
 //! serves it to npm and pnpm.
 //!
 //! Both tools reach the registry through TLS interception, not a mirror:
@@ -118,7 +118,7 @@ impl RegistryProtocol for NpmRegistry {
 
 /// What a `dist` object claims for its tarball: every `integrity` entry of
 /// the strongest algorithm (the tarball may match any), else the sha1
-/// `shasum`. `None` when it claims nothing tog can read (an unknown
+/// `shasum`. `None` when it claims nothing ward can read (an unknown
 /// algorithm, malformed hex).
 fn dist_claim(dist: &serde_json::Value) -> Option<Claim> {
     if let Some(list) = dist.get("integrity").and_then(|i| i.as_str()) {

@@ -3,9 +3,9 @@
 //! A host-local helper is a child that needs no network: `tar`, `cp`,
 //! `patch`, an offline extraction. A dependency tool is not one of those
 //! unless its whole invocation says so in a form listed below: the exact
-//! argv shape of the one reviewed call site, the tog-owned helper script it
+//! argv shape of the one reviewed call site, the greyward-owned helper script it
 //! runs (checked by content), and the environment the child will really
-//! see (the command's explicit edits over tog's own environment), with
+//! see (the command's explicit edits over ward's own environment), with
 //! every variable that could turn the network or an interpreter option back
 //! on pinned or absent. Every other start of a resolver program is refused,
 //! so a new call site that should have gone through the door fails the
@@ -20,7 +20,7 @@
 //! resolver.
 //!
 //! `RESOLVERS` names programs, not wrappers. `sh -c`, `env`, `bwrap` and
-//! `sandbox-exec` pass by design (a `tog run` script is `sh -c`), so a
+//! `sandbox-exec` pass by design (a `ward run` script is `sh -c`), so a
 //! resolver started through one is not seen.
 
 use sha2::{Digest, Sha256};
@@ -29,9 +29,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// The file names of every dependency tool tog runs, and of the programs
+/// The file names of every dependency tool ward runs, and of the programs
 /// that can fetch or install one. `git` is here because a resolver can
-/// reach it (npm and cargo git dependencies); tog's own verified git
+/// reach it (npm and cargo git dependencies); ward's own verified git
 /// fetches go through `kernel::gitsrc`, not a `local_*` call. `rustup`,
 /// `uvx`, `corepack`, `node`, `yarn`, `rebar3`, `pip`, `pip3`, `bundler`
 /// and `iex` can each download or run project code, and no host-local
@@ -47,7 +47,7 @@ pub const RESOLVERS: &[&str] = &[
 /// reviewed table, so the one `erl` form a host-local helper may run is
 /// exactly this text and nothing a later edit slips in beside it.
 pub const OTP_RUNTIME_PROBE: &str = "ok = crypto:start(), \
-             32 = byte_size(crypto:hash(sha256, <<\"tog\">>)), \
+             32 = byte_size(crypto:hash(sha256, <<\"ward\">>)), \
              {ok, _} = application:ensure_all_started(ssl), \
              true = is_list(ssl:versions()), \
              io:format(\"~s~n~s~n\", [erlang:system_info(otp_release), code:root_dir()]), \
@@ -57,7 +57,7 @@ pub const OTP_RUNTIME_PROBE: &str = "ok = crypto:start(), \
 /// `ruby ... spec` form may run. The tailor's test pins it to the text it
 /// writes, so editing the helper means reviewing this table again.
 pub const RUBY_HELPER_SHA256: &str =
-    "256735a5543c30c19bed1d5b5c07b3d00b359b2a7f040fd78d4e97d591855933";
+    "76901e315f6951236e6b2400bb9c3ddc4e7ea8cd7bf3f1de2afc285579217a60";
 
 /// The sha256 of the Elixir tailor's helper script, the only script the
 /// `elixir ... hexmark` form may run. Pinned by the tailor's test, as for
@@ -125,7 +125,7 @@ struct Invocation<'a> {
     env: Vec<(&'a OsStr, Option<&'a OsStr>)>,
     program: Option<PathBuf>,
     /// Whether the command names its program by an absolute path. A bare
-    /// name is resolved here through tog's `PATH`, which an `env_clear`ed
+    /// name is resolved here through ward's `PATH`, which an `env_clear`ed
     /// child does not use, so no form admits one.
     absolute: bool,
     store: Option<PathBuf>,
@@ -142,7 +142,7 @@ impl Invocation<'_> {
     }
 
     /// Whether the command itself sets `key` to exactly `value`, whatever
-    /// tog's own environment holds.
+    /// ward's own environment holds.
     fn set_to(&self, key: &str, value: &str) -> bool {
         self.edit(key) == Some(Some(OsStr::new(value)))
     }
@@ -209,7 +209,7 @@ impl Invocation<'_> {
     }
 
     /// The value the child sees for `key`: the command's own edit, or else
-    /// tog's environment, which the child inherits. `Command::env_clear`
+    /// ward's environment, which the child inherits. `Command::env_clear`
     /// is not visible here, so a form that needs a variable gone requires
     /// it removed explicitly; a cleared command is judged as if it
     /// inherited, which can only refuse more.
@@ -243,7 +243,7 @@ impl Invocation<'_> {
         sets_only_forced && inherits_none
     }
 
-    /// Whether the command itself edits every variable tog has, so the
+    /// Whether the command itself edits every variable ward has, so the
     /// child inherits nothing.
     fn fully_cleared(&self) -> bool {
         std::env::vars_os().all(|(name, _)| self.env.iter().any(|(edited, _)| *edited == name))
@@ -291,7 +291,7 @@ impl Invocation<'_> {
 
     /// Whether argument `index` is an absolute path to a regular file named
     /// `name` inside the store whose content has sha256 `expected`: the
-    /// tog-owned helper, in a directory only tog writes.
+    /// greyward-owned helper, in a directory only ward writes.
     fn is_helper(&self, index: usize, name: &str, expected: &str) -> bool {
         let Some(path) = self.args.get(index).map(Path::new) else {
             return false;
@@ -310,7 +310,7 @@ impl Invocation<'_> {
 }
 
 /// One reviewed offline form: a resolver program, and the invocation under
-/// which it reaches no network and runs nothing but tog's own code.
+/// which it reaches no network and runs nothing but ward's own code.
 struct OfflineForm {
     program: &'static str,
     matches: fn(&Invocation) -> bool,
@@ -384,7 +384,7 @@ const RUBY_SPEC_SETS: &[&str] = &[
 ];
 
 /// `go mod download` of module versions as the Go tailor builds it. Every
-/// variable is the command's own edit, never tog's inherited one: pinned
+/// variable is the command's own edit, never ward's inherited one: pinned
 /// ones set, the rest removed rather than emptied (Go reads an empty value
 /// as unset and falls back to `$GOROOT/go.env`), and `GOROOT` the store
 /// toolchain the program belongs to, so that fallback is the store's file.
@@ -513,7 +513,7 @@ fn ruby_spec(run: &Invocation) -> bool {
 
 const OFFLINE_FORMS: &[OfflineForm] = &[
     // The Go tailor's module extraction: `go mod download path@version...`
-    // by the store Go from a module cache tog staged, with the complete
+    // by the store Go from a module cache ward staged, with the complete
     // offline environment.
     OfflineForm {
         program: "go",
@@ -530,7 +530,7 @@ const OFFLINE_FORMS: &[OfflineForm] = &[
         program: "erl",
         matches: otp_probe,
     },
-    // The Ruby helper's `spec` mode: reads the gemspec of a .gem tog
+    // The Ruby helper's `spec` mode: reads the gemspec of a .gem ward
     // already verified.
     OfflineForm {
         program: "ruby",
@@ -704,7 +704,7 @@ mod tests {
     }
 
     /// The argv (and the environment each form reads) of every census row:
-    /// every place tog runs a tool that resolves with the network or
+    /// every place ward runs a tool that resolves with the network or
     /// evaluates project code. Each goes through the door, and none of them
     /// may start through a `local_*` helper.
     #[test]
@@ -715,7 +715,7 @@ mod tests {
         ];
         let census: &[(&str, &[&str], &[(&str, &str)])] = &[
             // Python: requirements lock, build requirements, add/remove/update,
-            // requirements.in edits, `tog x`.
+            // requirements.in edits, `ward x`.
             (
                 "/s/uv/uv",
                 &["pip", "compile", "requirements.in", "--generate-hashes"],
@@ -735,7 +735,7 @@ mod tests {
                 &["generate-lockfile", "--manifest-path", "/stage/Cargo.toml"],
                 &[],
             ),
-            // Node: missing lock, add/remove/update, pinned pnpm, `tog x`.
+            // Node: missing lock, add/remove/update, pinned pnpm, `ward x`.
             (
                 "/s/node/bin/npm",
                 &["install", "--package-lock-only", "--ignore-scripts"],
@@ -1028,7 +1028,7 @@ mod tests {
     }
 
     /// A form admits its program only as the realized store object, named
-    /// by absolute path: not a bare name tog's own `PATH` happens to
+    /// by absolute path: not a bare name ward's own `PATH` happens to
     /// resolve to it (an `env_clear`ed child searches libc's default path
     /// instead), and not a file staged under `<store>/tmp`, where unpacked
     /// packages land. Only the OTP probe runs a staged program.

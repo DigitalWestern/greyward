@@ -97,7 +97,7 @@ pub(crate) enum PatchMatch {
 /// `sha256-<hex>` spelling the prefix is preserved so the pair reads the same.
 ///
 /// pnpm changed both the algorithm and the encoding between major versions and
-/// tog accepts every form still found in lockfiles:
+/// ward accepts every form still found in lockfiles:
 ///
 /// * pnpm 9 (`lockfileVersion: '9.0'`) writes `createBase32HashFromFile`:
 ///   md5 of the file, RFC 4648 base32, padding stripped, lowercased —
@@ -118,7 +118,7 @@ pub(crate) enum PatchMatch {
 /// (`readNormalizedFile`: `content.split('\r\n').join('\n')`). The md5 form
 /// accepts only that normalized/lossy digest. SHA-256 forms accept either that
 /// digest or the raw-byte digest, preserving compatibility with lockfiles
-/// produced by the earlier tog implementation. A normalized match must
+/// produced by the earlier ward implementation. A normalized match must
 /// bind the raw bytes separately for environment identity because distinct
 /// invalid UTF-8 byte sequences can normalize to the same text. A raw match
 /// keeps the historical identity unchanged.
@@ -187,7 +187,7 @@ pub(super) fn base32_lower(bytes: &[u8]) -> String {
 }
 
 /// RFC 1321 md5. Needed only to read pnpm 9's patch hashes, which is not worth
-/// a dependency; this is never used to attest anything tog itself writes.
+/// a dependency; this is never used to attest anything ward itself writes.
 pub(super) fn md5(input: &[u8]) -> [u8; 16] {
     /// Per-round left-rotation amounts (RFC 1321 section 3.4).
     const SHIFTS: [u32; 64] = [

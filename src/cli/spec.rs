@@ -14,13 +14,13 @@ pub struct EcosystemWords {
     /// `Tailor::id`: what `ls` and `build` accept.
     pub id: &'static str,
     /// `Tailor::lock_ecosystem`: the `[toolchain.<name>]` section key of
-    /// `tog-toolchain.toml` that `update --toolchain` accepts. Where it
+    /// `greyward-toolchain.toml` that `update --toolchain` accepts. Where it
     /// differs from the id (`rust` for `cargo`), the id is accepted as a
     /// spelling of it too, because every other verb uses the id.
     pub toolchain: &'static str,
-    /// `Tailor::builds`: whether `tog build <id>` names it.
+    /// `Tailor::builds`: whether `ward build <id>` names it.
     pub builds: bool,
-    /// `Formatter::word`: the word `tog fmt --eco` selects it by.
+    /// `Formatter::word`: the word `ward fmt --eco` selects it by.
     pub formats: Option<&'static str>,
 }
 
@@ -120,16 +120,16 @@ const ID_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = id_words();
 const BUILD_ARRAY: [&str; build_count()] = build_words();
 const TOOLCHAIN_ARRAY: [&str; ECOSYSTEM_WORDS.len()] = toolchain_words();
 
-/// What `tog ls` accepts as a filter word: every closure is named for its
+/// What `ward ls` accepts as a filter word: every closure is named for its
 /// tailor's id, so these are the ecosystem ids. This is the `ls`
 /// vocabulary only; it never selects an ecosystem for sync, add, or build.
 pub const LS_WORDS: &[&str] = &ID_ARRAY;
 pub const BUILD_WORDS: &[&str] = &BUILD_ARRAY;
 pub const SHELL_WORDS: &[&str] = &["bash", "zsh", "fish"];
-/// Every tailor id, in registry order: what `tog attest` names.
+/// Every tailor id, in registry order: what `ward attest` names.
 pub const ECOSYSTEM_IDS: &[&str] = &ID_ARRAY;
 
-/// What `tog update --toolchain` lists as an ecosystem: the
+/// What `ward update --toolchain` lists as an ecosystem: the
 /// `[toolchain.<name>]` section keys.
 pub const TOOLCHAIN_WORDS: &[&str] = &TOOLCHAIN_ARRAY;
 
@@ -142,7 +142,7 @@ pub fn toolchain_aliases() -> impl Iterator<Item = &'static str> {
         .map(|row| row.id)
 }
 
-/// What `tog fmt --eco` accepts, in registry order.
+/// What `ward fmt --eco` accepts, in registry order.
 pub fn fmt_words() -> impl Iterator<Item = &'static str> {
     ECOSYSTEM_WORDS.iter().filter_map(|row| row.formats)
 }
@@ -156,7 +156,7 @@ pub fn toolchain_section(word: &str) -> Option<&'static str> {
 }
 pub const SYNC_ALIASES: &[&str] = &["install", "i"];
 
-/// The registries `tog x` installs from, as (tailor id, command-line word).
+/// The registries `ward x` installs from, as (tailor id, command-line word).
 /// Each row selects its registry three ways: `--<word>`, `--<id>`, and a
 /// `<word>:` prefix on the tool. The grammar runs before any tailor exists
 /// and may not name one, so this table mirrors the registry rather than
@@ -169,51 +169,51 @@ pub const COMMANDS: &[Spec] = &[
         name: "sync",
         group: Group::Bare,
         summary: "set up the environment(s) from the lockfiles",
-        usage: "tog [--frozen] [--fresh] [--strict] [--resolution-record <path>]...",
+        usage: "ward [--frozen] [--fresh] [--strict] [--resolution-record <path>]...",
         description: "\
 Discovers every ecosystem present in the current directory, realizes each
 locked plan into the immutable store, and projects it into the project
-(.venv, node_modules, .tog/...), then prints the command list. Outside a
+(.venv, node_modules, .greyward/...), then prints the command list. Outside a
 project it prints the command list and exits 0. No other verb is needed
-to get here: 'tog run', 'tog env', 'tog build', 'tog <script>' and
-'tog <file>' do the same first whenever the project is not set up or its
+to get here: 'ward run', 'ward env', 'ward build', 'ward <script>' and
+'ward <file>' do the same first whenever the project is not set up or its
 inputs changed. With
 --frozen, --fresh or --strict the command list is not printed, so a CI
 log ends with the result. A found manifest with no dependencies sets up
 an interpreter-only environment. Adding a dependency is
-'tog add <package>'. Which files are read per ecosystem: 'tog help inputs'.
+'ward add <package>'. Which files are read per ecosystem: 'ward help inputs'.
 
-TOOLCHAIN: the first writable setup writes tog-toolchain.toml at the
+TOOLCHAIN: the first writable setup writes greyward-toolchain.toml at the
 project root, naming the exact runtime per ecosystem; commit it. Later
 runs honor it and never reselect. A source file that disagrees with the
 lock (.python-version, .node-version, go.mod, rust-toolchain.toml,
-.ruby-version, .tool-versions, global.json) stops tog and names
-'tog update --toolchain', which is the only way to move a locked runtime.
+.ruby-version, .tool-versions, global.json) stops ward and names
+'ward update --toolchain', which is the only way to move a locked runtime.
 
---frozen never modifies project inputs, tog-toolchain.toml, or the catalog
+--frozen never modifies project inputs, greyward-toolchain.toml, or the catalog
 cache; it may realize store objects and write the projection after validation
 succeeds; validation failure exits before any write.
 
 Policy exceptions (unattested inputs, failed install scripts, ...) are
-recorded in .tog/closures/*.json and summarized at the end; --strict, a
-TOG_STRICT=1 environment, or a .tog/policy.toml deny list refuses
+recorded in .greyward/closures/*.json and summarized at the end; --strict, a
+GREYWARD_STRICT=1 environment, or a .greyward/policy.toml deny list refuses
 them instead.
 
-RESOLUTION RECORDS: a lock that a tog resolution door wrote carries a
-signed receipt, .tog/resolution/<ecosystem>.json. The sync copies a
+RESOLUTION RECORDS: a lock that a ward resolution door wrote carries a
+signed receipt, .greyward/resolution/<ecosystem>.json. The sync copies a
 receipt into the closure when a key in the machine policy's [signing]
 list signed it and it still matches the lock and manifests on disk;
 otherwise it records unrecorded-resolution, which --strict and the
-company policy refuse ('tog attest' makes a receipt). --resolution-record
+company policy refuse ('ward attest' makes a receipt). --resolution-record
 <path> adds records from a file or a directory of them (a CI artifact from
-'tog attest --record-out'); they are checked the same way and never
+'ward attest --record-out'); they are checked the same way and never
 written into the project.",
         examples: &[
-            ("tog", "set up this project, then show what to run next"),
-            ("tog --frozen", "CI: check the locks are current without writing them"),
-            ("tog --fresh", "rebuild .venv / node_modules from scratch"),
+            ("ward", "set up this project, then show what to run next"),
+            ("ward --frozen", "CI: check the locks are current without writing them"),
+            ("ward --fresh", "rebuild .venv / node_modules from scratch"),
             (
-                "tog --strict --frozen --resolution-record records/",
+                "ward --strict --frozen --resolution-record records/",
                 "CI gate: every lock needs a record a trusted key signed",
             ),
         ],
@@ -222,7 +222,7 @@ written into the project.",
             (
                 "--strict",
                 "refuse every policy exception, including a lock without a signed resolution \
-                 record (same as TOG_STRICT=1)",
+                 record (same as GREYWARD_STRICT=1)",
             ),
             (
                 "--resolution-record <path>",
@@ -231,7 +231,7 @@ written into the project.",
             ),
             (
                 "--frozen",
-                "validate tog-toolchain.toml and the dependency locks without writing either; fail if missing or stale",
+                "validate greyward-toolchain.toml and the dependency locks without writing either; fail if missing or stale",
             ),
             HELP_OPTION,
         ],
@@ -241,12 +241,12 @@ written into the project.",
         name: "add",
         group: Group::Everyday,
         summary: "add a dependency, re-lock, sync",
-        usage: "tog add <package>... [--dev] [--no-sync]",
+        usage: "ward add <package>... [--dev] [--no-sync]",
         description: "\
 Adds each package to the project's manifest with the ecosystem's own pinned
 tool (uv, the store npm, pinned pnpm, cargo, go, bundler), re-locks, and
 syncs. Where no pinned tool can make the edit (Poetry, PDM, Yarn classic,
-setup.py, Elixir, .NET) tog refuses and prints the exact line and file
+setup.py, Elixir, .NET) ward refuses and prints the exact line and file
 instead.
 
 Which ecosystem: an explicit prefix (py:requests, npm:react, cargo:serde,
@@ -254,17 +254,17 @@ go:github.com/x/y, gem:rails, hex:jason, nuget:Foo.Bar) or the name's shape
 (@scope/name, github.com/..., Foo.Bar) decides it; otherwise the nearest
 manifest walking up from here; if that directory holds several, the
 registries are asked and a name known to exactly one wins; if several know
-it you are asked at the terminal. Tog never guesses from the bare name.
+it you are asked at the terminal. Greyward never guesses from the bare name.
 Constraints pass through to the tool: 'requests>=2', 'react@18',
 'serde@1', 'rails@~> 7.1'.",
         examples: &[
-            ("tog add requests", "add a dependency, re-lock, and sync"),
-            ("tog add react@18 --dev", "a development dependency, at a version"),
-            ("tog add py:requests", "name the ecosystem when several manifests are here"),
+            ("ward add requests", "add a dependency, re-lock, and sync"),
+            ("ward add react@18 --dev", "a development dependency, at a version"),
+            ("ward add py:requests", "name the ecosystem when several manifests are here"),
         ],
         options: &[
             ("-D, --dev", "a development dependency (uv --dev, npm --save-dev, cargo --dev, bundler group development)"),
-            ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
+            ("--no-sync", "stop after the manifest and lock edit; review, then run 'ward'"),
             HELP_OPTION,
         ],
         words: &[],
@@ -273,17 +273,17 @@ Constraints pass through to the tool: 'requests>=2', 'react@18',
         name: "remove",
         group: Group::Everyday,
         summary: "remove a dependency, re-lock, sync",
-        usage: "tog remove <package>... [--dev] [--no-sync]",
+        usage: "ward remove <package>... [--dev] [--no-sync]",
         description: "\
 The inverse of add, through the same pinned tools with the same ecosystem
-choice. For a plain requirements file tog deletes the line itself.",
+choice. For a plain requirements file ward deletes the line itself.",
         examples: &[
-            ("tog remove requests", "drop it from the manifest, re-lock, and sync"),
-            ("tog remove react --dev", "from the development dependencies"),
+            ("ward remove requests", "drop it from the manifest, re-lock, and sync"),
+            ("ward remove react --dev", "from the development dependencies"),
         ],
         options: &[
             ("-D, --dev", "remove from development dependencies (uv --dev, cargo --dev)"),
-            ("--no-sync", "stop after the manifest and lock edit; review, then run 'tog'"),
+            ("--no-sync", "stop after the manifest and lock edit; review, then run 'ward'"),
             HELP_OPTION,
         ],
         words: &[],
@@ -291,8 +291,8 @@ choice. For a plain requirements file tog deletes the line itself.",
     Spec {
         name: "update",
         group: Group::Everyday,
-        summary: "update dependencies, --toolchain, or --self (tog itself)",
-        usage: "tog update [<package>...] [--no-sync]\n  tog update --toolchain [<ecosystem>] [--no-sync]\n  tog update --self",
+        summary: "update dependencies, --toolchain, or --self (ward itself)",
+        usage: "ward update [<package>...] [--no-sync]\n  ward update --toolchain [<ecosystem>] [--no-sync]\n  ward update --self",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
@@ -304,32 +304,32 @@ with their own tool.
 project's declarative toolchain sources, selects the newest compatible
 release for every ecosystem the project has, or only <ecosystem> — python,
 node, rust (spelled cargo too), go, ruby, elixir, dotnet — rewrites
-tog-toolchain.toml, and syncs. It takes no package name and leaves every
+greyward-toolchain.toml, and syncs. It takes no package name and leaves every
 dependency lock alone. It is also how an ecosystem the project just gained
 gets its section, and the next step every stale-lock refusal names.
 --no-sync stops after the lock is written, so the diff can be reviewed
 before anything is realized.
 
---self updates tog itself and touches no project: it asks GitHub for the
+--self updates ward itself and touches no project: it asks GitHub for the
 newest release, stops when this build is already that version, and
 otherwise downloads the binary for this machine, checks the sha256 the
 release publishes, and renames it over the running binary. It refuses,
-naming the directory, when that directory is not writable. 'tog doctor'
+naming the directory, when that directory is not writable. 'ward doctor'
 says when a newer release exists; nothing checks in the background.",
         examples: &[
-            ("tog update", "re-lock every dependency"),
-            ("tog update --toolchain python", "move the pinned Python, then sync"),
-            ("tog update --self", "replace this binary with the newest release"),
+            ("ward update", "re-lock every dependency"),
+            ("ward update --toolchain python", "move the pinned Python, then sync"),
+            ("ward update --self", "replace this binary with the newest release"),
         ],
         options: &[
-            ("--no-sync", "stop after the lock edit; review, then run 'tog'"),
+            ("--no-sync", "stop after the lock edit; review, then run 'ward'"),
             (
                 "--toolchain [<ecosystem>]",
-                "re-select the toolchain from the project's version files and rewrite tog-toolchain.toml, then sync",
+                "re-select the toolchain from the project's version files and rewrite greyward-toolchain.toml, then sync",
             ),
             (
                 "--self",
-                "replace this tog binary with the newest GitHub release",
+                "replace this ward binary with the newest GitHub release",
             ),
             HELP_OPTION,
         ],
@@ -339,28 +339,28 @@ says when a newer release exists; nothing checks in the background.",
         name: "run",
         group: Group::Everyday,
         summary: "run a command or package.json script in the environment(s)",
-        usage: "tog run [--] <command> [<args>...]",
+        usage: "ward run [--] <command> [<args>...]",
         description: "\
 Executes <command> with PATH and the ecosystem variables of the nearest
-projected root (the closest ancestor with .tog/closures/). When the
+projected root (the closest ancestor with .greyward/closures/). When the
 project has a package.json and <command> names one of its scripts, the
 script runs (pre/name/post, npm environment, exit code passed through) and
-wins over a same-named executable on PATH; 'tog <script>' is the short
-form when the script name is not a tog command, and 'tog <file>' runs a
-source file with its ecosystem's program ('tog app.py' is 'tog run python
+wins over a same-named executable on PATH; 'ward <script>' is the short
+form when the script name is not a ward command, and 'ward <file>' runs a
+source file with its ecosystem's program ('ward app.py' is 'ward run python
 app.py'; .py, .js, .mjs, .cjs, .ts, .mts, .cts, .rb, .exs and .go) inside
 the project that has that ecosystem. Everything after <command> is passed
 through unchanged.
 
 The environment is the one the project's inputs describe: when nothing is
-synced yet, or 'tog status' would say a manifest or lock changed, the
+synced yet, or 'ward status' would say a manifest or lock changed, the
 project is synced first (one line on stderr says why) and then the command
 runs. A sync that would refuse refuses here too, in its own words. A
 directory with no manifest has nothing to sync and exits 1 saying so.",
         examples: &[
-            ("tog run python app.py", "run a program in the project's environment"),
-            ("tog run pytest -q", "every argument after the command is passed through"),
-            ("tog dev", "a package.json script, without the word 'run'"),
+            ("ward run python app.py", "run a program in the project's environment"),
+            ("ward run pytest -q", "every argument after the command is passed through"),
+            ("ward dev", "a package.json script, without the word 'run'"),
         ],
         options: &[HELP_OPTION],
         words: &[],
@@ -369,20 +369,20 @@ directory with no manifest has nothing to sync and exits 1 saying so.",
         name: "env",
         group: Group::Everyday,
         summary: "print the environment as shell exports (for eval or direnv)",
-        usage: "tog env [--shell <bash|zsh|fish>]",
+        usage: "ward env [--shell <bash|zsh|fish>]",
         description: "\
-Prints, on stdout, the same PATH and ecosystem variables 'tog run' would
+Prints, on stdout, the same PATH and ecosystem variables 'ward run' would
 give a child: one line per variable, in the syntax --shell names. Nothing
 but those lines goes to stdout, so the output is safe to eval.
 
-'tog run <command>' scopes that environment to one command. 'env' makes it
+'ward run <command>' scopes that environment to one command. 'env' makes it
 ambient instead: every later command in the shell that evals it sees the
-environment, including commands tog knows nothing about. direnv is what
+environment, including commands ward knows nothing about. direnv is what
 scopes an ambient environment back to a directory, loading it on entry and
 unloading it on exit.
 
-  eval \"$(tog env)\"        # this shell, until it exits
-  echo 'eval \"$(tog env)\"' > .envrc && direnv allow
+  eval \"$(ward env)\"        # this shell, until it exits
+  echo 'eval \"$(ward env)\"' > .envrc && direnv allow
                            # direnv: scoped to this directory
 
 --shell defaults to the basename of $SHELL when that is bash, zsh, or fish,
@@ -395,10 +395,10 @@ Like 'run', it syncs first when the project is not synced or its inputs
 changed; that narration goes to stderr, so stdout still carries only the
 environment. A directory with no manifest prints nothing and exits 1
 saying so. A package.json script named 'env' is reached with
-'tog run env': a built-in always wins.",
+'ward run env': a built-in always wins.",
         examples: &[
-            ("eval \"$(tog env)\"", "this shell, until it exits"),
-            ("echo 'eval \"$(tog env)\"' > .envrc && direnv allow", "direnv, per directory"),
+            ("eval \"$(ward env)\"", "this shell, until it exits"),
+            ("echo 'eval \"$(ward env)\"' > .envrc && direnv allow", "direnv, per directory"),
         ],
         options: &[
             (
@@ -413,7 +413,7 @@ saying so. A package.json script named 'env' is reached with
         name: "x",
         group: Group::Everyday,
         summary: "run a tool without adding it as a dependency (like npx / uvx)",
-        usage: "tog x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]\n  tog x --clean [--py | --npm] [--from <package>] [<tool>[@<version>]]",
+        usage: "ward x [--py | --npm] [--from <package>] <tool>[@<version>] [<args>...]\n  ward x --clean [--py | --npm] [--from <package>] [<tool>[@<version>]]",
         description: "\
 Resolves the package with the store uv or npm, realizes it as an ordinary
 store environment (a store hit from the second run on), and executes the
@@ -421,15 +421,15 @@ tool with every argument passed through. Which registry: 'py:' or 'npm:'
 on the tool, --py / --npm, or the current project's ecosystem (Python
 first, then Node); outside a project the prefix is required. --from names
 the package when the executable is called something else
-('tog x --from httpie http'). Environments live under ~/.tog/x/
+('ward x --from httpie http'). Environments live under ~/.greyward/x/
 and are gc roots like any project. `--clean` removes every cached x
 environment, or only the selected tool's environments; store objects stay
-until the next `tog gc`. A running tool is left in place and reported as
+until the next `ward gc`. A running tool is left in place and reported as
 in use; retry after it exits.",
         examples: &[
-            ("tog x ruff check .", "run a tool that is not a dependency"),
-            ("tog x --npm prettier --write .", "say which registry when it is ambiguous"),
-            ("tog x --from httpie http example.com", "when the tool and the package differ"),
+            ("ward x ruff check .", "run a tool that is not a dependency"),
+            ("ward x --npm prettier --write .", "say which registry when it is ambiguous"),
+            ("ward x --from httpie http example.com", "when the tool and the package differ"),
         ],
         options: &[
             ("--clean", "remove cached x environments instead of running a tool"),
@@ -444,20 +444,20 @@ in use; retry after it exits.",
         name: "build",
         group: Group::Everyday,
         summary: "sandboxed, network-denied build (cargo | go | elixir | dotnet)",
-        usage: "tog build [<ecosystem>] [--] [<tool args>...]",
+        usage: "ward build [<ecosystem>] [--] [<tool args>...]",
         description: "\
 Runs the ecosystem's build tool inside the network-denied sandbox with the
 pinned toolchain and the realized dependency objects. The ecosystem is
 inferred when exactly one build-capable project (Cargo.toml, go.mod,
 mix.exs, *.csproj) is found from here upward; name it when several are.
 Every argument after the ecosystem is handed to the tool unchanged, so
-'tog build --release' works; use '--' if the first tool argument is
+'ward build --release' works; use '--' if the first tool argument is
 '-h' or '--help'. Like 'run', it sets the project up first when the
 ecosystem it builds is not set up or its inputs changed; in CI run
-'tog --frozen' before it.",
+'ward --frozen' before it.",
         examples: &[
-            ("tog build", "network-denied build with the pinned toolchain"),
-            ("tog build --release", "arguments after the verb go to the build tool"),
+            ("ward build", "network-denied build with the pinned toolchain"),
+            ("ward build --release", "arguments after the verb go to the build tool"),
         ],
         options: &[HELP_OPTION],
         words: BUILD_WORDS,
@@ -466,23 +466,23 @@ ecosystem it builds is not set up or its inputs changed; in CI run
         name: "fmt",
         group: Group::Everyday,
         summary: "format the Rust workspace with the pinned rustfmt",
-        usage: "tog fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
+        usage: "ward fmt [--check] [--eco <ecosystem>] [--] [<args>...]",
         description: "\
 Runs the pinned rustfmt/cargo-fmt for a Rust workspace. The workspace is
 discovered with the store Cargo tool and Cargo metadata is read with
 --no-deps, so a project that has never been synced needs no Cargo.lock,
 dependency resolution, or vendor object. --check returns rustfmt's status.
-The formatter is the one the committed tog-toolchain.toml pins, and the
-run writes no record: a .tog/closures/rustfmt.json an older tog left is
+The formatter is the one the committed greyward-toolchain.toml pins, and the
+run writes no record: a .greyward/closures/rustfmt.json an older ward left is
 deleted by a run without --check once the project has another closure, or
 once gc has forgotten the project's root.
 A package.json script named fmt takes precedence and is run as
-'tog run fmt'. In a polyglot directory use --eco rust: an explicit --eco
+'ward run fmt'. In a polyglot directory use --eco rust: an explicit --eco
 selects the ecosystem, so it formats Rust instead of running that script.
 --eco accepts rust.",
         examples: &[
-            ("tog fmt", "format the Rust workspace with the pinned rustfmt"),
-            ("tog fmt --check", "CI: fail when something is unformatted"),
+            ("ward fmt", "format the Rust workspace with the pinned rustfmt"),
+            ("ward fmt --check", "CI: fail when something is unformatted"),
         ],
         options: &[
             ("--check", "check formatting without editing files"),
@@ -495,7 +495,7 @@ selects the ecosystem, so it formats Rust instead of running that script.
         name: "doctor",
         group: Group::Inspect,
         summary: "check host prerequisites, the sandbox, and the store",
-        usage: "tog doctor [--isolation] [--json]",
+        usage: "ward doctor [--isolation] [--json]",
         description: "\
 The first-five-minutes command. Checks this build against the newest
 GitHub release (one request; 'not checked' when offline), the platform,
@@ -507,11 +507,11 @@ status 1 on any fail.
 
 --isolation checks only what isolates a resolver (npm, cargo, Bundler and
 the rest when they change a lock): bubblewrap, else rootless podman, and
-the tog-isolate helper. It fails when none of them can run one here.",
+the greyward-isolate helper. It fails when none of them can run one here.",
         examples: &[
-            ("tog doctor", "check this machine, the sandbox, and the store"),
-            ("tog doctor --json", "the same rows as one JSON document"),
-            ("tog doctor --isolation", "can this machine run a resolver isolated?"),
+            ("ward doctor", "check this machine, the sandbox, and the store"),
+            ("ward doctor --json", "the same rows as one JSON document"),
+            ("ward doctor --isolation", "can this machine run a resolver isolated?"),
         ],
         options: &[
             (
@@ -527,19 +527,19 @@ the tog-isolate helper. It fails when none of them can run one here.",
         name: "status",
         group: Group::Inspect,
         summary: "is the environment current with the manifest and the lock?",
-        usage: "tog status [--json]",
+        usage: "ward status [--json]",
         description: "\
 For every ecosystem found here: 'synced' when the last sync's inputs are
 byte-identical to the files on disk and the projection is in place;
 otherwise which file changed, that the projection is missing, or that the
 closure was synced on another platform. Under each row, the policy
 exceptions that sync recorded (kind and subject): what it allowed and
-cannot vouch for; 'tog audit' judges them. Offline and read-only. Exit
+cannot vouch for; 'ward audit' judges them. Offline and read-only. Exit
 status 0 only when everything is synced, so CI can use it as a 'did you
 commit the lock' gate.",
         examples: &[
-            ("tog status", "is the environment current with the lock?"),
-            ("tog status --json", "machine-readable, for a CI step"),
+            ("ward status", "is the environment current with the lock?"),
+            ("ward status --json", "machine-readable, for a CI step"),
         ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
@@ -548,15 +548,15 @@ commit the lock' gate.",
         name: "ls",
         group: Group::Inspect,
         summary: "list what is installed, per ecosystem",
-        usage: "tog ls [<ecosystem>] [--json]",
+        usage: "ward ls [<ecosystem>] [--json]",
         description: "\
 Name and version of every package in each synced closure, with the
 toolchain each runs on; -v adds the artifact and store object. Read from
-.tog/closures/*.json. Ecosystems: python, node,
+.greyward/closures/*.json. Ecosystems: python, node,
 cargo, go, ruby, elixir, dotnet.",
         examples: &[
-            ("tog ls", "every package in every synced ecosystem"),
-            ("tog ls python", "one ecosystem only"),
+            ("ward ls", "every package in every synced ecosystem"),
+            ("ward ls python", "one ecosystem only"),
         ],
         options: &[
             ("-v, --verbose", "add each package's artifact and store object"),
@@ -569,16 +569,17 @@ cargo, go, ruby, elixir, dotnet.",
         name: "audit",
         group: Group::Inspect,
         summary: "would the synced environments pass a policy? (CI gate)",
-        usage: "tog audit [--policy <file>] [--signed | --allow-unsigned] [--json]",
+        usage: "ward audit [--policy <file>] [--signed | --allow-unsigned] [--json]",
         description: "\
-Reads the closure records every sync committed to .tog/closures/*.json
+Reads the closure records every sync committed to .greyward/closures/*.json
 and judges the exceptions they record against the policy chain
-(TOG_POLICY or ~/.tog/policy.toml, every ancestor's .tog/policy.toml,
-TOG_STRICT) merged with --policy <file>. Merging only tightens: the file
-can add denials but never loosen what the machine or project policy
-says. When the machine policy has a [signing] table, each record's
+(GREYWARD_POLICY or ~/.greyward/policy.toml, every ancestor's
+.greyward/policy.toml, GREYWARD_STRICT) merged with --policy <file>.
+Merging only tightens: the file can add denials but never loosen what
+the machine or project policy says. When the machine policy has a
+[signing] table, each record's
 signature is verified against its trusted keys first (a project
-.tog/policy.toml or --policy <file> can only drop keys, never add one);
+.greyward/policy.toml or --policy <file> can only drop keys, never add one);
 without one, signatures are not checked, the report says so, and
 --signed makes that a usage error (exit 2) for a CI job that must never
 run unconfigured. A plain audit under CI (CI set to anything but false
@@ -587,9 +588,9 @@ signatures unchecked; --allow-unsigned runs it anyway. Per closure, the
 first that applies: bad-signature (tampered or malformed; find out who
 changed it), untrusted (signed by a key the trusted set does not
 contain), outdated (unsigned while signatures are checked, or predates
-input, platform, or exception recording; run 'tog' once, under a trusted
+input, platform, or exception recording; run 'ward' once, under a trusted
 key when signatures are checked, then commit), stale (its inputs changed
-since the sync, the same check 'tog status' makes), denied (each denied
+since the sync, the same check 'ward status' makes), denied (each denied
 exception's kind, subject, and detail, plus a count of permitted ones by
 kind), unknown (a kind this binary cannot judge), or clean. When
 signatures are checked, a record that is not trusted is not evaluated
@@ -597,13 +598,13 @@ further. A detected ecosystem with no closure is missing. Only clean
 passes. Offline, read-only, no store access, no sandbox needed. Exit
 status 0 when every closure is clean and none is missing, 1 otherwise, 2
 for an unreadable --policy file, or for --signed or a plain audit under
-CI with no trusted key configured. 'tog keygen' creates a signing key;
-set TOG_SIGNING_KEY where sync runs. A company deny list to start from
+CI with no trusted key configured. 'ward keygen' creates a signing key;
+set GREYWARD_SIGNING_KEY where sync runs. A company deny list to start from
 ships as docs/human/policy-company.toml.",
         examples: &[
-            ("tog audit", "does this environment pass my policy?"),
-            ("tog audit --signed", "the CI gate: signatures checked, or exit 2"),
-            ("tog audit --policy docs/human/policy-company.toml", "add a company deny list"),
+            ("ward audit", "does this environment pass my policy?"),
+            ("ward audit --signed", "the CI gate: signatures checked, or exit 2"),
+            ("ward audit --policy docs/human/policy-company.toml", "add a company deny list"),
         ],
         options: &[
             ("--policy <file>", "also deny what this policy file denies"),
@@ -618,17 +619,17 @@ ships as docs/human/policy-company.toml.",
         name: "plan",
         group: Group::Inspect,
         summary: "print the locked plan(s) as JSON",
-        usage: "tog plan [--json]",
+        usage: "ward plan [--json]",
         description: "\
-Prints one JSON document per ecosystem found here, exactly what 'tog
+Prints one JSON document per ecosystem found here, exactly what 'ward
 sync' would realize. Planning may resolve missing lockfiles with the store's
-own uv/npm/cargo and cache the result under .tog/.
+own uv/npm/cargo and cache the result under .greyward/.
 The output is JSON either way; --json adds nothing but the promise every
 --json command makes: stdout is JSON and a failure is a JSON object on
 stderr.",
         examples: &[
-            ("tog plan", "the locked plan for every ecosystem, as JSON"),
-            ("tog plan | jq .", "read it with jq"),
+            ("ward plan", "the locked plan for every ecosystem, as JSON"),
+            ("ward plan | jq .", "read it with jq"),
         ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
@@ -637,14 +638,14 @@ stderr.",
         name: "sbom",
         group: Group::Inspect,
         summary: "CycloneDX 1.5 SBOM of the synced environments",
-        usage: "tog sbom [--output <file>]",
+        usage: "ward sbom [--output <file>]",
         description: "\
 Emits a CycloneDX 1.5 document covering every ecosystem closure recorded by
 the last sync: pinned hashes, purls, and toolchain store ids. Writes to
 stdout unless --output is given.",
         examples: &[
-            ("tog sbom", "a CycloneDX document on stdout"),
-            ("tog sbom -o sbom.json", "write it to a file instead"),
+            ("ward sbom", "a CycloneDX document on stdout"),
+            ("ward sbom -o sbom.json", "write it to a file instead"),
         ],
         options: &[
             ("-o, --output <file>", "write the document to <file> instead of stdout"),
@@ -656,10 +657,10 @@ stdout unless --output is given.",
         name: "gc",
         group: Group::Maintain,
         summary: "collect unreferenced store objects and cached artifacts",
-        usage: "tog gc [--dry-run] [--keep-days <n>] [--project]\n  \
-                tog gc --drop-object <id>... [--dry-run]\n  \
-                tog gc --register <dir>... [--forget <key>...]\n  \
-                tog gc --reset [--dry-run]",
+        usage: "ward gc [--dry-run] [--keep-days <n>] [--project]\n  \
+                ward gc --drop-object <id>... [--dry-run]\n  \
+                ward gc --register <dir>... [--forget <key>...]\n  \
+                ward gc --reset [--dry-run]",
         description: "\
 Follows every registered project closure, removes store objects nothing
 references, drops cached artifacts older than the retention window, and
@@ -670,23 +671,23 @@ backups, and run homes no registered project owns. A root record says for
 itself what its project needs, so it keeps protecting those objects even
 when the project directory is gone; give the protection up with --forget.
 The one root gc forgets by itself is one whose project holds only retired
-closure records (the rustfmt.json an older tog fmt wrote) and which
+closure records (the rustfmt.json an older ward fmt wrote) and which
 protects nothing those records do not name; a dry run reports it.
-Cleanup is skipped while another Tog job is using this store. A record
+Cleanup is skipped while another Greyward job is using this store. A record
 that cannot be read stops the sweep rather than being guessed at: the
 refusal lists every one, and --drop-object removes the ones that cannot be
 repaired. Usable on a copied store from any host.
 
 --reset empties the store and starts it again: every object, record, root
 and project forest goes, and the downloads in the cache stay, so the next
-'tog' in each project rebuilds what it needs, mostly without the network.
-It is the way out of a store this tog refuses to open, one written by an
-older tog in a format it no longer reads.",
+'ward' in each project rebuilds what it needs, mostly without the network.
+It is the way out of a store this ward refuses to open, one written by an
+older ward in a format it no longer reads.",
         examples: &[
-            ("tog gc --dry-run", "what would be collected, without collecting it"),
-            ("tog gc", "collect unreferenced store objects"),
-            ("tog gc --project", "also collect old project forests, backups and run homes"),
-            ("tog gc --reset", "empty the store, keeping its downloads"),
+            ("ward gc --dry-run", "what would be collected, without collecting it"),
+            ("ward gc", "collect unreferenced store objects"),
+            ("ward gc --project", "also collect old project forests, backups and run homes"),
+            ("ward gc --reset", "empty the store, keeping its downloads"),
         ],
         options: &[
             (
@@ -715,7 +716,7 @@ older tog in a format it no longer reads.",
             (
                 "--reset",
                 "empty the store and start it again in the current format, keeping the \
-                 download cache; works on a store this tog refuses to open",
+                 download cache; works on a store this ward refuses to open",
             ),
             HELP_OPTION,
         ],
@@ -725,14 +726,14 @@ older tog in a format it no longer reads.",
         name: "store",
         group: Group::Maintain,
         summary: "'store path', 'store roots'",
-        usage: "tog store <path | roots>",
+        usage: "ward store <path | roots>",
         // Not a `\`-continued literal: that escape eats the leading spaces
         // of the next line, and this description is a two-row table.
-        description: "  path    print the store root (~/.tog/store unless TOG_STORE is set)
+        description: "  path    print the store root (~/.greyward/store unless GREYWARD_STORE is set)
   roots   list every registered project root as '<key>  <path>'",
         examples: &[
-            ("tog store path", "where the store lives"),
-            ("tog store roots", "every project the store protects"),
+            ("ward store path", "where the store lives"),
+            ("ward store roots", "every project the store protects"),
         ],
         options: &[HELP_OPTION],
         words: &["path", "roots"],
@@ -741,20 +742,20 @@ older tog in a format it no longer reads.",
         name: "keygen",
         group: Group::Maintain,
         summary: "create a closure-signing key and print its public key",
-        usage: "tog keygen <path>",
+        usage: "ward keygen <path>",
         description: "\
 Writes a new Ed25519 signing key to <path> (created exclusively, mode 0600;
 an existing file or symlink is refused, never overwritten) and prints the
 public key on stdout as the [signing] policy table to paste into the
-machine policy. Set TOG_SIGNING_KEY=<path> where 'tog' and
-'tog fmt' run so every closure they write is signed; once the machine
-policy trusts a key, 'tog audit' accepts only records signed by one it
+machine policy. Set GREYWARD_SIGNING_KEY=<path> where 'ward' and
+'ward fmt' run so every closure they write is signed; once the machine
+policy trusts a key, 'ward audit' accepts only records signed by one it
 trusts (until then it judges records without checking signatures). Keep the
 key outside the checkout, the store, and any sandbox read root; a job that
 runs untrusted project code must not hold one.",
         examples: &[
-            ("tog keygen ~/.tog/signing.key", "then set TOG_SIGNING_KEY to it where sync runs"),
-            ("tog keygen ci.key", "the public key it prints goes in the policy"),
+            ("ward keygen ~/.greyward/signing.key", "then set GREYWARD_SIGNING_KEY to it where sync runs"),
+            ("ward keygen ci.key", "the public key it prints goes in the policy"),
         ],
         options: &[HELP_OPTION],
         words: &[],
@@ -763,33 +764,34 @@ runs untrusted project code must not hold one.",
         name: "attest",
         group: Group::Maintain,
         summary: "sign a resolution record for each lock (for --strict)",
-        usage: "tog attest [<ecosystem>...] [--record-out <path>]\n  \
-                tog attest --ledger-export <ecosystem> <file>\n  \
-                tog attest --ledger-import <file>",
+        usage: "ward attest [<ecosystem>...] [--record-out <path>]\n  \
+                ward attest --ledger-export <ecosystem> <file>\n  \
+                ward attest --ledger-import <file>",
         description: "\
 Runs each ecosystem's own lock check (go mod tidy -diff, uv lock --locked,
 npm install --package-lock-only, ...) through a confined resolution door,
 and when the lock and manifest come out byte-unchanged writes the signed
-receipt .tog/resolution/<ecosystem>.json, signed with TOG_SIGNING_KEY. A
-sync joins a receipt into the closure when a key in the machine policy's
-[signing] list signed it; a lock without one records unrecorded-resolution,
-which --strict and the company policy refuse. With no ecosystem named, every
-ecosystem found here is attested, and nothing is written unless all pass. An
-ecosystem without a lock check through the door is refused with the reason.
+receipt .greyward/resolution/<ecosystem>.json, signed with
+GREYWARD_SIGNING_KEY. A sync joins a receipt into the closure when a key
+in the machine policy's [signing] list signed it; a lock without one
+records unrecorded-resolution, which --strict and the company policy
+refuse. With no ecosystem named, every ecosystem found here is attested,
+and nothing is written unless all pass. An ecosystem without a lock check
+through the door is refused with the reason.
 --record-out writes the records to <path> instead (a file when one
 ecosystem is named, else a directory of <ecosystem>.json) and leaves the
-checkout unchanged: the CI artifact 'tog --resolution-record' reads.
+checkout unchanged: the CI artifact 'ward --resolution-record' reads.
 --ledger-export writes the portable ledger the committed record names (it
 must be in the local store); --ledger-import stores one only when an
 attesting record here names exactly those bytes.",
         examples: &[
-            ("tog attest", "sign a receipt for every lock here"),
+            ("ward attest", "sign a receipt for every lock here"),
             (
-                "tog attest go --record-out go.json",
+                "ward attest go --record-out go.json",
                 "CI: write the record as an artifact, not into the checkout",
             ),
             (
-                "tog attest --ledger-export go ledger.json",
+                "ward attest --ledger-export go ledger.json",
                 "hand the evidence behind a record to another machine",
             ),
         ],
@@ -814,18 +816,18 @@ attesting record here names exactly those bytes.",
         name: "completions",
         group: Group::Maintain,
         summary: "print a shell completion script (bash | zsh | fish)",
-        usage: "tog completions <bash | zsh | fish>",
+        usage: "ward completions <bash | zsh | fish>",
         description: "\
 Generated from the same command table as this help, so it cannot drift.
 Install:
-  bash   tog completions bash > ~/.local/share/bash-completion/completions/tog
-  zsh    tog completions zsh  > \"${fpath[1]}/_tog\"   (then: compinit)
-  fish   tog completions fish > ~/.config/fish/completions/tog.fish
-Package.json script names complete after 'tog run' and as the first
+  bash   ward completions bash > ~/.local/share/bash-completion/completions/ward
+  zsh    ward completions zsh  > \"${fpath[1]}/_ward\"   (then: compinit)
+  fish   ward completions fish > ~/.config/fish/completions/ward.fish
+Package.json script names complete after 'ward run' and as the first
 word when a package.json is in the current directory.",
         examples: &[
-            ("eval \"$(tog completions bash)\"", "this shell, right now"),
-            ("tog completions zsh > \"${fpath[1]}/_tog\"", "then: compinit"),
+            ("eval \"$(ward completions bash)\"", "this shell, right now"),
+            ("ward completions zsh > \"${fpath[1]}/_ward\"", "then: compinit"),
         ],
         options: &[HELP_OPTION],
         words: SHELL_WORDS,
@@ -837,33 +839,33 @@ word when a package.json is in the current directory.",
 /// Hand-written rather than generated, because the order is the lesson.
 const START_HERE: &str = "\
 START HERE:
-  tog                   set up the project from its lockfiles
-  tog run <command>     run something inside that environment
-  tog add <package>     add a dependency, re-lock, sync
-  tog doctor            check this machine when something looks wrong
+  ward                   set up the project from its lockfiles
+  ward run <command>     run something inside that environment
+  ward add <package>     add a dependency, re-lock, sync
+  ward doctor            check this machine when something looks wrong
 ";
 
-/// What follows a bare `tog` whose sync succeeded: the commands most likely
+/// What follows a bare `ward` whose sync succeeded: the commands most likely
 /// to come next and where the full list is, short enough that the sync's
 /// own result stays on screen. Hand-written like `START_HERE`, and it
 /// repeats that section's lines after the first, which the person has just
 /// run.
 const SYNC_FOOTER: &str = "\
 NEXT:
-  tog run <command>     run something inside that environment
-  tog add <package>     add a dependency, re-lock, sync
-  tog build             build in the sandbox (cargo | go | elixir | dotnet)
-  tog doctor            check this machine when something looks wrong
-  tog --help            every command and option
+  ward run <command>     run something inside that environment
+  ward add <package>     add a dependency, re-lock, sync
+  ward build             build in the sandbox (cargo | go | elixir | dotnet)
+  ward doctor            check this machine when something looks wrong
+  ward --help            every command and option
 ";
 
-/// The footer `main` prints after a bare `tog` that synced.
+/// The footer `main` prints after a bare `ward` that synced.
 pub fn sync_footer() -> &'static str {
     SYNC_FOOTER
 }
 
 /// What `main` prints after a command ends with `code`, if anything: the
-/// [`sync_footer`] when the command was a bare `tog` whose sync succeeded
+/// [`sync_footer`] when the command was a bare `ward` whose sync succeeded
 /// and output is not `-q` (results only, which is what CI uses). A failed
 /// sync gets nothing, so its error stays the last thing on screen, and
 /// every named command gets nothing.
@@ -873,10 +875,10 @@ pub fn after_command(bare: bool, code: i32, quiet: bool) -> Option<String> {
 
 const ENVIRONMENT: &str = "\
 ENVIRONMENT:
-  TOG_STORE           store root (default ~/.tog/store)
-  TOG_STRICT=1        refuse every policy exception, like 'tog --strict'
-  TOG_POLICY          policy file used instead of ~/.tog/policy.toml
-  TOG_SIGNING_KEY     key file that signs closures and resolution records
+  GREYWARD_STORE           store root (default ~/.greyward/store)
+  GREYWARD_STRICT=1        refuse every policy exception, like 'ward --strict'
+  GREYWARD_POLICY          policy file used instead of ~/.greyward/policy.toml
+  GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
 ";
 
@@ -891,7 +893,7 @@ pub fn listed() -> impl Iterator<Item = &'static Spec> {
     COMMANDS.iter().filter(|spec| spec.group != Group::Bare)
 }
 
-/// The help topics that are not commands: `setup` is the bare `tog`,
+/// The help topics that are not commands: `setup` is the bare `ward`,
 /// `inputs` the per-ecosystem file table.
 pub const HELP_TOPICS: &[&str] = &["setup", "inputs"];
 
@@ -899,7 +901,7 @@ pub const HELP_TOPICS: &[&str] = &["setup", "inputs"];
 /// has a topic of its own rather than a place on the first screen.
 pub fn inputs() -> String {
     "\
-tog inputs — which files tog reads, per ecosystem
+ward inputs — which files ward reads, per ecosystem
 
 Every ecosystem found in the project directory is set up; any combination
 works.
@@ -910,7 +912,7 @@ works.
            when compatible. .python-version selects the interpreter: X.Y
            takes the newest pinned patch, X.Y.Z must be an exact pinned
            build, and with neither the newest pinned build is taken once
-           and then recorded in tog-toolchain.toml.
+           and then recorded in greyward-toolchain.toml.
   node     package.json with package-lock.json (v2/v3), pnpm-lock.yaml
            (v9, v6 importer shape also accepted) or yarn.lock (Yarn
            classic v1); a missing lock is written by the store npm
@@ -923,13 +925,13 @@ works.
   dotnet   *.csproj, *.sln or *.slnx with packages.lock.json (the lock
            is mandatory)
 
-tog-toolchain.toml at the project root pins the runtime per ecosystem;
-'tog help setup' says how it is written and moved.
+greyward-toolchain.toml at the project root pins the runtime per ecosystem;
+'ward help setup' says how it is written and moved.
 "
     .to_string()
 }
 
-/// `install` and `i` are `sync`, the hidden name of the bare `tog`.
+/// `install` and `i` are `sync`, the hidden name of the bare `ward`.
 pub fn canonical_name(name: &str) -> &str {
     if SYNC_ALIASES.contains(&name) {
         "sync"
@@ -944,37 +946,37 @@ const GLOBAL_OPTIONS: &str = "\
 OPTIONS (before or after the command; after 'run', 'build' or a script name
 everything belongs to the program, and 'fmt' and 'x' take them only ahead of
 the tool's own arguments):
-  -C, --directory <dir>  run as if tog had been started in <dir>
+  -C, --directory <dir>  run as if ward had been started in <dir>
   -q, --quiet            errors and results only
   -v, --verbose          every decision and subprocess command line
       --no-color         plain output (also: NO_COLOR, or a non-tty stderr)
       --frozen           CI: the implicit sync checks the locks instead of
                          writing them
       --strict           the implicit sync refuses every policy exception
-                         (same as TOG_STRICT=1)
-  -h, --help             this help ('tog help <command>' for one command)
+                         (same as GREYWARD_STRICT=1)
+  -h, --help             this help ('ward help <command>' for one command)
   -V, --version          print the version
 ";
 
-/// The bare form's own option, on the first screen because a bare `tog`
+/// The bare form's own option, on the first screen because a bare `ward`
 /// is the only way to spell it.
 const SETUP_OPTIONS: &str = "\
-SETUP OPTIONS (the bare 'tog' only; 'tog help setup' explains them):
+SETUP OPTIONS (the bare 'ward' only; 'ward help setup' explains them):
   --fresh     rebuild .venv / node_modules from scratch
 ";
 
 /// Top-level help: what the three shapes of argv mean, the four commands to
 /// start with, the command list by group, the bare form's options, the
 /// global options, and the environment. The lockfile table is reference
-/// material and lives in `tog help inputs`.
+/// material and lives in `ward help inputs`.
 pub fn usage() -> String {
     let mut text = format!(
-        "tog {VERSION} — one command for every package manager\n\n\
+        "ward {VERSION} — one command for every package manager\n\n\
          USAGE:\n  \
-         tog                        set up this project\n  \
-         tog <command> [<args>...]  run a command ('tog help <command>' explains it)\n  \
-         tog <script> [<args>...]   run a package.json script (like 'npm run')\n  \
-         tog <file> [<args>...]     run a source file in the environment (tog app.py)\n\n"
+         ward                        set up this project\n  \
+         ward <command> [<args>...]  run a command ('ward help <command>' explains it)\n  \
+         ward <script> [<args>...]   run a package.json script (like 'npm run')\n  \
+         ward <file> [<args>...]     run a source file in the environment (ward app.py)\n\n"
     );
     text.push_str(START_HERE);
     let width = listed()
@@ -1006,8 +1008,8 @@ pub fn usage() -> String {
     text.push_str(ENVIRONMENT);
     text.push_str(
         "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass\n\
-         the program's status through. Which files tog reads per ecosystem:\n\
-         'tog help inputs'. Full reference: docs/human/CLI.md.\n",
+         the program's status through. Which files ward reads per ecosystem:\n\
+         'ward help inputs'. Full reference: docs/human/CLI.md.\n",
     );
     text
 }
@@ -1092,9 +1094,9 @@ fn global_option_note(name: &str) -> &'static str {
 /// list, and DETAILS gives the prose a heading to skip past.
 pub fn help(spec: &Spec) -> String {
     let title = if spec.group == Group::Bare {
-        "tog".to_string()
+        "ward".to_string()
     } else {
-        format!("tog {}", spec.name)
+        format!("ward {}", spec.name)
     };
     let mut text = format!(
         "{title} — {}\n\nUSAGE:\n  {}\n\nEXAMPLES:\n",
@@ -1130,16 +1132,16 @@ pub fn help(spec: &Spec) -> String {
 mod tests {
     use super::*;
 
-    /// The footer follows only a bare `tog` whose sync went green, on its
+    /// The footer follows only a bare `ward` whose sync went green, on its
     /// own line after the sync's result, and never under `-q`. The
-    /// integration tests cover a bare `tog` outside a project and one whose
+    /// integration tests cover a bare `ward` outside a project and one whose
     /// sync fails; every fixture where a sync succeeds downloads a
     /// toolchain, so this is where the success case is pinned (#147).
     #[test]
     fn the_footer_follows_only_a_green_bare_sync() {
         let footer = after_command(true, 0, false).expect("a green bare sync gets the footer");
         assert!(footer.starts_with("\nNEXT:\n"), "{footer}");
-        assert!(footer.contains("tog --help"), "{footer}");
+        assert!(footer.contains("ward --help"), "{footer}");
         assert_eq!(after_command(true, 0, true), None, "-q suppresses it");
         assert_eq!(after_command(true, 1, false), None, "a failed sync");
         assert_eq!(after_command(true, 130, false), None, "an interrupted sync");
@@ -1169,9 +1171,9 @@ mod tests {
             );
             let help = help(spec);
             let title = if listed {
-                format!("tog {} — ", spec.name)
+                format!("ward {} — ", spec.name)
             } else {
-                "tog — ".to_string()
+                "ward — ".to_string()
             };
             assert!(help.starts_with(&title), "{}", spec.name);
             assert!(help.contains(spec.usage));
@@ -1185,19 +1187,19 @@ mod tests {
                 );
             }
         }
-        assert!(text.contains("TOG_STORE"));
-        // The lockfile table lives in 'tog help inputs'; the top level says
+        assert!(text.contains("GREYWARD_STORE"));
+        // The lockfile table lives in 'ward help inputs'; the top level says
         // so, and names the bare form's flags and where they are explained.
-        assert!(text.contains("'tog help inputs'"));
-        assert!(text.contains("'tog help setup'"));
+        assert!(text.contains("'ward help inputs'"));
+        assert!(text.contains("'ward help setup'"));
         // `--fresh` stays bare-only; `--frozen` and `--strict` are global
         // options now, named in the OPTIONS block instead of SETUP OPTIONS.
         assert!(text.contains("\n  --fresh "), "usage lacks --fresh");
         for flag in ["--frozen", "--strict"] {
             assert!(text.contains(flag), "usage lacks {flag}");
         }
-        assert!(text.contains("tog <script> [<args>...]"));
-        assert!(text.contains("tog <file> [<args>...]"));
+        assert!(text.contains("ward <script> [<args>...]"));
+        assert!(text.contains("ward <file> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
     }
 
@@ -1206,44 +1208,46 @@ mod tests {
     }
 
     /// Every command shows what it looks like in use, and every example is
-    /// a line that can be typed: it invokes tog, either as the first word
-    /// or inside a shell substitution (`eval "$(tog env)"`). An example
-    /// that is not a tog command line teaches the wrong thing.
+    /// a line that can be typed: it invokes ward, either as the first word
+    /// or inside a shell substitution (`eval "$(ward env)"`). An example
+    /// that is not a ward command line teaches the wrong thing.
     #[test]
-    fn every_command_shows_an_example_that_runs_tog() {
+    fn every_command_shows_an_example_that_runs_ward() {
         for spec in COMMANDS {
             assert!(
                 !spec.examples.is_empty(),
-                "tog {}: no EXAMPLES block",
+                "ward {}: no EXAMPLES block",
                 spec.name
             );
             let help = help(spec);
-            assert!(help.contains("EXAMPLES:"), "tog {}", spec.name);
-            assert!(help.contains("DETAILS:"), "tog {}", spec.name);
+            assert!(help.contains("EXAMPLES:"), "ward {}", spec.name);
+            assert!(help.contains("DETAILS:"), "ward {}", spec.name);
             for (command, gloss) in spec.examples {
                 assert!(
-                    *command == "tog" || command.starts_with("tog ") || command.contains("$(tog "),
-                    "tog {}: '{command}' does not run tog",
+                    *command == "ward"
+                        || command.starts_with("ward ")
+                        || command.contains("$(ward "),
+                    "ward {}: '{command}' does not run ward",
                     spec.name
                 );
                 assert!(
                     !gloss.is_empty(),
-                    "tog {}: '{command}' has no gloss",
+                    "ward {}: '{command}' has no gloss",
                     spec.name
                 );
-                assert!(help.contains(command), "tog {}: '{command}'", spec.name);
+                assert!(help.contains(command), "ward {}: '{command}'", spec.name);
             }
         }
     }
 
     /// Help is read in a terminal, so every line of it fits one. This holds
-    /// `tog --help` and every `tog help <command>` to `HELP_WIDTH`.
+    /// `ward --help` and every `ward help <command>` to `HELP_WIDTH`.
     #[test]
     fn every_help_line_fits_eighty_columns() {
-        let screens = std::iter::once(("tog --help".to_string(), usage())).chain(
+        let screens = std::iter::once(("ward --help".to_string(), usage())).chain(
             COMMANDS
                 .iter()
-                .map(|spec| (format!("tog help {}", spec.name), help(spec))),
+                .map(|spec| (format!("ward help {}", spec.name), help(spec))),
         );
         let mut over = Vec::new();
         for (screen, text) in screens {
@@ -1264,7 +1268,7 @@ mod tests {
     /// Every extra spelling the parser accepts is on the help screen, and no
     /// USAGE line omits the primary long spelling of an option its own
     /// OPTIONS block lists (#100). The second half checks one spelling per
-    /// option on purpose: `tog x` lists `--python` and `--node` in OPTIONS
+    /// option on purpose: `ward x` lists `--python` and `--node` in OPTIONS
     /// but keeps its usage line to `[--py | --npm]` to stay inside eighty
     /// columns.
     #[test]
@@ -1283,7 +1287,7 @@ mod tests {
             for spelling in spellings {
                 assert!(
                     text.contains(spelling),
-                    "tog help {command} hides '{spelling}'"
+                    "ward help {command} hides '{spelling}'"
                 );
             }
         }
@@ -1303,7 +1307,7 @@ mod tests {
                 }
                 assert!(
                     usage.contains(long),
-                    "tog {} usage omits {long}: {usage}",
+                    "ward {} usage omits {long}: {usage}",
                     command.name
                 );
             }
@@ -1311,20 +1315,20 @@ mod tests {
     }
 
     /// The command list is the first screen a newcomer reads, so no summary
-    /// line explains tog with tog's own words. The internal vocabulary
+    /// line explains ward with ward's own words. The internal vocabulary
     /// stays in the long descriptions, where there is room to define it; a
     /// summary says install, set up, link, or environment instead. No
     /// allow-list: every summary passes as written, so a new command's
     /// has to as well.
     #[test]
-    fn no_summary_explains_tog_in_togs_own_vocabulary() {
+    fn no_summary_explains_ward_in_its_own_vocabulary() {
         const JARGON: &[&str] = &["realiz", "project"];
         for spec in COMMANDS {
             let summary = spec.summary.to_ascii_lowercase();
             for word in JARGON {
                 assert!(
                     !summary.contains(word),
-                    "tog {}: the summary says '{word}': {}",
+                    "ward {}: the summary says '{word}': {}",
                     spec.name,
                     spec.summary
                 );
@@ -1339,7 +1343,7 @@ mod tests {
     fn the_sync_footer_repeats_start_here_and_points_at_the_help() {
         let footer = sync_footer();
         let mut start_here = START_HERE.lines().skip(1);
-        assert!(start_here.next().unwrap().starts_with("  tog   "));
+        assert!(start_here.next().unwrap().starts_with("  ward   "));
         for line in start_here {
             assert!(footer.contains(line), "the footer lacks {line:?}");
         }
@@ -1351,7 +1355,7 @@ mod tests {
                 "the footer names '{word}', which is not a command"
             );
         }
-        assert!(footer.contains("  tog --help  "), "{footer}");
+        assert!(footer.contains("  ward --help  "), "{footer}");
         assert!(footer.lines().count() <= 6, "{footer}");
     }
 
@@ -1389,7 +1393,7 @@ mod tests {
             assert_eq!(
                 flat.contains(refused),
                 !takes_sync_flags(spec.name),
-                "tog {}: {footer}",
+                "ward {}: {footer}",
                 spec.name
             );
         }
@@ -1409,10 +1413,10 @@ mod tests {
         // The three lock-writing verbs and `x` take `--strict` alone.
         for name in ["add", "remove", "update", "x"] {
             let footer = words(global_option_note(name));
-            assert!(footer.contains("--strict) "), "tog {name}: {footer}");
+            assert!(footer.contains("--strict) "), "ward {name}: {footer}");
             assert!(
                 footer.contains("--frozen is refused"),
-                "tog {name}: {footer}"
+                "ward {name}: {footer}"
             );
         }
     }

@@ -13,10 +13,10 @@ use crate::tailors::node::lock_import;
 use std::io;
 use std::path::Path;
 
-/// A package.json with no lockfile tog can import (package-lock.json,
+/// A package.json with no lockfile ward can import (package-lock.json,
 /// pnpm-lock.yaml, yarn.lock): delegate lock generation to npm, mirroring
 /// the uv flow for Python. Resolution is the ecosystem's job; realization
-/// is tog's. The project is read through the held descriptor; npm itself
+/// is ward's. The project is read through the held descriptor; npm itself
 /// runs in `project.path()`.
 ///
 /// npm runs through `door`, a missing-lock door.
@@ -44,7 +44,7 @@ pub fn ensure_npm_lock(
     }
     ui::note("no package-lock.json; resolving with the store npm...");
     // Store node's bundled npm, not host npm: a bare machine needs only
-    // tog. The npm that writes this lock is the one bundled in the Node
+    // ward. The npm that writes this lock is the one bundled in the Node
     // the project's toolchain selection names, confined through the door,
     // which publishes the lock with the signed resolution record.
     node::resolve::generate_lock(door, project, selected)?;
@@ -73,7 +73,7 @@ pub fn ensure_npm_lock(
 /// projection are the root's: the refusal names it. A project under a
 /// pnpm workspace that its lock does not list is refused as an edit is.
 /// Asked in `Tailor::preflight`, before the sync writes anything into the
-/// member (its toolchain lock, its journal), since a `.tog` directory in
+/// member (its toolchain lock, its journal), since a `.greyward` directory in
 /// the project is what makes it its own root.
 pub(crate) fn refuse_member_lock_generation(project: &ProjectRoot) -> io::Result<()> {
     use node::edit::NodeLock;
@@ -145,7 +145,7 @@ pub fn load_npm_plan_with_basis(
     Ok(None)
 }
 
-/// A package.json with no lock tog can import is refused by name:
+/// A package.json with no lock ward can import is refused by name:
 /// package-lock.json is the lock `prepare` generates, and `--frozen` skips
 /// `prepare`. A directory with no package.json is not a Node project and
 /// plans nothing.
@@ -157,7 +157,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
     }
 }
 
-/// A `package.json` with none of the locks tog imports.
+/// A `package.json` with none of the locks ward imports.
 pub(crate) fn needs_lock(project: &ProjectRoot) -> bool {
     let locked = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
         .iter()
@@ -195,7 +195,7 @@ pub(crate) fn input_records(project: &ProjectRoot, names: &[&str]) -> io::Result
 #[cfg(test)]
 mod tests {
     /// The basis names the lock at the bytes the plan read: a lock swapped
-    /// in afterwards (another tog, an editor) is not what this closure was
+    /// in afterwards (another ward, an editor) is not what this closure was
     /// planned from, and the join's `check_basis` refuses it. The old
     /// closure-time read would have taken the new lock as the basis.
     #[test]

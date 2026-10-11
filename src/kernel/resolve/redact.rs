@@ -169,7 +169,7 @@ enum Next {
     User,
 }
 
-/// Redact a command line: a tog verb's operands or a tool's argv.
+/// Redact a command line: a ward verb's operands or a tool's argv.
 /// `secrets` (the session token, the proxy address) are replaced wherever
 /// they occur, after the other rules ran.
 pub fn command(argv: &[String], secrets: &[&str]) -> Vec<String> {
@@ -321,7 +321,7 @@ mod tests {
                 "--no-auth",
                 "requests @ https://u:p@files.example/r.whl#sha256=00ff",
                 "--proxy",
-                &format!("http://tog:{token}@127.0.0.1:8119"),
+                &format!("http://ward:{token}@127.0.0.1:8119"),
                 "-c",
                 "credential.helper=store",
             ]),
@@ -407,7 +407,7 @@ mod tests {
                 "ci:hunter2",
                 "--config",
                 "http.extraHeader=Authorization: Bearer ghp_16C7e42F292c6912E7710c838347Ae178B4a",
-                "--proxy=http://tog:0123456789abcdef-session-token@127.0.0.1:41000",
+                "--proxy=http://ward:0123456789abcdef-session-token@127.0.0.1:41000",
             ]),
             &["0123456789abcdef-session-token", "127.0.0.1:41000"],
         );

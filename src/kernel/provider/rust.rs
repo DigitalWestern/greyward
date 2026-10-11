@@ -47,7 +47,7 @@ pub const RUST_VERSION: &str = "1.96.1";
 /// The catalog component that pins a release's official channel manifest,
 /// `channel-rust-<version>.toml`, by the sha256 of its bytes. Every optional
 /// component and cross target is provisioned from that file's rows
-/// (`rust_channel`), so pinning it pins them all. tog checks the sha256 only;
+/// (`rust_channel`), so pinning it pins them all. ward checks the sha256 only;
 /// the generator verified the manifest's signature before writing the row.
 pub const CHANNEL_MANIFEST: &str = "channel-manifest";
 
@@ -67,12 +67,12 @@ pub fn channel_manifest(platform: Platform, selected: &Selected) -> io::Result<A
                 .and_then(|shipped| shipped.artifact(platform, CHANNEL_MANIFEST))
                 .map_err(|_| {
                     err(format!(
-                        "this tog pins no channel manifest for Rust {version}, so it cannot \
+                        "this ward pins no channel manifest for Rust {version}, so it cannot \
                          provision the components, targets or profile rust-toolchain.toml asks \
-                         for; upgrade tog"
+                         for; upgrade ward"
                     ))
                 })
-                .map(|row| (row, "this tog's shipped Rust catalog"))?
+                .map(|row| (row, "this ward's shipped Rust catalog"))?
         }
     };
     row.check_from("cargo", CHANNEL_MANIFEST_RECIPE, "sha256", source)?;
@@ -147,8 +147,8 @@ fn fallback_pin(platform: Platform, default: Option<&str>) -> io::Result<&'stati
         .find(|pin| *pin == version)
         .ok_or_else(|| {
             err(format!(
-                "tog-toolchain.toml pins Rust {version} for building sdists, which this tog \
-                 does not ship for {}; run `tog update --toolchain python`",
+                "greyward-toolchain.toml pins Rust {version} for building sdists, which this ward \
+                 does not ship for {}; run `ward update --toolchain python`",
                 platform.triple()
             ))
         })
@@ -446,7 +446,7 @@ pub(super) fn validate_rust_layout(staged: &Path, platform: Platform) -> io::Res
 /// onto the catalog. No command resolves a project this way: a project's
 /// Rust is its lock's selection, and the Python sdist build of a project whose lock names no Rust uses
 /// [`resolve_toolchain_within_or`]: its tree is a store scratch directory
-/// that is nobody's tog project.
+/// that is nobody's ward project.
 /// Every entry point that is handed a [`Selected`] takes the version from it
 /// instead (`toolchain.version("rustc")`), so the lock decides the toolchain.
 /// What the file asks for beyond the channel is read from the lock's rows
@@ -474,8 +474,8 @@ pub fn resolve_toolchain_within(platform: Platform, root: &Path) -> io::Result<&
 /// `resolve_toolchain_within` with the default a project locked: an
 /// sdist whose own file names a channel gets that channel, and one with no
 /// file, no channel, or `stable` gets `default` (the Rust the Python
-/// section of `tog-toolchain.toml` pins for sdists) rather than whatever
-/// this tog's catalog calls its default today. `None` is the catalog's.
+/// section of `greyward-toolchain.toml` pins for sdists) rather than whatever
+/// this ward's catalog calls its default today. `None` is the catalog's.
 pub fn resolve_toolchain_within_or(
     platform: Platform,
     root: &Path,
@@ -519,7 +519,7 @@ fn resolve_toolchain_with(
         if let Some(tree) = input::toolchain_path(&table, legacy).map_err(located)? {
             return Err(err(format!(
                 "{}: names the local toolchain {tree}, which a project sync locks in \
-                 tog-toolchain.toml; there is no pinned Rust to resolve it to here",
+                 greyward-toolchain.toml; there is no pinned Rust to resolve it to here",
                 path.display()
             )));
         }

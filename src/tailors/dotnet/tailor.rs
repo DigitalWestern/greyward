@@ -132,7 +132,7 @@ impl Tailor for Dotnet {
             extension: "cs",
             runner: FileRunner::Built(
                 "a C# source file is built as part of its project, and a file-based app's \
-                 '#:package' lines would restore packages outside the lock: 'tog build' builds \
+                 '#:package' lines would restore packages outside the lock: 'ward build' builds \
                  the project in the sandbox",
             ),
         }]
@@ -221,11 +221,11 @@ impl Tailor for Dotnet {
     }
 
     fn refused_package_script(&self, dir: &Path) -> Option<String> {
-        std::fs::symlink_metadata(dir.join(".tog/closures/dotnet.json"))
+        std::fs::symlink_metadata(dir.join(".greyward/closures/dotnet.json"))
             .is_ok()
             .then(|| {
                 "package.json scripts are not run under a .NET projection (MSBuild belongs in \
-                 the sandbox: use `tog build dotnet`)"
+                 the sandbox: use `ward build dotnet`)"
                     .to_string()
             })
     }
@@ -248,7 +248,7 @@ impl Tailor for Dotnet {
         if comforter::has_closure(project, "dotnet")? {
             // This prevents accidental unsandboxed builds, not deliberate bypasses
             // through wrappers such as `sh -c`; during realization and build,
-            // tog never evaluates project code outside its sandbox. Missing-lock
+            // ward never evaluates project code outside its sandbox. Missing-lock
             // lock generation is the explicit host-side exception.
             if let Some(reason) = dotnet::refused_run_command(cmd) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
@@ -262,7 +262,7 @@ impl Tailor for Dotnet {
             // A private per-project home inside the store, laid out like
             // the sync path's scratch: a home under the shared temp root
             // lets another user plant files the SDK reads as this user,
-            // and a per-process one would make `tog env` print different
+            // and a per-process one would make `ward env` print different
             // bytes on every call.
             let scratch = ctx.store.run_home(dir, "dotnet")?;
             dotnet::prepare_scratch(&scratch)?;
@@ -322,7 +322,7 @@ impl Tailor for Dotnet {
             // sha512, base64 — not a raw file digest.
             push_property(
                 &mut c,
-                "tog:nuget:contentHash",
+                "greyward:nuget:contentHash",
                 &required(eco, &p, "content_hash")?,
             );
             out.push(c);
@@ -387,25 +387,25 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
-    /// The run guard is wired into the tailor's `tog run` environment: under
+    /// The run guard is wired into the tailor's `ward run` environment: under
     /// a .NET projection a build verb is refused before any closure object
     /// is read; without one, the tailor adds nothing and refuses nothing.
     #[test]
-    fn tog_run_under_a_dotnet_projection_refuses_build_verbs() {
+    fn ward_run_under_a_dotnet_projection_refuses_build_verbs() {
         let _store_env = crate::kernel::store::STORE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let scratch = TempDir::named("dotnet-run-guard");
-        let previous_store = std::env::var_os("TOG_STORE");
-        std::env::set_var("TOG_STORE", scratch.0.join("store"));
+        let previous_store = std::env::var_os("GREYWARD_STORE");
+        std::env::set_var("GREYWARD_STORE", scratch.0.join("store"));
         let ctx = Context::open(Platform::host().unwrap());
         match previous_store {
-            Some(value) => std::env::set_var("TOG_STORE", value),
-            None => std::env::remove_var("TOG_STORE"),
+            Some(value) => std::env::set_var("GREYWARD_STORE", value),
+            None => std::env::remove_var("GREYWARD_STORE"),
         }
         let ctx = ctx.unwrap();
         let project = scratch.0.join("project");
-        std::fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         let cmd = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
         let build = cmd(&["dotnet", "build"]);
 
@@ -422,7 +422,7 @@ mod tests {
 
         // A closure that names no objects: reaching it would fail on the
         // missing `sdk_object`, not with the guard's refusal.
-        std::fs::write(project.join(".tog/closures/dotnet.json"), "{}").unwrap();
+        std::fs::write(project.join(".greyward/closures/dotnet.json"), "{}").unwrap();
         let error = Dotnet
             .run_env(
                 &ctx,

@@ -11,7 +11,7 @@ use std::process::Command;
 /// The declared roots (and the working directory) an open project root
 /// holds, each resolved once through its held descriptor (#497). The socket
 /// scan walks that descriptor and bubblewrap binds it, so a project renamed
-/// or swapped (and even swapped back) since tog opened it is not what the
+/// or swapped (and even swapped back) since ward opened it is not what the
 /// build sees. A root no open project root holds keeps its pathname.
 #[derive(Default)]
 pub(super) struct HeldRoots {

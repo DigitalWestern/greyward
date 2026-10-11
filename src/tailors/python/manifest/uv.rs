@@ -543,7 +543,7 @@ fn resolve_uv_package<'a>(
             "uv.lock has no package variant compatible with the host for {name}; \
              falling back to uv resolution"
         ),
-        &format!("tog update {name}"),
+        &format!("ward update {name}"),
     );
     Ok(None)
 }
@@ -601,7 +601,7 @@ fn locked_from_uv_package(
                  resolution",
                 package.name
             ),
-            &format!("tog update {}", package.name),
+            &format!("ward update {}", package.name),
         );
         return None;
     };

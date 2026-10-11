@@ -1,7 +1,7 @@
 //! TOML parse errors that name a position, never a line of the file
 //! (kernel layer). A parser's own message quotes the failing source line,
 //! and a project file can be a link to a secret (the signing key's
-//! `ed25519:<seed>` line), so tog's readers report where, not what.
+//! `ed25519:<seed>` line), so ward's readers report where, not what.
 
 /// " at line L, column C" for `error` in `text`, or nothing when the
 /// parser gave no position.

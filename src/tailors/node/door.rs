@@ -4,8 +4,8 @@
 //! git dependencies through the git row, a scoped registry or a direct-URL
 //! tarball as `unattested-index`).
 //!
-//! Every Node resolution goes through here: `tog add`/`remove`/`update`, a
-//! missing `package-lock.json`, `tog x`'s npm resolution, and `tog
+//! Every Node resolution goes through here: `ward add`/`remove`/`update`, a
+//! missing `package-lock.json`, `ward x`'s npm resolution, and `ward
 //! attest`'s lock checks. None runs npm or pnpm directly.
 //!
 //! How the tools are pointed at the session, on the command line, where
@@ -31,7 +31,7 @@
 //! `--ignore-scripts`, `--node-options=`, pnpm's `pnpmfile` pair) come from
 //! the forced-settings table, and the door checks they are present. The
 //! programs they name are the host git and shell the sandbox's read-only
-//! system roots carry: tog provisions no git or shell of its own.
+//! system roots carry: ward provisions no git or shell of its own.
 
 use super::registry;
 use crate::kernel::resolve::confine;
@@ -54,7 +54,7 @@ pub(crate) const WHY_PNPM: &str = "runs the script-shell program a project's .np
 
 /// The git every npm and pnpm run starts for a git dependency, and the
 /// shell their forced `script-shell` names: the host's, on the sandbox's
-/// read-only system roots (tog provisions neither). The shell is required
+/// read-only system roots (ward provisions neither). The shell is required
 /// (npm reads `script-shell` whether or not a script runs). A host without
 /// git still resolves registry dependencies: the forced git is then a
 /// path that does not exist, so only a git dependency fails, naming it.
@@ -90,7 +90,7 @@ pub(crate) enum NodeTool<'a> {
     /// The store Node's npm.
     Npm { node_obj: &'a Path },
     /// The pinned pnpm, run as `node <script>` from the environment object
-    /// `tog x` realized it into ([`pnpm_program`]).
+    /// `ward x` realized it into ([`pnpm_program`]).
     Pnpm {
         node_obj: &'a Path,
         program: &'a PnpmProgram,
@@ -122,14 +122,14 @@ pub(crate) struct NodeRun<'a> {
     pub capture: bool,
 }
 
-/// The pinned pnpm as `tog x` realized it: the store environment object
+/// The pinned pnpm as `ward x` realized it: the store environment object
 /// its cache root links into, and the script `node` runs.
 pub(crate) struct PnpmProgram {
     pub env_obj: PathBuf,
     pub script: PathBuf,
 }
 
-/// Find the pnpm in the `tog x` cache root `root`: the environment object
+/// Find the pnpm in the `ward x` cache root `root`: the environment object
 /// its closure names, and `node_modules/pnpm`'s `bin` script in it. The
 /// sandbox mounts the object, not the cache root, so the script is named
 /// by its path in the object.
@@ -245,7 +245,7 @@ pub(crate) fn node_confined<'a>(
     };
     // An installed tree is never a resolution input: npm's lock-only
     // install ignores it, and pnpm's modules state is pointed into the
-    // scratch. Tog's projection is a symlink into the store anyway.
+    // scratch. Greyward's projection is a symlink into the store anyway.
     confined.exclude = vec![PathGlob::new("**/node_modules")?];
     confined.routes = vec![registry::route()?];
     confined.intercept = Intercept::Tls;
@@ -504,7 +504,7 @@ mod tests {
         );
         // A failure on a host without git says a git dependency is the
         // likely cause, whatever the tool printed (most runs inherit stderr,
-        // so tog never sees it); with git it does not.
+        // so ward never sees it); with git it does not.
         let hint = failure("npm", "install", "exit status: 1", "", true).to_string();
         assert!(hint.contains("this host has no /usr/bin/git"), "{hint}");
         assert!(hint.contains("nothing was synced"), "{hint}");
@@ -759,7 +759,7 @@ mod tests {
         String::from_utf8_lossy(&report.stderr).into_owned()
     }
 
-    /// Every flag a tool run gets, and nothing of the environment tog runs
+    /// Every flag a tool run gets, and nothing of the environment ward runs
     /// in: a stand-in Node object whose `npm` writes its argv and
     /// environment into the lock it is asked for, run through the
     /// missing-lock door. The session's flags, the forced settings, and
@@ -804,12 +804,12 @@ mod tests {
         let (env, cwd) = rest.split_once("---cwd---\n").unwrap();
         let args: Vec<&str> = args.lines().collect();
         for flag in [
-            "--proxy=http://tog:TOKEN@PROXY",
-            "--https-proxy=http://tog:TOKEN@PROXY",
+            "--proxy=http://ward:TOKEN@PROXY",
+            "--https-proxy=http://ward:TOKEN@PROXY",
             "--noproxy=",
             "--registry=https://registry.npmjs.org/",
             "--strict-ssl=true",
-            "--cafile=/run/tog/ca.pem",
+            "--cafile=/run/ward/ca.pem",
             "--update-notifier=false",
             "--audit=false",
             "--fund=false",
@@ -836,14 +836,14 @@ mod tests {
         );
         let has = |line: &str| env.lines().any(|found| found == line);
         for line in [
-            "NODE_EXTRA_CA_CERTS=/run/tog/ca.pem",
+            "NODE_EXTRA_CA_CERTS=/run/ward/ca.pem",
             "NPM_CONFIG_AUDIT=false",
             "NPM_CONFIG_FUND=false",
             "NPM_CONFIG_UPDATE_NOTIFIER=false",
-            "HTTPS_PROXY=http://tog:TOKEN@PROXY",
-            "https_proxy=http://tog:TOKEN@PROXY",
+            "HTTPS_PROXY=http://ward:TOKEN@PROXY",
+            "https_proxy=http://ward:TOKEN@PROXY",
             "NO_PROXY=",
-            "SSL_CERT_FILE=/run/tog/ca.pem",
+            "SSL_CERT_FILE=/run/ward/ca.pem",
             "GIT_CONFIG_NOSYSTEM=1",
         ] {
             assert!(has(line), "{line} missing from {env}");
@@ -854,7 +854,7 @@ mod tests {
         );
         assert!(
             env.lines().any(|line| line.starts_with("GIT_CONFIG_VALUE_")
-                && line.ends_with("=http://tog:TOKEN@PROXY")),
+                && line.ends_with("=http://ward:TOKEN@PROXY")),
             "the git row carries the proxy: {env}"
         );
         assert!(
@@ -863,7 +863,8 @@ mod tests {
             "{env}"
         );
         assert_eq!(cwd.trim(), project_dir.display().to_string());
-        let receipt = fs::read_to_string(project_dir.join(".tog/resolution/node.json")).unwrap();
+        let receipt =
+            fs::read_to_string(project_dir.join(".greyward/resolution/node.json")).unwrap();
         assert!(
             receipt.contains("\"package-lock.json\"") && receipt.contains("\"package.json\""),
             "{receipt}"
@@ -905,7 +906,7 @@ mod tests {
              done\n\
              [ \"$root\" = / ] && root=$PWD\n\
              { printf '%s\\n' \"$@\"; echo '---env---'; env | sort; echo \"---cwd---\"; pwd; } \
-             | sed -e 's/tog:[0-9a-f]*@/tog:TOKEN@/g' -e 's/127\\.0\\.0\\.1:8119/PROXY/g' \
+             | sed -e 's/ward:[0-9a-f]*@/ward:TOKEN@/g' -e 's/127\\.0\\.0\\.1:8119/PROXY/g' \
              > \"$root/package-lock.json\"\n",
         )
         .unwrap();
@@ -922,7 +923,7 @@ mod tests {
             .unwrap();
     }
 
-    /// `tog add` in an npm workspace member runs npm in the member with the
+    /// `ward add` in an npm workspace member runs npm in the member with the
     /// workspace root as the lock root: the root is in the snapshot (the
     /// stand-in finds it by npm's own walk, and would otherwise write a
     /// member lock the door refuses as undeclared), npm's working directory
@@ -1005,7 +1006,7 @@ mod tests {
         for flag in ["install", "--package-lock-only", "--", "is-odd@3.0.1"] {
             assert!(args.contains(&flag), "{flag} missing from {args:?}");
         }
-        let receipt = fs::read_to_string(root.join(".tog/resolution/node.json")).unwrap();
+        let receipt = fs::read_to_string(root.join(".greyward/resolution/node.json")).unwrap();
         for name in [
             "\"package-lock.json\"",
             "\"package.json\"",
@@ -1017,7 +1018,7 @@ mod tests {
             assert!(receipt.contains(name), "{name} missing from {receipt}");
         }
         assert!(
-            !app.join(".tog").exists(),
+            !app.join(".greyward").exists(),
             "the record was written in the member"
         );
         assert!(harness.upstream.seen().is_empty());
@@ -1511,8 +1512,8 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
         assert!(lock.contains("git+file://"), "{lock}");
     }
 
-    /// The pinned pnpm, realized into a `tog x` cache root the test owns:
-    /// what `tog add` borrows from its command, for pnpm's door tests. The
+    /// The pinned pnpm, realized into a `ward x` cache root the test owns:
+    /// what `ward add` borrows from its command, for pnpm's door tests. The
     /// realization resolves against the real registry (it needs pnpm's
     /// own tarball), so the harness proxy is switched off around it.
     struct TestHost {
@@ -1539,7 +1540,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
         ) -> io::Result<CachedTool> {
             use crate::tailors::RegistryTool as _;
             let root = self.cache.join(format!("{package}-{version}"));
-            let realized = !root.join(".tog/closures/node.json").is_file();
+            let realized = !root.join(".greyward/closures/node.json").is_file();
             if realized {
                 PROXY_FOR_TEST.with(|slot| slot.set(None));
                 let result = crate::tailors::node::registry_tool::NodeTool.realize(
@@ -1710,7 +1711,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
         assert!(!intercepted.join("node_modules").exists());
     }
 
-    /// `tog attest node` for both tools: npm's lock-only install on an
+    /// `ward attest node` for both tools: npm's lock-only install on an
     /// unchanged lock signs a record covering the manifest and the lock
     /// (and `.npmrc`), and after a dependency is added by hand npm would
     /// rewrite the lock, which is refused; pnpm's frozen lock-only install
@@ -1769,7 +1770,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             fs::read(npm_dir.join("package-lock.json")).unwrap(),
             lock_before
         );
-        assert!(!npm_dir.join(".tog/resolution/node.json").exists());
+        assert!(!npm_dir.join(".greyward/resolution/node.json").exists());
         fs::write(
             npm_dir.join("package.json"),
             "{\n  \"name\": \"spike\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {\"is-odd\": \"3.0.1\", \"is-number\": \"6.0.0\"}\n}\n",

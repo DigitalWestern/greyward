@@ -1,10 +1,10 @@
 /target
-# .tog/ is half record, half cache. The two records `tog audit` reads are
+# .greyward/ is half record, half cache. The two records `ward audit` reads are
 # committed; everything else in there is machine-local. The `**/` matters:
-# a monorepo has a .tog/ per subproject, and so does tests/fixtures/*.
+# a monorepo has a .greyward/ per subproject, and so does tests/fixtures/*.
 # README.md has the table.
-**/.tog/*
-!**/.tog/closures/
-!**/.tog/policy.toml
+**/.greyward/*
+!**/.greyward/closures/
+!**/.greyward/policy.toml
 .venv
 __pycache__/

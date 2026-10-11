@@ -1,9 +1,9 @@
-//! The .NET tailor: NuGet packages.lock.json (v1, tog-mandatory),
+//! The .NET tailor: NuGet packages.lock.json (v1, greyward-mandatory),
 //! materialization delegated to the pinned NuGet, per-build fresh offline
 //! restore, sandboxed builds only.
 //!
 //! Signed nupkgs' contentHash is a SEMANTIC hash over transformed bytes, so
-//! tog never compares lock hashes to raw
+//! ward never compares lock hashes to raw
 //! downloads — the pinned NuGet verifies contentHash while installing into
 //! the global-packages layout (locked mode), the same delegated-extractor
 //! pattern as Go, with the full SDK object id in the object identity. The
@@ -67,7 +67,7 @@ pub fn preflight_platform(platform: Platform) -> io::Result<()> {
 }
 
 /// The recipe this tailor knows how to build an SDK object from. A lock
-/// naming any other recipe was written by a tog that installs the SDK some
+/// naming any other recipe was written by a ward that installs the SDK some
 /// other way, and this one must not guess.
 const SDK_RECIPE: &str = "dotnet-sdk/1";
 
@@ -83,7 +83,7 @@ struct SdkSpec {
     sha512: String,
 }
 
-/// The selected SDK's row for `platform`, refused unless this tog knows the
+/// The selected SDK's row for `platform`, refused unless this ward knows the
 /// recipe that produced it. Microsoft publishes sha512, so the row must
 /// carry one: a sha256 row is a different provenance channel.
 fn sdk_spec(platform: Platform, selected: &Selected) -> io::Result<SdkSpec> {
@@ -261,7 +261,7 @@ pub fn check_global_json(project: &ProjectRoot, sdk_version: &str) -> io::Result
     }
     if sdk.get("rollForward").and_then(serde_json::Value::as_str) != Some("disable") {
         return Err(err(
-            "global.json must set \"rollForward\": \"disable\" (tog pins the SDK exactly)",
+            "global.json must set \"rollForward\": \"disable\" (ward pins the SDK exactly)",
         ));
     }
     Ok(())
@@ -366,10 +366,10 @@ fn xdg_data_home(scratch: &Path) -> PathBuf {
 ///
 /// The NuGet migration sentinel is the load-bearing part. NuGet guards its
 /// first-run migration with a machine-global named mutex ("NuGet-Migrations"),
-/// and tog hands every invocation a fresh home, so without the sentinel
+/// and ward hands every invocation a fresh home, so without the sentinel
 /// every invocation re-runs that migration and contends for that single
 /// mutex; concurrent syncs then die inside `Mutex.ReleaseMutex`. A home
-/// already marked migrated never takes the mutex, and a directory tog
+/// already marked migrated never takes the mutex, and a directory ward
 /// just created has nothing to migrate.
 pub(crate) fn prepare_scratch(scratch: &Path) -> io::Result<()> {
     fs::create_dir_all(scratch.join("home"))?;
@@ -378,7 +378,7 @@ pub(crate) fn prepare_scratch(scratch: &Path) -> io::Result<()> {
     fs::write(migrations.join("1"), "")
 }
 
-/// Env for `tog run`. Build-capable verbs are REJECTED at run: they
+/// Env for `ward run`. Build-capable verbs are REJECTED at run: they
 /// execute arbitrary MSBuild code and are sandbox-only. This env is for
 /// `dotnet <app.dll>`, --version/--info, and compiled-app execution.
 pub fn run_env(
@@ -397,8 +397,8 @@ pub const BUILD_VERBS: &[&str] = &[
     "build", "run", "test", "publish", "pack", "msbuild", "restore", "clean", "watch",
 ];
 
-/// `tog run`'s guard is advisory: wrappers can bypass it. During
-/// realization and build, tog never evaluates project code outside the
+/// `ward run`'s guard is advisory: wrappers can bypass it. During
+/// realization and build, ward never evaluates project code outside the
 /// build sandbox. Missing-lock generation and attestation evaluate MSBuild
 /// in the confined resolution sandbox through the NuGet mirror.
 pub fn refused_run_command(cmd: &[String]) -> Option<String> {
@@ -415,7 +415,7 @@ pub fn refused_run_command(cmd: &[String]) -> Option<String> {
         .any(|candidate| candidate.eq_ignore_ascii_case(verb))
     {
         return Some(format!(
-            "`dotnet {verb}` compiles/executes MSBuild code and must run sandboxed: use `tog build dotnet ...`"
+            "`dotnet {verb}` compiles/executes MSBuild code and must run sandboxed: use `ward build dotnet ...`"
         ));
     }
     if verb.eq_ignore_ascii_case("exec")
@@ -428,7 +428,7 @@ pub fn refused_run_command(cmd: &[String]) -> Option<String> {
         })
     {
         return Some(
-            "`dotnet exec .../MSBuild.dll` executes MSBuild code and must run sandboxed: use `tog build dotnet ...`"
+            "`dotnet exec .../MSBuild.dll` executes MSBuild code and must run sandboxed: use `ward build dotnet ...`"
                 .to_string(),
         );
     }
@@ -544,7 +544,7 @@ pub fn find_project(project: &ProjectRoot) -> io::Result<PathBuf> {
         1 => Ok(found.remove(0)),
         0 => Err(err("no .csproj found")),
         _ => Err(err(
-            "multiple .csproj files; tog supports one project per directory in v0",
+            "multiple .csproj files; ward supports one project per directory in v0",
         )),
     }
 }
@@ -565,7 +565,7 @@ pub fn has_marker(project: &ProjectRoot) -> io::Result<bool> {
             Ok(Entry::Regular | Entry::Directory | Entry::Symlink | Entry::Other)
         )
     };
-    Ok(present(LOCK_FILE) || present(".tog/closures/dotnet.json"))
+    Ok(present(LOCK_FILE) || present(".greyward/closures/dotnet.json"))
 }
 
 /// MSBuild elements a csproj may not contain, each because it breaks what
@@ -584,7 +584,7 @@ const BLOCKED_ELEMENTS: &[(&str, &str)] = &[
     ),
     (
         "ProjectReference",
-        "builds another project tog has not validated",
+        "builds another project ward has not validated",
     ),
     (
         "RestoreSources",
@@ -752,13 +752,13 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
             )));
         }
     }
-    // tog overrides the output and intermediate paths as global properties
+    // ward overrides the output and intermediate paths as global properties
     // on the command line, which a project cannot reassign unless it names
     // them in TreatAsLocalProperty.
     if !attribute_values(&markup, "treataslocalproperty", path)?.is_empty() {
         return Err(err(format!(
             "{}: unsupported MSBuild/project feature TreatAsLocalProperty: it lets the \
-             project override the paths tog sets on the command line",
+             project override the paths ward sets on the command line",
             path.display()
         )));
     }
@@ -885,7 +885,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
     }
 }
 
-/// Plan from packages.lock.json (v1 only; tog makes the opt-in lock
+/// Plan from packages.lock.json (v1 only; ward makes the opt-in lock
 /// mandatory), as `checked` read and parsed it. The project is read
 /// through the held descriptor.
 pub fn plan_dotnet(
@@ -914,12 +914,12 @@ pub fn plan_dotnet(
     let now = read_input_text(project, lock_rel)?;
     if now != *lock {
         return Err(err(
-            "packages.lock.json changed while planning; re-run 'tog'",
+            "packages.lock.json changed while planning; re-run 'ward'",
         ));
     }
     if resolve::resolution_basis(project)? != checked.basis {
         return Err(err(
-            ".NET resolution inputs changed while planning; run `tog` again",
+            ".NET resolution inputs changed while planning; run `ward` again",
         ));
     }
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
@@ -994,12 +994,12 @@ fn rewrite_metadata_source(path: &Path) -> io::Result<()> {
         })?
         .insert(
             "source".to_string(),
-            serde_json::Value::String("tog-feed".to_string()),
+            serde_json::Value::String("greyward-feed".to_string()),
         );
     fs::write(path, serde_json::to_vec(&value)?)
 }
 
-/// Realize the global-packages object: tog fetches every nupkg into a
+/// Realize the global-packages object: ward fetches every nupkg into a
 /// local folder feed (raw bytes cached by sha256), then the PINNED NuGet
 /// installs from that feed in LOCKED mode — it verifies each package's
 /// semantic contentHash against the lock and writes the exact
@@ -1070,7 +1070,7 @@ pub fn realize_packages(
         ));
     }
     fs::write(
-        verifier.join("tog-verifier.csproj"),
+        verifier.join("greyward-verifier.csproj"),
         synthetic_csproj(plan, tfm),
     )?;
     fs::write(
@@ -1080,7 +1080,7 @@ pub fn realize_packages(
     fs::write(
         verifier.join("nuget.config"),
         format!(
-            "<configuration><packageSources><clear /><add key=\"tog-feed\" \
+            "<configuration><packageSources><clear /><add key=\"greyward-feed\" \
              value=\"{}\" /></packageSources><config><add key=\"updatePackageLastAccessTime\" \
              value=\"false\" /></config></configuration>",
             xml_escape(&feed.display().to_string())
@@ -1153,7 +1153,7 @@ pub fn project_dotnet_env(
     let sdk_obj = sdk_obj.canonicalize()?;
     let packages_obj = packages_obj.canonicalize()?;
     let store = crate::comforter::store_from_object_path(&sdk_obj)
-        .ok_or_else(|| err(".NET SDK object is not in a Tog store"))?;
+        .ok_or_else(|| err(".NET SDK object is not in a Greyward store"))?;
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, activity, &sdk_obj)?;
     refs.object_path(&store, activity, &packages_obj)?;
@@ -1220,7 +1220,7 @@ fn ensure_dotnet_tmp_at(
             false
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // Two tog processes may race here (concurrent syncs share
+            // Two ward processes may race here (concurrent syncs share
             // this directory by design); losing the race is fine, the
             // validation below still applies to whatever now exists.
             match fs::create_dir(path) {
@@ -1405,10 +1405,10 @@ fn validate_build_args(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
-/// The output directory `bin/tog-<fingerprint>` under the project's held
+/// The output directory `bin/greyward-<fingerprint>` under the project's held
 /// path, with `bin` created. Neither may be a symlink, and both must
 /// resolve under the held path: the path is not canonicalized first, so a
-/// symlink swapped in at the project path since tog opened it is refused
+/// symlink swapped in at the project path since ward opened it is refused
 /// as escaping the project rather than published into (#497).
 fn checked_output_dir(project: &ProjectRoot, fingerprint: &str) -> io::Result<PathBuf> {
     let project_dir = project.path();
@@ -1421,7 +1421,7 @@ fn checked_output_dir(project: &ProjectRoot, fingerprint: &str) -> io::Result<Pa
             return Err(err(format!("{} must be a directory", bin.display())));
         }
     }
-    let output = bin.join(format!("tog-{fingerprint}"));
+    let output = bin.join(format!("greyward-{fingerprint}"));
     if let Ok(md) = fs::symlink_metadata(&output) {
         if md.file_type().is_symlink() {
             return Err(err(format!("{} must not be a symlink", output.display())));
@@ -1455,8 +1455,8 @@ fn publish_output(
         .parent()
         .ok_or_else(|| err("output directory has no bin parent"))?;
     let suffix = crate::kernel::fsroot::random_suffix()?;
-    let new = bin.join(format!(".tog-{fingerprint}.new.{suffix}"));
-    let old = bin.join(format!(".tog-{fingerprint}.old.{suffix}"));
+    let new = bin.join(format!(".greyward-{fingerprint}.new.{suffix}"));
+    let old = bin.join(format!(".greyward-{fingerprint}.old.{suffix}"));
     for path in [&new, &old] {
         if fs::symlink_metadata(path).is_ok() {
             return Err(err(format!(
@@ -1763,7 +1763,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("dotnet-sdk/99"), "{error}");
-        assert!(error.contains("upgrade tog"), "{error}");
+        assert!(error.contains("upgrade ward"), "{error}");
 
         let mut foreign = shipped_selection().unwrap();
         foreign.ecosystem = "go".into();
@@ -1827,8 +1827,8 @@ mod tests {
     }
 
     /// Every closure this tailor writes carries which bundle realized it and
-    /// which store object that bundle became: `tog status` compares the one,
-    /// `tog run` resolves the other.
+    /// which store object that bundle became: `ward status` compares the one,
+    /// `ward run` resolves the other.
     #[test]
     fn the_closure_body_records_the_bundle_and_the_runtime_object() {
         let selected = shipped_selection().unwrap();
@@ -1924,7 +1924,7 @@ mod tests {
         assert_eq!(reimported.projections, record.projections);
     }
 
-    /// `tog run`'s dotnet guard: a build verb is found past leading options,
+    /// `ward run`'s dotnet guard: a build verb is found past leading options,
     /// `dotnet exec` of MSBuild.dll is refused by file name, and running a
     /// built app is allowed.
     #[test]
@@ -1936,21 +1936,21 @@ mod tests {
             refused(&["dotnet", "-d", "build"]).as_deref(),
             Some(
                 "`dotnet build` compiles/executes MSBuild code and must run sandboxed: \
-                 use `tog build dotnet ...`"
+                 use `ward build dotnet ...`"
             )
         );
         assert_eq!(
             refused(&["dotnet", "MSBuild"]).as_deref(),
             Some(
                 "`dotnet MSBuild` compiles/executes MSBuild code and must run sandboxed: \
-                 use `tog build dotnet ...`"
+                 use `ward build dotnet ...`"
             )
         );
         assert_eq!(
             refused(&["dotnet", "exec", "/tmp/tools/msbuild.DLL"]).as_deref(),
             Some(
                 "`dotnet exec .../MSBuild.dll` executes MSBuild code and must run sandboxed: \
-                 use `tog build dotnet ...`"
+                 use `ward build dotnet ...`"
             )
         );
         assert_eq!(refused(&["dotnet", "exec", "app.dll"]), None);
@@ -2621,7 +2621,7 @@ mod tests {
 
         let project = base.join("project2");
         fs::create_dir_all(project.join("bin")).unwrap();
-        symlink(&outside, project.join("bin/tog-fp")).unwrap();
+        symlink(&outside, project.join("bin/greyward-fp")).unwrap();
         assert!(checked_output_dir(&ProjectRoot::open(&project).unwrap(), "fp").is_err());
 
         // The project renamed away and a symlink to another directory put
@@ -2644,7 +2644,7 @@ mod tests {
         rewrite_metadata_source(&metadata).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(metadata).unwrap()).unwrap();
-        assert_eq!(value["source"], "tog-feed");
+        assert_eq!(value["source"], "greyward-feed");
 
         let publish_project = base.join("publish-project");
         fs::create_dir_all(publish_project.join("bin")).unwrap();
@@ -2677,7 +2677,7 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(output.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
-            .filter(|name| name.to_string_lossy().starts_with(".tog-fp."))
+            .filter(|name| name.to_string_lossy().starts_with(".greyward-fp."))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }

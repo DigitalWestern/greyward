@@ -1,4 +1,4 @@
-//! Keeping the signing key's secret out of what tog prints and relays: a
+//! Keeping the signing key's secret out of what ward prints and relays: a
 //! parser's error quotes the line it failed on, and a project file can be
 //! the key under another name (a symlink, a hard link, an include). The
 //! secret is matched as any run of [`MIN_SECRET_RUN`] or more of its
@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// `text` with the signing key's secret replaced, wherever it appears: a
-/// last layer for a child's output tog relays and for everything tog prints
+/// last layer for a child's output ward relays and for everything ward prints
 /// (a parser's error quotes the line it failed on, and a project file can
 /// be the key under another name). See [`redact`] for what is matched.
 pub fn scrub_signing_key(text: &str) -> String {
@@ -26,7 +26,7 @@ pub fn scrub_signing_key(text: &str) -> String {
 
 /// The shortest run of a secret's characters that is redacted. The secret
 /// is 64 hex digits; 10 of them in a row turn up by chance about once in
-/// 10^12 positions, so ordinary hashes in tog's output are left alone.
+/// 10^12 positions, so ordinary hashes in ward's output are left alone.
 pub(crate) const MIN_SECRET_RUN: usize = 10;
 
 /// The text replacing each redacted run.

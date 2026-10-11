@@ -1,5 +1,5 @@
-//! `tog add` / `remove` / `update` for .NET (`Tailor::edit_manifest`). It
-//! refuses: tog never evaluates MSBuild outside the sandbox, and `dotnet
+//! `ward add` / `remove` / `update` for .NET (`Tailor::edit_manifest`). It
+//! refuses: ward never evaluates MSBuild outside the sandbox, and `dotnet
 //! add package` restores, so the user runs the edit with their own SDK.
 
 use crate::tailors::edit::{
@@ -7,7 +7,7 @@ use crate::tailors::edit::{
 };
 use std::io;
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "nuget",
     name: "NuGet",
@@ -41,11 +41,11 @@ pub(crate) fn edit_manifest(edit: &ManifestEdit<'_>) -> io::Result<EditOutcome> 
     let names = edit.texts().join(" ");
     Err(by_hand(match edit.verb {
         EditVerb::Add => format!(
-            "tog never evaluates MSBuild outside the sandbox, and 'dotnet add package' restores: run 'dotnet add package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'"
+            "ward never evaluates MSBuild outside the sandbox, and 'dotnet add package' restores: run 'dotnet add package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'ward'"
         ),
         EditVerb::Remove => format!(
-            "run 'dotnet remove package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'"
+            "run 'dotnet remove package {names}' then 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'ward'"
         ),
-        EditVerb::Update => "edit the PackageReference versions, run 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'tog'".to_string(),
+        EditVerb::Update => "edit the PackageReference versions, run 'dotnet restore --force-evaluate' with your own SDK, commit packages.lock.json, then 'ward'".to_string(),
     }))
 }

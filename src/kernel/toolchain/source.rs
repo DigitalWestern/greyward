@@ -23,7 +23,7 @@ use super::invalid;
 use std::io;
 use std::sync::OnceLock;
 
-/// A named reference to a credential held outside tog (an environment
+/// A named reference to a credential held outside ward (an environment
 /// variable or keychain entry an operator configures). Never the secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialRef {
@@ -213,8 +213,8 @@ impl SourcePolicy {
         github_publisher(&mut policy, "erlef-otp-builds", "erlef/otp_builds");
         github_publisher(
             &mut policy,
-            "tog-toolchains",
-            "DigitalWestern/tog-toolchains",
+            "greyward-toolchains",
+            "DigitalWestern/greyward-toolchains",
         );
         github_publisher(&mut policy, "elixir-lang", "elixir-lang/elixir");
         for (id, base) in [

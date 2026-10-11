@@ -11,11 +11,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// The project directories open `ProjectRoot`s hold, by canonical path. A
-/// tool tog starts "in the project" is given a path (`DelegateSpec`'s lock
+/// tool ward starts "in the project" is given a path (`DelegateSpec`'s lock
 /// root), and a process's working directory is only a path until the child
-/// enters it: a project swapped and restored between tog's open and that
+/// enters it: a project swapped and restored between ward's open and that
 /// chdir would start the tool in the other directory. With this table the
-/// child enters the directory tog holds instead (`held_dir_for`).
+/// child enters the directory ward holds instead (`held_dir_for`).
 static HELD: std::sync::Mutex<Vec<(u64, PathBuf, RawFd)>> = std::sync::Mutex::new(Vec::new());
 
 /// One `HELD` row, removed when its root is dropped. The row names the

@@ -1,6 +1,6 @@
 //! The Cargo tailor's `Tailor` implementation: what `sync`, `plan`, `build`,
 //! `run`, `ls`, `status`, and `sbom` do for a Cargo workspace, and the
-//! pinned formatter `tog fmt` runs.
+//! pinned formatter `ward fmt` runs.
 
 use crate::comforter;
 use crate::comforter::status::{lock_state, object_liveness_state, string, State};
@@ -55,7 +55,7 @@ fn realize_and_project(
     let workspace = &inputs.workspace;
     workspace.check_still_named()?;
     if fresh {
-        workspace.remove_dir_all(Path::new(".tog/cargo-home"))?;
+        workspace.remove_dir_all(Path::new(".greyward/cargo-home"))?;
     }
     cargo::project_cargo_env(
         activity,
@@ -144,8 +144,8 @@ impl Tailor for Cargo {
         &[SourceFile {
             extension: "rs",
             runner: FileRunner::Built(
-                "a Rust source file is built as part of its crate: 'tog build' builds the \
-                 crate in the sandbox, and 'tog run cargo run' builds and runs it",
+                "a Rust source file is built as part of its crate: 'ward build' builds the \
+                 crate in the sandbox, and 'ward run cargo run' builds and runs it",
             ),
         }]
     }
@@ -261,7 +261,7 @@ impl Tailor for Cargo {
     ) -> io::Result<Vec<String>> {
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
-        if project.input_entry(Path::new(".tog/cargo-home"))? != Entry::Absent {
+        if project.input_entry(Path::new(".greyward/cargo-home"))? != Entry::Absent {
             let closure = comforter::read_closure_in(project, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
             // inject arbitrary executable paths.
@@ -273,7 +273,7 @@ impl Tailor for Cargo {
                 "bin/rustc",
             )?;
             let cargo_home = project
-                .subdir(Path::new(".tog/cargo-home"))?
+                .subdir(Path::new(".greyward/cargo-home"))?
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotFound, "held Cargo home disappeared")
                 })?
@@ -326,8 +326,8 @@ impl Tailor for Cargo {
             // points into it.
             "cargo" => match object_liveness_state(body, &["rust_object", "vendor_object"]) {
                 Some(state) => state,
-                None if !project.is_input_dir(Path::new(".tog/cargo-home")) => {
-                    State::ProjectionMissing(".tog/cargo-home".into())
+                None if !project.is_input_dir(Path::new(".greyward/cargo-home")) => {
+                    State::ProjectionMissing(".greyward/cargo-home".into())
                 }
                 None => lock_state(project, "Cargo.lock", &string(&body["cargo_lock_sha256"]))?,
             },
@@ -373,7 +373,7 @@ impl Tailor for Cargo {
     }
 }
 
-/// `tog fmt` for Rust: the rustfmt component the toolchain lock pins.
+/// `ward fmt` for Rust: the rustfmt component the toolchain lock pins.
 pub struct Rustfmt;
 
 impl Formatter for Rustfmt {
@@ -395,13 +395,13 @@ impl Formatter for Rustfmt {
         {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                "no Rust project here; run `tog fmt` from a Cargo project",
+                "no Rust project here; run `ward fmt` from a Cargo project",
             ));
         }
         Ok(())
     }
 
-    /// The Cargo workspace root, found by tog's own walk of the manifests
+    /// The Cargo workspace root, found by ward's own walk of the manifests
     /// (no cargo runs on the host).
     fn root(&self, _ctx: &Context, cwd: &Path, _toolchain: &Selected) -> io::Result<PathBuf> {
         inputs::locate_cargo_root(cwd)?.canonicalize()
@@ -441,7 +441,7 @@ impl Formatter for Rustfmt {
         let rust_object = cargo::realize_runtime(store, activity, platform, toolchain)?;
         let rustfmt_object =
             rustfmt::ensure_rustfmt(store, activity, platform, toolchain, &rust_object)?;
-        // An older `tog fmt` wrote a `rustfmt` closure here; nothing reads
+        // An older `ward fmt` wrote a `rustfmt` closure here; nothing reads
         // one any more, so a formatting run removes it (unless it is the
         // only closure of a registered project: see
         // `remove_legacy_record`). `--check` changes
@@ -464,7 +464,7 @@ impl Formatter for Rustfmt {
     }
 }
 
-/// What `tog fmt` refuses before anything runs, checked in the directories
+/// What `ward fmt` refuses before anything runs, checked in the directories
 /// it holds, never at the paths they were opened at: a workspace renamed
 /// or replaced since is not what the sandbox mounts, so it is not what is
 /// checked either (#612).
@@ -495,7 +495,7 @@ fn fmt_preflight(
     let invocation_now = invocation.current_name()?;
     if !invocation_now.starts_with(&workspace_now) {
         return Err(io::Error::other(format!(
-            "{} is no longer inside the workspace {}; run 'tog fmt' again",
+            "{} is no longer inside the workspace {}; run 'ward fmt' again",
             invocation.path().display(),
             workspace.path().display()
         )));

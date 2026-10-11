@@ -307,7 +307,7 @@ pub(super) fn collect_workspace_manifests(
     };
     for file_name in entries {
         let name = file_name.to_string_lossy().into_owned();
-        if name == "node_modules" || name == ".git" || name == ".tog" {
+        if name == "node_modules" || name == ".git" || name == ".greyward" {
             continue;
         }
         let path = if directory == Path::new(".") {
@@ -469,7 +469,7 @@ pub fn plan_yarn(
 }
 
 /// `plan_yarn` with a test's own policy in place of the process one, so a
-/// test's expectations hold under `TOG_STRICT=1`.
+/// test's expectations hold under `GREYWARD_STRICT=1`.
 #[cfg(test)]
 pub(super) fn plan_yarn_with_policy(
     platform: Platform,
@@ -1006,7 +1006,7 @@ mod lock_shape_tests {
     fn a_sha1_yarn_integrity_is_recorded_inside_an_attribution() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        // An explicit permissive policy: TOG_STRICT=1 in the environment
+        // An explicit permissive policy: GREYWARD_STRICT=1 in the environment
         // would otherwise refuse the exception this test expects recorded.
         let permissive = crate::kernel::policy::Policy::default();
         let mut record = |kind: &str, subject: &str, detail: &str| {
@@ -1191,7 +1191,7 @@ mod lock_shape_tests {
         assert_invalid(
             error,
             "package.json: dependencies.b: https://***:***@r/b-1.0.0.tgz carries URL credentials \
-             (user:pass@ before its host); tog will not read a file that holds them",
+             (user:pass@ before its host); ward will not read a file that holds them",
         );
     }
 

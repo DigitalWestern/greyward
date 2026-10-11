@@ -1,6 +1,6 @@
 //! Output conventions (CLI.md): stdout is for results, stderr is for
 //! narration. `--quiet` drops narration, `--verbose` adds decisions and the
-//! command line of every subprocess tog starts, and color appears only
+//! command line of every subprocess ward starts, and color appears only
 //! on a terminal, only on stderr, only on the words that carry state.
 //!
 //! Quiet is implemented at the file-descriptor level: fd 2 is pointed at
@@ -85,7 +85,7 @@ fn install_panic_hook() {
             String::new()
         };
         write_error_channel(&format!(
-            "tog: {}: {payload}{where_}\ntog: this is a bug in tog; please report it with the command you ran\n{backtrace}",
+            "ward: {}: {payload}{where_}\nward: this is a bug in ward; please report it with the command you ran\n{backtrace}",
             paint("internal error", RED)
         ));
     }));
@@ -116,7 +116,7 @@ pub fn quiet() -> bool {
 }
 
 /// Run `job` with fd 1 pointed at fd 2, so whatever it or any child it
-/// spawns prints reaches stderr, then put fd 1 back. `tog env` syncs
+/// spawns prints reaches stderr, then put fd 1 back. `ward env` syncs
 /// before it prints and its stdout is evaled by a shell: a package
 /// manager's summary there would be executed as commands.
 pub fn with_stdout_on_stderr<T>(job: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
@@ -200,7 +200,7 @@ fn write_error_channel(text: &str) {
 
 /// A failure the command could not recover from. Always visible.
 pub fn error(message: &str) {
-    write_error_channel(&format!("tog: {}: {message}\n", paint("error", RED)));
+    write_error_channel(&format!("ward: {}: {message}\n", paint("error", RED)));
 }
 
 /// A failure with one command that is the way out: the error line, then the
@@ -208,7 +208,7 @@ pub fn error(message: &str) {
 pub fn error_with_fix(message: &str, fix: &str) {
     debug_assert_command(message, fix);
     write_error_channel(&format!(
-        "tog: {}: {message}\n{}",
+        "ward: {}: {message}\n{}",
         paint("error", RED),
         fix_line(fix)
     ));
@@ -241,15 +241,15 @@ pub fn error_json(message: &str) {
 /// The prefix of an advisory's first line, before color is applied. The
 /// tests hold `advisory_line` to it.
 #[cfg(test)]
-pub(crate) const WARNING_PREFIX: &str = "tog: warning: ";
+pub(crate) const WARNING_PREFIX: &str = "ward: warning: ";
 /// The prefix of the fix line. The same 14 columns as `WARNING_PREFIX`, so
 /// `fix:` right-aligns under `warning:`.
 #[cfg(test)]
-pub(crate) const FIX_PREFIX: &str = "tog:     fix: ";
+pub(crate) const FIX_PREFIX: &str = "ward:     fix: ";
 /// The prefix of the next line, for the rare warning whose best command
 /// explains the condition rather than clears it. The same 14 columns again,
 /// so its command starts where a fix's would.
-pub(crate) const NEXT_PREFIX: &str = "tog:    next: ";
+pub(crate) const NEXT_PREFIX: &str = "ward:    next: ";
 
 /// Something the user should know that did not stop the command, and the
 /// one command that resolves it. Suppressed by `--quiet` like all
@@ -305,13 +305,13 @@ fn debug_assert_command(message: &str, command: &str) {
 
 /// The first of the two lines, colored for the current terminal.
 pub(crate) fn advisory_line(message: &str) -> String {
-    format!("tog: {}: {message}\n", paint("warning", YELLOW))
+    format!("ward: {}: {message}\n", paint("warning", YELLOW))
 }
 
 /// The second of the two lines, colored for the current terminal. Green,
 /// like `synced`: it is the way out, not the problem.
 pub(crate) fn fix_line(command: &str) -> String {
-    format!("tog:     {}: {command}\n", paint("fix", GREEN))
+    format!("ward:     {}: {command}\n", paint("fix", GREEN))
 }
 
 /// The `next:` line. Uncolored: it is neither the problem nor the way out,
@@ -325,12 +325,12 @@ pub fn note(message: &str) {
     if quiet() {
         return;
     }
-    eprintln!("tog: {}", scrub(message));
+    eprintln!("ward: {}", scrub(message));
 }
 
 /// A handle for narration a lower layer renders itself: the GC reports
 /// write to any `Write`, so their tests can capture them. `--quiet` still silences it, at the descriptor level.
-/// Every line written through it starts with `tog: `, like `note`.
+/// Every line written through it starts with `ward: `, like `note`.
 pub fn narration() -> io::StderrLock<'static> {
     io::stderr().lock()
 }
@@ -430,7 +430,7 @@ impl Progress {
         let mut stderr = io::stderr();
         let _ = write!(
             stderr,
-            "\rtog: {}\x1b[K",
+            "\rward: {}\x1b[K",
             progress_line(&self.what, self.done, self.total)
         );
         let _ = stderr.flush();
@@ -475,11 +475,11 @@ pub fn shell_line<S: AsRef<str>>(argv: &[S]) -> String {
 /// Decision-level detail, only under `--verbose`.
 pub fn trace(message: &str) {
     if verbose() {
-        eprintln!("tog: {} {message}", paint("[verbose]", DIM));
+        eprintln!("ward: {} {message}", paint("[verbose]", DIM));
     }
 }
 
-/// The command line of a subprocess tog is about to start, only under
+/// The command line of a subprocess ward is about to start, only under
 /// `--verbose`; the bug-report mode's most useful line.
 pub fn trace_command(command: &std::process::Command) {
     if !verbose() {
@@ -664,10 +664,10 @@ mod tests {
         assert_eq!(
             warning_lines(
                 "node_modules was a real directory; moved aside",
-                "tog gc --project"
+                "ward gc --project"
             ),
-            "tog: warning: node_modules was a real directory; moved aside\n\
-             tog:     fix: tog gc --project\n"
+            "ward: warning: node_modules was a real directory; moved aside\n\
+             ward:     fix: ward gc --project\n"
         );
         assert_eq!(
             WARNING_PREFIX.len(),
@@ -676,8 +676,8 @@ mod tests {
         );
         assert_eq!(advisory_line("x"), format!("{WARNING_PREFIX}x\n"));
         assert_eq!(
-            fix_line("tog --fresh"),
-            format!("{FIX_PREFIX}tog --fresh\n")
+            fix_line("ward --fresh"),
+            format!("{FIX_PREFIX}ward --fresh\n")
         );
     }
 
@@ -687,9 +687,9 @@ mod tests {
     fn a_diagnostic_warning_names_the_next_command_in_the_fix_column() {
         assert!(!color(), "the test process has no terminal");
         assert_eq!(
-            warning_next_lines("3 policy exception(s) recorded", "tog audit"),
-            "tog: warning: 3 policy exception(s) recorded\n\
-             tog:    next: tog audit\n"
+            warning_next_lines("3 policy exception(s) recorded", "ward audit"),
+            "ward: warning: 3 policy exception(s) recorded\n\
+             ward:    next: ward audit\n"
         );
         assert_eq!(
             NEXT_PREFIX.len(),
@@ -701,6 +701,9 @@ mod tests {
             FIX_PREFIX.find(": "),
             "`next:` right-aligns under `fix:`"
         );
-        assert_eq!(next_line("tog audit"), format!("{NEXT_PREFIX}tog audit\n"));
+        assert_eq!(
+            next_line("ward audit"),
+            format!("{NEXT_PREFIX}ward audit\n")
+        );
     }
 }

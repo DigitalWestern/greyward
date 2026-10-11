@@ -10,7 +10,7 @@
 //! shrink, nothing may grow or newly cross a budget.
 //!
 //! Five housekeeping rules are enforced the same way: a test that sets
-//! `TOG_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
+//! `GREYWARD_STORE` holds `STORE_ENV_LOCK`, comments describe code rather
 //! than cite plan documents or review rounds, narration goes through
 //! `kernel::ui` rather than a raw stderr write, HTTP goes through
 //! `kernel::fetch` rather than a raw `ureq` call, and `docs/agent/` holds
@@ -225,7 +225,7 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "commands::deps::validate_spec",
         "argv validation",
     ),
-    // Likewise `tog x`'s argument rules, owned by its command.
+    // Likewise `ward x`'s argument rules, owned by its command.
     (
         "cli/x.rs",
         "commands::x::request_version",
@@ -346,7 +346,7 @@ fn layers_point_one_way() {
 /// permission behind and a copied site needs its own review.
 #[test]
 fn the_kernel_branches_on_no_ecosystem_name() {
-    let mut names: Vec<&str> = tog::tailors::registry()
+    let mut names: Vec<&str> = greyward::tailors::registry()
         .iter()
         .flat_map(|tailor| [tailor.id(), tailor.lock_ecosystem()])
         .collect();
@@ -874,7 +874,7 @@ fn blank_literals(text: &str) -> String {
     out
 }
 
-/// `TOG_STORE` is process-global. A test that sets or clears it without
+/// `GREYWARD_STORE` is process-global. A test that sets or clears it without
 /// holding `store::STORE_ENV_LOCK` redirects a concurrent test to the real
 /// store, so every write must happen with the lock held: in a function
 /// that took the lock earlier in its body, or in a method of an env guard
@@ -894,16 +894,16 @@ fn store_env_writes_hold_the_lock() {
     // write the variable dozens of times.
     assert!(
         writes >= 20,
-        "the TOG_STORE scan found only {writes} writes; it is passing vacuously"
+        "the GREYWARD_STORE scan found only {writes} writes; it is passing vacuously"
     );
     assert!(
         violations.is_empty(),
-        "TOG_STORE written without STORE_ENV_LOCK held:\n  {}",
+        "GREYWARD_STORE written without STORE_ENV_LOCK held:\n  {}",
         violations.join("\n  ")
     );
 }
 
-/// What a `{` opened, for the TOG_STORE scan.
+/// What a `{` opened, for the GREYWARD_STORE scan.
 enum EnvScope {
     /// Index into the function table.
     Function(usize),
@@ -912,14 +912,14 @@ enum EnvScope {
     Block,
 }
 
-/// The TOG_STORE writes in `text` made without the lock held, and how many
+/// The GREYWARD_STORE writes in `text` made without the lock held, and how many
 /// writes there were.
 fn store_env_violations(text: &str) -> (Vec<String>, usize) {
     let tokens = tokenize(text);
     let write_at = |i: usize| {
         (is_ident(tokens.get(i), "set_var") || is_ident(tokens.get(i), "remove_var"))
             && is_punct(tokens.get(i + 1), '(')
-            && matches!(tokens.get(i + 2), Some(Token::Str(name)) if name == "TOG_STORE")
+            && matches!(tokens.get(i + 2), Some(Token::Str(name)) if name == "GREYWARD_STORE")
     };
     // Pass one finds the guard types: impls whose methods write the
     // variable. Pass two checks every write and every use of a guard.
@@ -990,15 +990,16 @@ fn store_env_violations(text: &str) -> (Vec<String>, usize) {
                     Some(ty) if guards.contains(ty) => sites += 1,
                     _ => {
                         sites += 1;
-                        violations
-                            .push(format!("fn {name} writes TOG_STORE before taking the lock"));
+                        violations.push(format!(
+                            "fn {name} writes GREYWARD_STORE before taking the lock"
+                        ));
                     }
                 }
             } else if pass == 1 {
                 if let Some(Token::Ident(word)) = tokens.get(i) {
                     if guards.contains(word) && owner.as_ref() != Some(word) && !*locked {
                         violations.push(format!(
-                            "fn {name} uses the TOG_STORE guard {word} before taking the lock"
+                            "fn {name} uses the GREYWARD_STORE guard {word} before taking the lock"
                         ));
                     }
                 }
@@ -1011,30 +1012,30 @@ fn store_env_violations(text: &str) -> (Vec<String>, usize) {
 #[test]
 fn the_store_env_scan_sees_through_comments_and_guards() {
     let unlocked = "// STORE_ENV_LOCK is held by the caller\n\
-        fn t() { let s = \"STORE_ENV_LOCK\"; std::env::set_var(\"TOG_STORE\", p); }";
+        fn t() { let s = \"STORE_ENV_LOCK\"; std::env::set_var(\"GREYWARD_STORE\", p); }";
     assert_eq!(
         store_env_violations(unlocked).0,
-        ["fn t writes TOG_STORE before taking the lock"]
+        ["fn t writes GREYWARD_STORE before taking the lock"]
     );
-    let late = "fn t() { env::remove_var(\"TOG_STORE\"); let _l = STORE_ENV_LOCK.lock(); }";
+    let late = "fn t() { env::remove_var(\"GREYWARD_STORE\"); let _l = STORE_ENV_LOCK.lock(); }";
     assert_eq!(
         store_env_violations(late).0,
-        ["fn t writes TOG_STORE before taking the lock"]
+        ["fn t writes GREYWARD_STORE before taking the lock"]
     );
     let guarded = "struct StoreEnv(Option<OsString>);\n\
-        impl StoreEnv { fn enter(p: &Path) -> Self { std::env::set_var(\"TOG_STORE\", p); Self(None) } }\n\
-        impl Drop for StoreEnv { fn drop(&mut self) { std::env::remove_var(\"TOG_STORE\"); } }\n\
+        impl StoreEnv { fn enter(p: &Path) -> Self { std::env::set_var(\"GREYWARD_STORE\", p); Self(None) } }\n\
+        impl Drop for StoreEnv { fn drop(&mut self) { std::env::remove_var(\"GREYWARD_STORE\"); } }\n\
         fn good() { let _l = STORE_ENV_LOCK.lock(); let _e = StoreEnv::enter(p); }\n\
         fn bad() { let _e = StoreEnv::enter(p); }";
     let (found, sites) = store_env_violations(guarded);
     assert_eq!(
         found,
-        ["fn bad uses the TOG_STORE guard StoreEnv before taking the lock"]
+        ["fn bad uses the GREYWARD_STORE guard StoreEnv before taking the lock"]
     );
     assert_eq!(sites, 2);
     let nested = "fn t() { let _l = STORE_ENV_LOCK.lock();\n\
-        struct G; impl Drop for G { fn drop(&mut self) { std::env::remove_var(\"TOG_STORE\"); } }\n\
-        std::env::set_var(\"TOG_STORE\", p); let _g = G; }";
+        struct G; impl Drop for G { fn drop(&mut self) { std::env::remove_var(\"GREYWARD_STORE\"); } }\n\
+        std::env::set_var(\"GREYWARD_STORE\", p); let _g = G; }";
     assert_eq!(store_env_violations(nested), (Vec::<String>::new(), 2));
 }
 
@@ -1111,17 +1112,17 @@ fn comment_text(line: &str) -> Option<&str> {
     None
 }
 
-/// Narration has one vocabulary: `kernel::ui` prints `tog:` for progress and
-/// `tog: warning:` for an advisory, and it is the module `--quiet` and
+/// Narration has one vocabulary: `kernel::ui` prints `ward:` for progress and
+/// `ward: warning:` for an advisory, and it is the module `--quiet` and
 /// `--no-color` are implemented in. A raw `eprintln!` elsewhere in `src/`
 /// bypasses that distinction, so the user cannot tell a fallback from a
 /// phase. Test modules are exempt: a skip message is for whoever ran the
 /// suite, not for a user.
 ///
-/// Two spellings are tog's own narration: `eprintln!`, and a handle from
+/// Two spellings are ward's own narration: `eprintln!`, and a handle from
 /// `io::stderr()` written with `writeln!`. `eprint!` is the verbatim
 /// pass-through of a subprocess's captured output and of an
-/// already-rendered usage error, neither of which takes a `tog:` prefix.
+/// already-rendered usage error, neither of which takes a `ward:` prefix.
 /// A lower layer that renders its own narration into a `Write` gets its
 /// handle from `ui::narration()`.
 ///
@@ -1152,7 +1153,7 @@ const STDERR_HANDLES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Does this line of code write tog's narration to stderr directly? The
+/// Does this line of code write ward's narration to stderr directly? The
 /// comment part of the line is ignored; `.stderr(…)` (a `Command` method)
 /// and `child.stderr` (a field) are not the process's stderr.
 fn writes_stderr(line: &str) -> bool {
@@ -1213,7 +1214,7 @@ fn narration_goes_through_kernel_ui() {
 #[test]
 fn the_stderr_scan_sees_every_spelling() {
     for line in [
-        "eprintln!(\"tog: x\");",
+        "eprintln!(\"ward: x\");",
         "let mut out = io::stderr().lock();",
         "writeln!(std::io::stderr(), \"x\")?;",
         "let e = stderr(); // after `use std::io::stderr`",
@@ -1723,7 +1724,7 @@ const RAW_CHILD_SITES: &[(&str, &str, usize)] = &[
     // The one unmanaged sandbox spawn: the `None` arm of every sandbox
     // entry point, for callers that consume no store.
     ("src/kernel/sandbox.rs", "spawn_unmanaged", 1),
-    // Host probes, and the downloaded tog's `--version` before it is
+    // Host probes, and the downloaded ward's `--version` before it is
     // installed.
     ("src/commands/selfupdate.rs", "smoke_test", 1),
     ("src/tailors/dotnet/mod.rs", "invoking_uid", 1),
@@ -1765,7 +1766,7 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     // `store roots`: the lease its diagnostic read borrows.
     ("src/commands/store.rs", "list_roots", 1),
     ("src/commands/gc.rs", "run", 1),
-    // `gc --reset` opens a store `run` cannot: one tog refuses to read.
+    // `gc --reset` opens a store `run` cannot: one ward refuses to read.
     ("src/commands/gc.rs", "reset", 1),
     // `x --clean`, once per environment, on the store that owns it.
     ("src/commands/x/cleanup.rs", "clean_lease", 1),
@@ -1820,7 +1821,7 @@ fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bo
 /// a digest from somewhere else, keeps its count and passes. A function
 /// that changes where its digest comes from has to move groups by hand.
 const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
-    // A toolchain row: tog's catalog, or the project's toolchain lock
+    // A toolchain row: ward's catalog, or the project's toolchain lock
     // pinning one of its rows. `download_toolchain_artifact_held` also
     // authorizes the URL for the row's publisher, hit or miss.
     ("src/kernel/provider/cpython.rs", "realize_runtime", 1),
@@ -1834,17 +1835,17 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     ("src/tailors/go/mod.rs", "realize_runtime", 1),
     ("src/tailors/node/mod.rs", "realize_runtime", 1),
     ("src/tailors/ruby/mod.rs", "realize_runtime", 1),
-    // Compiled into tog: the native library table.
+    // Compiled into ward: the native library table.
     ("src/kernel/provider/nativelibs.rs", "realize_staged", 1),
     // The publisher's own listing, read over TLS: rubygems.org's API (or
-    // the store record tog wrote after checking a download against it), and
+    // the store record ward wrote after checking a download against it), and
     // Electron's SHASUMS256.txt from its GitHub release (kept in the
     // store). Never a lock's claim.
     ("src/tailors/ruby/mod.rs", "verify_gem", 1),
     ("src/kernel/provider/artifacts.rs", "provision", 1),
     // The project's pin: its committed lock (Cargo.lock checksums, mix.lock
-    // outer checksums, package-lock integrity, tog's Python lock) or a
-    // `tog.toml` declared artifact. tog honors the pin as the user's choice
+    // outer checksums, package-lock integrity, ward's Python lock) or a
+    // `greyward.toml` declared artifact. ward honors the pin as the user's choice
     // of bytes, as cargo, npm and pip with hashes do. A pin the upstream URL
     // would not serve fails on a cold cache and installs the pinned bytes
     // on a warm one.
@@ -1870,7 +1871,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
         1,
     ),
     // Cache reads of a pin's bytes: go's plan carries the sha256 of each
-    // module file tog itself inserted after checking it against go.sum's
+    // module file ward itself inserted after checking it against go.sum's
     // h1, and Corepack's check reads the pnpm tarball the node lock's
     // integrity names before comparing it with `packageManager`'s hash.
     // A persisted native classification is reused only for the lock
@@ -1927,7 +1928,7 @@ fn unchecked_store_at(tokens: &[(Token, String)], i: usize, names: &Names) -> bo
 
 /// The seven functions allowed to make a `Store` without validating its
 /// format marker, with how many times. Everything else goes through `Store::open`,
-/// `Store::existing` or `Store::open_at`, which refuse a store this tog
+/// `Store::existing` or `Store::open_at`, which refuse a store this ward
 /// does not read. A store made here is still validated before any record
 /// is read, because every lease but `try_activity_exclusive_unchecked`
 /// checks the marker once it is held. That last part is not something this
@@ -1939,7 +1940,7 @@ const UNCHECKED_STORES: &[(&str, &str, usize)] = &[
     ("src/kernel/store/mod.rs", "open_root", 1),
     ("src/kernel/store/mod.rs", "existing", 1),
     ("src/kernel/store/mod.rs", "handle", 1),
-    // `gc --reset` empties a store tog refuses to read, and never reads a
+    // `gc --reset` empties a store ward refuses to read, and never reads a
     // record of it.
     ("src/commands/gc.rs", "reset", 1),
     // A store named by an x environment's own records, which may not be the
@@ -2023,7 +2024,7 @@ fn every_public_supervise_spawn_is_fenced() {
                 .trim_start()
                 .starts_with("refuse_resolver(command, activity)?;"),
             None => {
-                clippy.contains(&format!("path = \"tog::kernel::supervise::{name}\""))
+                clippy.contains(&format!("path = \"greyward::kernel::supervise::{name}\""))
                     && names.contains(&format!("local_{name}").as_str())
             }
         };
@@ -2167,7 +2168,7 @@ fn the_scan_sees_every_spelling() {
 /// registry, so a new tailor is covered without editing this test.
 fn tailor_words() -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
-    for tailor in tog::tailors::registry() {
+    for tailor in greyward::tailors::registry() {
         words.push(tailor.id().into());
         words.push(tailor.lock_ecosystem().into());
         if let Ok(tool) = tailor.registry_tool() {
@@ -2182,7 +2183,7 @@ fn tailor_words() -> Vec<String> {
 
 /// Does a string literal name one of `words`: the whole literal, or, in a
 /// literal without whitespace (a name or path, not prose), one `/`
-/// component up to its first dot (`.tog/closures/dotnet.json`,
+/// component up to its first dot (`.greyward/closures/dotnet.json`,
 /// `python.json`)? Prose that mentions a name is not a match.
 fn names_a_word(literal: &str, words: &[String]) -> bool {
     let named = |text: &str| words.iter().any(|word| word == text);
@@ -2447,7 +2448,7 @@ fn the_literal_scan_sees_every_spelling() {
         fn byte() { f(b\"py\"); }\n\
         fn escaped() { f(\"say \\\"node\\\"\"); f(\"node:\"); }\n\
         fn comment() { // \"node\"\n /* \"py\" */ f('n'); }\n\
-        fn path() { f(\".tog/closures/node.json\"); f(\"node.json\"); \
+        fn path() { f(\".greyward/closures/node.json\"); f(\"node.json\"); \
             f(\"node_modules/.bin\"); f(\"run node.js x\"); }\n\
         #[cfg(test)]\nfn test_only() { f(\"node\"); }";
     let site = |function: &str, literal: &str, count: usize| {
@@ -2465,7 +2466,7 @@ fn the_literal_scan_sees_every_spelling() {
             site("raw", "node", 1),
             site("raw", "py", 1),
             site("byte", "py", 1),
-            site("path", ".tog/closures/node.json", 1),
+            site("path", ".greyward/closures/node.json", 1),
             site("path", "node.json", 1),
         ]
     );
@@ -2573,7 +2574,7 @@ fn gate_watches(paths: &[String]) -> std::collections::BTreeSet<String> {
 /// each with its reason.
 const ARCHIVE_GATE_EXEMPT: &[(&str, &str)] = &[(
     "src/kernel/gitsrc.rs",
-    "hands a tree tog checked out at a pinned commit to \
+    "hands a tree ward checked out at a pinned commit to \
      archive::pack_ustar_with_activity, which the gate watches; the file \
      changes often and its own end-to-end tests run when tests/git*.rs change",
 )];

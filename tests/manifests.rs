@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{command, copy_tree, fixture, tog_at, warm_store, TempDir};
+use common::{command, copy_tree, fixture, ward_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -25,7 +25,7 @@ fn all_manifest_fixtures_sync_and_run() {
         let project = root.join(name);
         copy_tree(&fixture(name), &project);
         let output = command(&project, root, &store)
-            .env("TOG_SANDBOX_TESTS", "required")
+            .env("GREYWARD_SANDBOX_TESTS", "required")
             .args(["sync"])
             .output()
             .unwrap();
@@ -35,7 +35,7 @@ fn all_manifest_fixtures_sync_and_run() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let run = tog_at(
+        let run = ward_at(
             &project,
             root,
             &store,
@@ -58,7 +58,7 @@ fn dynamic_vllm_shaped_fixture_syncs_real_dependencies() {
     copy_tree(&fixture("proj-vllm-shaped"), &project);
     let store = warm_store(&temp);
     let output = command(&project, root, &store)
-        .env("TOG_SANDBOX_TESTS", "required")
+        .env("GREYWARD_SANDBOX_TESTS", "required")
         .args(["sync"])
         .output()
         .unwrap();
@@ -68,7 +68,7 @@ fn dynamic_vllm_shaped_fixture_syncs_real_dependencies() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let run = tog_at(
+    let run = ward_at(
         &project,
         root,
         &store,

@@ -1,8 +1,8 @@
-//! `tog x <tool>`: run a tool from a registry without adding it to the
+//! `ward x <tool>`: run a tool from a registry without adding it to the
 //! project, cached forever. A synthetic single-requirement plan goes
 //! through the ordinary realize path, so the environment is an
 //! input-addressed store object; the second run is a store hit. Each tool
-//! gets a tiny project directory under `~/.tog/x/` holding the
+//! gets a tiny project directory under `~/.greyward/x/` holding the
 //! projection and its closure, which registers it as a gc root like any
 //! other project.
 
@@ -54,8 +54,8 @@ pub struct CleanRequest {
     pub tool: Option<String>,
 }
 
-const X_REQUEST_FILE: &str = ".tog/x.json";
-/// [`X_REQUEST_FILE`]'s name inside `.tog`.
+const X_REQUEST_FILE: &str = ".greyward/x.json";
+/// [`X_REQUEST_FILE`]'s name inside `.greyward`.
 const X_REQUEST_NAME: &str = "x.json";
 const X_LOCKS_DIR: &str = ".locks";
 
@@ -151,7 +151,7 @@ fn x_helpers(
 }
 
 /// The name of the directory a cached `x` environment lives in under
-/// `~/.tog/x`, for a caller that has to find one without re-deriving the
+/// `~/.greyward/x`, for a caller that has to find one without re-deriving the
 /// key by hand.
 pub fn environment_name(
     store_root: &Path,
@@ -180,7 +180,7 @@ pub fn environment_name(
 /// The directory one cached `x` environment lives in.
 ///
 /// The key names the store root because everything else in it is
-/// store-independent: two stores must not share one `~/.tog/x/` directory,
+/// store-independent: two stores must not share one `~/.greyward/x/` directory,
 /// or the second store's run would find a projection pointing into the
 /// first and fail in a way rerunning cannot clear.
 ///
@@ -194,9 +194,9 @@ pub fn environment_name(
 /// on each helper's runtime object too, under `x/4`: the `x/3` preimage
 /// with `<helper>=<object id>` fields appended. A tool with none keys on
 /// the `x/3` preimage alone. The key only names the directory: a cache hit
-/// also needs the request record (`.tog/x.json`) the run wrote there, so a
-/// directory an older tog made without one is rebuilt in place, never
-/// reused, and bare `tog x --clean` removes it.
+/// also needs the request record (`.greyward/x.json`) the run wrote there, so a
+/// directory an older ward made without one is rebuilt in place, never
+/// reused, and bare `ward x --clean` removes it.
 #[allow(clippy::too_many_arguments)]
 fn x_root_name(
     store: &Store,
@@ -253,7 +253,7 @@ fn ensure_x_metadata_dir(root: &Path) -> io::Result<()> {
         }
     }
     fs::create_dir_all(root)?;
-    let metadata_dir = root.join(".tog");
+    let metadata_dir = root.join(".greyward");
     if let Ok(metadata) = fs::symlink_metadata(&metadata_dir) {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(other(format!(
@@ -317,7 +317,7 @@ fn write_x_request_inner(
         }
     }
     let tmp = root
-        .join(".tog")
+        .join(".greyward")
         .join(format!(".x.json.tmp.{}", std::process::id()));
     let mut record = serde_json::json!({
         "schema": if store_root.is_some() { "x-request/2" } else { "x-request/1" },
@@ -363,14 +363,14 @@ fn choose_ecosystem(request: &Request, cwd: &Path) -> io::Result<&'static str> {
     Err(say_which_registry(&request.tool))
 }
 
-/// `x: say which registry provides 'ruff': 'tog x py:ruff' (PyPI) or ...`,
+/// `x: say which registry provides 'ruff': 'ward x py:ruff' (PyPI) or ...`,
 /// one alternative per registry tool.
 fn say_which_registry(tool: &str) -> io::Error {
     let choices: Vec<String> = registry_tools()
         .iter()
         .map(|(_, registry)| {
             format!(
-                "'tog x {}:{tool}' ({})",
+                "'ward x {}:{tool}' ({})",
                 registry.spelling(),
                 registry.registry_name()
             )
@@ -593,13 +593,13 @@ fn read_x_request(root: &Path) -> Option<XRecord> {
     parse_x_request(file)
 }
 
-/// [`read_x_request`] below a held root directory: `.tog` and the record
+/// [`read_x_request`] below a held root directory: `.greyward` and the record
 /// are each opened without following a symlink, so a rename of the root's
 /// pathname cannot make this read another root's record.
 fn read_x_request_in(root: &fs::File) -> Option<XRecord> {
-    let tog = store::open_directory_at(root.as_raw_fd(), b".tog").ok()?;
+    let ward = store::open_directory_at(root.as_raw_fd(), b".greyward").ok()?;
     let file = store::open_file_at(
-        tog.as_raw_fd(),
+        ward.as_raw_fd(),
         X_REQUEST_NAME.as_bytes(),
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
         0,
@@ -666,7 +666,7 @@ fn x_request_is_ready(
     Ok(true)
 }
 
-/// `tog x`: `x` has its own cached projection path and therefore does
+/// `ward x`: `x` has its own cached projection path and therefore does
 /// not pass through sync's policy initialization. Load the cwd policy,
 /// including all applicable ancestors, before realization or any cache-hit
 /// checks. The dispatcher recorded `--strict` before this runs, so a
@@ -704,7 +704,7 @@ pub fn launch(
     let toolchain = x_toolchain(platform, cwd, ecosystem)?;
     let runtime_object = tool.runtime_object_id(platform, &toolchain)?;
     let (helpers, helper_objects) = x_helpers(platform, cwd, ecosystem)?;
-    let root = x_home.join(".tog/x").join(x_root_name(
+    let root = x_home.join(".greyward/x").join(x_root_name(
         &store,
         platform,
         ecosystem,
@@ -760,7 +760,7 @@ pub fn launch(
     }
     if !executable.is_file() {
         return Err(other(format!(
-            "'{package}' installed but provides no '{bin}' executable; name it with --from: 'tog x --from {package} <tool>'"
+            "'{package}' installed but provides no '{bin}' executable; name it with --from: 'ward x --from {package} <tool>'"
         )));
     }
     let launch_env = tool.launch_env(&store, activity, platform, &root, &toolchain)?;
@@ -781,9 +781,9 @@ pub fn launch(
     Ok(crate::commands::shared::child_status_code(&status))
 }
 
-/// Run the executable `tog x` installed, with the user's arguments. The
-/// tool is the user's program (`tog x cowsay`, or a package that ships a
-/// `cargo` wrapper), not a resolution tog starts, so neither the door nor
+/// Run the executable `ward x` installed, with the user's arguments. The
+/// tool is the user's program (`ward x cowsay`, or a package that ships a
+/// `cargo` wrapper), not a resolution ward starts, so neither the door nor
 /// the host-local tripwire applies to it.
 // Reviewed site (tests/architecture.rs): the user's own program, which may be any tool.
 #[allow(clippy::disallowed_methods)]
@@ -796,7 +796,7 @@ fn run_installed_tool(
 
 /// Realize `package@version` from `ecosystem`'s registry tool for another
 /// command (a dependency edit's pinned pnpm), in the same registered
-/// `~/.tog/x/` environment `tog x` would use for it from `project`: both
+/// `~/.greyward/x/` environment `ward x` would use for it from `project`: both
 /// key on the same fields, so the two share one environment rather than
 /// realizing it twice. The resolver runs through `door`.
 pub(crate) fn realize_cached_tool(
@@ -812,7 +812,7 @@ pub(crate) fn realize_cached_tool(
     let toolchain = x_toolchain(platform, project, ecosystem)?;
     let runtime_object = tool.runtime_object_id(platform, &toolchain)?;
     let (helpers, helper_objects) = x_helpers(platform, project, ecosystem)?;
-    let root = home()?.join(".tog/x").join(x_root_name(
+    let root = home()?.join(".greyward/x").join(x_root_name(
         store,
         platform,
         ecosystem,
@@ -822,15 +822,15 @@ pub(crate) fn realize_cached_tool(
         &runtime_object,
         &helper_objects,
     )?);
-    // Take the same shared lifecycle lock `tog x` takes, and hand it back
-    // to the caller. `tog x --clean` removes a cached root under an
+    // Take the same shared lifecycle lock `ward x` takes, and hand it back
+    // to the caller. `ward x --clean` removes a cached root under an
     // exclusive lock, so without this a cleanup running alongside a
     // dependency edit could delete the delegate's environment out from under
     // it. The caller holds the lock for as long as it uses the root.
     let lock = acquire_x_root(&root)?;
     let executable = tool.bin_dir(&root).join(default_bin(package));
-    // The same request record `tog x` writes, so the environment is one
-    // `tog x` reuses and `tog x --clean <tool>` can name, and its
+    // The same request record `ward x` writes, so the environment is one
+    // `ward x` reuses and `ward x --clean <tool>` can name, and its
     // originating store is known when it is removed.
     let runtime = Some((
         &toolchain,
@@ -879,7 +879,7 @@ pub(crate) fn realize_cached_tool(
 }
 
 /// The cache decision `realize_cached_tool` makes, under the x-root lock
-/// its caller holds: reuse the root exactly when `tog x` would
+/// its caller holds: reuse the root exactly when `ward x` would
 /// (`x_request_is_ready`: a `ready` request record and a valid projection),
 /// otherwise mark it `realizing` and answer `false` so the caller rebuilds
 /// it. A root with no record, an unreadable one, or one left `realizing`
@@ -956,7 +956,7 @@ mod tests {
     /// being equal keeps one.
     #[test]
     fn the_x_key_follows_the_runtime() {
-        let store = Store::for_test(PathBuf::from("/tmp/tog-x-key-fixture"));
+        let store = Store::for_test(PathBuf::from("/tmp/greyward-x-key-fixture"));
         let platform = Platform::host().unwrap();
         let selected = fixed_selection("python", "cpython", "3.12.14");
         let name = |toolchain: &Selected, runtime_object: &str| {
@@ -1009,7 +1009,7 @@ mod tests {
         assert_eq!(node.bin_dir(root), root.join("node_modules/.bin"));
         let error = registry_tool("go").err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert_eq!(error.to_string(), "tog x does not support go");
+        assert_eq!(error.to_string(), "ward x does not support go");
         assert!(registry_tool("cobol").is_err());
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
     /// environment is found again only by recomputing this name, so any
     /// change to the key's bytes (its preimage, the hash, or the `py`/`npm`
     /// prefix a registry tool supplies) orphans every cache directory an
-    /// earlier tog made. The toolchain is a fixed bundle, not the shipped
+    /// earlier ward made. The toolchain is a fixed bundle, not the shipped
     /// catalog, so a catalog bump does not move these goldens.
     ///
     /// `py:` outside a project that locks Rust has no helper and keeps its
@@ -1106,7 +1106,7 @@ mod tests {
             "python"
         );
         let error = choose_from_project(&request(None), &[]).unwrap_err();
-        assert!(error.to_string().contains("tog x py:ruff"), "{error}");
+        assert!(error.to_string().contains("ward x py:ruff"), "{error}");
         assert_eq!(
             choose_from_project(&request(None), &["node"]).unwrap(),
             "node"
@@ -1187,7 +1187,7 @@ mod tests {
         let locks_python = base.join("locks-python");
         let node_only = base.join("node-only");
         for (project, python) in [(&locks_python, true), (&node_only, false)] {
-            fs::create_dir_all(project.join(".tog")).unwrap();
+            fs::create_dir_all(project.join(".greyward")).unwrap();
             fs::write(project.join("package.json"), "{}\n").unwrap();
             if python {
                 fs::write(project.join("requirements.txt"), "six==1.17.0\n").unwrap();
@@ -1255,7 +1255,7 @@ mod tests {
         )
         .unwrap();
         let bytes = resolved.pending.unwrap().canonical_bytes();
-        fs::write(project.join("tog-toolchain.toml"), &bytes).unwrap();
+        fs::write(project.join("greyward-toolchain.toml"), &bytes).unwrap();
 
         let (helpers, ids) = x_helpers(platform, &project, "python").unwrap();
         assert_eq!(
@@ -1277,7 +1277,10 @@ mod tests {
         );
         let (helpers, ids) = x_helpers(platform, &outside, "python").unwrap();
         assert!(helpers.is_empty() && ids.is_empty());
-        assert_eq!(fs::read(project.join("tog-toolchain.toml")).unwrap(), bytes);
+        assert_eq!(
+            fs::read(project.join("greyward-toolchain.toml")).unwrap(),
+            bytes
+        );
     }
 
     #[test]
@@ -1390,18 +1393,18 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("runner did not recreate the root after cleanup released its lock");
         runner.join().unwrap();
-        assert!(root.join(".tog").is_dir());
+        assert!(root.join(".greyward").is_dir());
     }
 
     #[test]
     fn fd_relative_removal_does_not_follow_replaced_x_directory() {
         let temp = TempDir::named("x-remove-fd");
         let base = &temp.0;
-        let x_dir = base.join("home/.tog/x");
+        let x_dir = base.join("home/.greyward/x");
         let root = x_dir.join("py-victim-test");
         let victim = base.join("victim");
-        fs::create_dir_all(root.join(".tog/nested")).unwrap();
-        fs::write(root.join(".tog/nested/old"), b"old").unwrap();
+        fs::create_dir_all(root.join(".greyward/nested")).unwrap();
+        fs::write(root.join(".greyward/nested/old"), b"old").unwrap();
         fs::create_dir_all(&victim).unwrap();
         fs::write(victim.join("keep"), b"keep").unwrap();
         std::os::unix::fs::symlink(&victim, root.join("victim-link")).unwrap();
@@ -1415,7 +1418,7 @@ mod tests {
         store::remove_tree_at(root_fd.as_raw_fd()).unwrap();
 
         assert!(victim.join("keep").is_file());
-        assert!(!root.join(".tog/nested/old").exists());
+        assert!(!root.join(".greyward/nested/old").exists());
         drop(root_fd);
         drop(validated);
     }
@@ -1424,16 +1427,16 @@ mod tests {
     fn dot_prefixed_entries_are_not_x_candidates() {
         let temp = TempDir::named("x-lock-entry");
         let base = &temp.0;
-        let x_dir = base.join("home/.tog/x");
+        let x_dir = base.join("home/.greyward/x");
         let root = x_dir.join("py-active");
-        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         let shared = lock_x_root(&root, false, false)
             .unwrap()
             .expect("active root shared lock");
         let lock_path = x_dir.join(".locks/py-active.lock");
         assert!(lock_path.is_file());
-        fs::create_dir_all(x_dir.join(".locks/.tog")).unwrap();
-        fs::write(x_dir.join(".locks/.tog/x.json"), "{}").unwrap();
+        fs::create_dir_all(x_dir.join(".locks/.greyward")).unwrap();
+        fs::write(x_dir.join(".locks/.greyward/x.json"), "{}").unwrap();
 
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
@@ -1452,7 +1455,7 @@ mod tests {
         let temp = TempDir::named("x-record");
         let base = &temp.0;
         let root = base.join("npm-scope-foo");
-        fs::create_dir_all(root.join(".tog")).unwrap();
+        fs::create_dir_all(root.join(".greyward")).unwrap();
         write_x_request(&root, "node", "@scope/foo", None, "realizing").unwrap();
         let request = serde_json::from_reader::<_, serde_json::Value>(
             fs::File::open(root.join(X_REQUEST_FILE)).unwrap(),
@@ -1501,9 +1504,9 @@ mod tests {
         let store = Store::for_test(base.join("other-store").canonicalize().unwrap());
         let object = store.root.join("objects").join("a".repeat(40) + "-env");
         fs::create_dir_all(&object).unwrap();
-        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         fs::write(
-            root.join(".tog/closures/python.json"),
+            root.join(".greyward/closures/python.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -1538,10 +1541,10 @@ mod tests {
     fn realizing_marker_makes_partial_root_a_cleanup_candidate() {
         let temp = TempDir::named("x-partial");
         let base = &temp.0;
-        let root = base.join("home/.tog/x/py-partial");
+        let root = base.join("home/.greyward/x/py-partial");
         ensure_x_metadata_dir(&root).unwrap();
         write_x_request(&root, "python", "ruff", None, "realizing").unwrap();
-        let candidates = x_candidates(&base.join("home/.tog/x")).unwrap();
+        let candidates = x_candidates(&base.join("home/.greyward/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
     }
@@ -1553,7 +1556,7 @@ mod tests {
         write_x_request(root, "python", "ruff", None, "realizing").unwrap();
     }
 
-    /// `$HOME` on another volume is a routine setup, and `tog x` follows
+    /// `$HOME` on another volume is a routine setup, and `ward x` follows
     /// the symlink when it creates and registers a root. Cleanup has to reach
     /// exactly the same environment or it could never remove what the runner
     /// just made.
@@ -1566,13 +1569,13 @@ mod tests {
         let home = base.join("home");
         std::os::unix::fs::symlink(&real_home, &home).unwrap();
 
-        let x_dir = home.join(".tog/x");
+        let x_dir = home.join(".greyward/x");
         let root = x_dir.join("py-linked-home");
-        // Runner path: creates .tog/x, .locks and the root itself.
+        // Runner path: creates .greyward/x, .locks and the root itself.
         let shared = acquire_x_root(&root).unwrap();
         seed_root(&root);
         assert!(real_home
-            .join(".tog/x/.locks/py-linked-home.lock")
+            .join(".greyward/x/.locks/py-linked-home.lock")
             .is_file());
         drop(shared);
 
@@ -1580,7 +1583,7 @@ mod tests {
         let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
         assert_eq!(
             validated.path,
-            real_home.canonicalize().unwrap().join(".tog/x")
+            real_home.canonicalize().unwrap().join(".greyward/x")
         );
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
@@ -1588,27 +1591,27 @@ mod tests {
         drop(validated);
     }
 
-    /// The same contract for a symlinked `~/.tog` — "move the cache off
+    /// The same contract for a symlinked `~/.greyward` — "move the cache off
     /// the root disk".
     #[test]
-    fn runner_and_cleanup_agree_about_a_symlinked_tog_directory() {
-        let temp = TempDir::named("x-symlinked-tog");
+    fn runner_and_cleanup_agree_about_a_symlinked_ward_directory() {
+        let temp = TempDir::named("x-symlinked-greyward");
         let base = &temp.0;
-        let real_tog = base.join("volume/tog");
-        fs::create_dir_all(&real_tog).unwrap();
+        let real_ward = base.join("volume/ward");
+        fs::create_dir_all(&real_ward).unwrap();
         let home = base.join("home");
         fs::create_dir_all(&home).unwrap();
-        std::os::unix::fs::symlink(&real_tog, home.join(".tog")).unwrap();
+        std::os::unix::fs::symlink(&real_ward, home.join(".greyward")).unwrap();
 
-        let x_dir = home.join(".tog/x");
-        let root = x_dir.join("py-linked-tog");
+        let x_dir = home.join(".greyward/x");
+        let root = x_dir.join("py-linked-greyward");
         let shared = acquire_x_root(&root).unwrap();
         seed_root(&root);
-        assert!(real_tog.join("x/.locks/py-linked-tog.lock").is_file());
+        assert!(real_ward.join("x/.locks/py-linked-greyward.lock").is_file());
         drop(shared);
 
         let validated = validated_x_dir(&x_dir).unwrap().expect("x directory");
-        assert_eq!(validated.path, real_tog.canonicalize().unwrap().join("x"));
+        assert_eq!(validated.path, real_ward.canonicalize().unwrap().join("x"));
         let candidates = x_candidates(&x_dir).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, root.canonicalize().unwrap());
@@ -1623,10 +1626,10 @@ mod tests {
         let temp = TempDir::named("x-symlinked-x");
         let base = &temp.0;
         let home = base.join("home");
-        fs::create_dir_all(home.join(".tog")).unwrap();
+        fs::create_dir_all(home.join(".greyward")).unwrap();
         let elsewhere = base.join("elsewhere");
         fs::create_dir_all(&elsewhere).unwrap();
-        let x_dir = home.join(".tog/x");
+        let x_dir = home.join(".greyward/x");
         std::os::unix::fs::symlink(&elsewhere, &x_dir).unwrap();
 
         let runner = open_x_dir(&x_dir).unwrap_err();
@@ -1648,7 +1651,7 @@ mod tests {
     /// is opened.
     #[test]
     fn cleanup_refuses_a_relative_home() {
-        let error = validated_x_dir(Path::new("relative-home/.tog/x")).unwrap_err();
+        let error = validated_x_dir(Path::new("relative-home/.greyward/x")).unwrap_err();
         assert!(error.to_string().contains("is not absolute"), "{error}");
     }
 
@@ -1660,7 +1663,7 @@ mod tests {
     fn cleanup_unlinks_the_root_lock_and_a_waiter_relocks_the_new_file() {
         let temp = TempDir::named("x-lock-unlink");
         let base = &temp.0;
-        let x_dir = base.join("home/.tog/x");
+        let x_dir = base.join("home/.greyward/x");
         let root = x_dir.join("py-unlink");
         fs::create_dir_all(&root).unwrap();
         let x_fd = open_directory_path(&x_dir.canonicalize().unwrap()).unwrap();
@@ -1762,11 +1765,11 @@ mod tests {
         )
         .unwrap();
 
-        let root = base.join("home/.tog/x/py-ready");
-        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        let root = base.join("home/.greyward/x/py-ready");
+        fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         std::os::unix::fs::symlink(&object, root.join(".venv")).unwrap();
         fs::write(
-            root.join(".tog/closures/python.json"),
+            root.join(".greyward/closures/python.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -1796,7 +1799,7 @@ mod tests {
             .unwrap();
         assert!(cached_projection(&store, &activity, &root, "python").is_ok());
         for id in ["test-env", "0123456789abcdef0123456789abcdef01234567-a..b"] {
-            let closure = root.join(".tog/closures/python.json");
+            let closure = root.join(".greyward/closures/python.json");
             let mut envelope: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&closure).unwrap()).unwrap();
             envelope["body"]["env_object"] = store.object_path(id).display().to_string().into();
@@ -1917,12 +1920,12 @@ mod tests {
     fn a_root_without_a_request_record_matches_only_an_unfiltered_clean() {
         let temp = TempDir::named("x-unrecorded");
         let base = &temp.0;
-        let root = base.join("home/.tog/x/py-ruff-0123456789abcdef");
-        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        let root = base.join("home/.greyward/x/py-ruff-0123456789abcdef");
+        fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         // Its closure names an object in some store: that is no longer
         // read as a claim of ownership.
         fs::write(
-            root.join(".tog/closures/python.json"),
+            root.join(".greyward/closures/python.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "python",
@@ -1931,7 +1934,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let candidates = x_candidates(&base.join("home/.tog/x")).unwrap();
+        let candidates = x_candidates(&base.join("home/.greyward/x")).unwrap();
         assert_eq!(candidates.len(), 1);
         let filter = |ecosystem: Option<&str>, tool: Option<&str>| {
             clean_filter(CleanRequest {
@@ -1975,7 +1978,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = TempDir::named("x-unreadable-owner");
         let root = temp.0.join("py-ruff-0123456789abcdef");
-        let closures = root.join(".tog/closures");
+        let closures = root.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::write(closures.join("python.json"), b"{}").unwrap();
         fs::set_permissions(&closures, fs::Permissions::from_mode(0o000)).unwrap();
@@ -2011,7 +2014,7 @@ mod tests {
         );
 
         let named = base.join("npm-named");
-        fs::create_dir_all(named.join(".tog")).unwrap();
+        fs::create_dir_all(named.join(".greyward")).unwrap();
         assert_eq!(
             candidate_ecosystem(
                 &open_directory_path(&named).unwrap(),
@@ -2021,7 +2024,7 @@ mod tests {
         );
 
         let unknown = base.join("mystery");
-        fs::create_dir_all(unknown.join(".tog")).unwrap();
+        fs::create_dir_all(unknown.join(".greyward")).unwrap();
         assert_eq!(
             candidate_ecosystem(
                 &open_directory_path(&unknown).unwrap(),
@@ -2048,8 +2051,8 @@ mod tests {
         )
         .unwrap();
 
-        let root = base.join("home/.tog/x/npm-pnpm-0123456789abcdef");
-        fs::create_dir_all(root.join(".tog/closures")).unwrap();
+        let root = base.join("home/.greyward/x/npm-pnpm-0123456789abcdef");
+        fs::create_dir_all(root.join(".greyward/closures")).unwrap();
         let projection_id = "ab".repeat(16);
         let key = hex::encode(Sha256::digest(
             root.canonicalize().unwrap().as_os_str().as_bytes(),
@@ -2066,7 +2069,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink(&forest, root.join("node_modules")).unwrap();
         fs::write(
-            root.join(".tog/closures/node.json"),
+            root.join(".greyward/closures/node.json"),
             serde_json::json!({
                 "schema": "closure/1",
                 "ecosystem": "node",
@@ -2089,7 +2092,7 @@ mod tests {
     }
 
     /// The pnpm cache `realize_cached_tool` uses is reused only when its
-    /// request record says `ready`, as `tog x` decides. One a tog before
+    /// request record says `ready`, as `ward x` decides. One a ward before
     /// this record left (no `x.json`) and one an interrupted run left
     /// `realizing` are both marked `realizing` and rebuilt, never reused,
     /// though each holds a working `pnpm`.

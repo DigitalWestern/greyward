@@ -3,7 +3,7 @@
 //!
 //! A closure records what one sync realized for one ecosystem, plus the store
 //! references that protect it. Publication registers the durable root record
-//! first and renames the visible `.tog/closures/<ecosystem>.json` after,
+//! first and renames the visible `.greyward/closures/<ecosystem>.json` after,
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod join;
@@ -42,12 +42,12 @@ fn with_scopes<R>(f: impl FnOnce(&mut Vec<(u64, Key)>) -> R) -> R {
 /// receive an explicit key snapshot instead of borrowing or moving this guard.
 ///
 /// ```compile_fail
-/// let guard = tog::comforter::init_signing().unwrap();
+/// let guard = greyward::comforter::init_signing().unwrap();
 /// std::thread::spawn(move || drop(guard));
 /// ```
 ///
 /// ```compile_fail
-/// let guard = tog::comforter::init_signing().unwrap();
+/// let guard = greyward::comforter::init_signing().unwrap();
 /// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
 /// ```
 #[must_use = "the signing key is in force only while its scope is held"]
@@ -74,7 +74,7 @@ impl Drop for SigningScope {
     }
 }
 
-/// Load the closure-signing key named by `TOG_SIGNING_KEY` for one
+/// Load the closure-signing key named by `GREYWARD_SIGNING_KEY` for one
 /// operation, before any store is opened or closure written, and keep it
 /// in force while the returned scope is held. An unset variable means
 /// every closure is written unsigned. A set variable, including an empty
@@ -82,13 +82,13 @@ impl Drop for SigningScope {
 /// `ed25519:<64 hex>` line) or the command fails here; it never downgrades
 /// to unsigned.
 pub fn init_signing() -> io::Result<SigningScope> {
-    let key = match std::env::var_os("TOG_SIGNING_KEY") {
+    let key = match std::env::var_os("GREYWARD_SIGNING_KEY") {
         None => None,
         Some(path) => Some(std::sync::Arc::new(
             SigningKey::load(Path::new(&path)).map_err(|error| {
                 io::Error::new(
                     error.kind(),
-                    format!("TOG_SIGNING_KEY: {error}; unset it to write unsigned closures"),
+                    format!("GREYWARD_SIGNING_KEY: {error}; unset it to write unsigned closures"),
                 )
             })?,
         )),
@@ -98,7 +98,7 @@ pub fn init_signing() -> io::Result<SigningScope> {
 
 /// The current thread's innermost operation signing key, or `None` when it has none (or
 /// no operation loaded one, in which case closures are written unsigned
-/// and `tog audit` reports them outdated).
+/// and `ward audit` reports them outdated).
 pub fn signing_key() -> Key {
     with_scopes(|scopes| scopes.last().and_then(|(_, key)| key.clone()))
 }
@@ -219,7 +219,7 @@ impl ClosureRefs {
 }
 
 /// Common closure envelope: every tailor's provenance lands at
-/// .tog/closures/<ecosystem>.json with a shared outer shape; the `body`
+/// .greyward/closures/<ecosystem>.json with a shared outer shape; the `body`
 /// stays tailor-owned. Written atomically. Store ownership and exact
 /// references are mandatory for production publication.
 pub fn write_closure(
@@ -288,17 +288,17 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     // is moved or a visible link replaced, and again by the closure writer.
     toolchain::recheck_before_publication(project)?;
     project.check_still_named()?;
-    // Registration imports the closures the project already has. A `.tog`
+    // Registration imports the closures the project already has. A `.greyward`
     // that is a symlink, or anything but a real directory, is refused here,
     // before the import could be pointed at another directory's closures.
-    match project.entry(Path::new(".tog"))? {
+    match project.entry(Path::new(".greyward"))? {
         Entry::Absent | Entry::Directory => {}
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is not a real directory; remove it and run 'tog' again",
-                    project.path().join(".tog").display()
+                    "{} is not a real directory; remove it and run 'ward' again",
+                    project.path().join(".greyward").display()
                 ),
             ))
         }
@@ -376,15 +376,15 @@ fn write_closure_inner(
     )?;
 
     // Hold the project directory open and publish through it. Every
-    // component of `.tog/closures/<ecosystem>.json` is walked with
-    // O_NOFOLLOW from that descriptor, so a `.tog` or `.tog/closures`
+    // component of `.greyward/closures/<ecosystem>.json` is walked with
+    // O_NOFOLLOW from that descriptor, so a `.greyward` or `.greyward/closures`
     // swapped for a symlink is refused instead of carrying provenance
     // outside the project (same class as the cargo-home/bin escape).
-    let closure_path = Path::new(".tog/closures").join(format!("{ecosystem}.json"));
+    let closure_path = Path::new(".greyward/closures").join(format!("{ecosystem}.json"));
     // Create the directory before the root record is registered: root
     // registration imports whatever closures the project already has, and a
-    // symlinked `.tog` must be refused before anything is written.
-    project.create_dir_all(Path::new(".tog/closures"))?;
+    // symlinked `.greyward` must be refused before anything is written.
+    project.create_dir_all(Path::new(".greyward/closures"))?;
 
     // Claim after validating the body and before writing the closure. If a
     // later write step fails, the claimed exceptions are gone with the frame;
@@ -429,7 +429,7 @@ fn write_closure_inner(
     });
     // Sign the value that is about to be pretty-printed: the signature
     // covers every envelope field and the whole body, exceptions included.
-    // `tog audit` rebuilds the same canonical bytes from the file.
+    // `ward audit` rebuilds the same canonical bytes from the file.
     if let Some(key) = signing_key() {
         key.sign(&mut envelope)?;
     }
@@ -453,7 +453,7 @@ fn check_closure_destination(project: &ProjectRoot, closure_path: &Path) -> io::
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is a symlink; remove it and run 'tog' again",
+                    "{} is a symlink; remove it and run 'ward' again",
                     project.path().join(closure_path).display()
                 ),
             ))
@@ -462,7 +462,7 @@ fn check_closure_destination(project: &ProjectRoot, closure_path: &Path) -> io::
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is a {} where the closure belongs; remove it and run 'tog' again",
+                    "{} is a {} where the closure belongs; remove it and run 'ward' again",
                     project.path().join(closure_path).display(),
                     match kind {
                         Entry::Directory => "directory",
@@ -489,18 +489,18 @@ pub(crate) fn replace_project_symlink(
     project.replace_symlink(relative, target, label)
 }
 
-/// Read a tailor's closure body back (for `tog run` and friends).
-/// The `tog x` cache roots this process realizes into, by canonical path:
+/// Read a tailor's closure body back (for `ward run` and friends).
+/// The `ward x` cache roots this process realizes into, by canonical path:
 /// what the resolution join leaves alone. `commands::x` marks a root right
 /// before it realizes a tool there, so the fact comes from the command,
 /// never from a file a project could commit.
 static CACHE_ROOTS: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-/// Mark `root` as a `tog x` cache root of this process. It must exist; the
+/// Mark `root` as a `ward x` cache root of this process. It must exist; the
 /// set holds its canonical path, which [`is_cache_root`] compares exactly.
 /// Marks last for the process and are never removed, also after a failed
-/// realization: the path is still that cache root, and tog is one-shot.
+/// realization: the path is still that cache root, and ward is one-shot.
 pub fn mark_cache_root(root: &Path) -> io::Result<()> {
     let canonical = fs::canonicalize(root)?;
     CACHE_ROOTS
@@ -532,7 +532,7 @@ pub(crate) fn clear_cache_roots_for_test() {
 pub fn read_closure(project_dir: &Path, ecosystem: &str) -> io::Result<serde_json::Value> {
     let path = project_dir.join(closure_relative(ecosystem));
     let text = fs::read_to_string(&path).map_err(|e| {
-        let message = format!("read {}: {e}; run `tog` first", path.display());
+        let message = format!("read {}: {e}; run `ward` first", path.display());
         crate::kernel::error::describe(e, message)
     })?;
     closure_body(&path, &text, ecosystem)
@@ -543,14 +543,14 @@ pub fn has_closure(project: &ProjectRoot, ecosystem: &str) -> io::Result<bool> {
     Ok(project.entry(&closure_relative(ecosystem))? != Entry::Absent)
 }
 
-/// `read_closure` through a project the command holds: the record is tog
+/// `read_closure` through a project the command holds: the record is ward
 /// state, read with the strict no-follow walk.
 pub fn read_closure_in(project: &ProjectRoot, ecosystem: &str) -> io::Result<serde_json::Value> {
     read_closure_if_present(project, ecosystem)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "read {}: not found; run `tog` first",
+                "read {}: not found; run `ward` first",
                 project.path().join(closure_relative(ecosystem)).display()
             ),
         )
@@ -567,7 +567,7 @@ pub fn read_closure_if_present(
     let relative = closure_relative(ecosystem);
     let path = project.path().join(&relative);
     let Some(bytes) = project.read_file(&relative).map_err(|e| {
-        let message = format!("read {}: {e}; run `tog` first", path.display());
+        let message = format!("read {}: {e}; run `ward` first", path.display());
         crate::kernel::error::describe(e, message)
     })?
     else {
@@ -576,7 +576,7 @@ pub fn read_closure_if_present(
     let text = String::from_utf8(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse {}: not UTF-8; run `tog` first", path.display()),
+            format!("parse {}: not UTF-8; run `ward` first", path.display()),
         )
     })?;
     closure_body(&path, &text, ecosystem).map(Some)
@@ -584,7 +584,7 @@ pub fn read_closure_if_present(
 
 /// Where a project keeps its `ecosystem` closure record, relative to its root.
 fn closure_relative(ecosystem: &str) -> PathBuf {
-    PathBuf::from(format!(".tog/closures/{ecosystem}.json"))
+    PathBuf::from(format!(".greyward/closures/{ecosystem}.json"))
 }
 
 /// The body of a closure envelope read from `path`, checked: it parses,
@@ -593,7 +593,7 @@ fn closure_body(path: &Path, text: &str, ecosystem: &str) -> io::Result<serde_js
     let v: serde_json::Value = serde_json::from_str(text).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("parse {}: {e}; run `tog` first", path.display()),
+            format!("parse {}: {e}; run `ward` first", path.display()),
         )
     })?;
     if let Some(recorded) = v["platform"].as_str() {
@@ -602,7 +602,7 @@ fn closure_body(path: &Path, text: &str, ecosystem: &str) -> io::Result<serde_js
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "{}: closure was projected on {recorded}; this host is {}; run `tog` here",
+                    "{}: closure was projected on {recorded}; this host is {}; run `ward` here",
                     path.display(),
                     host.triple()
                 ),
@@ -616,7 +616,7 @@ fn closure_body(path: &Path, text: &str, ecosystem: &str) -> io::Result<serde_js
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{}: unknown closure schema/ecosystem; re-run `tog`",
+                "{}: unknown closure schema/ecosystem; re-run `ward`",
                 path.display()
             ),
         ));
@@ -668,7 +668,7 @@ pub(crate) use crate::kernel::store::clone_tree_with_activity;
 /// Resolve an object reference from a closure body, CONTAINED to the
 /// active store: the recorded id must exist in the store and the recorded
 /// path must be exactly the store's path for that id. A project-editable
-/// closure must never inject arbitrary executable paths into `tog run`.
+/// closure must never inject arbitrary executable paths into `ward run`.
 pub fn closure_object(
     store: &crate::kernel::store::Store,
     activity: &StoreActivity,
@@ -679,7 +679,7 @@ pub fn closure_object(
     let bad = |msg: &str| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("closure {key}: {msg}; run `tog` first"),
+            format!("closure {key}: {msg}; run `ward` first"),
         )
     };
     let id = closure[key]["id"]
@@ -826,15 +826,15 @@ pub fn move_reserved_backup(
         project.sync_dir(Path::new("."))?;
     }
     backups_dir.sync_all()?;
-    // The one advisory for a real directory found where tog projects a
+    // The one advisory for a real directory found where ward projects a
     // symlink, said after the move so it is true when it is read. The
     // project's root record keeps protecting the backup, so `gc --project`
     // will not collect it while the project exists: the way out is to
     // delete it once nothing in it is missed.
     ui::warning(
         &format!(
-            "moved existing {} to {}: it was a real directory where tog projects a symlink \
-             (an install tool ran here, or tog had never synced this project); delete it \
+            "moved existing {} to {}: it was a real directory where ward projects a symlink \
+             (an install tool ran here, or ward had never synced this project); delete it \
              once you are sure nothing in it is missed",
             path.display(),
             destination.display()
@@ -883,7 +883,7 @@ pub(crate) fn store_from_object_path(path: &Path) -> Option<Store> {
 }
 
 /// A project file the plan was computed from, recorded in the closure so
-/// `tog status` can tell whether the projection is still current
+/// `ward status` can tell whether the projection is still current
 /// without re-planning. Additive closure field (`inputs`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InputRecord {
@@ -956,7 +956,7 @@ mod tests {
     }
 
     fn write_closure(dir: &Path, platform: Option<&str>) {
-        fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         let mut v = serde_json::json!({
             "schema": "closure/1",
             "ecosystem": "python",
@@ -965,7 +965,7 @@ mod tests {
         if let Some(platform) = platform {
             v["platform"] = serde_json::Value::String(platform.to_string());
         }
-        fs::write(dir.join(".tog/closures/python.json"), v.to_string()).unwrap();
+        fs::write(dir.join(".greyward/closures/python.json"), v.to_string()).unwrap();
     }
 
     #[test]
@@ -992,7 +992,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("path is padded"), "{error}");
         assert!(
-            !project.join(".tog").exists(),
+            !project.join(".greyward").exists(),
             "wrote into a project no record can name"
         );
         attribution.finish(false).unwrap();
@@ -1114,12 +1114,13 @@ mod tests {
         drop(activity);
 
         // The closure envelope is provenance...
-        assert!(project.join(".tog/closures/python.json").is_file());
+        assert!(project.join(".greyward/closures/python.json").is_file());
         // ...but the durable root record is what protects the object, and it
         // must name exactly the references the producer supplied.
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
-                .unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".greyward/closures/python.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(envelope["platform"], Platform::host().unwrap().triple());
         let roots = store.roots().unwrap();
         assert_eq!(roots.len(), 1, "no durable root record was published");
@@ -1132,7 +1133,7 @@ mod tests {
     }
 
     fn envelope(project: &Path, ecosystem: &str, body: serde_json::Value) {
-        let closures = project.join(".tog/closures");
+        let closures = project.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::write(
             closures.join(format!("{ecosystem}.json")),
@@ -1152,7 +1153,7 @@ mod tests {
         let (_store_dir, store) = test_store("bare-id-path");
         let id = complete_object(&store, "bare-id");
         let mentioned = complete_object(&store, "mentioned");
-        let elsewhere = std::env::temp_dir().join("tog-not-a-store");
+        let elsewhere = std::env::temp_dir().join("greyward-not-a-store");
         let activity = store
             .activity(crate::kernel::activity::ActivityMode::Exclusive)
             .unwrap();
@@ -1332,7 +1333,7 @@ mod tests {
         let project_dir = unique_project("record-before-closure");
         let project = &project_dir.0;
         let id = complete_object(&store, "record-first");
-        let closures = project.join(".tog/closures");
+        let closures = project.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::set_permissions(&closures, fs::Permissions::from_mode(0o555)).unwrap();
 
@@ -1411,7 +1412,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("zig"), "{error}");
         assert_eq!(fs::read(&legacy.registry_path).unwrap(), legacy_bytes);
-        fs::remove_file(project.join(".tog/closures/zig.json")).unwrap();
+        fs::remove_file(project.join(".greyward/closures/zig.json")).unwrap();
 
         // The durable half of a Python resync, before its projection switch:
         // the old Python and Node references are imported with the new one.
@@ -1456,7 +1457,7 @@ mod tests {
     }
 
     /// Root registration imports the closures the project already has
-    /// through the held descriptor. A symlinked `.tog` is refused before the
+    /// through the held descriptor. A symlinked `.greyward` is refused before the
     /// import could read another directory's closures, and a project swapped
     /// for another after it was opened is refused before anything is
     /// imported from either.
@@ -1481,8 +1482,8 @@ mod tests {
         let mut refs = ClosureRefs::new();
         refs.object_id(&store, &activity, &own).unwrap();
 
-        // A `.tog` that is a symlink to another project's state.
-        std::os::unix::fs::symlink(outside.join(".tog"), project.join(".tog")).unwrap();
+        // A `.greyward` that is a symlink to another project's state.
+        std::os::unix::fs::symlink(outside.join(".greyward"), project.join(".greyward")).unwrap();
         let root = crate::kernel::fsroot::ProjectRoot::open(project).unwrap();
         let project_lock = store.project_lock_in(&root).unwrap();
         let error =
@@ -1490,7 +1491,7 @@ mod tests {
                 .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         assert!(store.roots().unwrap().is_empty());
-        fs::remove_file(project.join(".tog")).unwrap();
+        fs::remove_file(project.join(".greyward")).unwrap();
 
         // The project renamed away and another put at its path, carrying
         // closures that name a foreign object.
@@ -1549,7 +1550,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(crate::kernel::policy::pending().len(), 1);
-        assert!(!project.join(".tog").exists());
+        assert!(!project.join(".greyward").exists());
         attribution.discard();
     }
 
@@ -1569,7 +1570,7 @@ mod tests {
         let temp = TempDir::named("closure-write-fails");
         let project = &temp.0;
         let (_store_dir, store) = test_store("closure-write-fails");
-        let closures = project.join(".tog/closures");
+        let closures = project.join(".greyward/closures");
         // A directory squatting on the closure's destination name makes the
         // final rename fail, after the claim and after the temp file was
         // written. Works for any user on Linux and macOS.
@@ -1609,15 +1610,16 @@ mod tests {
         let id = publish_test_closure(project, "python", &store, &mut attribution).unwrap();
         attribution.finish(true).unwrap();
 
-        let closure: serde_json::Value =
-            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
-                .unwrap();
+        let closure: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".greyward/closures/python.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(closure["ecosystem"], "python");
         assert_eq!(
             closure["body"]["store_object"].as_str(),
             Some(store.object_path(&id).to_str().unwrap())
         );
-        assert!(project.join(".tog/closures").is_dir());
+        assert!(project.join(".greyward/closures").is_dir());
     }
 
     #[test]
@@ -1736,9 +1738,10 @@ mod tests {
         drop(signing);
         written.unwrap();
         attribution.finish(true).unwrap();
-        let closure: serde_json::Value =
-            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
-                .unwrap();
+        let closure: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".greyward/closures/python.json")).unwrap(),
+        )
+        .unwrap();
         // The signature covers the envelope as written, exceptions included.
         assert_eq!(
             crate::kernel::signing::verify(&closure),
@@ -1774,9 +1777,10 @@ mod tests {
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
         publish_test_closure(project, "python", &store, &mut attribution).unwrap();
         attribution.finish(true).unwrap();
-        let closure: serde_json::Value =
-            serde_json::from_slice(&fs::read(project.join(".tog/closures/python.json")).unwrap())
-                .unwrap();
+        let closure: serde_json::Value = serde_json::from_slice(
+            &fs::read(project.join(".greyward/closures/python.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             crate::kernel::signing::verify(&closure),
             crate::kernel::signing::Verification::Unsigned
@@ -1784,20 +1788,20 @@ mod tests {
     }
 
     #[test]
-    fn write_closure_rejects_symlinked_tog_without_creating_outside_closures() {
+    fn write_closure_rejects_symlinked_ward_without_creating_outside_closures() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let mut attribution = crate::kernel::policy::Attribution::open("python").unwrap();
-        let temp = TempDir::named("closure-tog-symlink");
+        let temp = TempDir::named("closure-greyward-symlink");
         let root = &temp.0;
         let project = root.join("project");
         let outside = root.join("outside");
-        let (_store_dir, store) = test_store("closure-tog-symlink");
+        let (_store_dir, store) = test_store("closure-greyward-symlink");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, project.join(".tog")).unwrap();
+        symlink(&outside, project.join(".greyward")).unwrap();
 
         let error = publish_test_closure(&project, "python", &store, &mut attribution).unwrap_err();
-        assert!(error.to_string().contains(".tog"), "{error}");
+        assert!(error.to_string().contains(".greyward"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
@@ -1813,14 +1817,14 @@ mod tests {
         let project = root.join("project");
         let outside = root.join("outside.json");
         let (_store_dir, store) = test_store("closure-dest-symlink");
-        fs::create_dir_all(project.join(".tog/closures")).unwrap();
+        fs::create_dir_all(project.join(".greyward/closures")).unwrap();
         fs::write(&outside, b"untouched").unwrap();
-        symlink(&outside, project.join(".tog/closures/python.json")).unwrap();
+        symlink(&outside, project.join(".greyward/closures/python.json")).unwrap();
 
         let error = publish_test_closure(&project, "python", &store, &mut attribution).unwrap_err();
         assert!(error.to_string().contains("is a symlink"), "{error}");
         assert!(
-            error.to_string().contains("run 'tog' again"),
+            error.to_string().contains("run 'ward' again"),
             "the refusal does not say what to do: {error}"
         );
         assert_eq!(fs::read(&outside).unwrap(), b"untouched");
@@ -1831,8 +1835,9 @@ mod tests {
             "a refused closure still registered a root"
         );
         assert!(
-            !project.join(".tog/closures/python.json").is_symlink()
-                || fs::read_link(project.join(".tog/closures/python.json")).unwrap() == outside,
+            !project.join(".greyward/closures/python.json").is_symlink()
+                || fs::read_link(project.join(".greyward/closures/python.json")).unwrap()
+                    == outside,
             "the symlink was replaced"
         );
 
@@ -1848,12 +1853,12 @@ mod tests {
         let project = root.join("project");
         let outside = root.join("outside");
         let (_store_dir, store) = test_store("closure-closures-symlink");
-        fs::create_dir_all(project.join(".tog")).unwrap();
+        fs::create_dir_all(project.join(".greyward")).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, project.join(".tog/closures")).unwrap();
+        symlink(&outside, project.join(".greyward/closures")).unwrap();
 
         let error = publish_test_closure(&project, "python", &store, &mut attribution).unwrap_err();
-        assert!(error.to_string().contains(".tog/closures"), "{error}");
+        assert!(error.to_string().contains(".greyward/closures"), "{error}");
         assert!(error.to_string().contains("real directory"), "{error}");
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
 
@@ -1862,7 +1867,7 @@ mod tests {
 }
 
 /// `closure_object` and `read_closure` turn a project-editable file into a
-/// store path that `tog run` executes from. Each refusal below is a closure
+/// store path that `ward run` executes from. Each refusal below is a closure
 /// that must not reach the child.
 #[cfg(test)]
 mod closure_object_tests {
@@ -1880,7 +1885,7 @@ mod closure_object_tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
         assert_eq!(
             error.to_string(),
-            format!("closure runtime_object: {reason}; run `tog` first")
+            format!("closure runtime_object: {reason}; run `ward` first")
         );
     }
 
@@ -2078,7 +2083,7 @@ mod closure_object_tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "closure modcache_object: malformed id; run `tog` first"
+            "closure modcache_object: malformed id; run `ward` first"
         );
     }
 
@@ -2097,7 +2102,7 @@ mod closure_object_tests {
     }
 
     fn write_envelope(project: &Path, text: &str) -> PathBuf {
-        let closures = project.join(".tog/closures");
+        let closures = project.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         let path = closures.join("python.json");
         fs::write(&path, text).unwrap();
@@ -2119,7 +2124,7 @@ mod closure_object_tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "{}: unknown closure schema/ecosystem; re-run `tog`",
+                    "{}: unknown closure schema/ecosystem; re-run `ward`",
                     path.display()
                 )
             );
@@ -2129,14 +2134,14 @@ mod closure_object_tests {
     #[test]
     fn read_closure_refuses_a_missing_or_unparsable_file() {
         let project = TempDir::named("read-closure-missing");
-        let path = project.0.join(".tog/closures/python.json");
+        let path = project.0.join(".greyward/closures/python.json");
         let error = read_closure(&project.0, "python").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
         assert!(
             error
                 .to_string()
                 .starts_with(&format!("read {}: ", path.display()))
-                && error.to_string().ends_with("; run `tog` first"),
+                && error.to_string().ends_with("; run `ward` first"),
             "{error}"
         );
 
@@ -2147,7 +2152,7 @@ mod closure_object_tests {
             error
                 .to_string()
                 .starts_with(&format!("parse {}: ", path.display()))
-                && error.to_string().ends_with("; run `tog` first"),
+                && error.to_string().ends_with("; run `ward` first"),
             "{error}"
         );
     }
@@ -2156,8 +2161,8 @@ mod closure_object_tests {
     fn a_symlinked_closure_retains_the_held_read_refusal() {
         let temp = TempDir::named("closure-refusal-class");
         let project = ProjectRoot::open(&temp.0).unwrap();
-        let relative = Path::new(".tog/closures/node.json");
-        fs::create_dir_all(temp.0.join(".tog/closures")).unwrap();
+        let relative = Path::new(".greyward/closures/node.json");
+        fs::create_dir_all(temp.0.join(".greyward/closures")).unwrap();
         let outside = temp.0.join("outside.json");
         fs::write(&outside, b"original").unwrap();
         std::os::unix::fs::symlink(&outside, temp.0.join(relative)).unwrap();
@@ -2175,7 +2180,7 @@ mod closure_object_tests {
         assert_eq!(
             wrapped.to_string(),
             format!(
-                "read {}: {direct}; run `tog` first",
+                "read {}: {direct}; run `ward` first",
                 temp.0.join(relative).display()
             )
         );
@@ -2196,7 +2201,7 @@ mod closure_object_tests {
             read_closure_if_present(&held, "python").unwrap(),
             Some(serde_json::json!({"ok": true}))
         );
-        let path = temp.0.join(".tog/closures/python.json");
+        let path = temp.0.join(".greyward/closures/python.json");
         for bytes in [
             b"{not JSON".as_slice(),
             b"\xff\xfe".as_slice(),
@@ -2213,7 +2218,7 @@ mod closure_object_tests {
 
     #[test]
     fn optional_closure_read_refuses_symlinked_state() {
-        for parent in [".tog", ".tog/closures"] {
+        for parent in [".greyward", ".greyward/closures"] {
             let temp = TempDir::named("optional-closure-symlink");
             let project = temp.0.join("project");
             let outside = temp.0.join("outside");
@@ -2250,7 +2255,7 @@ mod closure_object_tests {
             read_closure_if_present(&held, "python").unwrap(),
             Some(serde_json::json!({"ok": true}))
         );
-        fs::remove_file(moved.join(".tog/closures/python.json")).unwrap();
+        fs::remove_file(moved.join(".greyward/closures/python.json")).unwrap();
         assert_eq!(read_closure_if_present(&held, "python").unwrap(), None);
         assert_eq!(
             read_closure_if_present(&ProjectRoot::open(&project).unwrap(), "python").unwrap(),

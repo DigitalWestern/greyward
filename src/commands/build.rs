@@ -1,4 +1,4 @@
-//! `tog build [ecosystem] [args...]`: a sandboxed build for the one
+//! `ward build [ecosystem] [args...]`: a sandboxed build for the one
 //! build-capable ecosystem present, or the named one, through the tailor
 //! registry.
 
@@ -32,7 +32,7 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
                 [] => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        "tog build requires a Cargo.toml, go.mod, or mix.exs project",
+                        "ward build requires a Cargo.toml, go.mod, or mix.exs project",
                     ))
                 }
                 many => {
@@ -40,7 +40,7 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
                         io::ErrorKind::InvalidInput,
                         format!(
                             "multiple build-capable ecosystems found ({}); specify one: \
-                             `tog build <ecosystem> ...`",
+                             `ward build <ecosystem> ...`",
                             many.iter()
                                 .map(|tailor| tailor.id())
                                 .collect::<Vec<_>>()
@@ -55,8 +55,8 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
     // sync-on-the-way-in exists to prevent, so when the ecosystem being
     // built is stale or never synced the project is synced first, as `run`
     // does: that sync may write a lock, like `cargo build` updating
-    // Cargo.lock. CI that must not write one runs `tog --frozen build`,
-    // whose implicit sync runs frozen (or `tog --frozen` first, and this
+    // Cargo.lock. CI that must not write one runs `ward --frozen build`,
+    // whose implicit sync runs frozen (or `ward --frozen` first, and this
     // check then finds nothing to do). Only the built ecosystem's
     // row decides, and only it is host preflighted, prepared and realized;
     // the input check and the toolchain lock still cover the whole project,

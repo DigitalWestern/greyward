@@ -24,7 +24,7 @@ pub(super) fn is_journal_name(name: &str) -> bool {
 
 /// Recover the interrupted resolution publications of the project at
 /// `dir` (the project the command operates on; a workspace root's journal
-/// is recovered by the next transaction there). Every tog command that
+/// is recovered by the next transaction there). Every ward command that
 /// writes a project runs this before anything else. Takes the store's
 /// project lock and the project directory's own lock itself.
 pub fn recover_project(
@@ -98,7 +98,7 @@ pub(super) fn recover_locked(
     Ok(notes)
 }
 
-/// Whether `journal` describes a publication tog made in this project
+/// Whether `journal` describes a publication ward made in this project
 /// with this store. Returns what does not hold, in words.
 fn check_journal(
     store: &Store,
@@ -113,9 +113,9 @@ fn check_journal(
     for dir in &journal.created_dirs {
         let dir = Path::new(dir);
         check_target(dir).map_err(|error| error.to_string())?;
-        let ours = [".tog", JOURNAL_DIR, RESOLUTION_DIR]
+        let ours = [".greyward", JOURNAL_DIR, RESOLUTION_DIR]
             .iter()
-            .any(|tog| dir == Path::new(tog));
+            .any(|ward| dir == Path::new(ward));
         let a_parent = journal
             .targets
             .iter()
@@ -136,7 +136,7 @@ fn check_journal(
     let Some(identity) = identity else {
         // Held: killed before the originals were committed, so nothing was
         // rooted and nothing in the project was touched. Finished: killed
-        // after the originals were released, and `tog gc` has collected
+        // after the originals were released, and `ward gc` has collected
         // them since. Either way only the journal is left, but only if this
         // store wrote it: another store's journal still has its originals
         // rooted there. A held journal from before journals named their
@@ -203,18 +203,18 @@ fn check_journal(
     Ok(())
 }
 
-/// One target: a project path of the kind a transaction holds (no `.tog`
+/// One target: a project path of the kind a transaction holds (no `.greyward`
 /// state but the receipt), its temporary named exactly as `temp_beside`
 /// names it and beside it, and well-formed digests.
 fn check_journal_target(journal: &Journal, target: &JournalTarget) -> Result<(), String> {
     let relative = Path::new(&target.target);
     check_target(relative).map_err(|error| error.to_string())?;
-    if relative.starts_with(".tog") && relative != receipt_path(&journal.ecosystem) {
+    if relative.starts_with(".greyward") && relative != receipt_path(&journal.ecosystem) {
         return Err(format!("it names {} as a target", target.target));
     }
     if !is_temp_for(relative, Path::new(&target.temp)) {
         return Err(format!(
-            "{} is not a temporary tog makes for {}",
+            "{} is not a temporary ward makes for {}",
             target.temp, target.target
         ));
     }
@@ -226,7 +226,7 @@ fn check_journal_target(journal: &Journal, target: &JournalTarget) -> Result<(),
     Ok(())
 }
 
-/// `temp` is `<dir>/.<name>.tog-<16 hex>.tmp` for `target` `<dir>/<name>`.
+/// `temp` is `<dir>/.<name>.greyward-<16 hex>.tmp` for `target` `<dir>/<name>`.
 fn is_temp_for(target: &Path, temp: &Path) -> bool {
     if check_target(temp).is_err() || temp.parent() != target.parent() {
         return false;
@@ -239,7 +239,7 @@ fn is_temp_for(target: &Path, temp: &Path) -> bool {
     };
     temp.strip_prefix('.')
         .and_then(|rest| rest.strip_prefix(name))
-        .and_then(|rest| rest.strip_prefix(".tog-"))
+        .and_then(|rest| rest.strip_prefix(".greyward-"))
         .and_then(|rest| rest.strip_suffix(".tmp"))
         .is_some_and(|hex| {
             hex.len() == 16
@@ -253,9 +253,9 @@ fn untrusted_journal(shown: &Path, detail: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "the resolution journal {} does not describe a publication tog made in this \
-             project with this store ({detail}), so nothing was changed. If a tog command \
-             using another TOG_STORE was interrupted here, run it again with that store; \
+            "the resolution journal {} does not describe a publication ward made in this \
+             project with this store ({detail}), so nothing was changed. If a ward command \
+             using another GREYWARD_STORE was interrupted here, run it again with that store; \
              otherwise inspect {} and delete it",
             shown.display(),
             shown.display()
@@ -337,7 +337,7 @@ pub(super) fn finish_committed(
 /// The last steps of every transaction and every recovery, once the
 /// project's files are final (untouched, published, or undone): release
 /// the originals, then delete the journal, then the directories the
-/// transaction created (`.tog/journal` cannot go while the journal is in
+/// transaction created (`.greyward/journal` cannot go while the journal is in
 /// it).
 ///
 /// The journal goes last so that a failed release is retried: the next

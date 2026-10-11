@@ -1,4 +1,4 @@
-//! `tog add` / `remove` / `update` for Go (`Tailor::edit_manifest`): the
+//! `ward add` / `remove` / `update` for Go (`Tailor::edit_manifest`): the
 //! store go's `go get` edits go.mod and go.sum, confined through the edit
 //! door, which publishes them with the signed resolution record.
 
@@ -10,7 +10,7 @@ use crate::tailors::edit::{
 };
 use std::io;
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "go",
     name: "the Go module proxy",

@@ -1,5 +1,5 @@
 //! The content-addressed object store (kernel layer): object paths, atomic
-//! commit, root records, projection bases, and the `TOG_STORE` override.
+//! commit, root records, projection bases, and the `GREYWARD_STORE` override.
 
 use crate::kernel::activity::{ActivityMode, StoreActivity};
 use crate::kernel::types::Identity;
@@ -39,8 +39,8 @@ pub use objects::*;
 pub use projection::*;
 pub use roots::*;
 
-/// Closure file stems an older tog wrote that nothing reads any more.
-/// `tog fmt` used to leave `.tog/closures/rustfmt.json` at a Cargo
+/// Closure file stems an older ward wrote that nothing reads any more.
+/// `ward fmt` used to leave `.greyward/closures/rustfmt.json` at a Cargo
 /// workspace root; it now deletes one when it formats beside another
 /// closure or once gc has forgotten the project's root, and until then
 /// every closure reader skips the name: the root
@@ -73,11 +73,11 @@ pub fn is_retired_closure(path: &Path) -> bool {
 ///   <root>/meta/<object-id>.json    identity + provenance
 ///   <root>/cache/sha256/<hash>      verified downloaded artifacts
 ///   <root>/tmp/                     staging for atomic renames
-///   <root>/run-homes/<key>/<eco>/   private HOME for `tog run` children
-///   <root>/records/<kind>/<k>.json  facts tog verified itself, by key
+///   <root>/run-homes/<key>/<eco>/   private HOME for `ward run` children
+///   <root>/records/<kind>/<k>.json  facts ward verified itself, by key
 ///
-/// ponytail: store root defaults to ~/.tog/store (TOG_STORE overrides).
-/// The /opt/tog/store decision only matters once binary-cache sharing
+/// ponytail: store root defaults to ~/.greyward/store (GREYWARD_STORE overrides).
+/// The /opt/greyward/store decision only matters once binary-cache sharing
 /// exists; identity format is machine-independent so migration is re-realize.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -87,12 +87,12 @@ pub struct Store {
 /// Why the store could not be created, in the user's terms: the path that
 /// failed, the cause translated out of errno, and the one lever they have.
 /// A bare `?` here surfaces as "Permission denied (os error 13)" with no
-/// path and no hint that `TOG_STORE` exists.
+/// path and no hint that `GREYWARD_STORE` exists.
 fn open_error(path: &Path, from_env: bool, error: io::Error) -> io::Error {
     let lever = if from_env {
-        "TOG_STORE names this path; point it at a writable directory"
+        "GREYWARD_STORE names this path; point it at a writable directory"
     } else {
-        "set TOG_STORE to a writable directory"
+        "set GREYWARD_STORE to a writable directory"
     };
     let cause = match error.raw_os_error() {
         Some(code) if code == libc::ENOSPC => "the filesystem is full".to_string(),
@@ -127,18 +127,18 @@ pub(crate) fn bare_record(identity: &crate::kernel::types::Identity) -> serde_js
 }
 
 impl Store {
-    /// Where `open` puts the store, and whether `TOG_STORE` chose it.
+    /// Where `open` puts the store, and whether `GREYWARD_STORE` chose it.
     fn configured_root() -> (PathBuf, bool) {
-        let explicit = std::env::var_os("TOG_STORE").map(PathBuf::from);
+        let explicit = std::env::var_os("GREYWARD_STORE").map(PathBuf::from);
         let from_env = explicit.is_some();
         (
-            explicit.unwrap_or_else(|| home().join(".tog/store")),
+            explicit.unwrap_or_else(|| home().join(".greyward/store")),
             from_env,
         )
     }
 
-    /// Where the store is configured to be (`TOG_STORE`, or
-    /// `~/.tog/store`), as configured: nothing is created or resolved.
+    /// Where the store is configured to be (`GREYWARD_STORE`, or
+    /// `~/.greyward/store`), as configured: nothing is created or resolved.
     pub fn configured_path() -> PathBuf {
         Self::configured_root().0
     }
@@ -199,15 +199,15 @@ impl Store {
     /// The configured store's canonical root and what its format marker
     /// says, without creating or changing anything: `None` when there is no
     /// directory there yet. This is how a store `open` refuses is still
-    /// named (`tog store path`), reported (`tog doctor`) and emptied
-    /// (`tog gc --reset`).
+    /// named (`ward store path`), reported (`ward doctor`) and emptied
+    /// (`ward gc --reset`).
     pub fn probe() -> io::Result<Option<(PathBuf, StoreFormat)>> {
         let (root, _) = Self::configured_root();
         Self::probe_at(&root)
     }
 
     /// The configured store's canonical root, without reading anything in
-    /// it: `None` when there is no directory there yet. `tog gc --reset`
+    /// it: `None` when there is no directory there yet. `ward gc --reset`
     /// starts here, because it must work on a store whose marker cannot
     /// even be read.
     pub fn locate() -> io::Result<Option<PathBuf>> {
@@ -223,7 +223,7 @@ impl Store {
     /// created. Safe to hand out because a handle alone reads no record:
     /// every lease primitive (`activity`, `try_activity_exclusive`)
     /// validates the format marker once the lease is held, so an operation
-    /// on a store this tog refuses stops there. `root` should be canonical.
+    /// on a store this ward refuses stops there. `root` should be canonical.
     pub fn handle(root: PathBuf) -> Store {
         Store { root }
     }
@@ -295,17 +295,17 @@ impl Store {
 
     /// Open the configured store, creating it if nothing is there.
     ///
-    /// A store this tog cannot read is refused, never opened: one with
+    /// A store this ward cannot read is refused, never opened: one with
     /// namespaces and no format marker (written before the marker existed),
-    /// and one whose marker names a format this tog does not know. The
-    /// error names the two ways out, `tog gc --reset` and moving the
+    /// and one whose marker names a format this ward does not know. The
+    /// error names the two ways out, `ward gc --reset` and moving the
     /// directory aside.
     pub fn open() -> io::Result<Store> {
         let (root, from_env) = Self::configured_root();
         Self::open_root(&root, from_env)
     }
 
-    /// `open` for a store at a path the caller names, whatever `TOG_STORE`
+    /// `open` for a store at a path the caller names, whatever `GREYWARD_STORE`
     /// says. A test that opens a store in-process uses this to stay out of
     /// the developer's own store without changing the process environment.
     pub fn open_at(root: &Path) -> io::Result<Store> {
@@ -319,12 +319,12 @@ impl Store {
             .map_err(|error| open_error(root, from_env, error))?;
         // Held while the marker is read and whatever is missing is
         // created: a reset holds the same lock while it empties the store,
-        // and a second tog creating this store waits for the first.
+        // and a second ward creating this store waits for the first.
         let _held = format::lock_root(&root)?;
         match format::probe(&root)? {
             StoreFormat::Current => {}
             // The marker goes in before the first namespace, so neither a
-            // crash nor a second tog can find namespaces without it.
+            // crash nor a second ward can find namespaces without it.
             StoreFormat::Uninitialized => format::write_marker(&root)
                 .map_err(|error| open_error(&root.join(FORMAT_FILE), from_env, error))?,
             refused => refused.refuse(&root)?,
@@ -339,7 +339,7 @@ impl Store {
     /// published last: a crash before the marker leaves a store that is
     /// still refused, never a marked one that is half initialised. (A new
     /// store is created the other way round, marker first, in `open_root`:
-    /// there the marker is what tells its namespaces from an older tog's.)
+    /// there the marker is what tells its namespaces from an older ward's.)
     pub(crate) fn reinitialize(&self) -> io::Result<()> {
         Self::create_namespaces(&self.root, false)?;
         let root = open_real_directory(&self.root, "store root")?;
@@ -350,7 +350,7 @@ impl Store {
         format::write_marker(&self.root)
     }
 
-    /// Refuse unless the marker says this is a store this tog reads. Called
+    /// Refuse unless the marker says this is a store this ward reads. Called
     /// with a lease held, which is what makes the answer last: the one
     /// operation that removes a marker, `gc --reset`, needs the exclusive
     /// lease.
@@ -360,7 +360,7 @@ impl Store {
             StoreFormat::Uninitialized => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "there is no tog store at {}: the directory has no format marker and \
+                    "there is no ward store at {}: the directory has no format marker and \
                      nothing stored in it",
                     self.root.display()
                 ),
@@ -412,13 +412,13 @@ impl Store {
         hex::encode(&Sha256::digest(canonical_project.as_os_str().as_bytes())[..8])
     }
 
-    /// The HOME a `tog run` child of `ecosystem` gets for this project:
+    /// The HOME a `ward run` child of `ecosystem` gets for this project:
     /// `<root>/run-homes/<project key>/<ecosystem>`, created on demand.
     ///
     /// It lives in the store rather than the shared temp root because a
     /// world-writable parent lets another user create the directory first
     /// and plant startup files (`.erlang`, `.iex.exs`) that the child runs
-    /// as this user. It is stable per project so `tog env` prints the same
+    /// as this user. It is stable per project so `ward env` prints the same
     /// bytes on every call. Both levels under `run-homes` are private to
     /// this user: a symlink or a directory someone else owns is refused,
     /// and one of ours with wider permissions is narrowed to 0700.
@@ -502,7 +502,7 @@ impl Store {
     }
 
     /// `try_activity_exclusive` without the format check, for the one
-    /// operation that exists to work on a store this tog refuses:
+    /// operation that exists to work on a store this ward refuses:
     /// `gc --reset`, which reads no record.
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
@@ -549,7 +549,7 @@ impl Store {
 
     /// `gc.lock` held shared: a cache lease keeps it until its verified
     /// artifact has been extracted by the caller. Shared, so leases in
-    /// separate tog processes download side by side, while GC's exclusive
+    /// separate ward processes download side by side, while GC's exclusive
     /// [`Store::gc_lock`] still waits for all of them.
     pub(crate) fn cache_lock(&self) -> io::Result<fs::File> {
         let f = open_private_lock(&self.root.join("gc.lock"), "GC")?;
@@ -579,7 +579,7 @@ impl Store {
             .unwrap_or_default())
     }
 
-    /// Drop `ids` from the project's root record, so `tog gc` may collect
+    /// Drop `ids` from the project's root record, so `ward gc` may collect
     /// them. The only caller is a resolution transaction releasing the
     /// original copies it rooted for the life of its journal; every other
     /// producer only adds. Ids the record does not hold are ignored, and a
@@ -642,7 +642,7 @@ pub(crate) fn register_empty_root_for_test(store: &Store, project: &Path) -> io:
 }
 
 /// Write the pathname-only registry entry (a project path and a newline)
-/// that tog wrote before root/2, so a test can show how such an entry is
+/// that ward wrote before root/2, so a test can show how such an entry is
 /// read today. Nothing outside tests writes one. The registry is marked
 /// initialized, as every registration then left it.
 #[cfg(test)]
@@ -1237,7 +1237,7 @@ mod tests {
 
         // A sync publishes the same identity with real evidence and finds
         // the object already there. The cache hit must not certify the
-        // record or rewrite it: it refuses, and `tog gc --drop-object` is
+        // record or rewrite it: it refuses, and `ward gc --drop-object` is
         // what clears the object for a rebuild.
         fs::write(store.cache_path("sha256", &digest), b"artifact").unwrap();
         let mut deps = ObjectDeps::new();
@@ -1308,7 +1308,7 @@ mod tests {
 
     #[test]
     fn strict_policy_rejects_cached_exceptions() {
-        if std::env::var_os("TOG_STORE_STRICT_CHILD").is_some() {
+        if std::env::var_os("GREYWARD_STORE_STRICT_CHILD").is_some() {
             let store = Store::open().unwrap();
             let _policy = crate::kernel::policy::init(&store.root).unwrap();
             let error = store
@@ -1342,10 +1342,10 @@ mod tests {
         let name = format!("{module}::strict_policy_rejects_cached_exceptions");
         let child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &name, "--nocapture"])
-            .env("TOG_STORE", &store.root)
-            .env("TOG_STORE_STRICT_CHILD", "1")
-            .env("TOG_STRICT", "1")
-            .env_remove("TOG_POLICY")
+            .env("GREYWARD_STORE", &store.root)
+            .env("GREYWARD_STORE_STRICT_CHILD", "1")
+            .env("GREYWARD_STRICT", "1")
+            .env_remove("GREYWARD_POLICY")
             .env("HOME", &temp.0)
             .output()
             .unwrap();
@@ -1467,14 +1467,14 @@ mod tests {
     #[test]
     fn store_creation_failures_name_the_path_the_cause_and_the_lever() {
         let denied = open_error(
-            Path::new("/ro/home/.tog/store"),
+            Path::new("/ro/home/.greyward/store"),
             false,
             io::Error::from(io::ErrorKind::PermissionDenied),
         );
         assert_eq!(
             denied.to_string(),
-            "create the store at /ro/home/.tog/store: permission denied; \
-             set TOG_STORE to a writable directory"
+            "create the store at /ro/home/.greyward/store: permission denied; \
+             set GREYWARD_STORE to a writable directory"
         );
         assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
 
@@ -1488,7 +1488,7 @@ mod tests {
             "{full}"
         );
         assert!(
-            full.to_string().contains("TOG_STORE names this path"),
+            full.to_string().contains("GREYWARD_STORE names this path"),
             "{full}"
         );
 
@@ -1547,7 +1547,7 @@ mod tests {
 
     /// Write one `closure/1` envelope into a project, as a producer would.
     fn project_closure(project: &Path, ecosystem: &str, body: serde_json::Value) {
-        let closures = project.join(".tog/closures");
+        let closures = project.join(".greyward/closures");
         fs::create_dir_all(&closures).unwrap();
         fs::write(
             closures.join(format!("{ecosystem}.json")),
@@ -1903,10 +1903,10 @@ mod tests {
     #[test]
     fn existing_never_creates_and_refuses_a_bent_layout() {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var_os("TOG_STORE");
+        let old = std::env::var_os("GREYWARD_STORE");
         let temp = temp_store();
         let check = |root: &Path| {
-            std::env::set_var("TOG_STORE", root);
+            std::env::set_var("GREYWARD_STORE", root);
             Store::existing()
         };
         let missing = temp.0.join("missing");
@@ -1927,8 +1927,8 @@ mod tests {
         fs::create_dir_all(old_store.join("objects")).unwrap();
         let pre_epoch = check(&old_store);
         match old {
-            Some(value) => std::env::set_var("TOG_STORE", value),
-            None => std::env::remove_var("TOG_STORE"),
+            Some(value) => std::env::set_var("GREYWARD_STORE", value),
+            None => std::env::remove_var("GREYWARD_STORE"),
         }
         assert!(absent.unwrap().is_none());
         assert!(!missing.exists());
@@ -1942,7 +1942,7 @@ mod tests {
             .to_string()
             .contains("is not a real directory"));
         let refusal = pre_epoch.unwrap_err();
-        assert_eq!(refusal_fix(&refusal), Some("tog gc --reset"));
+        assert_eq!(refusal_fix(&refusal), Some("ward gc --reset"));
         let refusal = refusal.to_string();
         assert!(refusal.contains("has no format marker"), "{refusal}");
         assert!(!old_store.join(FORMAT_FILE).exists());
@@ -1953,9 +1953,9 @@ mod tests {
     #[test]
     fn existing_shared_leases_the_store_and_skips_a_busy_one() {
         let _lock = STORE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old = std::env::var_os("TOG_STORE");
+        let old = std::env::var_os("GREYWARD_STORE");
         let temp = temp_store();
-        std::env::set_var("TOG_STORE", &temp.0);
+        std::env::set_var("GREYWARD_STORE", &temp.0);
         let leased = Store::existing_shared();
         let exclusive_while_leased = Store::existing().unwrap().unwrap().try_activity_exclusive();
         let leased = leased.unwrap().map(|(store, activity)| {
@@ -1979,11 +1979,11 @@ mod tests {
         release.0.send(()).unwrap();
         job.join().unwrap();
         let missing = temp.0.join("missing");
-        std::env::set_var("TOG_STORE", &missing);
+        std::env::set_var("GREYWARD_STORE", &missing);
         let absent = Store::existing_shared();
         match old {
-            Some(value) => std::env::set_var("TOG_STORE", value),
-            None => std::env::remove_var("TOG_STORE"),
+            Some(value) => std::env::set_var("GREYWARD_STORE", value),
+            None => std::env::remove_var("GREYWARD_STORE"),
         }
         assert_eq!(leased, Some(temp.0.canonicalize().unwrap()));
         assert!(
@@ -2038,7 +2038,7 @@ mod tests {
         let store = Store::open_at(&missing).unwrap();
         assert_eq!(
             fs::read(store.root.join(FORMAT_FILE)).unwrap(),
-            b"tog-store 1\n"
+            b"greyward-store 1\n"
         );
         assert!(store.root.join("objects").is_dir());
         let empty = temp.0.join("empty");
@@ -2073,12 +2073,12 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("has no format marker"), "{text}");
-        assert!(text.contains("an older tog wrote it"), "{text}");
-        // Not the store a bare `tog` selects, so the fix names it.
+        assert!(text.contains("an older ward wrote it"), "{text}");
+        // Not the store a bare `ward` selects, so the fix names it.
         assert_eq!(
             refusal_fix(&error).unwrap(),
             format!(
-                "TOG_STORE={} tog gc --reset",
+                "GREYWARD_STORE={} ward gc --reset",
                 old.canonicalize().unwrap().display()
             )
         );
@@ -2086,15 +2086,15 @@ mod tests {
         assert!(!old.join(FORMAT_FILE).exists());
         assert!(!old.join("cache").exists(), "a refused store was changed");
 
-        // A marker from a newer tog, and one that is not a marker at all.
+        // A marker from a newer ward, and one that is not a marker at all.
         let newer = temp.0.join("newer");
         fs::create_dir(&newer).unwrap();
-        fs::write(newer.join(FORMAT_FILE), b"tog-store 2\n").unwrap();
+        fs::write(newer.join(FORMAT_FILE), b"greyward-store 2\n").unwrap();
         let error = Store::open_at(&newer).unwrap_err();
-        assert_eq!(refusal_fix(&error), Some("tog update --self"));
+        assert_eq!(refusal_fix(&error), Some("ward update --self"));
         let text = error.to_string();
-        assert!(text.contains("a newer tog wrote it"), "{text}");
-        assert!(text.contains("tog-store 2"), "{text}");
+        assert!(text.contains("a newer ward wrote it"), "{text}");
+        assert!(text.contains("greyward-store 2"), "{text}");
         assert!(
             !newer.join("objects").exists(),
             "a refused store was changed"
@@ -2103,10 +2103,10 @@ mod tests {
         fs::create_dir(&unknown).unwrap();
         fs::write(unknown.join(FORMAT_FILE), b"hello\n").unwrap();
         let error = Store::open_at(&unknown).unwrap_err();
-        assert!(refusal_fix(&error).unwrap().ends_with(" tog gc --reset"));
+        assert!(refusal_fix(&error).unwrap().ends_with(" ward gc --reset"));
         let text = error.to_string();
         assert!(
-            text.contains("a format marker this tog does not know"),
+            text.contains("a format marker this ward does not know"),
             "{text}"
         );
         assert!(text.contains("hello"), "{text}");
@@ -2141,7 +2141,7 @@ mod tests {
         let (ruby, gems) = (object("ruby"), object("gems"));
         let (beam, deps) = (object("beam"), object("deps"));
         let (sdk, packages) = (object("sdk"), object("packages"));
-        // A retired `rustfmt` record an older `tog fmt` left is skipped by
+        // A retired `rustfmt` record an older `ward fmt` left is skipped by
         // the importer, so the object only it names is not in the record.
         let rustfmt = named_object(&store, "rustfmt");
         let backup = store.root.join("backups/venv-backup");

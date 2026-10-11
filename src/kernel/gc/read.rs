@@ -99,7 +99,7 @@ pub(super) fn collect_root(
 pub(super) fn unusable_root(root: &RootEntry, reason: &str) -> io::Error {
     io::Error::other(format!(
         "refusing to sweep: root {} has an unusable registry record at {} ({}). Repair the \
-         record, or give up that project's protection explicitly with `tog gc --forget \
+         record, or give up that project's protection explicitly with `ward gc --forget \
          {}`. Dry runs stop here too: the records decide what a real sweep would keep.",
         root.key,
         root.registry_path.display(),
@@ -322,9 +322,9 @@ fn read_objects(
             set.insert(id);
             let ids = set.into_iter().collect::<Vec<_>>().join(" ");
             match dependents.len() {
-                0 => format!("drop it with `tog gc --drop-object {ids}`"),
+                0 => format!("drop it with `ward gc --drop-object {ids}`"),
                 count => format!(
-                    "drop it and the {count} object(s) that depend on it with `tog gc \
+                    "drop it and the {count} object(s) that depend on it with `ward gc \
                      --drop-object {ids}`"
                 ),
             }
@@ -474,7 +474,7 @@ fn read_cache(store: &Store) -> io::Result<(Vec<(&'static str, HeldDir)>, Vec<Ca
 }
 
 /// Enumerate interrupted staging directories, and every other temporary a
-/// killed tog leaves, under the already-held `tmp`.
+/// killed ward leaves, under the already-held `tmp`.
 fn read_stages(store: &Store, tmp: &HeldDir) -> io::Result<Vec<DirEntrySnapshot>> {
     let mut stages = Vec::new();
     for entry in fs::read_dir(store.root.join("tmp"))? {
@@ -517,7 +517,7 @@ pub(super) fn tmp_kind(name: &std::ffi::OsStr) -> &'static str {
     }
 }
 
-/// Every name tog gives a temporary under `tmp/`, with the file type it
+/// Every name ward gives a temporary under `tmp/`, with the file type it
 /// writes there. A longer prefix comes before the shorter one it extends
 /// (`resolve-meta-` is a file, `resolve-` a directory). GC holds the
 /// exclusive lease, so any of these it sees was left by a process that died
@@ -545,7 +545,7 @@ pub(super) const TMP_LEFTOVERS: &[(&str, libc::mode_t)] = &[
     ("npm-archive-classification-", libc::S_IFREG),
     // Store record writes
     ("record-", libc::S_IFREG),
-    // `tog doctor`'s writability probe
+    // `ward doctor`'s writability probe
     (".doctor-", libc::S_IFREG),
 ];
 
@@ -810,14 +810,14 @@ fn unusable_record_advice(store: &Store, file: &str, reason: &str) -> String {
         };
     let advice = if droppable {
         format!(
-            "drop it with `tog gc --drop-object {stem}` (the next sync that needs the object \
+            "drop it with `ward gc --drop-object {stem}` (the next sync that needs the object \
              rebuilds it), or restore the file from a backup"
         )
     } else if store::is_object_id(stem) && fs::symlink_metadata(store.object_path(stem)).is_ok() {
         // Removing the record alone leaves an object with no record, which
         // the sweep refuses; drop takes that object once the record is gone.
         format!(
-            "remove it with `{}`, then drop the object it leaves behind with `tog gc \
+            "remove it with `{}`, then drop the object it leaves behind with `ward gc \
              --drop-object {stem}`, or restore the file from a backup",
             remove_record_line(store, file)
         )

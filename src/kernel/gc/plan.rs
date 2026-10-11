@@ -85,7 +85,7 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> 
         if snapshot.meta.get(&entry.id).is_none() {
             blocked.push(format!(
                 "object {} has no usable metadata; restore meta/{}.json, or drop the object \
-                 with `tog gc --drop-object {}` and let the next sync rebuild it",
+                 with `ward gc --drop-object {}` and let the next sync rebuild it",
                 entry.id, entry.id, entry.id
             ));
         }
@@ -123,8 +123,8 @@ pub(super) fn validate<'a>(snapshot: &'a Snapshot) -> io::Result<Validated<'a>> 
                 ),
                 None => format!(
                     "root object {id} has no metadata; restore meta/{id}.json, or find the root \
-                     that names it with `tog store roots` and give up its protection with \
-                     `tog gc --forget <key>`"
+                     that names it with `ward store roots` and give up its protection with \
+                     `ward gc --forget <key>`"
                 ),
             });
             continue;
@@ -487,9 +487,9 @@ fn plan_projections(
             counter: Counter::RunHomes,
         });
     }
-    // A project record is a cache of work tog did in that project (a
+    // A project record is a cache of work ward did in that project (a
     // passing `mix deps.get --check-locked`), so removing it loses nothing
-    // tog cannot redo: a project that comes back (a drive mounted again, a
+    // ward cannot redo: a project that comes back (a drive mounted again, a
     // directory restored) pays one more registry check and is recorded anew.
     for entry in &snapshot.orphan_records {
         let bytes = file_size_of(&entry.stat);
@@ -824,7 +824,7 @@ mod plan_tests {
         let error = validate(&snapshot).err().unwrap().to_string();
         assert!(
             error.contains(&format!("object {id} has no usable metadata"))
-                && error.contains(&format!("tog gc --drop-object {id}")),
+                && error.contains(&format!("ward gc --drop-object {id}")),
             "{error}"
         );
     }

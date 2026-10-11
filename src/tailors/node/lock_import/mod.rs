@@ -132,7 +132,7 @@ fn contain_link_target(root: &Path, target: &str, raw: &str) -> io::Result<()> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if existing.is_symlink() {
                     return Err(err(format!(
-                        "workspace link target {raw:?} passes through a dangling symlink; tog cannot tell whether it stays in the project"
+                        "workspace link target {raw:?} passes through a dangling symlink; ward cannot tell whether it stays in the project"
                     )));
                 }
                 existing.pop();
@@ -356,7 +356,7 @@ fn conflict(
         .or_else(|| holders.clone().next());
     let holder_who = holder.map_or("another package", |(holder, _)| holder.who.as_str());
     let mut message = format!(
-        "{} needs {} but {holder_who} needs {}, and Node resolving from {}'s real path reaches {path} first; tog cannot project both",
+        "{} needs {} but {holder_who} needs {}, and Node resolving from {}'s real path reaches {path} first; ward cannot project both",
         requirer.who,
         target_description(dependency, nodes),
         occupied_description(found),
@@ -766,7 +766,7 @@ fn check_links_inside_packages(
             .max_by_key(|package| package.len());
         if let Some(package) = host.filter(|package| !needs_workspace.contains(*package)) {
             return Err(err(format!(
-                "link {path} -> {} would be planted inside the package {package}, which is store content; tog cannot project a local package nested under a registry package that does not depend on it",
+                "link {path} -> {} would be planted inside the package {package}, which is store content; ward cannot project a local package nested under a registry package that does not depend on it",
                 link.target
             )));
         }
@@ -960,7 +960,7 @@ fn build_plan_recording(
             // - any other local package gets its dependencies placed where
             //   Node looks from the target's real path, wherever the link
             //   itself sits: the nearest enclosing importer's node_modules,
-            //   then the importers above it. The only node_modules tog
+            //   then the importers above it. The only node_modules ward
             //   projects into source are importers', so that chain is the
             //   whole lookup; reachability is checked after placement.
             let importer = target == "." || workspace_paths.contains(target);
@@ -3541,7 +3541,7 @@ snapshots:
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; tog cannot project a local package nested under a registry package that does not depend on it"
+            "link node_modules/x/node_modules/lib -> vendor/lib would be planted inside the package node_modules/x, which is store content; ward cannot project a local package nested under a registry package that does not depend on it"
         );
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
@@ -3589,7 +3589,7 @@ mod pnpm_lock_shape_tests {
             let lock = format!("{line}importers:\n  .: {{}}\n");
             assert_invalid(
                 refused(&dir.0, &lock),
-                &format!("unsupported pnpm lockfileVersion {shown:?} (tog supports 9.0 and 6.0)"),
+                &format!("unsupported pnpm lockfileVersion {shown:?} (ward supports 9.0 and 6.0)"),
             );
         }
     }
@@ -3731,12 +3731,12 @@ snapshots:
             (
                 "link:../../dangling",
                 "../../dangling",
-                "passes through a dangling symlink; tog cannot tell whether it stays in the project",
+                "passes through a dangling symlink; ward cannot tell whether it stays in the project",
             ),
             (
                 "link:../../dangling/child",
                 "../../dangling/child",
-                "passes through a dangling symlink; tog cannot tell whether it stays in the project",
+                "passes through a dangling symlink; ward cannot tell whether it stays in the project",
             ),
         ] {
             let error = refused(&dir.0, &link_lock("packages/lib", "dependencies", reference));

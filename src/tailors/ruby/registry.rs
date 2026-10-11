@@ -1,4 +1,4 @@
-//! The RubyGems protocol, as tog's resolution proxy serves it to Bundler.
+//! The RubyGems protocol, as ward's resolution proxy serves it to Bundler.
 //!
 //! Bundler reaches rubygems.org through a registry mirror, not
 //! interception: `BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/` names the
@@ -33,7 +33,7 @@ pub const ROUTE_ID: &str = "rubygems";
 pub const INDEX_HOST: &str = "index.rubygems.org";
 pub const GEMS_HOST: &str = "rubygems.org";
 /// The Bundler setting that points rubygems.org at a mirror. Bundler reads
-/// it from the environment even under tog's `BUNDLE_IGNORE_CONFIG=1`.
+/// it from the environment even under ward's `BUNDLE_IGNORE_CONFIG=1`.
 pub const MIRROR_VARIABLE: &str = "BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/";
 
 /// The longest gem name or file name the grammar accepts.

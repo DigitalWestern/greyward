@@ -8,8 +8,8 @@
 //! archive under the same name, fails here. Where an upstream publishes no
 //! checksum listing (Homebrew portable-ruby and erlef's OTP builds, whose
 //! only published digest is GitHub's asset metadata), the archive is
-//! downloaded and hashed. So is every row tog builds itself
-//! (DigitalWestern/tog-toolchains): the `.sha256` beside such an asset is
+//! downloaded and hashed. So is every row ward builds itself
+//! (DigitalWestern/greyward-toolchains): the `.sha256` beside such an asset is
 //! published by the same party as the row, so checking against it would be
 //! circular, while hashing the asset at least proves the hosted bytes are
 //! the ones the row pins. The conda-forge packages the native library set
@@ -19,8 +19,8 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use greyward::kernel::toolchain::{ArtifactRow, Bundle};
 use sha2::{Digest as _, Sha256, Sha512};
-use tog::kernel::toolchain::{ArtifactRow, Bundle};
 
 /// One agent for every request, with timeouts: a stalled upstream fails
 /// the test instead of hanging the shard. The read timeout bounds each
@@ -171,7 +171,7 @@ impl Upstream {
         }
         if url.contains("/Homebrew/homebrew-portable-ruby/releases/download/")
             || url.contains("/erlef/otp_builds/releases/download/")
-            || url.contains("/DigitalWestern/tog-toolchains/releases/download/")
+            || url.contains("/DigitalWestern/greyward-toolchains/releases/download/")
         {
             return (self.downloaded(row), url.to_string());
         }
@@ -199,7 +199,7 @@ fn side_file(algo: &str, text: &str) -> String {
 
 /// The default, the newest and the oldest release of a catalog.
 fn samples(ecosystem: &str) -> Vec<Bundle> {
-    let catalog = tog::tailors::by_id(ecosystem)
+    let catalog = greyward::tailors::by_id(ecosystem)
         .unwrap()
         .toolchain_catalog()
         .unwrap();
@@ -219,7 +219,7 @@ fn verify(ecosystem: &str) {
     for bundle in samples(ecosystem) {
         for row in &bundle.artifacts {
             let (published, source) = upstream.published(row);
-            let shipped = tog::kernel::toolchain::qualified(&row.digest);
+            let shipped = greyward::kernel::toolchain::qualified(&row.digest);
             assert_eq!(
                 shipped,
                 published,
@@ -280,7 +280,7 @@ fn cargo_rows_match_upstream() {
 #[test]
 #[ignore = "network: downloads every pinned conda-forge package (about 100 MB)"]
 fn native_library_pins_match_conda_forge() {
-    use tog::kernel::provider::nativelibs::LINUX_NATIVE_PACKAGES;
+    use greyward::kernel::provider::nativelibs::LINUX_NATIVE_PACKAGES;
     for package in LINUX_NATIVE_PACKAGES {
         let url = package.url();
         let hashed = hex::encode(Sha256::digest(get(&url)));

@@ -1,5 +1,5 @@
-//! The Cargo resolution doors: `tog add`/`remove`/`update`, a missing
-//! `Cargo.lock`, and `tog attest`'s lock check, each the store cargo
+//! The Cargo resolution doors: `ward add`/`remove`/`update`, a missing
+//! `Cargo.lock`, and `ward attest`'s lock check, each the store cargo
 //! confined through the kernel's cargo door (TLS interception, the
 //! crates.io route, the git row) at the workspace root.
 //!
@@ -137,12 +137,12 @@ pub(crate) fn generate_lock(
     .map(drop)
 }
 
-/// `tog attest` for Cargo: `cargo metadata --locked` at the workspace root
+/// `ward attest` for Cargo: `cargo metadata --locked` at the workspace root
 /// through `door`'s transaction with the record's producer. `--locked`
 /// fails when `Cargo.lock` is not what the manifests resolve to, and the
 /// run downloads every crate (cargo reads each one's manifest), each
 /// verified against its index checksum by the proxy. The check publishes
-/// nothing, not even the receipt: `tog attest` publishes every record only
+/// nothing, not even the receipt: `ward attest` publishes every record only
 /// once every check passed.
 pub(crate) fn attest_project(
     door: &mut ResolutionDoor<'_>,
@@ -155,7 +155,7 @@ pub(crate) fn attest_project(
     if project.relative(root).map(|rel| rel.as_os_str().is_empty()) != Some(true) {
         return Err(err(format!(
             "{} is a member of the Cargo workspace at {}; its Cargo.lock and resolution record \
-             live there, so run `tog attest cargo` in {}",
+             live there, so run `ward attest cargo` in {}",
             project.path().display(),
             root.display(),
             root.display()
@@ -184,7 +184,7 @@ pub(crate) fn attest_project(
     if !report.status.success() {
         return Err(err(format!(
             "Cargo.lock in {} is not what cargo resolves the manifests to, so it is not \
-             attested; run `tog` to bring it up to date and commit the result\n{}",
+             attested; run `ward` to bring it up to date and commit the result\n{}",
             project.path().display(),
             crate::kernel::resolve::confine::scrub_signing_key(
                 String::from_utf8_lossy(&report.stderr).trim()
@@ -381,14 +381,14 @@ mod tests {
         );
     }
 
-    /// The members tog lists are the ones the host `cargo metadata` lists,
+    /// The members ward lists are the ones the host `cargo metadata` lists,
     /// with the explicit member winning over `exclude` and the glob-reached
     /// one losing to it. The symlinked spellings of the test above are not
     /// compared: cargo 1.98.1 finds a member's workspace root through the
     /// spelling, not the real path, and refuses the workspace as a whole
-    /// ("member of the wrong workspace"), so tog's placement of them is
+    /// ("member of the wrong workspace"), so ward's placement of them is
     /// checked on its own there. Ignored: it needs a cargo on `PATH` (the
-    /// one that builds tog does), and runs offline.
+    /// one that builds ward does), and runs offline.
     #[test]
     #[ignore]
     fn member_listing_matches_cargo_metadata() {
@@ -1106,7 +1106,7 @@ mod tests {
             let marker = project.join("markers").join(name);
             fs::write(
                 &marker,
-                format!("#!/bin/sh\necho tog-marker-ran:{name} >&2\nexit 97\n"),
+                format!("#!/bin/sh\necho greyward-marker-ran:{name} >&2\nexit 97\n"),
             )
             .unwrap();
             fs::set_permissions(&marker, std::os::unix::fs::PermissionsExt::from_mode(0o755))
@@ -1136,7 +1136,7 @@ mod tests {
         let assert_no_marker = |report: &DelegateReport| {
             let text = stderr(report);
             assert!(
-                !text.contains("tog-marker-ran") && !text.contains("/markers/"),
+                !text.contains("greyward-marker-ran") && !text.contains("/markers/"),
                 "a project-named program ran: {text}"
             );
         };
@@ -1191,7 +1191,7 @@ mod tests {
             marker("registries.evil.credential-provider"),
         );
         // The registry and its provider declared only in an included file:
-        // tog finds it there and forces its provider like any other.
+        // ward finds it there and forces its provider like any other.
         fs::write(project.join(".cargo/evil.toml"), &string).unwrap();
         for (form, text) in [
             ("arrays", format!("{config}{providers}")),

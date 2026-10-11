@@ -2,9 +2,9 @@
 # One run on a Mac fills in the Mach allow-list table of docs/agent/DESIGNS.md §6
 # (PR 0, "pending: needs a macOS host"). From the repository root:
 #
-#   tools/proxy_spike/macos_mach.sh [work dir, default ~/tog-pr0-mach]
+#   tools/proxy_spike/macos_mach.sh [work dir, default ~/greyward-pr0-mach]
 #
-# It builds tog, provisions every census toolchain into a scratch store by
+# It builds ward, provisions every census toolchain into a scratch store by
 # syncing the test fixtures, installs mitmproxy in a venv, runs the census
 # under `sandbox-exec` with a `(deny mach-lookup (with report))` profile
 # (spike.py --engine seatbelt, which iterates each run to the smallest
@@ -13,11 +13,11 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-work=${1:-$HOME/tog-pr0-mach}
+work=${1:-$HOME/greyward-pr0-mach}
 store=$work/store
-tog=$repo/target/release/tog
+ward=$repo/target/release/ward
 mkdir -p "$work/prov"
-export TOG_STORE=$store
+export GREYWARD_STORE=$store
 
 cargo build --release --locked --manifest-path "$repo/Cargo.toml"
 
@@ -34,10 +34,10 @@ data["packageManager"] = "pnpm@9.15.4"
 json.dump(data, open(path, "w"), indent=2)
 PY
 for fixture in cargo-hello go-hello ruby-hello elixir-hello dotnet-hello proj-npm proj-a; do
-  (cd "$work/prov/$fixture" && "$tog" >/dev/null)
+  (cd "$work/prov/$fixture" && "$ward" >/dev/null)
 done
-(cd "$work/prov/proj-a" && "$tog" add iniconfig >/dev/null)
-(cd "$work/prov/proj-pnpm" && "$tog" add is-number >/dev/null)
+(cd "$work/prov/proj-a" && "$ward" add iniconfig >/dev/null)
+(cd "$work/prov/proj-pnpm" && "$ward" add is-number >/dev/null)
 
 if [ ! -x "$work/venv/bin/mitmdump" ]; then
   python3 -m venv "$work/venv"

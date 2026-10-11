@@ -1,7 +1,7 @@
 //! The resolution proxy's certificate authority: what lets it read the
 //! requests of a tool that speaks https (cargo, git, and later npm and uv).
 //!
-//! One authority per tog process, made when the proxy starts: an ECDSA
+//! One authority per ward process, made when the proxy starts: an ECDSA
 //! P-256 key generated through `ring` that never leaves memory, and a
 //! self-signed certificate that may sign only server leaves (path length
 //! 0). A door that intercepts writes the certificate (never the key) into
@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How long the authority and its leaves are valid, in days either side of
-/// today. A tog process lives minutes; the margin absorbs clock skew
+/// today. A ward process lives minutes; the margin absorbs clock skew
 /// between the host and nothing else (the sandbox shares its clock).
 const VALID_BEFORE_DAYS: i64 = 1;
 const VALID_AFTER_DAYS: i64 = 30;
@@ -58,7 +58,7 @@ impl Authority {
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
         params.distinguished_name.push(
             rcgen::DnType::CommonName,
-            "tog resolution proxy (this tog process only)",
+            "ward resolution proxy (this ward process only)",
         );
         params.key_usages = vec![
             rcgen::KeyUsagePurpose::KeyCertSign,
@@ -99,7 +99,7 @@ impl Authority {
     }
 
     #[cfg(test)]
-    /// A root set holding only this authority, for a client in tog's own
+    /// A root set holding only this authority, for a client in ward's own
     /// tests that plays the tool.
     pub fn roots(&self) -> rustls::RootCertStore {
         let mut roots = rustls::RootCertStore::empty();

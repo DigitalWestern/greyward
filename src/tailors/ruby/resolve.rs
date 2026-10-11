@@ -1,5 +1,5 @@
 //! The Ruby resolution doors: the store Bundler confined through the proxy
-//! session's RubyGems mirror for a missing lock and `tog attest`, and the
+//! session's RubyGems mirror for a missing lock and `ward attest`, and the
 //! planner's two helper checks confined with no route at all.
 
 use super::door::{ruby_tool, run_ruby, run_ruby_checked, RubyPublish, RubyRun, OUTPUTS, SCRATCH};
@@ -99,12 +99,12 @@ pub(super) fn helper(
     )
 }
 
-/// `tog attest` for Ruby: `bundle lock` in the project, frozen, through
+/// `ward attest` for Ruby: `bundle lock` in the project, frozen, through
 /// `door`'s transaction with the record's producer. `bundle lock` with
 /// `BUNDLE_FROZEN=true` still re-resolves a Gemfile the lock no longer
 /// matches and writes the new lock into the stage (measured), so the
 /// record's byte-unchanged rule is what refuses it. The check publishes nothing,
-/// not even the receipt: `tog attest` publishes every record only once
+/// not even the receipt: `ward attest` publishes every record only once
 /// every check passed.
 pub fn attest_project(
     door: &mut ResolutionDoor<'_>,
@@ -141,7 +141,7 @@ pub fn attest_project(
     if !report.status.success() {
         return Err(err(format!(
             "Gemfile.lock in {} is not what bundle lock would write, so it is not attested; \
-             run `tog` to bring it up to date and commit the result\n{}",
+             run `ward` to bring it up to date and commit the result\n{}",
             project.path().display(),
             String::from_utf8_lossy(&report.stderr).trim()
         )));
@@ -295,7 +295,7 @@ mod tests {
     /// names rubygems.org, and every request is a compact-index read), the
     /// planner's two helper checks with no route at all, `bundle add
     /// --skip-install` through the edit door (no gem is downloaded), and
-    /// `tog attest`'s check: an unchanged lock signed, a drifted Gemfile
+    /// `ward attest`'s check: an unchanged lock signed, a drifted Gemfile
     /// refused.
     #[test]
     #[ignore = "realizes the store Ruby over the network"]
@@ -372,10 +372,10 @@ mod tests {
         let lock = fs::read_to_string(dir.join("Gemfile.lock")).unwrap();
         assert!(lock.contains("remote: https://rubygems.org/"), "{lock}");
         assert!(lock.contains("rake (13.4.2)"), "{lock}");
-        assert!(dir.join(".tog/resolution/ruby.json").is_file());
+        assert!(dir.join(".greyward/resolution/ruby.json").is_file());
 
         // Compare against Bundler talking directly to the recorded registry,
-        // through an opaque TLS forwarder rather than the tog mirror.
+        // through an opaque TLS forwarder rather than the ward mirror.
         let direct = temp.0.join("direct");
         let direct_home = temp.0.join("direct-home");
         fs::create_dir_all(&direct).unwrap();

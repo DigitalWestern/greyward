@@ -91,7 +91,7 @@ impl ProjectRoot {
                 None => {
                     return Err(refusal(format!(
                         "every temporary name for {} is occupied (last tried {:?}); \
-                         remove stale .tog-tmp entries and retry",
+                         remove stale .greyward-tmp entries and retry",
                         display.display(),
                         OsStr::from_bytes(&last)
                     )))

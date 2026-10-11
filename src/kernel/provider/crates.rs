@@ -217,7 +217,7 @@ pub fn realize_vendor(
 ///
 /// Cargo writes `git+<url>?rev=<ref>#<commit>` (also `?branch=`/`?tag=`, and
 /// sometimes no query at all). The fragment is always the resolved commit,
-/// which is what tog realizes; the whole string is kept because the
+/// which is what ward realizes; the whole string is kept because the
 /// generated config's `[source."…"]` key must match it exactly.
 pub fn parse_cargo_git_source(source: &str) -> Option<CargoGitSource> {
     let rest = source.strip_prefix("git+")?;
@@ -705,15 +705,15 @@ pub fn lock_digest(lock_toml: &str) -> String {
 /// replaced by the vendor directory, because cargo matches these keys against
 /// the lockfile's source string verbatim; without them it would try to reach
 /// the network for a git dependency.
-pub fn tog_config_text_for(
+pub fn ward_config_text_for(
     vendor_obj: &Path,
     git_sources: &[CargoGitSource],
 ) -> io::Result<String> {
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
     let mut text = format!(
         "[source.crates-io]\n\
-         replace-with = \"tog-vendor\"\n\
-         [source.tog-vendor]\n\
+         replace-with = \"greyward-vendor\"\n\
+         [source.greyward-vendor]\n\
          directory = {vendor}\n"
     );
     let mut seen = BTreeSet::new();
@@ -736,7 +736,7 @@ pub fn tog_config_text_for(
             "[source.{key}]\n\
              git = {url}\n\
              {reference}\
-             replace-with = \"tog-vendor\"\n"
+             replace-with = \"greyward-vendor\"\n"
         ));
     }
     text.push_str("[net]\noffline = true\n");
@@ -808,7 +808,7 @@ mod tests {
         let commit = "b".repeat(40);
         let source = format!("git+https://github.com/o/r?rev={commit}#{commit}");
         let git = parse_cargo_git_source(&source).unwrap();
-        let text = tog_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
+        let text = ward_config_text_for(Path::new("/store/vendor"), &[git.clone(), git]).unwrap();
         assert!(text.contains(&format!("[source.\"{source}\"]")), "{text}");
         assert_eq!(
             text.matches("replace-with").count(),
@@ -822,12 +822,12 @@ mod tests {
         // replaced with the same reference kind, not with rev.
         let branch_source = format!("git+https://github.com/o/r?branch=main#{commit}");
         let branch = parse_cargo_git_source(&branch_source).unwrap();
-        let branch_text = tog_config_text_for(Path::new("/store/vendor"), &[branch]).unwrap();
+        let branch_text = ward_config_text_for(Path::new("/store/vendor"), &[branch]).unwrap();
         assert!(branch_text.contains("branch = \"main\""), "{branch_text}");
         assert!(!branch_text.contains("rev = "), "{branch_text}");
         let tag_source = format!("git+https://github.com/o/r?tag=v1#{commit}");
         let tag = parse_cargo_git_source(&tag_source).unwrap();
-        let tag_text = tog_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
+        let tag_text = ward_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
         assert!(tag_text.contains("tag = \"v1\""), "{tag_text}");
         assert!(text.trim_end().ends_with("offline = true"), "{text}");
     }

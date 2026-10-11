@@ -458,7 +458,7 @@ mod tests {
     /// The cold fetch must extract the archive the decision was read from.
     #[test]
     fn a_cold_fetch_of_another_candidate_than_the_classified_one_stops() {
-        let store = Store::for_test(PathBuf::from("/nonexistent/tog-test-store"));
+        let store = Store::for_test(PathBuf::from("/nonexistent/greyward-test-store"));
         let classified = sha512_of(b"classified");
         let fetched = sha512_of(b"fetched instead");
         let package = registry_package(&format!("{} {}", sri_of(&classified), sri_of(&fetched)));

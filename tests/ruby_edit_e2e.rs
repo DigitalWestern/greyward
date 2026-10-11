@@ -1,4 +1,4 @@
-//! Dependency edits must not run native gem builds outside Tog's sandbox.
+//! Dependency edits must not run native gem builds outside Greyward's sandbox.
 #![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
@@ -28,8 +28,8 @@ fn path_gem(project: &Path, directory: &str, name: &str, native: bool) {
             "Gem::Specification.new do |s|\n\
              s.name = '{name}'\n\
              s.version = '9.9.9'\n\
-             s.summary = 'Tog regression fixture'\n\
-             s.authors = ['Tog']\n\
+             s.summary = 'Greyward regression fixture'\n\
+             s.authors = ['Greyward']\n\
              s.files = Dir['lib/**/*', 'ext/**/*']\n\
              {extension}end\n"
         ),

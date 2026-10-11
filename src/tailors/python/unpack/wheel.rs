@@ -1145,7 +1145,7 @@ mod entry_guard_tests {
 
     #[test]
     fn an_entry_point_name_that_is_a_path_is_refused() {
-        for name in ["../tog", "bin/tog", "bin\\tog", ".", "..", ""] {
+        for name in ["../ward", "bin/ward", "bin\\ward", ".", "..", ""] {
             let text = format!("[console_scripts]\n{name} = pkg.cli:main\n");
             let error = parse_entry_points(&text).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name:?}");
@@ -1156,8 +1156,8 @@ mod entry_guard_tests {
             );
         }
         // The same names under gui_scripts.
-        let error = parse_entry_points("[gui_scripts]\n../tog = pkg.cli:main\n").unwrap_err();
-        assert_eq!(error.to_string(), "invalid entry point name: ../tog");
+        let error = parse_entry_points("[gui_scripts]\n../ward = pkg.cli:main\n").unwrap_err();
+        assert_eq!(error.to_string(), "invalid entry point name: ../ward");
     }
 
     #[test]
@@ -1195,7 +1195,7 @@ mod entry_guard_tests {
             "__future__:annotations",
             "_\u{FF3F}future\u{FF3F}\u{FF3F}:annotations",
         ] {
-            let text = format!("[console_scripts]\ntog = {value}\n");
+            let text = format!("[console_scripts]\nward = {value}\n");
             let error = parse_entry_points(&text).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{value:?}");
             assert_eq!(
@@ -1229,7 +1229,7 @@ mod entry_guard_tests {
             "pkg:x\u{FF3F}",
             "pkg.cli:Main.run",
         ] {
-            let text = format!("[console_scripts]\ntog = {value}\n");
+            let text = format!("[console_scripts]\nward = {value}\n");
             let entries =
                 parse_entry_points(&text).unwrap_or_else(|error| panic!("{value:?}: {error}"));
             assert_eq!(entries.len(), 1, "{value:?}");
@@ -1243,21 +1243,25 @@ mod entry_guard_tests {
 [some.plugins]\n\
 ../ignored = pkg:thing\n\
 [console_scripts]\n\
-tog = pkg.cli:main [extra1,extra2]\n\
+ward = pkg.cli:main [extra1,extra2]\n\
 ; another comment\n\
 \n\
-tog-admin=pkg.admin:Cli.run\n\
+greyward-admin=pkg.admin:Cli.run\n\
 caf = caf\u{e9}.cli:_run2\n\
 [gui_scripts]\n\
-tog-gui = pkg.gui:main\n\
+greyward-gui = pkg.gui:main\n\
 [other]\n\
 bad/name = x:y\n";
         assert_eq!(
             parse_entry_points(text).unwrap(),
             [
-                ("tog".to_string(), "pkg.cli".to_string(), "main".to_string()),
                 (
-                    "tog-admin".to_string(),
+                    "ward".to_string(),
+                    "pkg.cli".to_string(),
+                    "main".to_string()
+                ),
+                (
+                    "greyward-admin".to_string(),
                     "pkg.admin".to_string(),
                     "Cli.run".to_string()
                 ),
@@ -1267,7 +1271,7 @@ bad/name = x:y\n";
                     "_run2".to_string()
                 ),
                 (
-                    "tog-gui".to_string(),
+                    "greyward-gui".to_string(),
                     "pkg.gui".to_string(),
                     "main".to_string()
                 ),

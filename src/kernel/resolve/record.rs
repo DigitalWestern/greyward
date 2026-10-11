@@ -1,5 +1,5 @@
 //! The signed resolution record (kernel layer): the receipt a resolution
-//! door leaves in `.tog/resolution/<ecosystem>.json`, how it is built and
+//! door leaves in `.greyward/resolution/<ecosystem>.json`, how it is built and
 //! signed, how a candidate record is judged against the files on disk, and
 //! the identity math of the ledger object it names.
 //!
@@ -18,8 +18,8 @@
 //!
 //! 1. authenticate the raw envelope (signature, then the trusted set);
 //! 2. read `schema`, `isolation` and every exception `kind` as plain
-//!    strings, and refuse outright a value this tog cannot judge, under
-//!    every policy, so an older tog never publishes a closure from a newer
+//!    strings, and refuse outright a value this ward cannot judge, under
+//!    every policy, so an older ward never publishes a closure from a newer
 //!    record and silently drops a finding it cannot read;
 //! 3. parse the typed `resolution/1` shape;
 //! 4. check that every path is one the tailor lists, that every existing
@@ -46,7 +46,7 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// The one record schema this tog reads and writes.
+/// The one record schema this ward reads and writes.
 pub const SCHEMA: &str = "resolution/1";
 const SCHEMA_PREFIX: &str = "resolution/";
 /// The version segment of every ledger object id (`PortableLedger::identity`).
@@ -55,7 +55,7 @@ const LEDGER_ID_VERSION: &str = "1";
 pub use super::transaction::{receipt_path, RESOLUTION_DIR};
 
 /// The committed receipt's bytes, read with the strict no-follow walk
-/// (`ProjectRoot::read_file`): the receipt is tog state under `.tog`, so a
+/// (`ProjectRoot::read_file`): the receipt is ward state under `.greyward`, so a
 /// symlink anywhere on its path is refused as tampering rather than read
 /// through. `None` when there is no receipt.
 pub fn read_receipt(project: &ProjectRoot, ecosystem: &str) -> io::Result<Option<Vec<u8>>> {
@@ -70,7 +70,7 @@ pub enum RecordDoor {
     Edit,
     /// A lock generated because the project had none.
     MissingLock,
-    /// `tog attest`: the tool's lock check, which leaves the lock unchanged.
+    /// `ward attest`: the tool's lock check, which leaves the lock unchanged.
     Attest,
 }
 
@@ -144,7 +144,7 @@ pub struct LedgerSummary {
 }
 
 /// One exception the door recorded, as the record carries it. The same
-/// three fields as `policy::Exception`, and nothing else: a field this tog
+/// three fields as `policy::Exception`, and nothing else: a field this ward
 /// does not know makes the record malformed rather than silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,7 +162,7 @@ pub struct ResolutionRecord {
     pub ecosystem: String,
     pub door: String,
     pub tool: Tool,
-    /// The redacted tog verb and operands.
+    /// The redacted ward verb and operands.
     pub command: Vec<String>,
     /// Project-relative path to sha256, for every file the door published.
     pub outputs: BTreeMap<String, String>,
@@ -192,7 +192,7 @@ pub struct RecordFacts {
 
 impl ResolutionRecord {
     /// Build a record from the door's facts. Refuses anything the join
-    /// would call malformed, so a door can never sign a record no tog can
+    /// would call malformed, so a door can never sign a record no ward can
     /// attest.
     pub fn new(facts: RecordFacts) -> io::Result<Self> {
         let mut exceptions: Vec<RecordedException> = facts
@@ -501,7 +501,7 @@ impl Reason {
 }
 
 /// A candidate that does not attest: the reason, whether a trusted key had
-/// already vouched for it (so the fix is a fresh `tog attest`, not a new
+/// already vouched for it (so the fix is a fresh `ward attest`, not a new
 /// key), and what the reason is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -558,7 +558,7 @@ pub enum Judgment {
 
 /// Judge one candidate record for `ecosystem` in `project`. `origin` names
 /// the candidate in a hard failure. `Err` is a hard failure (a value this
-/// tog cannot judge in an authenticated record) or an I/O error reading the
+/// ward cannot judge in an authenticated record) or an I/O error reading the
 /// project; either fails the caller whatever the policy.
 pub fn judge(
     origin: &str,
@@ -624,7 +624,7 @@ fn check_vocabulary(origin: &str, envelope: &Value) -> io::Result<()> {
     let cannot_read = |what: String| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{origin}: the resolution record uses {what}, which this tog cannot read; upgrade tog"),
+            format!("{origin}: the resolution record uses {what}, which this ward cannot read; upgrade ward"),
         )
     };
     if let Some(schema) = envelope.get("schema").and_then(Value::as_str) {
@@ -744,7 +744,7 @@ fn check_disk(
 }
 
 /// The typed record in `bytes` for `ecosystem`, signature unchecked: for
-/// reading the ledger id a receipt names (`tog attest --ledger-export`),
+/// reading the ledger id a receipt names (`ward attest --ledger-export`),
 /// which the ledger's own digest then proves.
 pub fn parse_unverified(bytes: &[u8], ecosystem: &str) -> Result<ResolutionRecord, String> {
     let envelope: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
@@ -764,10 +764,10 @@ pub struct RecordSpec {
     /// The operation's signing key. `None` writes the record unsigned, which no
     /// sync attests.
     pub key: Option<Arc<SigningKey>>,
-    /// A lock check (`tog attest`): the run must leave every output
+    /// A lock check (`ward attest`): the run must leave every output
     /// byte-unchanged, or nothing is published.
     pub require_unchanged: bool,
-    /// Publish the record as the project's receipt. `false` (`tog attest
+    /// Publish the record as the project's receipt. `false` (`ward attest
     /// --record-out`) leaves the held receipt as it was, and the record
     /// goes only to the slot.
     pub publish_receipt: bool,
@@ -824,7 +824,7 @@ impl ResolutionRecord {
             let names: Vec<&str> = changed.keys().map(String::as_str).collect();
             return Err(io::Error::other(format!(
                 "{}'s lock check would change {}; the committed files are not what {} accepts, \
-                 so nothing is attested (run `tog` to bring them up to date)",
+                 so nothing is attested (run `ward` to bring them up to date)",
                 spec.tool.name,
                 names.join(", "),
                 spec.tool.name
@@ -994,7 +994,7 @@ pub fn commit_ledger(
 }
 
 /// Publish checked records as the project's receipts, all or nothing:
-/// `tog attest`'s second phase, run only after every ecosystem's lock check
+/// `ward attest`'s second phase, run only after every ecosystem's lock check
 /// passed without publishing anything.
 ///
 /// The project lock (the one every door's transaction holds to publish) is
@@ -1015,10 +1015,10 @@ pub fn publish_receipts(
 ) -> io::Result<()> {
     store.require_activity(activity, "receipt publication")?;
     let lock = locked_and_recovered(store, activity, project)?;
-    // Whether this call creates the receipt directory (and `.tog`), so
+    // Whether this call creates the receipt directory (and `.greyward`), so
     // putting back a receipt that did not exist also removes them.
     let created = [
-        Path::new(".tog"),
+        Path::new(".greyward"),
         Path::new(RESOLUTION_DIR),
         Path::new(super::transaction::JOURNAL_DIR),
     ]
@@ -1075,7 +1075,7 @@ pub fn publish_receipts(
             format!(
                 "{error}; putting back the receipts this command had already published also \
                  failed, so these now hold a new record while another ecosystem's did not \
-                 publish: {}; restore them from version control or run `tog attest` again",
+                 publish: {}; restore them from version control or run `ward attest` again",
                 left.join(", ")
             ),
         ));
@@ -1102,8 +1102,8 @@ fn locked_and_recovered(
         }
     }
     Err(io::Error::other(format!(
-        "{} keeps showing an interrupted resolution publication while tog attest waits to \
-         publish; wait for the other tog command in this project to finish, then run `tog \
+        "{} keeps showing an interrupted resolution publication while ward attest waits to \
+         publish; wait for the other ward command in this project to finish, then run `ward \
          attest` again",
         project
             .path()
@@ -1149,7 +1149,7 @@ fn remove_created_dirs(project: &ProjectRoot, created: &[PathBuf]) -> io::Result
 }
 
 /// The `flock` a resolution transaction holds on the project directory
-/// itself, so a tog process using another store cannot publish or recover
+/// itself, so a ward process using another store cannot publish or recover
 /// here meanwhile. Taken only while no transaction of this process is
 /// held: a second one from this process would wait forever.
 fn lock_project_dir(project: &ProjectRoot) -> io::Result<std::fs::File> {
@@ -1178,8 +1178,8 @@ fn check_still_described(project: &ProjectRoot, record: &ResolutionRecord) -> io
         return Ok(());
     }
     Err(io::Error::other(format!(
-        "{} changed in {} after tog attest checked the {} lock; no receipt was published; run \
-         `tog attest` again",
+        "{} changed in {} after ward attest checked the {} lock; no receipt was published; run \
+         `ward attest` again",
         changed.join(", "),
         project.path().display(),
         record.ecosystem
@@ -1227,8 +1227,8 @@ fn publish_receipt(
         if held.as_deref() != Some(digest.as_str()) {
             transaction.abandon()?;
             return Err(io::Error::other(format!(
-                "{} changed in {} after tog attest checked the {} lock; no receipt was \
-                 published; run `tog attest` again",
+                "{} changed in {} after ward attest checked the {} lock; no receipt was \
+                 published; run `ward attest` again",
                 path,
                 project.path().display(),
                 record.ecosystem
@@ -1278,7 +1278,7 @@ fn finish(published: Published) {
     if let Published::CleanupPending(error) = published {
         crate::kernel::ui::warning(
             &format!("the receipt was published, but cleaning up after it failed: {error}"),
-            "the next tog command in this project finishes the cleanup",
+            "the next ward command in this project finishes the cleanup",
         );
     }
 }

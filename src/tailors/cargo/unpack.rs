@@ -38,7 +38,7 @@ pub(super) fn stage_rustfmt(
     // archived modes, and the object's identity covers the executable bit.
     // The scratch directory sits inside `staged`, so it must be gone before
     // commit: a failed cleanup is an error, never a stray tree in the object.
-    let full = staged.join(".tog-rustfmt-full");
+    let full = staged.join(".greyward-rustfmt-full");
     let extracted = (|| -> io::Result<()> {
         fs::create_dir_all(&full)?;
         crate::kernel::archive::extract_validated_with_activity_and_options(

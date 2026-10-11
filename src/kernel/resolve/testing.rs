@@ -583,7 +583,7 @@ fn read_line_bytes(stream: &mut impl Read) -> String {
 /// `Proxy-Authorization` carrying `token`.
 #[cfg(test)]
 pub(crate) fn proxy_authorization(token: &str) -> String {
-    let encoded = crate::kernel::base64::encode(format!("tog:{token}").as_bytes());
+    let encoded = crate::kernel::base64::encode(format!("ward:{token}").as_bytes());
     format!("Proxy-Authorization: Basic {encoded}\r\n")
 }
 
@@ -592,16 +592,16 @@ pub(crate) fn proxy_authorization(token: &str) -> String {
 /// ran the suite.
 #[cfg(test)]
 mod host {
-    /// `TOG_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
+    /// `GREYWARD_SANDBOX_TESTS=required` (any non-empty value) turns a skip into
     /// a panic, so CI cannot report a skipped check as passed.
     fn skip_or_panic(test: &str, reason: impl std::fmt::Display) {
-        if matches!(std::env::var_os("TOG_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
+        if matches!(std::env::var_os("GREYWARD_SANDBOX_TESTS"), Some(value) if !value.is_empty()) {
             panic!("required Linux sandbox test {test} unavailable: {reason}");
         }
         eprintln!("skip {test}: {reason}");
     }
 
-    /// The tog binary cargo built beside this test binary, which the
+    /// The ward binary cargo built beside this test binary, which the
     /// sandbox binds as the relay; `None` (after a skip) when the host
     /// cannot run a confined door.
     pub(crate) fn relay(test: &str) -> Option<std::path::PathBuf> {
@@ -616,27 +616,27 @@ mod host {
             skip_or_panic(test, format!("bubblewrap preflight failed: {error}"));
             return None;
         }
-        binary(test, "TOG_SANDBOX_TESTS")
+        binary(test, "GREYWARD_SANDBOX_TESTS")
     }
 
     /// Find the actual CLI without requiring a different isolation backend.
     fn binary(test: &str, required: &str) -> Option<std::path::PathBuf> {
         let exe = std::env::current_exe().unwrap();
-        let tog = exe
+        let ward = exe
             .parent()
             .and_then(std::path::Path::parent)
-            .map(|dir| dir.join("tog"));
-        match tog {
-            Some(tog) if tog.is_file() => Some(tog),
+            .map(|dir| dir.join("ward"));
+        match ward {
+            Some(ward) if ward.is_file() => Some(ward),
             _ => {
-                let reason = format!("no tog binary beside {} (run cargo test)", exe.display());
+                let reason = format!("no ward binary beside {} (run cargo test)", exe.display());
                 if matches!(std::env::var_os(required), Some(value) if !value.is_empty()) {
                     panic!("required isolation test {test} unavailable: {reason}");
                 }
                 skip_or_panic(
                     test,
                     format!(
-                        "no tog binary beside {} (run `cargo test`, which builds it)",
+                        "no ward binary beside {} (run `cargo test`, which builds it)",
                         exe.display()
                     ),
                 );
@@ -647,7 +647,7 @@ mod host {
 
     /// `relay`, for a door run through rootless podman: `None` (after a
     /// skip) when podman cannot run a fenced container here. Its own switch,
-    /// `TOG_PODMAN_TESTS`, makes the skip a panic, since a host with
+    /// `GREYWARD_PODMAN_TESTS`, makes the skip a panic, since a host with
     /// bubblewrap need not have a podman new enough.
     pub(crate) fn podman_relay(
         test: &str,
@@ -657,16 +657,18 @@ mod host {
             crate::kernel::platform::Platform::host(),
             Ok(crate::kernel::platform::Platform::X86_64UnknownLinuxGnu)
         ) {
-            if matches!(std::env::var_os("TOG_PODMAN_TESTS"), Some(value) if !value.is_empty()) {
+            if matches!(std::env::var_os("GREYWARD_PODMAN_TESTS"), Some(value) if !value.is_empty())
+            {
                 panic!("required podman test {test} unavailable: unsupported platform");
             }
             eprintln!("skip {test}: unsupported platform");
             return None;
         }
-        let relay = binary(test, "TOG_PODMAN_TESTS")?;
+        let relay = binary(test, "GREYWARD_PODMAN_TESTS")?;
         if let Err(error) = crate::kernel::resolve::container::preflight(activity) {
             let reason = format!("podman preflight failed: {error}");
-            if matches!(std::env::var_os("TOG_PODMAN_TESTS"), Some(value) if !value.is_empty()) {
+            if matches!(std::env::var_os("GREYWARD_PODMAN_TESTS"), Some(value) if !value.is_empty())
+            {
                 panic!("required podman test {test} unavailable: {reason}");
             }
             eprintln!("skip {test}: {reason}");

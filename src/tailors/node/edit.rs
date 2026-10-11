@@ -1,9 +1,9 @@
-//! `tog add` / `remove` / `update` for Node (`Tailor::edit_manifest`).
+//! `ward add` / `remove` / `update` for Node (`Tailor::edit_manifest`).
 //!
 //! A project with its own package-lock.json (or none yet) is edited by the
 //! store node's npm. A pnpm lock, its own or its workspace's, is edited by
 //! the exact pnpm the project's `packageManager` field pins, realized in
-//! the `tog x` cache (see `corepack`). Both run confined through the edit
+//! the `ward x` cache (see `corepack`). Both run confined through the edit
 //! door (`super::door`), which publishes the manifest and the lock with
 //! the signed resolution record. yarn is not a pinned tool, so a yarn
 //! project refuses with the command to run.
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 // Node
 
-/// How `tog add` names this ecosystem's public registry.
+/// How `ward add` names this ecosystem's public registry.
 pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
     prefix: "npm",
     name: "npm",
@@ -92,7 +92,7 @@ fn package_manager_version(
             })?;
             let parsed = CorepackAlgo::parse(algo).ok_or_else(|| {
                 other(format!(
-                    "{}: packageManager hash algorithm {algo:?} is not supported; tog verifies {}; drop the suffix or re-pin with one of those",
+                    "{}: packageManager hash algorithm {algo:?} is not supported; ward verifies {}; drop the suffix or re-pin with one of those",
                     package_json.display(),
                     CorepackAlgo::SUPPORTED
                 ))
@@ -232,7 +232,7 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
         .map_err(|error| other(format!("read {}: {error}", lock_path.display())))?;
     let importers = super::lock_import::pnpm_lock_importers(&text).map_err(|error| {
         other(format!(
-            "{}: {error}; tog reads workspace membership from this file, so it must parse. If it is the result of an unresolved merge conflict, resolve the conflict or delete the file and run 'pnpm install' in {} to regenerate it, then run tog again",
+            "{}: {error}; ward reads workspace membership from this file, so it must parse. If it is the result of an unresolved merge conflict, resolve the conflict or delete the file and run 'pnpm install' in {} to regenerate it, then run ward again",
             lock_path.display(),
             root.display()
         ))
@@ -254,7 +254,7 @@ fn pnpm_membership(root: &Path, project: &Path) -> io::Result<PnpmMembership> {
 /// find unconfined; the root's lock, when it has one, is then the lock to
 /// edit, `yarn.lock` included). Any other ancestor lock is a boundary.
 ///
-/// The last variant is not an advisory flag a caller may drop: tog
+/// The last variant is not an advisory flag a caller may drop: ward
 /// cannot tell a member added since the last install from a project the
 /// workspace deliberately excludes, so each caller has to say what it does
 /// about that, and anything that would write a lockfile must refuse.
@@ -288,7 +288,7 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
     if let Some(lock_name) = node_lock_at(project) {
         return Ok(own(lock_name));
     }
-    if project.join(".tog").is_dir() {
+    if project.join(".greyward").is_dir() {
         return Ok(own("package-lock.json"));
     }
     for ancestor in project.ancestors().skip(1) {
@@ -309,7 +309,7 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
             }
         }
         // npm needs no lock at the root to take it as the workspace root,
-        // so neither does tog: a root that has none yet gets its first
+        // so neither does ward: a root that has none yet gets its first
         // lock from the member's edit, at the root.
         let relative = project
             .strip_prefix(ancestor)
@@ -328,14 +328,14 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
                 root: ancestor.to_path_buf(),
             });
         }
-        if lock_name.is_some() || ancestor.join(".tog").is_dir() {
+        if lock_name.is_some() || ancestor.join(".greyward").is_dir() {
             break;
         }
     }
     Ok(own("package-lock.json"))
 }
 
-/// Does `root`'s `pnpm-workspace.yaml` (present, with a `packages` list tog
+/// Does `root`'s `pnpm-workspace.yaml` (present, with a `packages` list ward
 /// can read) name the directory `relative` as a member? A settings-only
 /// file names nobody.
 fn pnpm_workspace_yaml_names(root: &Path, relative: &Path) -> io::Result<bool> {
@@ -350,7 +350,7 @@ fn pnpm_workspace_yaml_names(root: &Path, relative: &Path) -> io::Result<bool> {
 }
 
 /// The refusal for a command run in a workspace member whose lock, and
-/// with it tog's record and projection, live at the root: the member
+/// with it ward's record and projection, live at the root: the member
 /// cannot be resolved or synced alone.
 pub(crate) fn member_lock_elsewhere(project: &Path, root: &Path, lock_name: &str) -> io::Error {
     other(format!(
@@ -391,12 +391,12 @@ fn is_yarn_berry(root: &Path) -> bool {
 fn yarn_refusal(root: &Path, verb: EditVerb, texts: &[String], dev: bool) -> io::Error {
     if is_yarn_berry(root) {
         return by_hand(
-            "this project uses Yarn Berry; Berry cache checksums are not npm tarball integrity values; convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only', then 'tog'",
+            "this project uses Yarn Berry; Berry cache checksums are not npm tarball integrity values; convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only', then 'ward'",
         );
     }
     let tool_verb = verb.command();
     by_hand(format!(
-        "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'tog' (it imports yarn.lock)",
+        "this project is locked by yarn (yarn.lock) and yarn is not a pinned tool; run 'yarn {tool_verb}{}{}', then 'ward' (it imports yarn.lock)",
         if dev && verb == EditVerb::Add { " -D" } else { "" },
         texts.iter().map(|text| format!(" {text}")).collect::<String>()
     ))
@@ -429,11 +429,11 @@ fn pnpm_edit_args(
 }
 
 /// The refusal for a project under a pnpm workspace whose lock does not
-/// list it: tog cannot tell a member added since the last install from a
+/// list it: ward cannot tell a member added since the last install from a
 /// deliberate exclusion, and never writes a lock inside a workspace.
 pub(crate) fn unlisted_member_refusal(project: &Path, workspace_root: &Path) -> io::Error {
     other(format!(
-        "{} sits under the pnpm workspace {} but {} does not list it as an importer, so tog cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run tog again. If it is deliberately outside the workspace, put a .tog directory in {} to make it its own root. Tog refuses rather than write a package-lock.json inside a pnpm workspace",
+        "{} sits under the pnpm workspace {} but {} does not list it as an importer, so ward cannot tell whether it is a workspace member. If it is a member you added since the last install, run 'pnpm install' in {} and then run ward again. If it is deliberately outside the workspace, put a .greyward directory in {} to make it its own root. Greyward refuses rather than write a package-lock.json inside a pnpm workspace",
         project.display(),
         workspace_root.display(),
         workspace_root.join("pnpm-lock.yaml").display(),
@@ -564,7 +564,7 @@ fn package_label(cwd: &Option<PathBuf>) -> String {
     }
 }
 
-/// The pnpm a project's `packageManager` pins, realized in the `tog x`
+/// The pnpm a project's `packageManager` pins, realized in the `ward x`
 /// cache and found in the store: what a Node door runs. The cache root's
 /// lifecycle lock is held for as long as this lives.
 pub(crate) struct PinnedPnpm {
@@ -775,7 +775,7 @@ mod tests {
 
     /// Corepack has written three hash algorithms over its life; every one it
     /// writes is a pin, so none of them may be misdiagnosed as an inexact
-    /// version. An algorithm tog cannot verify is refused by name.
+    /// version. An algorithm ward cannot verify is refused by name.
     #[test]
     fn corepack_hash_suffixes_accept_every_supported_algorithm() {
         let package_json = Path::new("package.json");
@@ -844,9 +844,9 @@ mod tests {
     /// `pnpm-lock.yaml` decides membership, so two shapes a glob-based
     /// reading would send down the npm branch — writing a stray
     /// `package-lock.json` inside a pnpm workspace — resolve correctly: an
-    /// alternation group, which pnpm's glob engine supports and tog's
+    /// alternation group, which pnpm's glob engine supports and ward's
     /// matcher does not, and a block sequence at the parent key's own
-    /// indent, which is ordinary hand-written YAML that tog's
+    /// indent, which is ordinary hand-written YAML that ward's
     /// lockfile-shaped parser rejects.
     #[test]
     fn workspace_membership_comes_from_the_lock_not_the_glob() {
@@ -859,7 +859,7 @@ mod tests {
             "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  apps/web: {}\n",
         )
         .unwrap();
-        // Both hostile-to-tog shapes at once: alternation, at indent 0.
+        // Both hostile-to-greyward shapes at once: alternation, at indent 0.
         fs::write(
             root.join("pnpm-workspace.yaml"),
             "packages:\n- '(apps|libs)/*'\n",
@@ -957,7 +957,7 @@ mod tests {
                 PnpmMembership::Listed
             ),
             "pnpm 9.12.3 writes the importer key packages/a/b for the on-disk \
-             directory packages/a\\b, so tog must normalise the same way"
+             directory packages/a\\b, so ward must normalise the same way"
         );
     }
 
@@ -1058,19 +1058,19 @@ mod tests {
                 excluded,
                 NodeLock::UnlistedUnderPnpmWorkspace { ref workspace_root } if workspace_root == &root
             ),
-            "tog does not reimplement pnpm's exclusion globs, so a project \
+            "ward does not reimplement pnpm's exclusion globs, so a project \
              the lock does not list is ambiguous and must refuse rather than \
              guess npm"
         );
 
-        fs::create_dir_all(independent.join(".tog")).unwrap();
+        fs::create_dir_all(independent.join(".greyward")).unwrap();
         assert_eq!(
             selected(&independent),
             ("package-lock.json".to_string(), independent.clone()),
-            "a .tog directory is how a project inside a workspace tree \
+            "a .greyward directory is how a project inside a workspace tree \
              declares itself its own root"
         );
-        fs::remove_dir_all(independent.join(".tog")).unwrap();
+        fs::remove_dir_all(independent.join(".greyward")).unwrap();
 
         fs::write(independent.join("package-lock.json"), "{}\n").unwrap();
         assert_eq!(
@@ -1083,7 +1083,7 @@ mod tests {
         assert_eq!(selected(&member), ("package-lock.json".to_string(), member));
 
         let boundary = root.join("packages/boundary");
-        fs::create_dir_all(boundary.join(".tog")).unwrap();
+        fs::create_dir_all(boundary.join(".greyward")).unwrap();
         assert_eq!(
             selected(&boundary),
             ("package-lock.json".to_string(), boundary)
@@ -1095,7 +1095,7 @@ mod tests {
     /// or a literal path, less a `!` pattern), and the member has a
     /// manifest. The root needs no lock yet; a root with `yarn.lock` is
     /// still the root (its edit then refuses as yarn's). A member's own
-    /// lock or `.tog` directory, a `!` exclusion, a directory without a
+    /// lock or `.greyward` directory, a `!` exclusion, a directory without a
     /// manifest, and a root whose `workspaces` does not name the project
     /// each leave the project its own root, as before.
     #[test]
@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(
             selected(&lib),
             ("package-lock.json".to_string(), lib.clone()),
-            "a packages list tog cannot read names no member here; the root sync refuses it"
+            "a packages list ward cannot read names no member here; the root sync refuses it"
         );
     }
 
@@ -1198,19 +1198,19 @@ mod tests {
             "an excluded project under a root lock is its own root, as before"
         );
 
-        // The member's own lock, and its own `.tog`, win.
+        // The member's own lock, and its own `.greyward`, win.
         fs::write(app.join("package-lock.json"), "{}\n").unwrap();
         assert_eq!(
             selected(&app),
             ("package-lock.json".to_string(), app.clone())
         );
         fs::remove_file(app.join("package-lock.json")).unwrap();
-        fs::create_dir_all(app.join(".tog")).unwrap();
+        fs::create_dir_all(app.join(".greyward")).unwrap();
         assert_eq!(
             selected(&app),
             ("package-lock.json".to_string(), app.clone())
         );
-        fs::remove_dir_all(app.join(".tog")).unwrap();
+        fs::remove_dir_all(app.join(".greyward")).unwrap();
         assert_eq!(member(&app), Some(root.clone()));
 
         // A yarn root is still the root; the edit is then yarn's refusal.

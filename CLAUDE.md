@@ -97,15 +97,15 @@
     `$HOME` first: these tests leave large stores behind and fill the
     `/tmp` quota.
   Clean up after yourself. Give each run its own fresh scratch directory,
-  for example `TMPDIR=$HOME/tog-tmp/<branch-name>`. Once the checks pass,
-  delete that directory (`rm -rf "$HOME/tog-tmp/<branch-name>"`), and
-  any `$HOME/tog-tmp/run-*` directory you created. Do this before you
+  for example `TMPDIR=$HOME/greyward-tmp/<branch-name>`. Once the checks pass,
+  delete that directory (`rm -rf "$HOME/greyward-tmp/<branch-name>"`), and
+  any `$HOME/greyward-tmp/run-*` directory you created. Do this before you
   report the work as done, so nobody has to clear disk space later.
   Delete only directories you created in this task: never
-  `$HOME/tog-tmp` itself, and never another agent's directory, which may
-  still be in use. Also delete the `/tmp/tog-*` stores your own test
+  `$HOME/greyward-tmp` itself, and never another agent's directory, which may
+  still be in use. Also delete the `/tmp/greyward-*` stores your own test
   runs left, and only those. Use `find /tmp -mindepth 1 -maxdepth 1
-  -name 'tog-*' -user "$USER" -mmin -<minutes since you started>`, and
+  -name 'greyward-*' -user "$USER" -mmin -<minutes since you started>`, and
   read the list before deleting anything. A `find` without `-mindepth 1`
   can match the parent directory itself, and once deleted a whole tree
   that way.
@@ -120,6 +120,6 @@
 
 # About Ethan
 
-My name is Ethan. I work in finance at a private credit firm doing capital markets and origination, and software engineering is something I’ve taken up as a hobby on the side. I’ve built a number of smaller projects before this—mostly Python/data analysis, HTML/CSS, scripts, and other relatively straightforward projects—but Tog is my first large-scale backend/systems project. I am still very much a newcomer to Rust, systems programming, package managers, CI infrastructure, toolchains, dependency resolution, security, and many of the architectural concepts that appear throughout this codebase.
+My name is Ethan. I work in finance at a private credit firm doing capital markets and origination, and software engineering is something I’ve taken up as a hobby on the side. I’ve built a number of smaller projects before this—mostly Python/data analysis, HTML/CSS, scripts, and other relatively straightforward projects—but Greyward is my first large-scale backend/systems project. I am still very much a newcomer to Rust, systems programming, package managers, CI infrastructure, toolchains, dependency resolution, security, and many of the architectural concepts that appear throughout this codebase.
 
-When working with me, do not assume that I understand terminology, conventions, or abstractions simply because they already exist in the codebase or because I have successfully built complicated parts of Tog. Much of this project has been written with substantial help from coding agents, so the sophistication of the code is significantly ahead of my own software-engineering knowledge. When explaining something, optimize for helping me actually understand it rather than sounding technically complete. Start with the simple mental model: what the thing is, why it exists, what problem it solves, and how it fits into Tog. Define unfamiliar terminology in plain English as you introduce it, and use concrete examples or analogies when they help. Then go deeper technically if necessary. I would much rather receive an explanation that initially feels almost embarrassingly simple than one that assumes background knowledge I don’t have. The goal is not merely to make changes to Tog for me; it is to help me gradually understand the system I am building.
+When working with me, do not assume that I understand terminology, conventions, or abstractions simply because they already exist in the codebase or because I have successfully built complicated parts of Greyward. Much of this project has been written with substantial help from coding agents, so the sophistication of the code is significantly ahead of my own software-engineering knowledge. When explaining something, optimize for helping me actually understand it rather than sounding technically complete. Start with the simple mental model: what the thing is, why it exists, what problem it solves, and how it fits into Greyward. Define unfamiliar terminology in plain English as you introduce it, and use concrete examples or analogies when they help. Then go deeper technically if necessary. I would much rather receive an explanation that initially feels almost embarrassingly simple than one that assumes background knowledge I don’t have. The goal is not merely to make changes to Greyward for me; it is to help me gradually understand the system I am building.

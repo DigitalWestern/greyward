@@ -1,7 +1,7 @@
 //! Committed toolchain lock: which exact toolchain each ecosystem uses.
 //!
-//! The file is `tog-toolchain.toml` next to the manifests, outside the
-//! ignored `.tog/` directory. It records one bundle per ecosystem plus the
+//! The file is `greyward-toolchain.toml` next to the manifests, outside the
+//! ignored `.greyward/` directory. It records one bundle per ecosystem plus the
 //! whole consulted input list, including sources that held no request, so a
 //! new higher-precedence file flips a row from absent to present instead of
 //! changing nothing the lock knows about.
@@ -19,7 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Project-relative path of the lock file.
-pub const LOCK_PATH: &str = "tog-toolchain.toml";
+pub const LOCK_PATH: &str = "greyward-toolchain.toml";
 
 /// Supported lock schema version. A schema that adds a hashed field mints a
 /// new version; old files keep the id their own bytes produced.
@@ -145,18 +145,18 @@ pub struct ToolchainLock {
 #[serde(deny_unknown_fields)]
 struct LockFile {
     schema_version: u64,
-    tog_version: String,
+    ward_version: String,
     toolchain: BTreeMap<String, EcoLock>,
 }
 
 impl ToolchainLock {
     /// Parse and strictly validate lock bytes.
     pub fn parse(bytes: &[u8]) -> io::Result<Self> {
-        let text =
-            std::str::from_utf8(bytes).map_err(|_| invalid("tog-toolchain.toml is not UTF-8"))?;
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| invalid("greyward-toolchain.toml is not UTF-8"))?;
         let inner: LockFile = toml::from_str(text).map_err(|e| {
             invalid(crate::kernel::tomlerr::describe(
-                "tog-toolchain.toml",
+                "greyward-toolchain.toml",
                 text,
                 &e,
             ))
@@ -169,18 +169,18 @@ impl ToolchainLock {
     fn validate(&self) -> io::Result<()> {
         if self.inner.schema_version != SCHEMA_VERSION {
             return Err(invalid(format!(
-                "tog-toolchain.toml: unsupported schema_version {}",
+                "greyward-toolchain.toml: unsupported schema_version {}",
                 self.inner.schema_version
             )));
         }
-        if self.inner.tog_version.is_empty() {
-            return Err(invalid("tog-toolchain.toml: empty tog_version"));
+        if self.inner.ward_version.is_empty() {
+            return Err(invalid("greyward-toolchain.toml: empty ward_version"));
         }
         if self.inner.toolchain.is_empty() {
-            return Err(invalid("tog-toolchain.toml: no toolchain entries"));
+            return Err(invalid("greyward-toolchain.toml: no toolchain entries"));
         }
         for (eco, entry) in &self.inner.toolchain {
-            let bad = |what: String| invalid(format!("tog-toolchain.toml [{eco}]: {what}"));
+            let bad = |what: String| invalid(format!("greyward-toolchain.toml [{eco}]: {what}"));
             if !is_bare_key(eco) {
                 return Err(bad("ecosystem name is not a bare TOML key".into()));
             }
@@ -368,7 +368,7 @@ impl ToolchainLock {
             if computed != entry.bundle_id {
                 return Err(bad(format!(
                     "bundle_id {} does not match its rows and helper pins ({computed}); the file was edited, \
-                     run `tog update --toolchain {eco}`",
+                     run `ward update --toolchain {eco}`",
                     entry.bundle_id
                 )));
             }
@@ -383,8 +383,8 @@ impl ToolchainLock {
         let mut out = String::new();
         out.push_str(&format!("schema_version = {}\n", self.inner.schema_version));
         out.push_str(&format!(
-            "tog_version = {}\n",
-            quoted(&self.inner.tog_version)
+            "ward_version = {}\n",
+            quoted(&self.inner.ward_version)
         ));
         for (eco, entry) in &self.inner.toolchain {
             out.push_str(&format!("\n[toolchain.{eco}]\n"));
@@ -490,13 +490,13 @@ impl ToolchainLock {
         self.inner.toolchain.get(name)
     }
 
-    /// An empty lock for `tog_version`. It is not valid until at least one
+    /// An empty lock for `ward_version`. It is not valid until at least one
     /// ecosystem has been set: a lock with no toolchain entry states nothing.
-    pub fn new(tog_version: &str) -> ToolchainLock {
+    pub fn new(ward_version: &str) -> ToolchainLock {
         ToolchainLock {
             inner: LockFile {
                 schema_version: SCHEMA_VERSION,
-                tog_version: tog_version.to_string(),
+                ward_version: ward_version.to_string(),
                 toolchain: BTreeMap::new(),
             },
         }
@@ -587,16 +587,17 @@ impl ToolchainLock {
         ecosystem: &str,
         helpers: &BTreeMap<String, String>,
     ) -> io::Result<()> {
-        let entry =
-            self.inner.toolchain.get_mut(ecosystem).ok_or_else(|| {
-                invalid(format!("tog-toolchain.toml has no [{ecosystem}] section"))
-            })?;
+        let entry = self.inner.toolchain.get_mut(ecosystem).ok_or_else(|| {
+            invalid(format!(
+                "greyward-toolchain.toml has no [{ecosystem}] section"
+            ))
+        })?;
         entry.helpers = helpers.clone();
         entry.bundle_id = entry.bundle()?.section_id(helpers);
         self.validate()
     }
 
-    /// Publish the canonical bytes at `tog-toolchain.toml` through the held
+    /// Publish the canonical bytes at `greyward-toolchain.toml` through the held
     /// project root: an `O_EXCL` temporary on a random name, the file
     /// fsynced, renamed descriptor-relative, and the directory fsynced.
     pub fn publish_via(&self, root: &ProjectRoot) -> io::Result<()> {
@@ -607,7 +608,7 @@ impl ToolchainLock {
 impl EcoLock {
     /// The component whose version names the runtime: the first primary.
     // Read by tests/toolchain_lock.rs, outside lib.rs's `boundary` reach.
-    #[cfg_attr(tog_dead_code, allow(dead_code))]
+    #[cfg_attr(ward_dead_code, allow(dead_code))]
     pub fn runtime(&self) -> &str {
         &self.runtime
     }
@@ -615,7 +616,7 @@ impl EcoLock {
     /// The catalog release key this section was minted from. Provenance,
     /// never a key honoring the lock looks up.
     // Read by tests/toolchain_lock.rs, outside lib.rs's `boundary` reach.
-    #[cfg_attr(tog_dead_code, allow(dead_code))]
+    #[cfg_attr(ward_dead_code, allow(dead_code))]
     pub fn release(&self) -> &str {
         &self.release
     }
@@ -644,7 +645,7 @@ impl EcoLock {
             None => None,
             Some(value) => Some(u32::try_from(value).map_err(|_| {
                 invalid(format!(
-                    "tog-toolchain.toml [{}]: revision {value} is out of range",
+                    "greyward-toolchain.toml [{}]: revision {value} is out of range",
                     self.release
                 ))
             })?),
@@ -654,7 +655,9 @@ impl EcoLock {
             .iter()
             .map(|name| {
                 let table = self.component.get(name.as_str()).ok_or_else(|| {
-                    invalid(format!("tog-toolchain.toml: component {name} has no table"))
+                    invalid(format!(
+                        "greyward-toolchain.toml: component {name} has no table"
+                    ))
                 })?;
                 Ok(Component {
                     name: name.clone(),
@@ -667,7 +670,7 @@ impl EcoLock {
         for (triple, platform) in &self.platforms {
             let host = Platform::from_triple(triple).ok_or_else(|| {
                 invalid(format!(
-                    "tog-toolchain.toml: unsupported platform triple {triple:?}"
+                    "greyward-toolchain.toml: unsupported platform triple {triple:?}"
                 ))
             })?;
             for (component, row) in &platform.artifacts {
@@ -769,7 +772,7 @@ pub fn stale_rows(recorded: &[InputRow], current: &[InputRow]) -> Vec<StaleRow> 
     }
     for row in current {
         let (path, field) = key(row);
-        // A row the lock never recorded (a source a later tog consults)
+        // A row the lock never recorded (a source a later ward consults)
         // changes nothing while it states no value: only one that asks for
         // something makes the lock stale.
         if row.value.is_some()
@@ -861,7 +864,7 @@ mod tests {
     use super::*;
 
     pub(super) const NODE_LOCK: &str = r#"schema_version = 1
-tog_version = "0.1.0"
+ward_version = "0.1.0"
 
 [toolchain.node]
 runtime = "node"
@@ -932,13 +935,13 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         let error = ToolchainLock::parse(bad_id.as_bytes()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "tog-toolchain.toml [node]: bad bundle_id \"md5:abc\""
+            "greyward-toolchain.toml [node]: bad bundle_id \"md5:abc\""
         );
         let both = NODE_LOCK.replace("absent = true\n", "absent = true\nvalue = \"24.20.0\"\n");
         let error = ToolchainLock::parse(both.as_bytes()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "tog-toolchain.toml [node]: input package.json has both a value and absent = true"
+            "greyward-toolchain.toml [node]: input package.json has both a value and absent = true"
         );
     }
 
@@ -953,7 +956,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         let error = ToolchainLock::parse(dotted_eco.as_bytes()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "tog-toolchain.toml [no.de]: ecosystem name is not a bare TOML key"
+            "greyward-toolchain.toml [no.de]: ecosystem name is not a bare TOML key"
         );
         let dotted_component = NODE_LOCK
             .replace("\"node-gyp\"", "\"node.gyp\"")
@@ -961,7 +964,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         let error = ToolchainLock::parse(dotted_component.as_bytes()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "tog-toolchain.toml [node]: component name \"node.gyp\" is not a bare TOML key"
+            "greyward-toolchain.toml [node]: component name \"node.gyp\" is not a bare TOML key"
         );
     }
 
@@ -976,7 +979,8 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             let parsed: toml::Value = toml::from_str(&format!("v = {quoted}")).unwrap();
             assert_eq!(parsed["v"].as_str(), Some(text.as_str()), "U+{code:04X}");
         }
-        let with_del = NODE_LOCK.replace("tog_version = \"0.1.0\"", "tog_version = \"0.1\\u007F\"");
+        let with_del =
+            NODE_LOCK.replace("ward_version = \"0.1.0\"", "ward_version = \"0.1\\u007F\"");
         let lock = ToolchainLock::parse(with_del.as_bytes()).unwrap();
         let again = ToolchainLock::parse(&lock.canonical_bytes()).unwrap();
         assert_eq!(again, lock);
@@ -1022,7 +1026,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             let error = ToolchainLock::parse(text.as_bytes()).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                format!("tog-toolchain.toml [node]: {expect}"),
+                format!("greyward-toolchain.toml [node]: {expect}"),
                 "{from}"
             );
         }
@@ -1038,12 +1042,12 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         let error = ToolchainLock::parse(embedded_row.as_bytes()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "tog-toolchain.toml [node]: embedded component bundled-npm has its own artifact row"
+            "greyward-toolchain.toml [node]: embedded component bundled-npm has its own artifact row"
         );
         let error = ToolchainLock::parse(extra_row("npm").as_bytes()).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "tog-toolchain.toml [node]: artifact row for unknown component npm"
+            "greyward-toolchain.toml [node]: artifact row for unknown component npm"
         );
     }
 
@@ -1324,7 +1328,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
         assert!(error.contains("[node]: bundle_id"), "{error}");
         assert!(error.contains("does not match its rows"), "{error}");
         assert!(
-            error.contains("run `tog update --toolchain node`"),
+            error.contains("run `ward update --toolchain node`"),
             "{error}"
         );
 
@@ -1447,7 +1451,7 @@ digest = "sha256:855d581f8a4eb1a8117e3426de25fe02770592febcfb31369aee1ffbfee9e8e
             None,
         )];
         assert!(stale_rows(&absent, &recorded[1..2]).is_empty());
-        // A source the lock never recorded (one a later tog consults) leaves
+        // A source the lock never recorded (one a later ward consults) leaves
         // the lock fresh while it states nothing, and stales it once it does.
         let later = [input("setup.py", "python_requires", None, None)];
         assert!(stale_rows(&recorded[..1], &[&recorded[..1], &later[..]].concat()).is_empty());
@@ -1551,17 +1555,17 @@ mod validate_tests {
     fn the_file_header_is_checked_first() {
         assert_eq!(
             refusal(&edited("schema_version = 1", "schema_version = 2")),
-            "tog-toolchain.toml: unsupported schema_version 2"
+            "greyward-toolchain.toml: unsupported schema_version 2"
         );
         assert_eq!(
-            refusal(&edited("tog_version = \"0.1.0\"", "tog_version = \"\"")),
-            "tog-toolchain.toml: empty tog_version"
+            refusal(&edited("ward_version = \"0.1.0\"", "ward_version = \"\"")),
+            "greyward-toolchain.toml: empty ward_version"
         );
         // An empty table, not a missing one: serde refuses the latter
         // before the validator sees it.
         assert_eq!(
             refusal(&format!("{}[toolchain]\n", cut_from("[toolchain.node]"))),
-            "tog-toolchain.toml: no toolchain entries"
+            "greyward-toolchain.toml: no toolchain entries"
         );
     }
 
@@ -1608,7 +1612,7 @@ mod validate_tests {
         ] {
             assert_eq!(
                 refusal(&edited(from, to)),
-                format!("tog-toolchain.toml [node]: {message}"),
+                format!("greyward-toolchain.toml [node]: {message}"),
                 "{from} -> {to}"
             );
         }
@@ -1620,15 +1624,15 @@ mod validate_tests {
         );
         assert_eq!(
             refusal(&unlisted),
-            "tog-toolchain.toml [node]: table for unlisted component extra"
+            "greyward-toolchain.toml [node]: table for unlisted component extra"
         );
         assert_eq!(
             refusal(&cut_from("[[toolchain.node.inputs]]")),
-            "tog-toolchain.toml [node]: no inputs"
+            "greyward-toolchain.toml [node]: no inputs"
         );
         assert_eq!(
             refusal(&cut_from("[toolchain.node.platforms.")),
-            "tog-toolchain.toml [node]: no platforms"
+            "greyward-toolchain.toml [node]: no platforms"
         );
     }
 
@@ -1642,15 +1646,15 @@ mod validate_tests {
         };
         assert_eq!(
             refusal(&with("{ node = \"node-24.20.0-r1\" }")),
-            "tog-toolchain.toml [node]: helper name \"node\" is not another ecosystem"
+            "greyward-toolchain.toml [node]: helper name \"node\" is not another ecosystem"
         );
         assert_eq!(
             refusal(&with("{ \"python 3\" = \"x\" }")),
-            "tog-toolchain.toml [node]: helper name \"python 3\" is not another ecosystem"
+            "greyward-toolchain.toml [node]: helper name \"python 3\" is not another ecosystem"
         );
         assert_eq!(
             refusal(&with("{ python = \"\" }")),
-            "tog-toolchain.toml [node]: helper python has an empty release"
+            "greyward-toolchain.toml [node]: helper python has an empty release"
         );
     }
 
@@ -1685,7 +1689,7 @@ mod validate_tests {
         ] {
             assert_eq!(
                 refusal(&edited(from, to)),
-                format!("tog-toolchain.toml [node]: {message}"),
+                format!("greyward-toolchain.toml [node]: {message}"),
                 "{from} -> {to}"
             );
         }
@@ -1733,7 +1737,7 @@ mod validate_tests {
         ] {
             assert_eq!(
                 refusal(&edited(from, to)),
-                format!("tog-toolchain.toml [node]: {message}"),
+                format!("greyward-toolchain.toml [node]: {message}"),
                 "{from} -> {to}"
             );
         }
@@ -1749,7 +1753,7 @@ mod validate_tests {
         );
         assert_eq!(
             refusal(&empty),
-            "tog-toolchain.toml [node]: platform aarch64-apple-darwin has no artifacts"
+            "greyward-toolchain.toml [node]: platform aarch64-apple-darwin has no artifacts"
         );
     }
 
@@ -1759,12 +1763,12 @@ mod validate_tests {
         assert_eq!(
             refusal(&edited(https, &format!("{https}\nsource = \"mirror\""))),
             format!(
-                "tog-toolchain.toml [node]: artifact row aarch64-apple-darwin/node has source \
+                "greyward-toolchain.toml [node]: artifact row aarch64-apple-darwin/node has source \
                  \"mirror\"; the only source a row names is {PATH_SOURCE:?}"
             )
         );
         let disagree = format!(
-            "tog-toolchain.toml [node]: artifact row aarch64-apple-darwin/node: \
+            "greyward-toolchain.toml [node]: artifact row aarch64-apple-darwin/node: \
              source = {PATH_SOURCE:?} goes with a file:// url and only with one"
         );
         assert_eq!(
@@ -1791,10 +1795,10 @@ mod validate_tests {
         // here so the message is checked whole.
         assert_eq!(
             refusal(&text),
-            "tog-toolchain.toml [node]: bundle_id \
+            "greyward-toolchain.toml [node]: bundle_id \
              sha256:683bc7a0c5d38d3fcc9e73a6e55ab75bda308fb66204c4808942e750b5c1266b \
              does not match its rows and helper pins (sha256:5419c27039c163698f07224f3b288589eae2e2f35d950b911fc081350d54e895); the file was \
-             edited, run `tog update --toolchain node`"
+             edited, run `ward update --toolchain node`"
         );
     }
 
@@ -1802,7 +1806,7 @@ mod validate_tests {
     fn a_revision_past_u32_is_refused() {
         assert_eq!(
             refusal(&edited("revision = 1", "revision = 4294967296")),
-            "tog-toolchain.toml [node-24.20.0-r1]: revision 4294967296 is out of range"
+            "greyward-toolchain.toml [node-24.20.0-r1]: revision 4294967296 is out of range"
         );
     }
 

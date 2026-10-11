@@ -5,9 +5,9 @@
 //! project-chosen code, so it runs only isolated. On Linux the isolation is
 //! bubblewrap with:
 //!
-//! - a private network namespace whose only way out is tog's proxy: the
-//!   proxy's Unix socket is bound at `/run/tog/proxy.sock`, and the first
-//!   process, `tog __resolution-relay`, listens on `127.0.0.1:8119` inside
+//! - a private network namespace whose only way out is ward's proxy: the
+//!   proxy's Unix socket is bound at `/run/ward/proxy.sock`, and the first
+//!   process, `ward __resolution-relay`, listens on `127.0.0.1:8119` inside
 //!   the namespace and splices each connection to that socket;
 //! - the project as a staged snapshot bound at its real path (the real
 //!   project is not mounted at all), store objects read-only, fresh `/tmp`
@@ -94,7 +94,7 @@ pub struct Missing {
     pub fix: String,
 }
 
-/// Every engine this build of tog can try, probed: what is usable and
+/// Every engine this build of ward can try, probed: what is usable and
 /// what is not. An interrupt during a probe is returned as the error it is.
 pub fn probe_tiers(activity: &StoreActivity) -> io::Result<(Vec<TierOffer>, Vec<Missing>)> {
     #[cfg(test)]
@@ -180,7 +180,7 @@ pub fn choose_tier(
     let mut message = format!("{tool} {why}, so it runs only in isolation, and ");
     match unfenced {
         Some(offer) => message.push_str(&format!(
-            "the only isolation here ({}) cannot fence its network to tog's proxy, which \
+            "the only isolation here ({}) cannot fence its network to ward's proxy, which \
              policy denies (unconfined-resolution)",
             offer.engine.name()
         )),
@@ -193,8 +193,8 @@ pub fn choose_tier(
         ));
     }
     message.push_str(
-        ". This build of tog has no isolation helper (tog-isolate), so enable one of the \
-         above and run the command again (`tog doctor --isolation` shows each)",
+        ". This build of ward has no isolation helper (greyward-isolate), so enable one of the \
+         above and run the command again (`ward doctor --isolation` shows each)",
     );
     // An engine is here and the policy turned it down: a refusal. No
     // engine at all: something this machine does not support.
@@ -413,7 +413,7 @@ const FORCED: &[ForcedRow] = &[
 ];
 
 /// git's forced settings, carried in `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
-/// because the tools, not tog, start git. Every tool gets them.
+/// because the tools, not ward, start git. Every tool gets them.
 const GIT_FORCED: &[(&str, &str)] = &[
     ("credential.helper", ""),
     ("core.fsmonitor", "false"),
@@ -562,14 +562,14 @@ pub const SYSTEM_READ_ROOTS: &[&str] = &[
 ];
 
 /// The signing-key paths a door must keep out of every mounted root: the
-/// one `TOG_SIGNING_KEY` names and the default `tog keygen` suggests.
+/// one `GREYWARD_SIGNING_KEY` names and the default `ward keygen` suggests.
 pub fn signing_key_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(path) = std::env::var_os("TOG_SIGNING_KEY").filter(|path| !path.is_empty()) {
+    if let Some(path) = std::env::var_os("GREYWARD_SIGNING_KEY").filter(|path| !path.is_empty()) {
         paths.push(PathBuf::from(path));
     }
     if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-        paths.push(PathBuf::from(home).join(".tog").join("signing.key"));
+        paths.push(PathBuf::from(home).join(".greyward").join("signing.key"));
     }
     paths
 }
@@ -605,7 +605,7 @@ pub(crate) fn key_ids(paths: &[PathBuf]) -> Vec<FileId> {
 /// key inside a tree a tool reads would put the key in front of that tool,
 /// and in front of the user in the tool's parse error. Walked from the
 /// descriptor (`/proc/self/fd/<n>` on Linux) rather than the path: a tree
-/// renamed or replaced after tog opened it is not what is scanned, while
+/// renamed or replaced after ward opened it is not what is scanned, while
 /// the sandbox mounts the held one (#612). Messages name the path the root
 /// was opened at.
 pub fn refuse_key_links_in(
@@ -661,7 +661,7 @@ fn refuse_key_links_walk(
                     io::ErrorKind::PermissionDenied,
                     format!(
                         "{} is the signing key (the same file, by device and inode); move the \
-                         key out of the project and point TOG_SIGNING_KEY at it",
+                         key out of the project and point GREYWARD_SIGNING_KEY at it",
                         display.join(&child).display()
                     ),
                 ));
@@ -711,9 +711,9 @@ pub fn refuse_protected_under_roots(protected: &[PathBuf], roots: &[PathBuf]) ->
                         io::ErrorKind::PermissionDenied,
                         format!(
                             "the signing key {} is under {}, which the resolution sandbox \
-                             mounts, so the tool could read it; move the key (tog keygen \
+                             mounts, so the tool could read it; move the key (ward keygen \
                              <path outside the project, the store and the system roots>) and \
-                             point TOG_SIGNING_KEY at it",
+                             point GREYWARD_SIGNING_KEY at it",
                             key.display(),
                             root.display()
                         ),
@@ -725,7 +725,7 @@ pub fn refuse_protected_under_roots(protected: &[PathBuf], roots: &[PathBuf]) ->
     Ok(())
 }
 
-/// `tog keygen`: refuse a key path under a system read root.
+/// `ward keygen`: refuse a key path under a system read root.
 pub fn refuse_key_under_system_root(path: &Path) -> io::Result<()> {
     let roots: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
     for spelling in spellings(path) {
@@ -734,7 +734,7 @@ pub fn refuse_key_under_system_root(path: &Path) -> io::Result<()> {
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is under {}, which every sandbox can read; keep the signing key \
-                     outside the system directories (for example ~/.tog/signing.key)",
+                     outside the system directories (for example ~/.greyward/signing.key)",
                     path.display(),
                     root.display()
                 ),
@@ -908,7 +908,7 @@ pub struct ConfinedRun<'a> {
     /// The proxy's CA certificate on the host, for an intercepting door:
     /// bound read-only at `relay::CA_FILE`.
     pub ca_file: Option<&'a Path>,
-    /// The tog executable to bind as the relay (`running_executable()` in
+    /// The ward executable to bind as the relay (`running_executable()` in
     /// production).
     pub executable: &'a Path,
     /// The tool's argv; `argv[0]` an absolute path inside a bound root.
@@ -921,7 +921,7 @@ pub struct ConfinedRun<'a> {
     pub env: &'a [(OsString, OsString)],
     /// Store objects (the tool, its runtime) bound read-only at their paths.
     pub read_roots: &'a [PathBuf],
-    /// Tog-owned persistent caches under the store root, bound read-write
+    /// Greyward-owned persistent caches under the store root, bound read-write
     /// at their paths and neither snapshotted nor diffed (Go's planner
     /// module cache). What the tool writes there is never a project output.
     pub cache_roots: &'a [PathBuf],
@@ -953,12 +953,12 @@ pub struct ConfinedOutcome {
     pub stderr: Vec<u8>,
 }
 
-/// The running tog executable, resolved before any sandbox starts.
+/// The running ward executable, resolved before any sandbox starts.
 pub fn running_executable() -> io::Result<PathBuf> {
     let path = fs::read_link("/proc/self/exe")?;
     if !fs::metadata(&path)?.is_file() {
         return Err(io::Error::other(format!(
-            "the running tog executable {} is not a regular file",
+            "the running ward executable {} is not a regular file",
             path.display()
         )));
     }
@@ -1309,7 +1309,10 @@ fn check_cache_roots(
             return Err(refuse(root, "is not a directory"));
         }
         if real == store_root || !real.starts_with(&store_root) {
-            return Err(refuse(root, "is not a tog-owned directory under the store"));
+            return Err(refuse(
+                root,
+                "is not a greyward-owned directory under the store",
+            ));
         }
         let overlaps = |other: &PathBuf| real.starts_with(other) || other.starts_with(&real);
         if snapshot_roots.iter().any(overlaps)
@@ -1344,7 +1347,7 @@ fn proxy_args(
         "--unshare-ipc",
         "--unshare-uts",
         "--hostname",
-        "tog",
+        "ward",
         "--unshare-cgroup-try",
         "--die-with-parent",
         "--new-session",
@@ -1385,10 +1388,10 @@ fn proxy_args(
     }
     args.push("--ro-bind".into());
     args.push(mounts.executable.clone().into_os_string());
-    args.push(relay::TOG_EXECUTABLE.into());
-    // Every bind is in place: the root tmpfs (with /run/tog, /etc's
+    args.push(relay::GREYWARD_EXECUTABLE.into());
+    // Every bind is in place: the root tmpfs (with /run/ward, /etc's
     // mount points, and the directories bubblewrap made for the binds) goes
-    // read-only, so the tool can neither move /run/tog aside nor create a
+    // read-only, so the tool can neither move /run/ward aside nor create a
     // file like /etc/ld.so.preload. The snapshot, scratch, /tmp and /dev are
     // mounts of their own and stay writable.
     args.push("--remount-ro".into());
@@ -1405,7 +1408,7 @@ fn proxy_args(
     args.push("--chdir".into());
     args.push(mounts.cwd.clone().into_os_string());
     for part in [
-        relay::TOG_EXECUTABLE,
+        relay::GREYWARD_EXECUTABLE,
         relay::VERB,
         "--exec-log-fd",
         "3",
@@ -1944,18 +1947,18 @@ mod tests {
     #[test]
     fn keygen_refuses_a_path_under_a_system_read_root() {
         for path in [
-            "/usr/local/share/tog.key",
-            "/etc/tog/signing.key",
-            "/opt/tog/key",
+            "/usr/local/share/greyward.key",
+            "/etc/greyward/signing.key",
+            "/opt/greyward/key",
             "/private/etc/key",
-            "/Library/tog/key",
+            "/Library/greyward/key",
             "/System/key",
-            "/bin/tog.key",
-            "/sbin/tog.key",
-            "/lib/tog.key",
-            "/lib32/tog.key",
-            "/lib64/tog.key",
-            "/libx32/tog.key",
+            "/bin/greyward.key",
+            "/sbin/greyward.key",
+            "/lib/greyward.key",
+            "/lib32/greyward.key",
+            "/lib64/greyward.key",
+            "/libx32/greyward.key",
         ] {
             let error = refuse_key_under_system_root(Path::new(path)).unwrap_err();
             assert!(
@@ -1970,7 +1973,7 @@ mod tests {
         // A symlink to a system root is refused by what it resolves to.
         let link = temp.0.join("into-usr");
         std::os::unix::fs::symlink("/usr/share", &link).unwrap();
-        let error = refuse_key_under_system_root(&link.join("tog.key")).unwrap_err();
+        let error = refuse_key_under_system_root(&link.join("greyward.key")).unwrap_err();
         assert!(error.to_string().contains("/usr"), "{error}");
     }
 
@@ -1997,7 +2000,7 @@ mod tests {
         }
         // A short symlink to the directory keeps the bind path under
         // SUN_LEN whatever the temp dir, and the socket lands in place.
-        let short = PathBuf::from(format!("/tmp/tog-scan-{}", std::process::id()));
+        let short = PathBuf::from(format!("/tmp/greyward-scan-{}", std::process::id()));
         let _ = fs::remove_file(&short);
         std::os::unix::fs::symlink(dirty.join("lib/deep"), &short).unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(short.join("agent.sock")).unwrap();

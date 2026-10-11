@@ -10,7 +10,7 @@ mod common;
 
 use common::{
     assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, fixture, temp_entries,
-    tog, tog_at, TempDir,
+    ward, ward_at, TempDir,
 };
 
 fn copy_dotnet_hello(project: &Path) {
@@ -25,7 +25,7 @@ fn published_dll(project: &Path) -> PathBuf {
     std::fs::read_dir(project.join("bin"))
         .unwrap()
         .filter_map(|e| e.ok())
-        .find(|e| e.file_name().to_string_lossy().starts_with("tog-"))
+        .find(|e| e.file_name().to_string_lossy().starts_with("greyward-"))
         .map(|e| e.path().join("proj.dll"))
         .expect("staged bin dir")
 }
@@ -63,7 +63,7 @@ fn assert_realization_does_not_evaluate_user_project(temp: &TempDir) {
     std::fs::write(csproj, text).unwrap();
     let store = temp.0.join("tripwire-store");
     assert_ok(
-        tog_at(&project, &temp.0, &store, &["sync"]),
+        ward_at(&project, &temp.0, &store, &["sync"]),
         "tripwire sync",
     );
     assert!(
@@ -81,42 +81,42 @@ fn assert_signed_dotnet_resolution(temp: &TempDir) {
     std::fs::remove_file(project.join("packages.lock.json")).unwrap();
     let key = temp.0.join("resolution.key");
     let trust = assert_ok(
-        tog(&temp.0, &temp.0, &["keygen", key.to_str().unwrap()]),
+        ward(&temp.0, &temp.0, &["keygen", key.to_str().unwrap()]),
         "resolution keygen",
     );
-    std::fs::create_dir_all(temp.0.join(".tog")).unwrap();
+    std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
     std::fs::write(
-        temp.0.join(".tog/policy.toml"),
+        temp.0.join(".greyward/policy.toml"),
         format!("deny = [\"unrecorded-resolution\"]\n{trust}"),
     )
     .unwrap();
-    let env = [("TOG_SIGNING_KEY", &key)];
+    let env = [("GREYWARD_SIGNING_KEY", &key)];
     assert_ok(
-        common::tog_env(&project, &temp.0, &["sync"], &env),
+        common::ward_env(&project, &temp.0, &["sync"], &env),
         "signed missing-lock restore",
     );
-    let receipt_path = project.join(".tog/resolution/dotnet.json");
+    let receipt_path = project.join(".greyward/resolution/dotnet.json");
     let read = |path: &Path| -> serde_json::Value {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     };
-    let public = tog::kernel::signing::SigningKey::load(&key)
+    let public = greyward::kernel::signing::SigningKey::load(&key)
         .unwrap()
         .public_key();
     let receipt = read(&receipt_path);
     assert_eq!(
-        tog::kernel::signing::verify(&receipt),
-        tog::kernel::signing::Verification::Valid(public)
+        greyward::kernel::signing::verify(&receipt),
+        greyward::kernel::signing::Verification::Valid(public)
     );
     let lock_before = std::fs::read(project.join("packages.lock.json")).unwrap();
     let project_before = std::fs::read(project.join("proj.csproj")).unwrap();
     assert_ok(
-        common::tog_env(&project, &temp.0, &["attest", "dotnet"], &env),
+        common::ward_env(&project, &temp.0, &["attest", "dotnet"], &env),
         "signed .NET attest",
     );
     let receipt = read(&receipt_path);
     assert_eq!(
-        tog::kernel::signing::verify(&receipt),
-        tog::kernel::signing::Verification::Valid(public)
+        greyward::kernel::signing::verify(&receipt),
+        greyward::kernel::signing::Verification::Valid(public)
     );
     assert_eq!(
         std::fs::read(project.join("packages.lock.json")).unwrap(),
@@ -127,14 +127,14 @@ fn assert_signed_dotnet_resolution(temp: &TempDir) {
         project_before
     );
     assert_ok(
-        common::tog_env(&project, &temp.0, &["sync"], &env),
+        common::ward_env(&project, &temp.0, &["sync"], &env),
         "trusted .NET receipt join",
     );
-    let closure_path = project.join(".tog/closures/dotnet.json");
+    let closure_path = project.join(".greyward/closures/dotnet.json");
     let closure_before = std::fs::read(&closure_path).unwrap();
     assert_eq!(read(&closure_path)["body"]["resolution"], receipt);
     std::fs::write(project.join("added-input.txt"), "new MSBuild-visible data").unwrap();
-    let refused = common::tog_env(&project, &temp.0, &["sync"], &env);
+    let refused = common::ward_env(&project, &temp.0, &["sync"], &env);
     assert!(!refused.status.success());
     assert!(
         common::text(&refused.stderr).contains("policy denies unrecorded-resolution"),
@@ -151,12 +151,12 @@ fn dotnet_sync_sandboxed_build_and_run() {
     let project = temp.0.join("dotnet-hello");
     copy_dotnet_hello(&project);
     let store = temp.0.join("store");
-    let temp_before = temp_entries("tog-dn-run-");
+    let temp_before = temp_entries("greyward-dn-run-");
 
-    assert_ok(tog(&project, &temp.0, &["sync"]), "sync");
-    let run_home = assert_private_run_home(&project, &temp.0, &store, "dotnet", "tog-dn-run-");
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
+    let run_home = assert_private_run_home(&project, &temp.0, &store, "dotnet", "greyward-dn-run-");
     let version = assert_ok(
-        tog(&project, &temp.0, &["run", "dotnet", "--version"]),
+        ward(&project, &temp.0, &["run", "dotnet", "--version"]),
         "dotnet --version",
     );
     // The run home carries the NuGet migration sentinel the sync path
@@ -173,7 +173,7 @@ fn dotnet_sync_sandboxed_build_and_run() {
     );
     if cfg!(target_os = "linux") {
         let info = assert_ok(
-            tog(&project, &temp.0, &["run", "dotnet", "--info"]),
+            ward(&project, &temp.0, &["run", "dotnet", "--info"]),
             "dotnet --info",
         );
         // `dotnet --info` pads with variable whitespace; compare fields.
@@ -191,23 +191,23 @@ fn dotnet_sync_sandboxed_build_and_run() {
             "SDK base path is not under the committed store object: {base_path:?}\n{info}"
         );
     }
-    assert_ok(tog(&project, &temp.0, &["build"]), "build");
+    assert_ok(ward(&project, &temp.0, &["build"]), "build");
     let dll = published_dll(&project);
     assert!(dll.is_file());
     let out = assert_ok(
-        tog(&project, &temp.0, &["run", "dotnet", dll.to_str().unwrap()]),
+        ward(&project, &temp.0, &["run", "dotnet", dll.to_str().unwrap()]),
         "run built app",
     );
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
 
     std::fs::remove_dir_all(dll.parent().unwrap()).unwrap();
     assert_ok(
-        tog(&project, &temp.0, &["build"]),
+        ward(&project, &temp.0, &["build"]),
         "build after published output deletion",
     );
     let rebuilt = published_dll(&project);
     let out = assert_ok(
-        tog(
+        ward(
             &project,
             &temp.0,
             &["run", "dotnet", rebuilt.to_str().unwrap()],
@@ -217,10 +217,10 @@ fn dotnet_sync_sandboxed_build_and_run() {
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
 
     // Build-capable verbs are sandbox-only.
-    let refused = tog(&project, &temp.0, &["run", "dotnet", "build"]);
+    let refused = ward(&project, &temp.0, &["run", "dotnet", "build"]);
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("tog build dotnet"),
+        String::from_utf8_lossy(&refused.stderr).contains("ward build dotnet"),
         "build verb must be refused at run"
     );
 
@@ -229,7 +229,7 @@ fn dotnet_sync_sandboxed_build_and_run() {
     // Without its lock the project is refused under --frozen and left
     // alone; a plan regenerates the lock with the store SDK.
     assert_frozen_never_writes_the_lock(&project, &temp.0, "packages.lock.json");
-    let left: Vec<_> = temp_entries("tog-dn-run-")
+    let left: Vec<_> = temp_entries("greyward-dn-run-")
         .difference(&temp_before)
         .cloned()
         .collect();

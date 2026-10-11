@@ -1,7 +1,7 @@
 //! CPython constraint parsing and selection.
 //!
 //! Version parsing and matching lives in `pep440`; this module only collects
-//! interpreter inputs and chooses one of tog's pinned CPython builds. It
+//! interpreter inputs and chooses one of ward's pinned CPython builds. It
 //! is pure once project files have been collected: selection never consults
 //! the host Python or a package index.
 
@@ -140,13 +140,13 @@ fn declared(inputs: &PythonInputs) -> (Option<String>, Option<String>) {
 /// The selection for the interpreter the project's toolchain selection
 /// names, checked against every constraint the project declares.
 ///
-/// This chooses nothing: `version` comes from `tog-toolchain.toml` (or the
+/// This chooses nothing: `version` comes from `greyward-toolchain.toml` (or the
 /// selection a first sync is about to publish), which already honored
 /// `.python-version` and `requires-python`. What is left here are the
 /// sources the lock deliberately does not read — a `setup.cfg`
 /// `python_requires`, a constraint only `setup.py` metadata states — so a
 /// disagreement is a warning naming the next command, never a reselection.
-/// A version this tog has no build for is refused rather than approximated.
+/// A version this ward has no build for is refused rather than approximated.
 pub fn locked(
     platform: Platform,
     version: &str,
@@ -156,8 +156,8 @@ pub fn locked(
         io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "tog-toolchain.toml selects cpython {version}, which this tog has no build for on {}; \
-                 upgrade tog or run `tog update --toolchain python`",
+                "greyward-toolchain.toml selects cpython {version}, which this ward has no build for on {}; \
+                 upgrade ward or run `ward update --toolchain python`",
                 platform.triple()
             ),
         )
@@ -185,12 +185,12 @@ pub fn locked(
     if !violated.is_empty() {
         warnings.push((
             format!(
-                "cpython {} from tog-toolchain.toml does not satisfy {}; honoring the lock \
+                "cpython {} from greyward-toolchain.toml does not satisfy {}; honoring the lock \
                  (change the declaration first)",
                 pin.version,
                 violated.join(", ")
             ),
-            "tog update --toolchain python".to_string(),
+            "ward update --toolchain python".to_string(),
         ));
     }
     Ok(PythonSelection {
@@ -300,7 +300,7 @@ pub fn select_python_with_inputs(
                      .python-version (change one of them first)",
                     explicit.raw, declared
                 ),
-                "tog update --toolchain python".to_string(),
+                "ward update --toolchain python".to_string(),
             ));
         }
         (pin, Some(explicit.raw.clone()))
@@ -797,7 +797,7 @@ mod tests {
 
     /// The toolchain lock and interpreter selection read `.python-version`
     /// through one parser, so a line one accepts the other never refuses
-    /// (#479): `tog update --toolchain` must not lock what the sync refuses.
+    /// (#479): `ward update --toolchain` must not lock what the sync refuses.
     #[test]
     fn python_version_lock_and_selection_agree() {
         use crate::kernel::toolchain::input::{read_python_version, InputRow};
@@ -861,7 +861,7 @@ mod tests {
         assert!(selection
             .warnings
             .iter()
-            .all(|(_, fix)| fix == "tog update --toolchain python"));
+            .all(|(_, fix)| fix == "ward update --toolchain python"));
     }
 
     #[test]

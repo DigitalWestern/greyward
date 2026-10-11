@@ -17,9 +17,9 @@ by position.
 The resolution proxy (#68) is built: every ecosystem resolves confined
 through it, and the door has no unsandboxed mode (#208). Left of it:
 
-1. **#201: docker and `tog-isolate`.** The podman backend and `tog doctor
+1. **#201: docker and `greyward-isolate`.** The podman backend and `ward doctor
    --isolation` are built. Docker cannot pass the relay's descriptors
-   into a container, and the setuid `tog-isolate` helper needs a root
+   into a container, and the setuid `greyward-isolate` helper needs a root
    install to build and test.
 
 The macOS door (Seatbelt rules, the Mach allow-list from one run of
@@ -37,7 +37,7 @@ None open.
 
 - **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
 - **#656: harness HOME containment.** Add alternate-spelling coverage and define physical containment with the existing offline exceptions in the next shared-harness change.
-- **#657: native_libs probe target directory.** Give the Rust probe build an explicit `--target-dir` so an inherited `CARGO_TARGET_DIR` cannot hide its output, and list `TOG_STORE` in the local e2e recipe.
+- **#657: native_libs probe target directory.** Give the Rust probe build an explicit `--target-dir` so an inherited `CARGO_TARGET_DIR` cannot hide its output, and list `GREYWARD_STORE` in the local e2e recipe.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
@@ -51,7 +51,7 @@ None open.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml` (at that tag, change `@main` in `action.yml`'s header and in
   CLI.md to it). The opt-in store cache shipped.
-- **A shared system store at `/opt/tog/store`: review, then build (#69).**
+- **A shared system store at `/opt/greyward/store`: review, then build (#69).**
   The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
   round, then its four implementation PRs in order.
 
@@ -69,7 +69,7 @@ None open.
 - **The release catalog and the company layer (#404, #405).** Key and
   credential policy decided 2026-10-03 (#72): trusted keys are entries in
   the files of the machine/home policy chain, rotation is a commit to that
-  policy, and revocation is removal from the list, after which `tog audit`
+  policy, and revocation is removal from the list, after which `ward audit`
   fails any record the removed key signed. The private-registry test
   account is a GitHub Packages registry under the DigitalWestern org. This
   unblocks the authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3,

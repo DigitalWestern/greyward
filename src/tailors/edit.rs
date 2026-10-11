@@ -1,13 +1,13 @@
-//! What `tog add`, `remove` and `update` ask of a tailor
+//! What `ward add`, `remove` and `update` ask of a tailor
 //! (`Tailor::edit_manifest`), and the pieces every tailor's edit shares.
 //!
 //! Doctrine: resolution belongs to the ecosystem's pinned tool, realization
-//! belongs to tog. Every manifest or lock edit is delegated to a store tool
+//! belongs to ward. Every manifest or lock edit is delegated to a store tool
 //! (uv, the store node's npm, pinned pnpm, cargo, go, bundler, mix) through
 //! the resolution door, the same trust boundary as missing-lock generation.
 //! Where no pinned tool can make the edit, the tailor **refuses with the
 //! exact line and file**; that is still one tool telling the user what to
-//! type next. Tog edits a file itself in exactly one case: a plain
+//! type next. Greyward edits a file itself in exactly one case: a plain
 //! requirements file, where the "tool" is a text append.
 
 use crate::kernel::resolve::ResolutionDoor;
@@ -63,7 +63,7 @@ pub struct ManifestEdit<'a> {
     pub specs: &'a [DepSpec],
     pub dev: bool,
     /// What the command lends the edit: the project's toolchain and the
-    /// shared `tog x` tool cache.
+    /// shared `ward x` tool cache.
     pub host: &'a dyn EditHost,
 }
 
@@ -90,7 +90,7 @@ pub struct EditOutcome {
 }
 
 /// What a tailor's edit needs from the command that runs it. The command
-/// owns toolchain selection outside a sync and the `~/.tog/x` cache; a
+/// owns toolchain selection outside a sync and the `~/.greyward/x` cache; a
 /// tailor reaches both only through this.
 pub trait EditHost {
     /// The toolchain the project at `dir` selects for `ecosystem` (a tailor
@@ -100,7 +100,7 @@ pub trait EditHost {
     fn toolchain(&self, dir: &Path, ecosystem: &str) -> io::Result<Selected>;
 
     /// Realize `package@version` from `ecosystem`'s registry tool into the
-    /// `~/.tog/x` environment `tog x` would use for it from `project`, so
+    /// `~/.greyward/x` environment `ward x` would use for it from `project`, so
     /// the two share one environment. The resolver runs through `door`.
     fn cached_tool(
         &self,
@@ -112,11 +112,11 @@ pub trait EditHost {
     ) -> io::Result<CachedTool>;
 }
 
-/// A registry tool realized in the `tog x` cache for an edit.
+/// A registry tool realized in the `ward x` cache for an edit.
 pub struct CachedTool {
     /// The cache root the tool is projected into.
     pub root: PathBuf,
-    /// The root's shared lifecycle lock. `tog x --clean` removes a root
+    /// The root's shared lifecycle lock. `ward x --clean` removes a root
     /// under the exclusive lock, so the caller holds this for as long as it
     /// uses the root. Held, never read: dropping it releases the lock.
     #[allow(dead_code)]
@@ -125,7 +125,7 @@ pub struct CachedTool {
     pub realized: bool,
 }
 
-/// How `tog add` names an ecosystem's public registry: the `prefix:` that
+/// How `ward add` names an ecosystem's public registry: the `prefix:` that
 /// says which ecosystem a spec is for, and the registry's name in messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackageRegistry {
@@ -137,7 +137,7 @@ pub(crate) fn other(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
 
-/// The refusal for a project shape `tog add`/`remove`/`update` does not
+/// The refusal for a project shape `ward add`/`remove`/`update` does not
 /// edit (Poetry, PDM, setup.py, Yarn, mix, .NET): the message names the
 /// edit to make by hand. `Unsupported`, so it exits with that class.
 pub(crate) fn by_hand(message: impl Into<String>) -> io::Error {

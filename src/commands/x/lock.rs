@@ -1,11 +1,11 @@
-//! The `~/.tog/x` directory and the per-environment advisory locks: the
+//! The `~/.greyward/x` directory and the per-environment advisory locks: the
 //! runner holds one shared while it builds or runs an environment, and
-//! `tog x --clean` takes it exclusive before removing one.
+//! `ward x --clean` takes it exclusive before removing one.
 
 use super::*;
 
 /// Open the shared x directory, creating it the first time. A symlinked
-/// `$HOME` or `~/.tog` is followed, like cleanup's `validated_x_dir` does,
+/// `$HOME` or `~/.greyward` is followed, like cleanup's `validated_x_dir` does,
 /// but `x` itself must be a real directory: a symlink there could point the
 /// locks and environments anywhere.
 pub(super) fn open_x_dir(x_dir: &Path) -> io::Result<fs::File> {

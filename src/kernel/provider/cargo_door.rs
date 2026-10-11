@@ -3,8 +3,8 @@
 //! [`crates_index`](super::crates_index) route, git dependencies through the
 //! git row, any other registry as `unattested-index`).
 //!
-//! Two tailors use it: the Cargo tailor (`tog add`/`remove`/`update`, a
-//! missing `Cargo.lock`, `tog attest`) and Python, for the `Cargo.lock` of
+//! Two tailors use it: the Cargo tailor (`ward add`/`remove`/`update`, a
+//! missing `Cargo.lock`, `ward attest`) and Python, for the `Cargo.lock` of
 //! an sdist's Rust extension. Every cargo resolution goes through here;
 //! none falls back to running cargo directly.
 //!
@@ -51,7 +51,7 @@ pub enum CargoPublish<'a> {
         outputs: Vec<PathBuf>,
         receipt: Option<ReceiptProducer<'a>>,
     },
-    /// The lock root is tog's own (an unpacked sdist): accepted `outputs`
+    /// The lock root is ward's own (an unpacked sdist): accepted `outputs`
     /// are written back into it, and the caller roots the ledger.
     Detached { outputs: Vec<PathBuf> },
 }
@@ -104,7 +104,7 @@ pub fn parse_toml(path: &Path, text: &str) -> io::Result<toml::Table> {
     toml::from_str(text).map_err(|error| toml_refusal(&path.display().to_string(), text, &error))
 }
 
-/// Where tog's own reads of a project's cargo files may land: under
+/// Where ward's own reads of a project's cargo files may land: under
 /// `root`, never the signing key. A project is cloned, so its
 /// `.cargo/config.toml` or `Cargo.toml` can be a symlink (or a hard link)
 /// to any file the user can read.
@@ -116,8 +116,8 @@ pub struct Bound {
 }
 
 impl Bound {
-    /// Bounded by `root`, refusing the key `TOG_SIGNING_KEY` or
-    /// `~/.tog/signing.key` names.
+    /// Bounded by `root`, refusing the key `GREYWARD_SIGNING_KEY` or
+    /// `~/.greyward/signing.key` names.
     pub fn new(root: &Path) -> io::Result<Bound> {
         Bound::with_keys(root, &confine::signing_key_paths())
     }
@@ -156,7 +156,7 @@ impl Bound {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{} resolves to {}, outside {}; tog does not read, or let cargo read, a \
+                    "{} resolves to {}, outside {}; ward does not read, or let cargo read, a \
                      project file that leads out of the project",
                     path.display(),
                     real.display(),
@@ -190,7 +190,7 @@ impl Bound {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{} is the signing key (the same file, by device and inode{through}); tog \
+                    "{} is the signing key (the same file, by device and inode{through}); ward \
                      does not read it as a cargo file or let cargo read it",
                     path.display()
                 ),
@@ -287,7 +287,7 @@ pub fn config_files(dir: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
 
 /// [`config_files`] in `dir` (relative to `root`, empty for the root itself),
 /// read from the descriptor `root` holds rather than by path: a directory
-/// renamed or replaced after tog opened the root is not what is read.
+/// renamed or replaced after ward opened the root is not what is read.
 /// Each file is opened from the held root, symlinks inside the project
 /// followed as cargo follows them, and the file actually opened is then
 /// checked: its held ancestry must reach the root's identity, and it
@@ -329,7 +329,7 @@ fn held_config_files_with(
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "{} is the signing key (the same file, by device and inode, through {}); \
-                     tog does not read it as a cargo file or let cargo read it",
+                     ward does not read it as a cargo file or let cargo read it",
                     shown.display(),
                     real.display()
                 ),
@@ -339,7 +339,7 @@ fn held_config_files_with(
             return Err(crate::kernel::error::refused(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{} resolves to {}, outside {}; tog does not read, or let cargo read, a \
+                    "{} resolves to {}, outside {}; ward does not read, or let cargo read, a \
                      project file that leads out of the project",
                     shown.display(),
                     real.display(),
@@ -389,7 +389,7 @@ fn held_config_files_with(
                 return Err(crate::kernel::error::refused(
                     io::ErrorKind::PermissionDenied,
                     format!(
-                        "{} includes {}, outside {}; tog does not read, or let cargo read, a \
+                        "{} includes {}, outside {}; ward does not read, or let cargo read, a \
                          project file that leads out of the project",
                         shown.display(),
                         named.display(),
@@ -774,7 +774,7 @@ fn place_members(root: &Path, manifest: &toml::Table) -> io::Result<Placed> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "the Cargo workspace at {} names members tog cannot place: {}. Write each \
+                "the Cargo workspace at {} names members ward cannot place: {}. Write each \
                  without a `..` after a wildcard",
                 root.display(),
                 refused.join(", ")
@@ -1038,7 +1038,7 @@ enum Part {
 /// wildcard, no directory skipped. Each name is matched by
 /// [`glob::Pattern`] with cargo's options, so the syntax is the crate's
 /// own; a part it refuses (`**` inside a name, an unclosed `[`) is an
-/// error, as it is for cargo. Only the walk is tog's.
+/// error, as it is for cargo. Only the walk is ward's.
 /// Symlinks are not followed, so the walk ends on any tree; a symlinked
 /// directory it would enter is reported instead
 /// ([`Expanded::through_symlinks`]).
@@ -1571,7 +1571,7 @@ mod tests {
         assert!(!error.contains(SEED), "{error}");
     }
 
-    /// tog's own readers name a parse error's position, never its text,
+    /// ward's own readers name a parse error's position, never its text,
     /// and refuse a config that leads out of the lock root.
     #[test]
     fn toml_errors_never_echo_the_file() {

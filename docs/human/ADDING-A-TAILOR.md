@@ -9,9 +9,9 @@ when they were ported to the `Tailor` trait on 2026-09-12.
 
 | File | Owns |
 |---|---|
-| `catalog.toml` | The toolchain catalog: every release tog can realize, one verified row per platform, and the `default` a project with no pin gets. Generated, never hand-edited: add a reader for the ecosystem's upstream to `tools/catalog.py` and run `python3 tools/catalog.py <eco>` (see "Regenerating a catalog" below). |
+| `catalog.toml` | The toolchain catalog: every release Greyward can realize, one verified row per platform, and the `default` a project with no pin gets. Generated, never hand-edited: add a reader for the ecosystem's upstream to `tools/catalog.py` and run `python3 tools/catalog.py <eco>` (see "Regenerating a catalog" below). |
 | `mod.rs` | `static CATALOG: Shipped` over `include_str!("catalog.toml")` and `toolchain_catalog` (the parsed release bundles, with the recipe ids the identities commit to), `preflight_platform`, `ensure_<toolchain>_for`, `plan_*`, `realize_*`, `project_*_env`, and `build_sandboxed` if the ecosystem builds. Declares the sibling modules. |
-| `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `refused_command` (`tog run` verbs refused before any environment is looked up), `source_files` (the extensions `tog <file>` runs, and with what), `listing`, `closure_state`, `doctor`, `sbom_components`, `formatter` (`tog fmt`: a `Formatter`, like `registry_tool`), `object_kinds`, `toolchain_kinds` (which of those kinds `doctor` lists as realized toolchains), `toolchain_catalog`, `toolchain_sources` (required: the declarative files the toolchain version is read from, through the `row_for` readers in `src/kernel/toolchain/input.rs`, and the selection request they state), `runtime_programs` (the runtime names `tog run` never takes from the host), `registry_tool` (`tog x`). Only implement what the ecosystem has; the defaults say "not supported". |
+| `tailor.rs` | `pub struct <Eco>;` and `impl Tailor for <Eco>` (`src/tailors/mod.rs`). Each method is one verb's branch: `detect`, `preflight`, `prepare` (missing-lock generation), `plan`, `sync`, `build*`, `run_env`, `refused_command` (`ward run` verbs refused before any environment is looked up), `source_files` (the extensions `ward <file>` runs, and with what), `listing`, `closure_state`, `doctor`, `sbom_components`, `formatter` (`ward fmt`: a `Formatter`, like `registry_tool`), `object_kinds`, `toolchain_kinds` (which of those kinds `doctor` lists as realized toolchains), `toolchain_catalog`, `toolchain_sources` (required: the declarative files the toolchain version is read from, through the `row_for` readers in `src/kernel/toolchain/input.rs`, and the selection request they state), `runtime_programs` (the runtime names `ward run` never takes from the host), `registry_tool` (`ward x`). Only implement what the ecosystem has; the defaults say "not supported". |
 | `objects.rs` | `pub static KINDS: &[ObjectKind]`: one row per (kind, schema) pair the tailor commits to the store, with the grammar of the identity inputs its producer writes. Add the producer's full `live_contract` beside its identity constructor whenever it has dynamic counts, paired keys, or platform-conditional inputs. A kind without a row is refused at commit. The rows are enforced by `kernel/objmeta.rs` (`check_identity_grammar`), and that file's tests are where a new kind's dropped-input test goes (`node_env_package_dropped_is_detected` is the model). The registry hands every tailor's rows to the kernel at startup (`tailors::install_kinds`, called by `commands::dispatch`); nothing to wire by hand. |
 | `inputs.rs` (optional) | Project-inputs-to-plan loaders when they are more than a few lines. |
 
@@ -50,7 +50,7 @@ Rules the tailor must keep:
   contract, required-input omissions, relation mutations, and count
   mutations.
 - Closures are written through `comforter::write_closure` and read through
-  `comforter::read_closure`; `.tog/closures/<eco>.json` is the proof a
+  `comforter::read_closure`; `.greyward/closures/<eco>.json` is the proof a
   project was synced and is what `status`, `ls`, `sbom`, and `audit` read.
 - `prepare` is the one method that writes project inputs: it generates the
   dependency lock when there is none, with the ecosystem's own tool. `plan`
@@ -82,7 +82,7 @@ step:
   the tailor's own `edit.rs`. The edit's tool runs through the
   `ResolutionDoor` it is given. `claims_package_name` and `edit_root` are
   optional. Nothing in `src/commands/deps.rs` changes.
-- `tog x`, only if the ecosystem implements `Tailor::registry_tool`: a
+- `ward x`, only if the ecosystem implements `Tailor::registry_tool`: a
   `(id, spelling)` row in `X_REGISTRIES` (`src/cli/spec.rs`), which the
   parser reads for the `--<word>`/`--<id>` flags and the `<word>:` prefix,
   and the two flags in the `x` help. A parser test fails until the row
@@ -95,7 +95,7 @@ step:
   seconds.
 - An e2e test `tests/<eco>_e2e.rs` marked `#[ignore]` that syncs, runs, and
   (if applicable) builds the fixture offline the second time; it takes
-  `supervise::SUPERVISION_TEST_LOCK` and a temp `TOG_STORE`.
+  `supervise::SUPERVISION_TEST_LOCK` and a temp `GREYWARD_STORE`.
 - A row in `tests/acceptance.sh` and in `docs/human/ARCHITECTURE.md`'s
   tailor section; if the sandbox or platform pins change, update the
   Platforms section there.

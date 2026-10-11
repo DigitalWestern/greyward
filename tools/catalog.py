@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify tog's shipped toolchain catalogs.
+"""Generate and verify ward's shipped toolchain catalogs.
 
 Each ecosystem's shipped releases live in a checked-in TOML file that the
 binary embeds (`src/kernel/toolchain/document.rs` reads it). This script is
@@ -35,7 +35,7 @@ manifest signatures) and `tar`.
 GitHub API calls use $GH_TOKEN / $GITHUB_TOKEN, or `gh auth token`, when
 available. Release listings and checksum files are fetched fresh on every
 run; only archives, which a versioned URL names immutably, are cached under
-$TMPDIR/tog-catalog-cache (a cached archive is re-hashed on every use).
+$TMPDIR/greyward-catalog-cache (a cached archive is re-hashed on every use).
 Standard library only. Offline tests: `python3 tools/test_catalog.py`.
 """
 import argparse
@@ -92,7 +92,7 @@ class Failure(Exception):
 # archive's bytes are cached, because its URL names one immutable upload,
 # and every use hashes the cached bytes again. Nothing is cached for a 404.
 
-CACHE = os.path.join(os.environ.get("TMPDIR", "/tmp"), "tog-catalog-cache")
+CACHE = os.path.join(os.environ.get("TMPDIR", "/tmp"), "greyward-catalog-cache")
 _token = None
 
 
@@ -113,7 +113,7 @@ def github_token():
 def http_get(url):
     """One GET: the body, or None for a 404. The single network seam (the
     offline tests replace it)."""
-    headers = {"User-Agent": "tog-catalog-generator"}
+    headers = {"User-Agent": "greyward-catalog-generator"}
     if url.startswith("https://api.github.com/"):
         headers["Accept"] = "application/vnd.github+json"
         if github_token():
@@ -469,7 +469,7 @@ def scratch_file(name, body):
     """`body` written under this run's scratch directory."""
     global SCRATCH
     if SCRATCH is None:
-        SCRATCH = tempfile.mkdtemp(prefix="tog-catalog-")
+        SCRATCH = tempfile.mkdtemp(prefix="greyward-catalog-")
     path = os.path.join(SCRATCH, name)
     with open(path, "wb") as f:
         f.write(body)
@@ -760,7 +760,7 @@ def run_linux_bottle(path, tag, version):
     if (os.uname().sysname, os.uname().machine) != ("Linux", "x86_64"):
         return False
     import tempfile
-    with tempfile.TemporaryDirectory(prefix="tog-catalog-ruby-") as scratch:
+    with tempfile.TemporaryDirectory(prefix="greyward-catalog-ruby-") as scratch:
         subprocess.run(["tar", "-xzf", path, "-C", scratch, "--strip-components", "2"], check=True)
         result = subprocess.run(
             [os.path.join(scratch, "bin/ruby"), "-ropenssl", "-rpsych", "-rzlib", "-e", "print RUBY_VERSION"],
@@ -840,7 +840,7 @@ def generate_ruby(existing, report):
 
 # --------------------------------------------------------------------------
 # Elixir: the BEAM pair. OTP is a per-platform build (erlef/otp_builds on
-# Darwin, DigitalWestern/tog-toolchains on Linux), so an OTP version enters
+# Darwin, DigitalWestern/greyward-toolchains on Linux), so an OTP version enters
 # only when both exist. Elixir is the platform-neutral `elixir-otp-<major>`
 # zip; Hex and rebar3 follow Mix's own rule over builds.hex.pm's install
 # CSVs (the newest row whose Elixir and OTP are not newer than the pair).
@@ -851,7 +851,7 @@ def generate_ruby(existing, report):
 # (`beam-otp29.0.5-elixir1.20.4-r2`, `revision = 2`), never an edit.
 
 ERLEF = "erlef/otp_builds"
-TOG_TOOLCHAINS = "DigitalWestern/tog-toolchains"
+GREYWARD_TOOLCHAINS = "DigitalWestern/greyward-toolchains"
 ELIXIR = "elixir-lang/elixir"
 
 
@@ -881,7 +881,7 @@ def generate_elixir(existing, report):
             if d:
                 darwin[m.group(1)] = (r["tag_name"], d)
     linux = {}
-    for r in github_releases(TOG_TOOLCHAINS):
+    for r in github_releases(GREYWARD_TOOLCHAINS):
         m = re.fullmatch(r"otp-(\d+(?:\.\d+)+)-x86_64-unknown-linux-gnu-(\w+)", r["tag_name"])
         if not m:
             continue
@@ -889,16 +889,16 @@ def generate_elixir(existing, report):
         digests = asset_digests(r)
         if name not in digests:
             continue
-        side = fetch_text(f"https://github.com/{TOG_TOOLCHAINS}/releases/download/{r['tag_name']}/{name}.sha256").split()[0]
+        side = fetch_text(f"https://github.com/{GREYWARD_TOOLCHAINS}/releases/download/{r['tag_name']}/{name}.sha256").split()[0]
         digest = "sha256:" + side
-        check_github_digest(report, f"tog-toolchains {name}", digests[name], digest, "its .sha256")
+        check_github_digest(report, f"greyward-toolchains {name}", digests[name], digest, "its .sha256")
         linux[m.group(1)] = (r["tag_name"], name, digest)
     otps = sorted(set(darwin) & set(linux), key=version_key)
     majors_supported = sorted({int(v.split(".")[0]) for v in darwin}, reverse=True)[:3]
     no_linux = [v for v in darwin if v not in linux and int(v.split(".")[0]) in majors_supported]
     if no_linux:
         report.skip(f"{len(no_linux)} OTP releases ({', '.join(sorted(no_linux, key=version_key)[-4:])}, ...)",
-                    "no Linux build in tog-toolchains (DESIGNS WP3 PR 8 rebuilds OTP)")
+                    "no Linux build in greyward-toolchains (DESIGNS WP3 PR 8 rebuilds OTP)")
     hex_csv = fetch_text("https://builds.hex.pm/installs/hex.csv")
     rebar_csv = fetch_text("https://builds.hex.pm/installs/rebar.csv")
     elixirs = {}
@@ -956,8 +956,8 @@ def generate_elixir(existing, report):
         rows = [
             row(DARWIN, "otp", "erlef-otp-builds", dtag, "beam-toolchain/1",
                 f"https://github.com/{ERLEF}/releases/download/{dtag}/otp-aarch64-apple-darwin.tar.gz", ddigest),
-            row(LINUX, "otp", "tog-toolchains", ltag, "otp-install-cross-minimal/1",
-                f"https://github.com/{TOG_TOOLCHAINS}/releases/download/{ltag}/{lname}", ldigest),
+            row(LINUX, "otp", "greyward-toolchains", ltag, "otp-install-cross-minimal/1",
+                f"https://github.com/{GREYWARD_TOOLCHAINS}/releases/download/{ltag}/{lname}", ldigest),
         ]
         for platform in PLATFORMS:
             rows.append(row(platform, "elixir", "elixir-lang", f"v{elixir}-otp-{major}", "beam-toolchain/1", z[0], z[1]))
@@ -1091,7 +1091,7 @@ def generate_dotnet(existing, report):
 # whose detached signature is checked with gpgv against the Rust release key
 # checked in at tools/keys/rust-release-signing-key.asc. The manifest names
 # every archive by sha256; a release's rows are its rustc, rust-std, cargo
-# and rustfmt archives on each platform, plus the manifest itself (tog
+# and rustfmt archives on each platform, plus the manifest itself (ward
 # provisions optional components and cross targets from it, pinned by that
 # row). Each archive row is cross-checked against the .sha256 file beside
 # it on static.rust-lang.org. Supported releases are every stable release

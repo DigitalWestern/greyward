@@ -2,12 +2,18 @@
 //! pinned artifacts — and proves store + fetch + cpython + wheel + projection
 //! work end to end. Heavy (downloads CPython on cold store), so #[ignore]d;
 //! run: cargo test --test kernel_smoke -- --ignored
-//! The store is a scratch one unless TOG_STORE names another, never the
+//! The store is a scratch one unless GREYWARD_STORE names another, never the
 //! developer's own.
 
 // Tests spawn fixtures and take leases freely (see clippy.toml).
 #![allow(clippy::disallowed_methods)]
 
+use greyward::kernel::platform::Platform;
+#[cfg(debug_assertions)]
+use greyward::kernel::store::ObjectDeps;
+#[cfg(debug_assertions)]
+use greyward::kernel::store::Store;
+use greyward::kernel::types::*;
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
 #[cfg(debug_assertions)]
@@ -15,12 +21,6 @@ use std::fs;
 #[cfg(debug_assertions)]
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::Command;
-use tog::kernel::platform::Platform;
-#[cfg(debug_assertions)]
-use tog::kernel::store::ObjectDeps;
-#[cfg(debug_assertions)]
-use tog::kernel::store::Store;
-use tog::kernel::types::*;
 
 mod common;
 
@@ -32,9 +32,9 @@ fn realize_env_and_run_python() {
     let temp = TempDir::new("kernel-smoke-store");
     let store = common::open_store(&temp);
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
-    let mut attribution = tog::kernel::policy::Attribution::open("python").unwrap();
+    let mut attribution = greyward::kernel::policy::Attribution::open("python").unwrap();
     let plan = Plan {
         ecosystem: "python".into(),
         python_version: "3.12.14".into(),
@@ -49,12 +49,12 @@ fn realize_env_and_run_python() {
         }],
     };
 
-    let env = tog::tailors::python::env::realize_env(
-        &mut tog::kernel::resolve::ResolutionDoor::open(
+    let env = greyward::tailors::python::env::realize_env(
+        &mut greyward::kernel::resolve::ResolutionDoor::open(
             &store,
             activity,
             Platform::host().unwrap(),
-            tog::kernel::resolve::DoorKind::Planner,
+            greyward::kernel::resolve::DoorKind::Planner,
             &mut attribution,
         )
         .unwrap(),
@@ -80,12 +80,12 @@ fn realize_env_and_run_python() {
     assert_eq!(stdout.trim(), "1.17.0 3.12.14");
 
     // Idempotent: same plan, same object.
-    let env2 = tog::tailors::python::env::realize_env(
-        &mut tog::kernel::resolve::ResolutionDoor::open(
+    let env2 = greyward::tailors::python::env::realize_env(
+        &mut greyward::kernel::resolve::ResolutionDoor::open(
             &store,
             activity,
             Platform::host().unwrap(),
-            tog::kernel::resolve::DoorKind::Planner,
+            greyward::kernel::resolve::DoorKind::Planner,
             &mut attribution,
         )
         .unwrap(),
@@ -101,11 +101,11 @@ fn tailor_grammar_drift_panics_before_publishing() {
     // This regression commits through the kernel directly, so it keeps an
     // explicit installation even though public tailor realization entry
     // points now self-install their rows.
-    tog::tailors::install_kinds();
+    greyward::tailors::install_kinds();
     let temp = TempDir::new("kernel-smoke");
     let store = Store::open_at(&temp.0).unwrap();
     let activity = &store
-        .activity(tog::kernel::activity::ActivityMode::Shared)
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let identity = Identity {
         kind: "cpython".into(),

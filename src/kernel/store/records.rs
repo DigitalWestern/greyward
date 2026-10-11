@@ -1,10 +1,10 @@
-//! Store-owned records: small JSON facts tog establishes itself and keeps
+//! Store-owned records: small JSON facts ward establishes itself and keeps
 //! across syncs, under `<root>/records/<kind>/<name>.json`. A tailor uses
 //! them to answer a question it would otherwise ask the network again, such
 //! as the digest a registry serves for an immutable package coordinate.
 //!
-//! The store, unlike a project, is written only by tog: a repository cannot
-//! ship a record, so what a record says is what an earlier tog run checked.
+//! The store, unlike a project, is written only by ward: a repository cannot
+//! ship a record, so what a record says is what an earlier ward run checked.
 //! Every access resolves from held descriptors with `O_NOFOLLOW`, and a
 //! write is a private file in `tmp/` renamed into place, so a reader sees
 //! either the old record or the new one, never a torn write or a planted
@@ -20,7 +20,7 @@ pub(crate) const RECORDS: &str = "records";
 pub(crate) const RECORD_CAP: u64 = 1 << 20;
 
 /// The project a record belongs to, when it was written with
-/// [`Store::write_project_record`]: `tog gc --project` removes such a record
+/// [`Store::write_project_record`]: `ward gc --project` removes such a record
 /// once that directory is gone. `None` for a record about something
 /// immutable (a registry digest), or bytes that are no record at all.
 /// There is no older project record to migrate: project-keyed records
@@ -31,7 +31,7 @@ pub(crate) fn record_project(bytes: &[u8]) -> Option<PathBuf> {
     record["project"].as_str().map(PathBuf::from)
 }
 
-/// A record kind is one path component tog names itself: lowercase ASCII,
+/// A record kind is one path component ward names itself: lowercase ASCII,
 /// digits and `-`.
 fn check_kind(kind: &str) -> io::Result<()> {
     let valid = !kind.is_empty()
@@ -162,7 +162,7 @@ impl Store {
     }
 
     /// [`Store::write_record`] for a fact about one project, keyed by its
-    /// canonical path. The record also names the project, so `tog gc
+    /// canonical path. The record also names the project, so `ward gc
     /// --project` can remove it once the project is gone.
     pub fn write_project_record(
         &self,

@@ -111,7 +111,7 @@ fn split_key_value_raw(value: &str) -> Option<(String, String)> {
 }
 
 /// YAML that pnpm never writes but a hand edit can produce. Reading it as
-/// a plain string would give tog a different lock from the one pnpm reads,
+/// a plain string would give ward a different lock from the one pnpm reads,
 /// so it is refused on its own line.
 fn unsupported(line: usize, what: &str) -> io::Error {
     err(format!(
@@ -634,7 +634,7 @@ mod tests {
     }
 
     /// Each row is YAML pnpm never writes but a hand edit can produce.
-    /// Reading any of them as a plain string would give tog a different
+    /// Reading any of them as a plain string would give ward a different
     /// lock from the one pnpm reads, so each is refused on its own line.
     #[test]
     fn yaml_pnpm_never_writes_is_refused_on_its_line() {

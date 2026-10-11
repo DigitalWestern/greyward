@@ -1,4 +1,4 @@
-//! `tog run <cmd>`: run a command inside the projected environment.
+//! `ward run <cmd>`: run a command inside the projected environment.
 //! Every tailor contributes its PATH prefixes and environment through
 //! `Tailor::run_env`. A command that names a project script (a
 //! package.json script) runs as that script's steps instead, with the
@@ -35,15 +35,15 @@ fn package_script_refusal(dir: &std::path::Path, script_resolved: bool) -> Optio
 pub(crate) fn refused_command(cmd: &[String]) -> Option<String> {
     let program = cmd.first()?.rsplit('/').next()?;
     let argument = |index: usize| cmd.get(index).map(String::as_str).unwrap_or_default();
-    // `tog run activate` and `tog run source .venv/bin/activate`: there is
+    // `ward run activate` and `ward run source .venv/bin/activate`: there is
     // no activate script to find.
     if program == "activate"
         || (matches!(program, "source" | ".") && argument(1).contains("activate"))
     {
         return Some(
-            "a tog environment has no activate script: 'tog run <command>' is the \
+            "a ward environment has no activate script: 'ward run <command>' is the \
              activation, and it applies to one command instead of a shell session. \
-             'tog run python', 'tog run pytest', 'tog run npm test' all see the \
+             'ward run python', 'ward run pytest', 'ward run npm test' all see the \
              projected environment"
                 .to_string(),
         );
@@ -75,7 +75,7 @@ fn unprovided_runtime(dir: &Path, program: &str, prefix: &[String]) -> io::Resul
     Ok((!provided).then(|| {
         format!(
             "'{program}' is the {} runtime, but the project's environment does not provide it, \
-             and tog does not run the host's in its place; 'tog doctor' says what is missing",
+             and ward does not run the host's in its place; 'ward doctor' says what is missing",
             tailor.id()
         )
     }))
@@ -112,7 +112,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             refusal,
         ));
     }
-    // Walk up from cwd to the nearest projected root, so `tog run`
+    // Walk up from cwd to the nearest projected root, so `ward run`
     // works from workspace subdirectories like npm run does.
     let cwd = ctx.project_dir();
     // The environment the command runs in is the one the project's inputs
@@ -133,7 +133,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             io::ErrorKind::NotFound,
             format!(
                 "no environment projected here for command '{}', and no manifest to sync one \
-                 from in {} (see 'tog help inputs')",
+                 from in {} (see 'ward help inputs')",
                 cmd[0],
                 dir.display()
             ),
@@ -209,9 +209,9 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     Ok(child_status_code(&status))
 }
 
-/// Run the command the user typed after `tog run`, which may itself be a
-/// dependency tool (`tog run cargo build`, `tog run npm test`): it is the
-/// user's program in the user's projection, not a resolution tog starts,
+/// Run the command the user typed after `ward run`, which may itself be a
+/// dependency tool (`ward run cargo build`, `ward run npm test`): it is the
+/// user's program in the user's projection, not a resolution ward starts,
 /// so neither the door nor the host-local tripwire applies to it.
 // Reviewed site (tests/architecture.rs): the user's own program, which may be any tool.
 #[allow(clippy::disallowed_methods)]
@@ -240,8 +240,8 @@ mod tests {
             .unwrap();
         assert!(why.contains("'node' is the node runtime"), "{why}");
         assert!(why.contains("does not run the host's"), "{why}");
-        assert!(why.contains("tog doctor"), "{why}");
-        assert!(!why.contains("run 'tog' to sync"), "{why}");
+        assert!(why.contains("ward doctor"), "{why}");
+        assert!(!why.contains("run 'ward' to sync"), "{why}");
         // A file named like the runtime that cannot be executed is not it.
         let node = bin.0.join("node");
         std::fs::write(&node, "").unwrap();
@@ -293,12 +293,12 @@ mod tests {
     }
 
     /// The three daily-use habits a projection cannot honour, each refused
-    /// with the tog verb that replaces it.
+    /// with the ward verb that replaces it.
     #[test]
     fn immutable_environments_refuse_pip_activate_and_npm_install() {
         let pip = refusal(&["pip", "install", "flask"]).expect("pip install is refused");
         assert!(pip.contains("immutable"), "{pip}");
-        assert!(pip.contains("tog add <package>"), "{pip}");
+        assert!(pip.contains("ward add <package>"), "{pip}");
         assert!(refusal(&["pip3", "uninstall", "flask"]).is_some());
         // An absolute path is the same program, and an option before the
         // verb does not hide it.
@@ -329,23 +329,23 @@ mod tests {
 
         let activate = refusal(&["activate"]).expect("activate is refused");
         assert!(activate.contains("no activate script"), "{activate}");
-        assert!(activate.contains("tog run <command>"), "{activate}");
+        assert!(activate.contains("ward run <command>"), "{activate}");
         assert!(refusal(&["source", ".venv/bin/activate"]).is_some());
 
         let npm = refusal(&["npm", "install", "is-odd"]).expect("npm install is refused");
         assert!(npm.contains("node_modules"), "{npm}");
-        // `install` and `ci` install the lockfile: the bare `tog` replaces them.
+        // `install` and `ci` install the lockfile: the bare `ward` replaces them.
         assert!(
-            npm.contains("'tog' sets node_modules up from the lockfile"),
+            npm.contains("'ward' sets node_modules up from the lockfile"),
             "{npm}"
         );
         assert!(refusal(&["npm", "ci"])
             .unwrap()
-            .contains("'tog' sets node_modules up from the lockfile"));
-        // `add`/`remove` change the lockfile: `tog add`/`tog remove` do.
+            .contains("'ward' sets node_modules up from the lockfile"));
+        // `add`/`remove` change the lockfile: `ward add`/`ward remove` do.
         let add = refusal(&["pnpm", "add", "is-odd"]).expect("pnpm add is refused");
         assert!(add.starts_with("'pnpm add' would replace"), "{add}");
-        assert!(add.contains("edit dependencies through tog"), "{add}");
+        assert!(add.contains("edit dependencies through ward"), "{add}");
         // Bare `yarn` installs; bare `npm`, `pnpm` and `bun` print help.
         let message = refusal(&["yarn"]).expect("bare yarn is refused");
         assert!(message.contains("node_modules"), "{message}");
@@ -429,13 +429,13 @@ mod tests {
         // The advice still follows the subcommand, not the first word.
         assert!(refusal(&["npm", "--prefix", ".", "ci"])
             .unwrap()
-            .contains("'tog' sets node_modules up from the lockfile"));
+            .contains("'ward' sets node_modules up from the lockfile"));
         assert!(refusal(&["pnpm", "-C", ".", "add", "x"])
             .unwrap()
-            .contains("edit dependencies through tog"));
+            .contains("edit dependencies through ward"));
         assert!(refusal(&["yarn", "--cwd", "."])
             .unwrap()
-            .contains("'tog' sets node_modules up from the lockfile"));
+            .contains("'ward' sets node_modules up from the lockfile"));
     }
 
     /// Everything else still runs. A refusal that caught `npm run build`,
@@ -523,11 +523,11 @@ mod tests {
     fn dotnet_projection_refuses_resolved_package_scripts() {
         let scratch = TempDir::named("run-script");
         let dir = scratch.0.clone();
-        std::fs::create_dir_all(dir.join(".tog/closures")).unwrap();
+        std::fs::create_dir_all(dir.join(".greyward/closures")).unwrap();
         assert!(package_script_refusal(&dir, true).is_none());
-        std::fs::write(dir.join(".tog/closures/dotnet.json"), "{}").unwrap();
+        std::fs::write(dir.join(".greyward/closures/dotnet.json"), "{}").unwrap();
         let refusal = package_script_refusal(&dir, true).expect("refused");
-        assert!(refusal.contains("tog build dotnet"), "{refusal}");
+        assert!(refusal.contains("ward build dotnet"), "{refusal}");
         assert!(package_script_refusal(&dir, false).is_none());
     }
 }

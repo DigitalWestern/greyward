@@ -1,6 +1,6 @@
 //! Real PyPI source-package build coverage. These tests use the unit-test
 //! relay hook because dependency resolution runs through the confined door.
-//! Build the CLI, then run with TMPDIR under HOME and TOG_SANDBOX_TESTS=required:
+//! Build the CLI, then run with TMPDIR under HOME and GREYWARD_SANDBOX_TESTS=required:
 //! `cargo test --locked --lib build::isolation_tests -- --ignored --test-threads=2`.
 
 #[cfg(test)]

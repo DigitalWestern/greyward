@@ -1,11 +1,11 @@
 //! Project inputs that live outside the project directory: an absolute
-//! `tog.toml` `[python].requirements` path, or a requirements include
+//! `greyward.toml` `[python].requirements` path, or a requirements include
 //! beside the project. The held descriptor cannot read them, so they are
 //! read by path, and a path can name a different file from one moment to
 //! the next.
 //!
 //! Each is therefore read once per held project: the first stage that
-//! names one (manifest planning, the closure's input digest, the `tog
+//! names one (manifest planning, the closure's input digest, the `ward
 //! status` check) takes a snapshot, and every later stage of the same
 //! command sees those bytes. A file replaced between stages cannot make a
 //! command plan from one file and record the digest of another (#501). A

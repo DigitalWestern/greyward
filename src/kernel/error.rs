@@ -2,7 +2,7 @@
 //! the failures whose kind decides what a script or a CI job does next
 //! (#258).
 //!
-//! Tog's functions return `io::Result`, and an `io::ErrorKind` cannot say
+//! Greyward's functions return `io::Result`, and an `io::ErrorKind` cannot say
 //! "the policy refused this" apart from "a file is corrupt": both are
 //! `InvalidData` or `PermissionDenied` somewhere. So a failure that belongs
 //! to one of the classes below carries a [`Classified`] value inside its
@@ -13,7 +13,7 @@
 //! tell a stale lock from a denied exception without parsing the message.
 //!
 //! An error with no class is an ordinary failure (exit 1). A signal that
-//! stopped tog is not a class here: `supervise::stop_signal` already
+//! stopped ward is not a class here: `supervise::stop_signal` already
 //! reports it, and `main` exits `128 + signal` for it.
 //!
 //! A caller that adds words to an error must keep its class: [`context`]
@@ -25,15 +25,15 @@ use std::io;
 /// A failure class whose exit status is its own (see `docs/human/CLI.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// Tog will not do this, by rule: a policy denial, a project directory
+    /// Greyward will not do this, by rule: a policy denial, a project directory
     /// swapped for a symlink, a store it will not open. Running it again
     /// changes nothing; the policy or the input has to.
     Refused,
     /// A committed file no longer describes what it should (a stale
-    /// `tog-toolchain.toml`), or is missing where `--frozen` or a strict
+    /// `greyward-toolchain.toml`), or is missing where `--frozen` or a strict
     /// policy never writes one. The fix is to update it and commit it.
     Stale,
-    /// Something this tog or this machine does not support.
+    /// Something this ward or this machine does not support.
     Unsupported,
     /// The network failed. Running it again may work.
     Network,

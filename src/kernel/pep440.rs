@@ -846,7 +846,7 @@ pub fn marker_version_matches(op: &str, target: &str, version: &str) -> io::Resu
     } else {
         match SpecifierSet::parse(&format!("{op}{target}"), source) {
             Ok(specifier) => Some(specifier),
-            // A number past u64 is a valid specifier tog cannot hold, not
+            // A number past u64 is a valid specifier ward cannot hold, not
             // an invalid one: comparing it as a string would be a guess.
             Err(error)
                 if error

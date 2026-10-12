@@ -9,8 +9,10 @@
 //! tool is told to trust it (`http.cainfo`, `http.sslCAInfo`). The system
 //! and user trust stores are never touched.
 //!
-//! A leaf is minted per intercepted host on first use and kept for the
-//! process, with the TLS server configuration that serves it: the `ring`
+//! A leaf is minted per intercepted host on first use and kept, with the
+//! TLS server configuration that serves it, until [`MAX_CACHED_HOSTS`]
+//! others were used more recently (so a tool that opens tunnels to ever
+//! new hosts cannot grow ward's memory without bound): the `ring`
 //! provider named explicitly, only `http/1.1` offered by ALPN, and a
 //! certificate resolver that refuses a handshake whose server name is not
 //! the host the tunnel was opened for.
@@ -36,6 +38,18 @@ const VALID_AFTER_DAYS: i64 = 30;
 /// The longest host name a leaf is minted for (DNS's own limit).
 const MAX_HOST: usize = 253;
 
+/// How many hosts' configurations are kept. A resolution reaches a handful
+/// of hosts; past this many, the least recently used is minted again on
+/// its next tunnel.
+const MAX_CACHED_HOSTS: usize = 256;
+
+/// Server configurations by host, each with the tick it was last used at.
+#[derive(Default)]
+struct Configs {
+    tick: u64,
+    by_host: HashMap<String, (u64, Arc<rustls::ServerConfig>)>,
+}
+
 /// The process's certificate authority and the leaves it has minted.
 pub struct Authority {
     cert: rcgen::Certificate,
@@ -46,7 +60,7 @@ pub struct Authority {
     leaf_signer: Arc<dyn rustls::sign::SigningKey>,
     pem: String,
     provider: Arc<CryptoProvider>,
-    configs: Mutex<HashMap<String, Arc<rustls::ServerConfig>>>,
+    configs: Mutex<Configs>,
 }
 
 impl Authority {
@@ -83,7 +97,7 @@ impl Authority {
             leaf_signer,
             pem,
             provider,
-            configs: Mutex::new(HashMap::new()),
+            configs: Mutex::new(Configs::default()),
         })
     }
 
@@ -110,15 +124,19 @@ impl Authority {
     }
 
     /// The TLS server configuration for a tunnel to `host`, minted on first
-    /// use and kept for the process. `host` is a lowercase DNS name or an IP
-    /// literal (without brackets).
+    /// use and kept while it is among the [`MAX_CACHED_HOSTS`] most recently
+    /// used. `host` is a lowercase DNS name or an IP literal (without
+    /// brackets).
     pub(crate) fn server_config(&self, host: &str) -> io::Result<Arc<rustls::ServerConfig>> {
         check_host(host)?;
         let mut configs = self
             .configs
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(config) = configs.get(host) {
+        configs.tick += 1;
+        let tick = configs.tick;
+        if let Some((used, config)) = configs.by_host.get_mut(host) {
+            *used = tick;
             return Ok(config.clone());
         }
         let leaf = self.mint(host)?;
@@ -134,7 +152,19 @@ impl Authority {
         // only. Tools that prefer h2 fall back to parallel connections.
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let config = Arc::new(config);
-        configs.insert(host.to_string(), config.clone());
+        if configs.by_host.len() >= MAX_CACHED_HOSTS {
+            let oldest = configs
+                .by_host
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(host, _)| host.clone());
+            if let Some(oldest) = oldest {
+                configs.by_host.remove(&oldest);
+            }
+        }
+        configs
+            .by_host
+            .insert(host.to_string(), (tick, config.clone()));
         Ok(config)
     }
 
@@ -315,6 +345,38 @@ mod tests {
             .is_err());
         assert!(authority.pem().starts_with("-----BEGIN CERTIFICATE-----"));
         assert!(!authority.pem().contains("PRIVATE KEY"));
+    }
+
+    /// The cache keeps at most `MAX_CACHED_HOSTS` hosts and evicts the
+    /// least recently used: a host used again stays, the one untouched
+    /// longest is minted anew.
+    #[test]
+    fn the_configuration_cache_is_bounded_and_least_recently_used() {
+        let authority = Authority::new().unwrap();
+        let host = |index: usize| format!("h{index}.test");
+        let kept = authority.server_config(&host(0)).unwrap();
+        let dropped = authority.server_config(&host(1)).unwrap();
+        for index in 2..MAX_CACHED_HOSTS {
+            authority.server_config(&host(index)).unwrap();
+        }
+        // h0 is used again, so h1 is now the least recently used.
+        assert!(Arc::ptr_eq(
+            &kept,
+            &authority.server_config(&host(0)).unwrap()
+        ));
+        authority.server_config(&host(MAX_CACHED_HOSTS)).unwrap();
+        assert_eq!(
+            authority.configs.lock().unwrap().by_host.len(),
+            MAX_CACHED_HOSTS
+        );
+        assert!(Arc::ptr_eq(
+            &kept,
+            &authority.server_config(&host(0)).unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &dropped,
+            &authority.server_config(&host(1)).unwrap()
+        ));
     }
 
     #[test]

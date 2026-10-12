@@ -51,8 +51,10 @@ const GIT_METHODS: &[&str] = &["GET", "HEAD", "POST"];
 const READ_METHODS: &[&str] = &["GET", "HEAD"];
 
 /// The tool's side of the tunnel under TLS: the connection's buffered
-/// reader (it may already hold the client's first TLS bytes) and its
-/// writer.
+/// reader and its writer. The reader holds nothing yet when TLS starts: a
+/// tool that sends its first TLS bytes before the `CONNECT` is answered
+/// gets a 400, since `read_body` refuses any bytes behind a request as
+/// pipelining.
 pub(super) struct Plain<'a, S: Stream> {
     inner: &'a mut BufReader<Timed<S>>,
 }

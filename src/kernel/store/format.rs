@@ -20,9 +20,7 @@ pub const STORE_FORMAT: u32 = 1;
 /// The word before the number on the marker's one line.
 const FORMAT_WORD: &str = "greyward-store";
 
-/// Every namespace `Store::open` creates under the root. The first
-/// component of each is also how a store with no marker is told from a
-/// directory nothing has been stored in yet.
+/// Every namespace `Store::open` creates under the root.
 pub(super) const NAMESPACES: &[&str] = &[
     "objects",
     "meta",
@@ -40,8 +38,8 @@ pub(super) const NAMESPACES: &[&str] = &[
 
 /// What `ward gc --reset` removes from the root: everything written in the
 /// store's record formats, and everything that only means something next to
-/// those records. `tmp` is emptied rather than removed (it holds the
-/// publication lock), and the marker is rewritten.
+/// those records. `tmp` is not removed (it holds the publication lock):
+/// only the temporaries ward names there are, and the marker is rewritten.
 ///
 /// Whatever is not listed stays: `cache/` (verified downloads, each named
 /// by its own digest, which is what the store is rebuilt from), `backups/`
@@ -66,10 +64,15 @@ pub(crate) const RESET_REMOVES: &[&str] = &[
 pub enum StoreFormat {
     /// The marker names the format this ward reads.
     Current,
-    /// No marker and no store namespace: nothing has been stored here, and
-    /// `Store::open` creates the store with the marker.
+    /// No marker and nothing only a ward writes: nothing has been stored
+    /// here. `Store::open` creates the store with the marker in a directory
+    /// that is empty, or holds only empty namespaces, and refuses any other
+    /// (see `vacant`).
     Uninitialized,
-    /// Store namespaces with no marker: written before the marker existed.
+    /// No marker, and what only a ward writes into a store (its lease
+    /// files, an object, an object's record): written before the marker
+    /// existed. Directory names alone are never this: `tmp`, `records` and
+    /// `objects` are names anyone's directory may hold (#676).
     PreEpoch,
     /// A well-formed marker naming a later format than this ward knows.
     Newer(u32),
@@ -305,12 +308,12 @@ pub fn probe(root: &Path) -> io::Result<StoreFormat> {
     if let Some(format) = read_marker(root)? {
         return Ok(format);
     }
-    if !has_namespace(root)? {
+    if !has_store_evidence(root)? {
         return Ok(StoreFormat::Uninitialized);
     }
-    // A ward creating this store publishes the marker before its first
-    // namespace. So namespaces seen after a missing marker may be a store
-    // being created right now, whose marker has landed since: read it again
+    // A ward creating this store publishes the marker before anything else.
+    // So store files seen after a missing marker may be a store being
+    // created right now, whose marker has landed since: read it again
     // before calling the store unmarked.
     Ok(read_marker(root)?.unwrap_or(StoreFormat::PreEpoch))
 }
@@ -390,17 +393,91 @@ fn parse(bytes: &[u8]) -> StoreFormat {
     }
 }
 
-/// Whether anything is where one of the store's namespaces would be.
-fn has_namespace(root: &Path) -> io::Result<bool> {
-    for namespace in NAMESPACES {
-        let first = namespace.split('/').next().expect("a namespace has a name");
-        match fs::symlink_metadata(root.join(first)) {
+/// The files at the root only a ward's lease writes: never unlinked, so a
+/// store any ward has worked in keeps them.
+const LEASE_FILES: &[&str] = &["activity.lock", "gc.lock"];
+
+/// Whether `root` holds anything only a ward writes into a store: a lease
+/// file, an entry under `objects/` named as an object id, or a record under
+/// `meta/` named after one. A directory of the user's that happens to have
+/// a `tmp/` or a `records/` has none of these.
+fn has_store_evidence(root: &Path) -> io::Result<bool> {
+    for name in LEASE_FILES {
+        match fs::symlink_metadata(root.join(name)) {
             Ok(_) => return Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
     }
-    Ok(false)
+    let named = |namespace: &str, id_of: fn(&str) -> Option<&str>| -> io::Result<bool> {
+        let entries = match fs::read_dir(root.join(namespace)) {
+            Ok(entries) => entries,
+            // Absent, or not a directory: no object and no record.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false)
+            }
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let name = entry?.file_name();
+            if name.to_str().and_then(id_of).is_some_and(is_object_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    Ok(named("objects", |name| Some(name))? || named("meta", |name| name.strip_suffix(".json"))?)
+}
+
+/// Whether `root` has nothing in it a store could lose or a user could:
+/// no entry at all, or only namespace directories with no file anywhere
+/// below them (a store whose creation stopped before its marker, made by a
+/// ward from before the marker existed). `Store::open` creates a store only
+/// in such a directory, and `ward gc --reset` treats one as nothing to
+/// empty. Anything else without a marker or store evidence is someone
+/// else's directory.
+pub(super) fn vacant(root: &Path) -> io::Result<bool> {
+    fn no_files_below(path: &Path) -> io::Result<bool> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() || !no_files_below(&entry.path())? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let namespace = NAMESPACES
+            .iter()
+            .any(|namespace| namespace.split('/').next() == name.to_str());
+        if !namespace || !entry.file_type()?.is_dir() || !no_files_below(&entry.path())? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The refusal for a directory that holds files and is not a ward store,
+/// for `Store::open` and `ward gc --reset` alike. It carries no `fix:`
+/// command: the way out is the user's to pick, and a reset is exactly what
+/// must not be run on someone else's files.
+pub(crate) fn not_a_store(root: &Path, verb: &str) -> io::Error {
+    crate::kernel::error::refused(
+        io::ErrorKind::InvalidData,
+        format!(
+            "{} is not a ward store and is not empty: it has no format marker and nothing a \
+             ward stores, so {verb}. Point GREYWARD_STORE at a new or empty directory, \
+             or move what is there aside",
+            root.display()
+        ),
+    )
 }
 
 /// Write the current marker into `root`. The bytes go to a temporary beside
@@ -458,20 +535,55 @@ mod tests {
     }
 
     #[test]
-    fn a_namespace_without_a_marker_is_a_pre_epoch_store() {
-        for namespace in ["objects", "meta", "cache", "roots", "records"] {
+    fn what_only_a_ward_writes_without_a_marker_is_a_pre_epoch_store() {
+        let id = format!("{}-test-kept-1", "a".repeat(40));
+        for (path, directory) in [
+            ("activity.lock".to_string(), false),
+            ("gc.lock".to_string(), false),
+            (format!("objects/{id}"), true),
+            (format!("meta/{id}.json"), false),
+        ] {
             let temp = TempDir::new();
-            fs::create_dir(temp.0.join(namespace)).unwrap();
-            assert_eq!(
-                probe(&temp.0).unwrap(),
-                StoreFormat::PreEpoch,
-                "{namespace}"
-            );
+            let path = temp.0.join(&path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if directory {
+                fs::create_dir(&path).unwrap();
+            } else {
+                fs::write(&path, b"").unwrap();
+            }
+            assert_eq!(probe(&temp.0).unwrap(), StoreFormat::PreEpoch, "{path:?}");
         }
         // A directory holding only files ward never names is not a store yet.
         let temp = TempDir::new();
         fs::write(temp.0.join("notes.txt"), b"x").unwrap();
         assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Uninitialized);
+        assert!(!vacant(&temp.0).unwrap());
+    }
+
+    /// The names of a store's namespaces are names anyone's directory may
+    /// have. Holding them, and files in them, does not make a directory a
+    /// store (#676), and it is not vacant either: a store is not created
+    /// beside those files.
+    #[test]
+    fn namespace_names_alone_are_not_a_store() {
+        let temp = TempDir::new();
+        for namespace in ["objects", "meta", "cache", "roots", "records", "tmp"] {
+            fs::create_dir(temp.0.join(namespace)).unwrap();
+        }
+        fs::create_dir_all(temp.0.join("cache/sha256")).unwrap();
+        assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Uninitialized);
+        // Empty namespaces are what a creation that stopped early leaves.
+        assert!(vacant(&temp.0).unwrap());
+        // Names that are no object id are the user's.
+        fs::write(temp.0.join("meta/report.json"), b"{}").unwrap();
+        fs::create_dir(temp.0.join("objects/photos")).unwrap();
+        fs::write(temp.0.join("tmp/draft.txt"), b"draft").unwrap();
+        assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Uninitialized);
+        assert!(!vacant(&temp.0).unwrap());
+        // A file at the root that is not a namespace is not vacant either.
+        let temp = TempDir::new();
+        fs::create_dir(temp.0.join("docs")).unwrap();
+        assert!(!vacant(&temp.0).unwrap());
     }
 
     #[test]
@@ -752,8 +864,8 @@ mod tests {
         let temp = TempDir::named("store-format-reread");
         assert_eq!(read_marker(&temp.0).unwrap(), None);
         write_marker(&temp.0).unwrap();
-        fs::create_dir(temp.0.join("objects")).unwrap();
-        assert!(has_namespace(&temp.0).unwrap());
+        fs::write(temp.0.join("activity.lock"), b"").unwrap();
+        assert!(has_store_evidence(&temp.0).unwrap());
         assert_eq!(read_marker(&temp.0).unwrap(), Some(StoreFormat::Current));
         assert_eq!(probe(&temp.0).unwrap(), StoreFormat::Current);
     }

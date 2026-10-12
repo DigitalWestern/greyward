@@ -772,10 +772,20 @@ A store says which format it is in: `<store>/format` holds one line,
 nothing else. There is no migration code: a store it cannot read is
 refused, and the fix is to empty it.
 
-- No directory, or an empty one: a new store is created, marker first.
+- No directory, or an empty one (or one holding only empty store
+  namespaces): a new store is created, marker first.
 - The marker says `greyward-store 1`: the store opens.
-- Store directories but no marker: a store written before the marker
-  existed, or one a reset did not finish. Refused.
+- No marker, and something only a ward writes into a store: its lease
+  files (`activity.lock`, `gc.lock`), an `objects/` entry named as an
+  object id, or a `meta/<object id>.json`. A store written before the
+  marker existed, or one a reset did not finish. Refused, with
+  `ward gc --reset` as the fix.
+- No marker and none of that, but other files: not a store at all (a
+  `GREYWARD_STORE` pointed at a home or a project by mistake). Directory
+  names alone prove nothing, since `tmp/`, `records/` or `objects/` can be
+  anyone's. Refused with no `fix:` line, no store is created beside those
+  files, no lease file is written into the directory, and `ward gc --reset`
+  refuses it too (#676).
 - A higher number: a newer Greyward wrote it. Refused, and the fix is to update
   this Greyward.
 - Anything else in the marker, or a marker that cannot be read (its mode,
@@ -808,9 +818,9 @@ There is no fallback lock.
 
 The one reader that takes no lock is `ward store path`, which only prints
 the path and reads the marker to say whether the store is refused. It reads
-the marker a second time before it calls namespaces without a marker an old
-store, because a store being created publishes the marker before its first
-namespace. During a reset it can report the store as having no marker. That
+the marker a second time before it calls store files without a marker an
+old store, because a store being created publishes the marker before
+anything else. During a reset it can report the store as having no marker. That
 is true at that moment, and it stops when the reset finishes. `ward doctor`
 is not such a reader: it opens the store (waiting for the root lock like
 any other command, and saying so) and then takes a shared lease without
@@ -839,7 +849,9 @@ root without reading the marker, takes the exclusive lease, and then:
 1. unlinks the marker and fsyncs the root directory, so the removal is on
    disk before anything else is deleted;
 2. removes `objects/`, `meta/`, `roots/`, `records/`, `resolve/`,
-   `forests/`, `root-locks/` and staging;
+   `forests/`, `root-locks/`, and the entries under `tmp/` named as ward's
+   own temporaries (`stage-*`, `dl-*`, `meta-*`, ...), leaving anything
+   else there;
 3. recreates the namespaces and fsyncs them;
 4. publishes the new marker: written to a temporary file, fsynced, renamed
    into place, and the root directory fsynced.

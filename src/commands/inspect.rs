@@ -2361,6 +2361,7 @@ mod tests {
         let temp = TempDir::named("doctor-refused");
         let root = temp.0.join("store");
         fs::create_dir_all(root.join("objects")).unwrap();
+        fs::write(root.join("activity.lock"), b"").unwrap();
         let error = Store::open_at(&root).unwrap_err();
         let mut checks = Vec::new();
         store_checks(Err(&error), &mut checks);

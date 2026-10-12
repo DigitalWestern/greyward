@@ -596,12 +596,25 @@ impl Sandbox<'_> {
             push_arg(&mut args, "--tmpfs");
             push_arg(&mut args, cwd.as_os_str());
         }
-        for (flag, binds) in [("--ro-bind", &read_binds), ("--bind", &write_binds)] {
-            for (source, dest) in binds {
-                push_arg(&mut args, flag);
-                args.push(source.clone().into_os_string());
-                args.push(dest.clone().into_os_string());
-            }
+        // A later bind covers an earlier one under it, so the binds go
+        // shallowest first: a read-only root under a writable root stays
+        // read-only, and a writable root under a read-only root stays
+        // writable (#680). At the same depth read-only goes first, so a
+        // root declared both ways is writable.
+        let mut binds: Vec<(&str, &PathBuf, &PathBuf)> = read_binds
+            .iter()
+            .map(|(source, dest)| ("--ro-bind", source, dest))
+            .chain(
+                write_binds
+                    .iter()
+                    .map(|(source, dest)| ("--bind", source, dest)),
+            )
+            .collect();
+        binds.sort_by_key(|(flag, _, dest)| (dest.components().count(), *flag == "--bind"));
+        for (flag, source, dest) in binds {
+            push_arg(&mut args, flag);
+            args.push(source.clone().into_os_string());
+            args.push(dest.clone().into_os_string());
         }
 
         push_setenv(&mut args, "PATH", env_path);
@@ -1221,16 +1234,26 @@ fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> i
 }
 
 fn find_bwrap() -> Option<PathBuf> {
+    find_bwrap_in(Path::new("/usr/bin/bwrap"), std::env::var_os("PATH"))
+}
+
+/// The bubblewrap at `system`, else the first on `path`.
+fn find_bwrap_in(system: &Path, path: Option<OsString>) -> Option<PathBuf> {
     // The distro binary first (mirrors the hardcoded /usr/bin/sandbox-exec on
     // macOS); PATH only as a fallback for unusual installs.
-    let system = PathBuf::from("/usr/bin/bwrap");
-    if let Ok(metadata) = fs::metadata(&system) {
+    if let Ok(metadata) = fs::metadata(system) {
         if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-            return Some(system);
+            return Some(system.to_path_buf());
         }
     }
-    let path = std::env::var_os("PATH")?;
+    let path = path?;
     for directory in std::env::split_paths(&path) {
+        // A relative entry (`.`, `node_modules/.bin`) names a directory under
+        // the cwd, usually the project, whose `bwrap` must not become the
+        // sandbox engine (#680).
+        if !directory.is_absolute() {
+            continue;
+        }
         let candidate = directory.join("bwrap");
         let Ok(metadata) = fs::metadata(&candidate) else {
             continue;
@@ -1238,10 +1261,7 @@ fn find_bwrap() -> Option<PathBuf> {
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             continue;
         }
-        let Ok(candidate) = fs::canonicalize(candidate) else {
-            continue;
-        };
-        if candidate.is_absolute() {
+        if let Ok(candidate) = fs::canonicalize(candidate) {
             return Some(candidate);
         }
     }
@@ -2114,6 +2134,51 @@ mod tests {
         assert!(result.is_err(), "read-only parent accepted a write");
     }
 
+    /// The opposite nesting: a read-only root under a writable root stays
+    /// read-only, while the rest of the writable root stays writable (#680).
+    #[test]
+    fn linux_read_only_child_under_writable_parent_stays_read_only() {
+        if !linux_ready("linux_read_only_child_under_writable_parent_stays_read_only") {
+            return;
+        }
+        let root = temp_dir("overlap-ro");
+        let scratch = root.0.join("scratch");
+        let parent = root.0.join("parent");
+        let child = parent.join("ro");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&child).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&child],
+            write: vec![&parent, &scratch],
+            host_view: HostView::Full,
+        };
+        let child_file = child.join("written");
+        let result = run(
+            &sandbox,
+            &["/usr/bin/touch", child_file.to_str().unwrap()],
+            &scratch,
+            &parent,
+            &[],
+        );
+        assert!(result.is_err(), "read-only child accepted a write");
+        assert!(!child_file.exists());
+
+        let parent_file = parent.join("y");
+        let result = run(
+            &sandbox,
+            &["/usr/bin/touch", parent_file.to_str().unwrap()],
+            &scratch,
+            &parent,
+            &[],
+        );
+        assert!(
+            result.is_ok(),
+            "writable parent refused a write: {result:?}"
+        );
+        assert!(parent_file.exists());
+    }
+
     #[test]
     fn linux_unbound_cwd_is_enterable_but_empty() {
         if !linux_ready("linux_unbound_cwd_is_enterable_but_empty") {
@@ -2273,6 +2338,37 @@ mod tests {
             .any(|line| line.starts_with("PWD=")));
     }
 
+    /// A relative PATH entry resolves against the cwd, usually the project,
+    /// so its `bwrap` is never the engine. The same file through an
+    /// absolute entry is (#680).
+    #[test]
+    fn bwrap_lookup_skips_relative_path_entries() {
+        let root = temp_dir("relative-path-bwrap");
+        let bin = root.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fake = bin.join("bwrap");
+        fs::write(&fake, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let missing = root.0.join("no-system-bwrap");
+        // `bin` spelled relative to this process's cwd.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(bin.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        assert!(relative.join("bwrap").is_file());
+        assert_eq!(
+            find_bwrap_in(&missing, Some(relative.into_os_string())),
+            None
+        );
+        assert_eq!(
+            find_bwrap_in(&missing, Some(bin.clone().into_os_string())),
+            Some(fs::canonicalize(&fake).unwrap())
+        );
+    }
+
     /// bubblewrap's helper is the sandbox's pid 1, readable by the build,
     /// so its environment must hold nothing from the host (#669).
     #[test]
@@ -2299,7 +2395,10 @@ mod tests {
         )
         .expect("read /proc/1/environ");
         let environ = String::from_utf8(output).unwrap();
-        assert!(!environ.contains("GREYWARD_TEST_PID_ONE_CANARY"), "{environ}");
+        assert!(
+            !environ.contains("GREYWARD_TEST_PID_ONE_CANARY"),
+            "{environ}"
+        );
         assert_eq!(environ.trim(), "", "pid 1 inherited: {environ}");
     }
 

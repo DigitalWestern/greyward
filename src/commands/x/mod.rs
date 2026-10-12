@@ -796,7 +796,7 @@ fn run_installed_tool(
     command: &mut Command,
     activity: &StoreActivity,
 ) -> io::Result<std::process::ExitStatus> {
-    crate::kernel::supervise::status(command, activity)
+    crate::kernel::ui::with_users_stderr(|| crate::kernel::supervise::status(command, activity))
 }
 
 /// Realize `package@version` from `ecosystem`'s registry tool for another

@@ -1210,6 +1210,24 @@ fn run_names_a_program_it_cannot_find() {
     assert!(!stderr.contains("os error"), "{stderr}");
 }
 
+/// `-q` is "errors and results only": the user's own program keeps its
+/// stderr (a traceback, a compiler error), while ward's narration stays
+/// silent, and its status still passes through.
+#[test]
+fn quiet_keeps_the_users_programs_stderr() {
+    let home = TempDir::boundary("cli-quiet-child-home");
+    let project = TempDir::boundary("cli-quiet-child-project");
+    python_env_fixture(&project.0);
+    let out = ward(
+        &project.0,
+        &home.0,
+        &["-q", "run", "sh", "-c", "echo CE >&2; echo CO; exit 3"],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "CO\n");
+    assert_eq!(text(&out.stderr), "CE\n");
+}
+
 #[test]
 fn store_path_honors_the_store_variable() {
     let home = TempDir::boundary("cli-store");

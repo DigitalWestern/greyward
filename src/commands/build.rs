@@ -100,7 +100,10 @@ pub fn run(
     )?;
     let selected = toolchain.get(tailor.lock_ecosystem())?;
     let mut attribution = policy::Attribution::open(tailor.id())?;
-    tailor.build(ctx, &root, &cwd, rest, selected, &mut attribution)?;
+    // The compiler's errors are the user's, even under `--quiet`.
+    crate::kernel::ui::with_users_stderr(|| {
+        tailor.build(ctx, &root, &cwd, rest, selected, &mut attribution)
+    })?;
     attribution.finish(true)
 }
 

@@ -134,14 +134,22 @@ pub(crate) enum Builds {
     Never,
 }
 
+/// A check of a run's accepted outputs, read from their staged copies
+/// ([`door::PublishFacts::output`]) before the transaction publishes
+/// anything: an error refuses the publication, so the project keeps the
+/// files it had.
+pub(crate) type OutputCheck = std::rc::Rc<dyn Fn(&door::PublishFacts<'_>) -> io::Result<()>>;
+
 /// Where a run's accepted outputs go.
 pub(crate) enum UvTarget {
     /// The lock root is a project: the outputs are published through the
     /// transaction, with the record `record` describes (none: the outputs
-    /// alone, which a sync then records as `unrecorded-resolution`).
+    /// alone, which a sync then records as `unrecorded-resolution`), once
+    /// `check` accepts them.
     Project {
         record: Option<RecordSpec>,
         slot: RecordSlot,
+        check: Option<OutputCheck>,
     },
     /// The lock root is ward's own (a `ward x` cache root, a scratch
     /// directory): accepted outputs are written back into it.
@@ -455,6 +463,26 @@ fn probe_then_run(
     )
 }
 
+/// The receipt producer of a project publication: `check` runs first, on
+/// the staged outputs, and refuses the whole publication when it fails;
+/// then `producer` makes the record, if there is one. Every attempt gets
+/// its own, so a probe that publishes is checked as a retry is.
+fn checked_receipt<'r>(
+    producer: Option<door::ReceiptProducer<'r>>,
+    check: Option<OutputCheck>,
+) -> Option<door::ReceiptProducer<'r>> {
+    let Some(check) = check else {
+        return producer;
+    };
+    Some(Box::new(move |facts: &door::PublishFacts<'_>| {
+        check(facts)?;
+        match producer {
+            Some(produce) => produce(facts),
+            None => Ok(None),
+        }
+    }))
+}
+
 /// One attempt of `run`, with or without `--no-build`.
 fn attempt(
     door: &mut ResolutionDoor<'_>,
@@ -467,11 +495,18 @@ fn attempt(
 ) -> io::Result<DelegateReport> {
     let args = attempt_args(run, no_build);
     let publish = match &run.target {
-        UvTarget::Project { record, slot } => Publish::Project {
+        UvTarget::Project {
+            record,
+            slot,
+            check,
+        } => Publish::Project {
             outputs: run.outputs.clone(),
-            receipt: record
-                .as_ref()
-                .map(|spec| record::producer(record_for(spec, &args), slot.clone())),
+            receipt: checked_receipt(
+                record
+                    .as_ref()
+                    .map(|spec| record::producer(record_for(spec, &args), slot.clone())),
+                check.clone(),
+            ),
         },
         UvTarget::Detached => Publish::Detached {
             outputs: run.outputs.clone(),
@@ -796,6 +831,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
                 target: UvTarget::Project {
                     record: Some(spec),
                     slot: slot.clone(),
+                    check: None,
                 },
                 builds: Builds::Probe,
                 capture: true,
@@ -874,6 +910,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
                 target: UvTarget::Project {
                     record: Some(spec),
                     slot: Default::default(),
+                    check: None,
                 },
                 builds: Builds::Probe,
                 capture: true,
@@ -943,6 +980,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
                 target: UvTarget::Project {
                     record: None,
                     slot: Default::default(),
+                    check: None,
                 },
                 builds: Builds::Probe,
                 capture: true,
@@ -998,6 +1036,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
                 target: UvTarget::Project {
                     record: None,
                     slot: Default::default(),
+                    check: None,
                 },
                 builds: Builds::Probe,
                 capture: true,

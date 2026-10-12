@@ -396,6 +396,7 @@ pub(crate) fn attest_project(
             target: UvTarget::Project {
                 record: Some(spec),
                 slot: slot.clone(),
+                check: None,
             },
             builds: Builds::Probe,
             capture: true,

@@ -6,12 +6,12 @@ use crate::comforter;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy;
-use crate::kernel::resolve::{DoorKind, ResolutionDoor};
+use crate::kernel::resolve::{door, DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
 use crate::kernel::types;
 use crate::kernel::ui;
 use crate::tailors::python;
-use crate::tailors::python::door::{Builds, Index, Uv, UvRun, UvTarget};
+use crate::tailors::python::door::{Builds, Index, OutputCheck, Uv, UvRun, UvTarget};
 use crate::tailors::python::manifest;
 use crate::tailors::python::pypi;
 use crate::tailors::python::pyselect;
@@ -499,6 +499,7 @@ pub fn ensure_lock(
         selected,
         compile_path.as_deref(),
         &source.command(),
+        Some(lock_check(inputs.hash_pins(project)?)),
     )?;
     if repinned {
         // Said once the lock exists, with its full path: an automatic sync
@@ -759,11 +760,25 @@ pub(crate) fn lock_command(
     project: &ProjectRoot,
     selected: &Selected,
     door: &mut ResolutionDoor<'_>,
-) -> io::Result<String> {
+) -> io::Result<(String, OutputCheck)> {
     let inputs = Inputs::discover(project, selected, door, false, true)?;
-    Ok(inputs
+    let command = inputs
         .lock_source(project, selected, door.platform())?
-        .command())
+        .command();
+    Ok((command, lock_check(inputs.hash_pins(project)?)))
+}
+
+/// The check a compiled `requirements.lock.txt` passes before it is
+/// published: uv generates hashes without checking the ones its input
+/// wrote, so a lock that lost a pin is refused while the old one still
+/// stands.
+pub(crate) fn lock_check(pins: Vec<pypi::HashPin>) -> OutputCheck {
+    std::rc::Rc::new(
+        move |facts: &door::PublishFacts<'_>| match facts.output(Path::new(LOCK))? {
+            Some(bytes) => pypi::check_hash_pins(&pins, &String::from_utf8_lossy(&bytes)),
+            None => Ok(()),
+        },
+    )
 }
 
 /// How uv, started in the held project directory, is told the compile
@@ -798,6 +813,7 @@ fn compile_lock(
     selected: &Selected,
     compile_path: Option<&Path>,
     command: &str,
+    check: Option<OutputCheck>,
 ) -> io::Result<()> {
     let pyver = selected.version("cpython")?;
     // Store-pinned uv, not host uv: a bare machine needs only ward. It runs
@@ -834,6 +850,7 @@ fn compile_lock(
             target: UvTarget::Project {
                 record,
                 slot: Default::default(),
+                check,
             },
             builds: Builds::Probe,
             // Quiet on success; on failure its words go into ward's error.
@@ -1585,6 +1602,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stub_input(&project_dir), "six>=1.16\n");
+    }
+
+    /// uv generates hashes without checking the ones its input wrote, so
+    /// the compiled lock is checked while it is still staged: one that
+    /// lost a pin is refused, and the lock already committed stays as it
+    /// was.
+    #[test]
+    fn a_relock_that_drops_a_pin_is_refused_before_it_is_published() {
+        let Some(_relay) =
+            stub_relay("a_relock_that_drops_a_pin_is_refused_before_it_is_published")
+        else {
+            return;
+        };
+        let pinned = "a".repeat(64);
+        let other = "b".repeat(64);
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // The marker makes the pinned file not directly consumable, so
+        // preparing re-locks it.
+        std::fs::write(
+            project_dir.join("requirements.txt"),
+            format!("six==1.17.0 ; python_version >= \"3\" --hash=sha256:{pinned}\n"),
+        )
+        .unwrap();
+        let old = "# the lock already committed\nsix==1.17.0 --hash=sha256:old\n";
+        std::fs::write(project_dir.join(LOCK), old).unwrap();
+        let store = store_with_stub_uv_writing(
+            &temp.0.join("store"),
+            &format!("six==1.17.0 --hash=sha256:{other}"),
+        );
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let error = ensure_lock(
+            &project,
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &test_activity(&store),
+                Platform::host().unwrap(),
+                DoorKind::MissingLock,
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "requirements.txt line 1: six is pinned to sha256:{pinned}"
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_dir.join(LOCK)).unwrap(),
+            old,
+            "the lock that lost a pin was published"
+        );
     }
 
     /// The inputs of the project in `dir`, discovered with no store: a

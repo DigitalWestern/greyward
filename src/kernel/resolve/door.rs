@@ -243,9 +243,21 @@ pub struct PublishFacts<'f> {
     /// The exceptions this run recorded.
     pub exceptions: &'f [Fact],
     snapshot: &'f Snapshot,
+    staged: &'f Outputs,
 }
 
 impl PublishFacts<'_> {
+    /// The bytes of the accepted output at `relative` (under the lock
+    /// root), read from the staged copy before anything is published, or
+    /// `None` when the run wrote no such output. A producer that refuses
+    /// them refuses the whole publication: the lock root keeps what it had.
+    pub fn output(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
+        match self.staged.get(relative) {
+            Some(file) => self.staged.contents(file).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// The pre-run sha256 of a regular file under the lock root (a
     /// manifest the receipt vouches for), `None` when it was not one.
     pub fn input_digest(&self, relative: &Path) -> Option<[u8; 32]> {
@@ -378,6 +390,7 @@ pub(super) fn run(
         isolation: ran.outcome.tier.isolation(),
         exceptions: &facts,
         snapshot: &snapshot,
+        staged: &outputs,
     };
     match hold.take() {
         Some((tx, again)) => {

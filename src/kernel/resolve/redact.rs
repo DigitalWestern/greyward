@@ -16,7 +16,14 @@
 //!   holds a `user:password` pair. Caller-named secrets (the session token,
 //!   the proxy address) are replaced wherever they appear.
 //!
+//! - A policy fact (an exception's subject and detail) names a URL by its
+//!   origin, or by its origin and file name, never by its whole path: some
+//!   registries carry an account token there (Gemfury's
+//!   `/<token>/<account>/`), and the resolution record is committed.
+//!
 //! Headers and the environment are never recorded, so they need no rule.
+
+use url::Url;
 
 pub const REDACTED: &str = "REDACTED";
 
@@ -93,6 +100,34 @@ pub fn url(raw: &str, keep: &[&str]) -> String {
         });
     }
     out
+}
+
+/// `scheme://host[:port]` (the port only when it is not the scheme's
+/// default): how a policy fact names the host a request went to.
+/// Spelled out rather than taken from `Url::origin`, which is opaque
+/// (`null`) for `git://`.
+pub fn origin(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+/// How a policy fact names an artifact: its [`origin`] and its file name,
+/// the rest of the path elided as `...`
+/// (`https://npm.fury.io/.../pkg-1.0.tgz`).
+pub fn origin_and_file(url: &Url) -> String {
+    let origin = origin(url);
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    match segments.as_slice() {
+        [] => origin,
+        [file] => format!("{origin}/{file}"),
+        [.., file] => format!("{origin}/.../{file}"),
+    }
 }
 
 /// `scheme://user:pw@host/...` without `user:pw@`. The authority ends at the
@@ -261,6 +296,28 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A fact names a host or an artifact without the path, where a token
+    /// may sit, and without userinfo, query or fragment.
+    #[test]
+    fn facts_name_the_origin_and_file_only() {
+        let url = |raw: &str| Url::parse(raw).unwrap();
+        let fury = url("https://u:pw@npm.fury.io/s3cr3t/acct/-/pkg-1.0.tgz?sig=x#y");
+        assert_eq!(origin(&fury), "https://npm.fury.io");
+        assert_eq!(
+            origin_and_file(&fury),
+            "https://npm.fury.io/.../pkg-1.0.tgz"
+        );
+        let shallow = url("https://registry.test:8443/pkg-1.0.tgz");
+        assert_eq!(origin(&shallow), "https://registry.test:8443");
+        assert_eq!(
+            origin_and_file(&shallow),
+            "https://registry.test:8443/pkg-1.0.tgz"
+        );
+        assert_eq!(origin_and_file(&url("https://h.test/")), "https://h.test");
+        assert_eq!(origin(&url("git://github.com/o/r.git")), "git://github.com");
+        assert_eq!(origin(&url("https://[::1]:9/x")), "https://[::1]:9");
     }
 
     #[test]

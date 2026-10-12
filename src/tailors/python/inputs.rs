@@ -139,7 +139,8 @@ enum Pins {
     AsWritten,
     /// `requirements.lock.txt`, compiled by uv from the manifest.
     /// `repinned` when the manifest was hash-pinned already but not in a
-    /// form the planner reads (markers, extras).
+    /// form the planner reads (markers, extras): every hash it names must
+    /// still be in the lock (#689).
     Lock { repinned: bool },
 }
 
@@ -206,11 +207,14 @@ impl Inputs {
         })
     }
 
-    /// Where the pins come from.
+    /// Where the pins come from. A hash the manifest writes that is not a
+    /// well-formed sha256 is refused here, by line, before any lock is
+    /// read or compiled: re-locking around it would drop the pin (#689).
     fn pins(&self) -> io::Result<Pins> {
         if self.manifest.is_empty() || self.manifest.locked_packages.is_some() {
             return Ok(Pins::Manifest);
         }
+        pypi::hash_pins(&self.source, &self.input)?;
         if !is_fully_pinned(&self.source) {
             return Ok(Pins::Lock { repinned: false });
         }
@@ -400,11 +404,14 @@ pub fn read_plan(
             return Ok((plan, inputs.selection, records));
         }
         Pins::AsWritten => inputs.source,
-        Pins::Lock { .. } => read_lock(
-            project,
-            &inputs.input,
-            &inputs.lock_stamp(project, selected)?,
-        )?,
+        Pins::Lock { repinned } => {
+            let stamp = inputs.lock_stamp(project, selected)?;
+            let lock = read_lock(project, &inputs.input, &stamp)?;
+            if repinned {
+                pypi::check_hash_pins(&inputs.source, &inputs.input, &lock)?;
+            }
+            lock
+        }
     };
 
     // These are project-local .greyward caches, not store identities; one
@@ -1385,6 +1392,59 @@ mod tests {
             crate::kernel::error::class_of(&error),
             Some(crate::kernel::error::Class::Stale),
             "{error}"
+        );
+    }
+
+    /// Plan `requirements` beside `lock` (no stamp, as a fresh checkout
+    /// has none) with no store: the refusal, which must come first.
+    fn plan_refusal(requirements: &str, lock: Option<&str>) -> String {
+        let temp = crate::kernel::testutil::TempDir::new();
+        std::fs::write(temp.0.join("requirements.txt"), requirements).unwrap();
+        if let Some(lock) = lock {
+            std::fs::write(temp.0.join(LOCK), lock).unwrap();
+        }
+        let before = tree(&temp.0);
+        let store = store::Store::for_test(temp.0.join("absent-store"));
+        let error = read_plan(
+            &ProjectRoot::open(&temp.0).unwrap(),
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &crate::kernel::testutil::detached_lease().1,
+                Platform::host().unwrap(),
+                DoorKind::Planner,
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert_eq!(tree(&temp.0), before);
+        error.to_string()
+    }
+
+    /// A hash-pinned file with a marker is re-locked, but a hash ward cannot
+    /// check is refused by line first, and a lock that drops a hash the
+    /// file pins is refused rather than planned (#689).
+    #[test]
+    fn a_relock_keeps_every_hash_the_requirements_pin() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let message = plan_refusal(
+            "six==1.17.0 ; python_version >= \"3\" --hash=md5:0123\n",
+            None,
+        );
+        assert_eq!(
+            message,
+            "requirements.txt line 1: only sha256 hashes are supported, got: --hash=md5:0123"
+        );
+        let message = plan_refusal(
+            &format!("six==1.17.0 ; python_version >= \"3\" --hash=sha256:{a}\n"),
+            Some(&format!("six==1.17.0 --hash=sha256:{b}\n")),
+        );
+        assert!(
+            message.starts_with(&format!(
+                "requirements.txt line 1: six is pinned to sha256:{a}, which the compiled lock"
+            )),
+            "{message}"
         );
     }
 

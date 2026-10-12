@@ -173,9 +173,21 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn logical_lines(text: &str) -> Vec<String> {
-    let mut logical: Vec<String> = Vec::new();
+    numbered_logical_lines(text)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect()
+}
+
+/// [`logical_lines`], each with the 1-based number of the line it starts on.
+fn numbered_logical_lines(text: &str) -> Vec<(usize, String)> {
+    let mut logical: Vec<(usize, String)> = Vec::new();
     let mut current = String::new();
-    for raw in text.lines() {
+    let mut start = 1;
+    for (index, raw) in text.lines().enumerate() {
+        if current.is_empty() {
+            start = index + 1;
+        }
         let line = strip_comment(raw);
         let trimmed = line.trim_end();
         if let Some(stripped) = trimmed.strip_suffix('\\') {
@@ -184,14 +196,14 @@ fn logical_lines(text: &str) -> Vec<String> {
         } else {
             current.push_str(trimmed);
             if !current.trim().is_empty() {
-                logical.push(std::mem::take(&mut current));
+                logical.push((start, std::mem::take(&mut current)));
             } else {
                 current.clear();
             }
         }
     }
     if !current.trim().is_empty() {
-        logical.push(current);
+        logical.push((start, current));
     }
     logical
 }
@@ -420,6 +432,97 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
         }
     }
     Ok(reqs)
+}
+
+/// The `--hash` pins one requirements line writes, by the package it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashPin {
+    /// The 1-based line the requirement starts on.
+    pub line: usize,
+    /// PEP 503 normalized.
+    pub name: String,
+    /// Lowercase hex, no "sha256:" prefix.
+    pub sha256s: Vec<String>,
+}
+
+/// Every `--hash` pin in a requirements text, whatever else its line
+/// carries (markers, extras, a range). A hash that is not a well-formed
+/// sha256 is refused with its line: ward verifies sha256 only, and a pin it
+/// cannot check must not turn into a re-lock that drops it (#689). `file`
+/// names the text in the refusal.
+pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
+    let mut pins = Vec::new();
+    for (line, logical) in numbered_logical_lines(text) {
+        if is_requirement_option(&logical) {
+            continue;
+        }
+        let mut spec = String::new();
+        let mut sha256s = Vec::new();
+        for tok in logical.split_whitespace() {
+            let Some(hash) = tok.strip_prefix("--hash=") else {
+                if !spec.is_empty() {
+                    spec.push(' ');
+                }
+                spec.push_str(tok);
+                continue;
+            };
+            let Some(hex) = hash.strip_prefix("sha256:") else {
+                return Err(err(format!(
+                    "{file} line {line}: only sha256 hashes are supported, got: {tok}"
+                )));
+            };
+            if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(err(format!(
+                    "{file} line {line}: malformed sha256 hash: {hex}"
+                )));
+            }
+            sha256s.push(hex.to_ascii_lowercase());
+        }
+        if sha256s.is_empty() || is_skippable_spec(&spec) {
+            continue;
+        }
+        let name: String = spec
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        pins.push(HashPin {
+            line,
+            name: normalize_name(&name),
+            sha256s,
+        });
+    }
+    Ok(pins)
+}
+
+/// Refuse a compiled `lock` that drops a hash `source` pins. A hash-pinned
+/// file the planner cannot read as it is (markers, extras) is re-locked by
+/// uv, which takes the index's hashes: every hash the user wrote for a
+/// package the lock keeps must still be one the lock allows, or the pin
+/// that guarded against an upstream change would be gone. A package the
+/// lock leaves out (a marker false on this platform) has nothing to check.
+pub fn check_hash_pins(source: &str, file: &str, lock: &str) -> io::Result<()> {
+    let locked = parse_requirements(lock)?;
+    for pin in hash_pins(source, file)? {
+        let Some(requirement) = locked.iter().find(|locked| locked.name == pin.name) else {
+            continue;
+        };
+        if let Some(dropped) = pin
+            .sha256s
+            .iter()
+            .find(|hash| !requirement.sha256s.contains(hash))
+        {
+            return Err(err(format!(
+                "{file} line {}: {} is pinned to sha256:{dropped}, which the compiled \
+                 lock does not allow for {} {}; correct the hash, or drop the pin to \
+                 accept the index's files",
+                pin.line, pin.name, requirement.name, requirement.version
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// One downloadable file for a (name, version), from the PyPI JSON API.
@@ -1610,5 +1713,76 @@ mod hash_pin_tests {
         // And such a listing cannot satisfy a pin on the dropped entries.
         let error = lock(&req(&[PIN]), &files).unwrap_err().to_string();
         assert!(error.ends_with("PyPI has: e.whl"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod requirement_hash_pin_tests {
+    use super::*;
+
+    const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// An md5 or malformed sha256 pin is refused with the line it starts
+    /// on, continuations counted, wherever the line also has a marker (#689).
+    #[test]
+    fn a_hash_ward_cannot_check_is_refused_by_line() {
+        let md5 = format!(
+            "# pins\nsix==1.17.0 ; python_version >= \"3\" \\\n    --hash=sha256:{A}\n\
+             idna==3.10 --hash=md5:0123\n"
+        );
+        let error = hash_pins(&md5, "requirements.txt").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "requirements.txt line 4: only sha256 hashes are supported, got: --hash=md5:0123"
+        );
+        let short = format!("six[x]==1.17.0 --hash=sha256:{}\n", &A[1..]);
+        let error = hash_pins(&short, "requirements.txt").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("requirements.txt line 1: malformed sha256 hash: "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn hash_pins_name_each_pinned_package_and_its_line() {
+        let text = format!(
+            "-r base.txt\nSix_Pkg[x]==1.17.0 ; python_version >= \"3\" \\\n    \
+             --hash=sha256:{A} \\\n    --hash=sha256:{}\nidna>=3\n",
+            B.to_ascii_uppercase()
+        );
+        assert_eq!(
+            hash_pins(&text, "requirements.txt").unwrap(),
+            vec![HashPin {
+                line: 2,
+                name: "six-pkg".into(),
+                sha256s: vec![A.into(), B.into()],
+            }]
+        );
+    }
+
+    /// The re-lock may keep a hash-pinned package only with every hash the
+    /// user wrote; a package the lock leaves out has nothing to check.
+    #[test]
+    fn a_relock_that_drops_a_user_hash_is_refused() {
+        let source = format!("six==1.17.0 ; python_version >= \"3\" --hash=sha256:{A}\n");
+        let kept = format!("six==1.17.0 --hash=sha256:{A} --hash=sha256:{B}\n");
+        check_hash_pins(&source, "requirements.txt", &kept).unwrap();
+        let other = format!("idna==3.10 --hash=sha256:{B}\n");
+        check_hash_pins(&source, "requirements.txt", &other).unwrap();
+        let dropped = format!("six==1.17.0 --hash=sha256:{B}\n");
+        let error = check_hash_pins(&source, "requirements.txt", &dropped).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!(
+                "requirements.txt line 1: six is pinned to sha256:{A}, which the compiled \
+                 lock does not allow for six 1.17.0"
+            )),
+            "{message}"
+        );
     }
 }

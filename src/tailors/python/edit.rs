@@ -542,7 +542,7 @@ fn edit_run(
 
 /// Recompile `input` into `output` (both in the project) with `extra`
 /// (the upgrade flags), the same compile the missing-lock door runs.
-fn uv_compile(
+pub(super) fn uv_compile(
     edit: &ManifestEdit<'_>,
     door: &mut ResolutionDoor<'_>,
     input: &Path,

@@ -350,8 +350,9 @@ pub(crate) fn attest_project(
                 "{} has no lock a tool resolved (no uv.lock, requirements.lock.txt, or \
                  requirements.in with its compiled requirements.txt), so there is no lock check \
                  to attest; run `ward` for an unpinned source; for a hand-hashed \
-                 requirements.txt, copy it to requirements.in and run `ward update` to \
-                 compile the pair; commit the result, then attest",
+                 requirements.txt, run `ward update --adopt python`, which keeps it as \
+                 requirements.in and compiles the pair with a signed resolution record; \
+                 commit the result",
                 dir.display()
             ),
         ));
@@ -420,7 +421,7 @@ fn refuse_foreign_header(project: &ProjectRoot, output: &str) -> io::Result<()> 
         return Ok(());
     }
     let recovery = if output == "requirements.txt" {
-        "run `ward update` to compile it again"
+        "run `ward update --adopt python` to compile it again from requirements.in"
     } else {
         "delete only requirements.lock.txt and run `ward` to compile it again"
     };
@@ -642,7 +643,7 @@ mod tests {
         let pair = refuse_foreign_header(&root, "requirements.txt")
             .unwrap_err()
             .to_string();
-        assert!(pair.contains("run `ward update`"));
+        assert!(pair.contains("run `ward update --adopt python`"));
         assert!(!pair.contains("delete"));
         let generated = refuse_foreign_header(&root, "requirements.lock.txt")
             .unwrap_err()

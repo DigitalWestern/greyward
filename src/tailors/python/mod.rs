@@ -3,6 +3,7 @@
 //! modules, PyPI locking, wheel installs, manifest discovery, and sandboxed
 //! sdist builds.
 
+mod adopt;
 pub mod build;
 pub(crate) mod build_requires;
 pub(crate) mod door;

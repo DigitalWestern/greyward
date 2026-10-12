@@ -2,6 +2,7 @@
 //! is the only layer that knows about every tailor *and* the kernel; the
 //! binary parses arguments and calls `resolve` then `dispatch`.
 
+pub(crate) mod adopt;
 pub(crate) mod attest;
 pub(crate) mod audit;
 pub(crate) mod build;
@@ -265,6 +266,7 @@ fn writes_closures(command: &cli::Command) -> bool {
             | Add { .. }
             | Remove { .. }
             | Update { .. }
+            | Adopt { .. }
             | X { .. }
     )
 }
@@ -358,6 +360,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         // Like `run`, `env` needs the store open: a recorded runtime is a
         // store object, whose bin directory is on the PATH `env` prints.
         Env { shell } => env::run(&ctx, shell, sync.frozen),
+        Adopt { ecosystem, no_sync } => adopt::run(&ctx, ecosystem.as_deref(), no_sync).map(|_| 0),
         Add {
             specs,
             dev,
@@ -386,11 +389,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
             no_sync,
         )
         .map(|_| 0),
-        Update {
-            names,
-            no_sync,
-            toolchain: _,
-        } => deps::run(
+        Update { names, no_sync, .. } => deps::run(
             &ctx,
             deps::Request {
                 verb: deps::Verb::Update,

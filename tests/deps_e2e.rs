@@ -236,6 +236,143 @@ fn python_foreign_header_pair_recovers_with_update() {
     assert!(project.join(".greyward/resolution/python.json").is_file());
 }
 
+/// A handwritten hashed `requirements.txt`: the six wheel's real digest,
+/// and no resolver header.
+const HAND_HASHED: &str = "six==1.16.0 \\\n    \
+    --hash=sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254\n";
+
+/// Hashes prove package bytes, not how the set was resolved (#655): attest
+/// refuses a hand-hashed requirements.txt, and `update --adopt python` is
+/// the explicit step that has the resolver compile it. The original
+/// survives as requirements.in, the compiled lock keeps its pin and its
+/// hash, the door writes a signed record, attest then signs the lock
+/// without changing it, and a strict sync trusts the record.
+#[test]
+#[ignore]
+fn python_hand_hashed_requirements_adopt_then_attest_and_strict_sync() {
+    let temp = scratch("python-adopt");
+    let store = temp.0.join("store");
+    let home = temp.0.join("home");
+    let key = home.join("signing.key");
+    let public = greyward::kernel::signing::generate(&key).unwrap();
+    let policy = temp.0.join("policy.toml");
+    std::fs::write(&policy, format!("[signing]\ntrusted = ['{public}']\n")).unwrap();
+    let signed = |project: &Path, args: &[&str]| {
+        command(project, &home, &store)
+            .env("TMPDIR", temp.0.join("tmp"))
+            .env("GREYWARD_SANDBOX_TESTS", "required")
+            .env("GREYWARD_SIGNING_KEY", &key)
+            .env("GREYWARD_POLICY", &policy)
+            .args(args)
+            .output()
+            .expect("spawn ward")
+    };
+    let receipt = |project: &Path| project.join(".greyward/resolution/python.json");
+
+    // A different requirements.in is another source: adoption refuses
+    // rather than compile the lock from it, and changes nothing.
+    let other = temp.0.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("requirements.txt"), HAND_HASHED).unwrap();
+    std::fs::write(other.join("requirements.in"), "idna==3.10\n").unwrap();
+    let refused = signed(&other, &["update", "--adopt", "python", "--no-sync"]);
+    assert!(!refused.status.success(), "adopted over another source");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("already exists and differs"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(other.join("requirements.in")).unwrap(),
+        "idna==3.10\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("requirements.txt")).unwrap(),
+        HAND_HASHED
+    );
+    assert!(!receipt(&other).exists());
+
+    let project = temp.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("requirements.txt"), HAND_HASHED).unwrap();
+    // The hashes are installable as they are; this sync writes the
+    // toolchain lock attest reads.
+    assert_ok(signed(&project, &[]), "sync the hand-hashed lock");
+
+    // Direct attest refuses: no resolver wrote this lock.
+    let attest = signed(&project, &["attest", "python"]);
+    assert!(!attest.status.success(), "attested hashes alone");
+    let stderr = String::from_utf8_lossy(&attest.stderr);
+    assert!(
+        stderr.contains("has no lock a tool resolved")
+            && stderr.contains("ward update --adopt python"),
+        "{stderr}"
+    );
+    assert!(!receipt(&project).exists());
+    let strict = signed(&project, &["--strict"]);
+    assert!(
+        !strict.status.success(),
+        "a strict sync trusted a lock with no resolution record"
+    );
+
+    let adopt = assert_ok(
+        signed(&project, &["update", "--adopt", "python", "--no-sync"]),
+        "adopt the hand-hashed lock",
+    );
+    assert!(
+        adopt.contains("python: requirements.txt, original pins against the compiled lock:")
+            && adopt.contains("= six 1.16.0 (hashes: 1 of 1 kept, "),
+        "{adopt}"
+    );
+    assert!(!adopt.contains("! six"), "{adopt}");
+    assert_eq!(
+        std::fs::read_to_string(project.join("requirements.in")).unwrap(),
+        HAND_HASHED
+    );
+    let lock = std::fs::read(project.join("requirements.txt")).unwrap();
+    let text = String::from_utf8_lossy(&lock);
+    assert!(text.contains("#    ward"), "{text}");
+    assert!(text.contains("six==1.16.0"), "{text}");
+    assert!(
+        text.contains(
+            "--hash=sha256:8abb2f1d86890a2dfb989f9a77cfcfd3e47c2a354b01111771326f8aa26e0254"
+        ),
+        "{text}"
+    );
+    assert!(receipt(&project).is_file(), "adoption wrote no record");
+
+    // Attest checks the compiled pair and signs it without changing it.
+    assert_ok(
+        signed(&project, &["attest", "python"]),
+        "attest the adopted lock",
+    );
+    assert_eq!(
+        std::fs::read(project.join("requirements.txt")).unwrap(),
+        lock
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("requirements.in")).unwrap(),
+        HAND_HASHED
+    );
+
+    // A strict sync trusts the signed record.
+    assert_ok(
+        signed(&project, &["--strict"]),
+        "strict sync after adoption",
+    );
+    assert_eq!(
+        std::fs::read(project.join("requirements.txt")).unwrap(),
+        lock
+    );
+
+    // Adopting again has nothing to do and changes nothing.
+    let again = signed(&project, &["update", "--adopt", "python", "--no-sync"]);
+    let stderr = String::from_utf8_lossy(&again.stderr).into_owned();
+    assert_ok(again, "adopt twice");
+    assert!(stderr.contains("nothing to adopt"), "{stderr}");
+    assert_eq!(
+        std::fs::read(project.join("requirements.txt")).unwrap(),
+        lock
+    );
+}
+
 #[test]
 #[ignore]
 fn python_requirements_add_update_remove_roundtrip() {

@@ -291,8 +291,8 @@ choice. For a plain requirements file ward deletes the line itself.",
     Spec {
         name: "update",
         group: Group::Everyday,
-        summary: "update dependencies, --toolchain, or --self (ward itself)",
-        usage: "ward update [<package>...] [--no-sync]\n  ward update --toolchain [<ecosystem>] [--no-sync]\n  ward update --self",
+        summary: "update dependencies, --toolchain, --adopt, or --self (ward)",
+        usage: "ward update [<package>...] [--no-sync]\n  ward update --toolchain [<ecosystem>] [--no-sync]\n  ward update --adopt [<ecosystem>] [--no-sync]\n  ward update --self",
         description: "\
 Re-locks everything (or only the named packages) to the newest versions the
 manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
@@ -310,6 +310,18 @@ gets its section, and the next step every stale-lock refusal names.
 --no-sync stops after the lock is written, so the diff can be reviewed
 before anything is realized.
 
+--adopt gives a lock no resolver wrote (a hand-hashed requirements.txt)
+the provenance 'ward attest' and --strict require, without upgrading
+anything. The original is kept as requirements.in, byte for byte (an
+existing, different requirements.in is refused), and the store uv
+compiles requirements.txt from it through the confined resolution door,
+which writes the signed record .greyward/resolution/<ecosystem>.json. The
+original pins and the compiled ones are printed for review, with every
+original hash the compiled lock dropped. A pip-compile pair another tool
+generated is recompiled from its requirements.in the same way. An
+ecosystem whose lock already comes from its resolver says there is
+nothing to adopt.
+
 --self updates ward itself and touches no project: it asks GitHub for the
 newest release, stops when this build is already that version, and
 otherwise downloads the binary for this machine, checks the sha256 the
@@ -319,6 +331,7 @@ says when a newer release exists; nothing checks in the background.",
         examples: &[
             ("ward update", "re-lock every dependency"),
             ("ward update --toolchain python", "move the pinned Python, then sync"),
+            ("ward update --adopt python --no-sync", "compile a hand-hashed lock; review the diff"),
             ("ward update --self", "replace this binary with the newest release"),
         ],
         options: &[
@@ -326,6 +339,10 @@ says when a newer release exists; nothing checks in the background.",
             (
                 "--toolchain [<ecosystem>]",
                 "re-select the toolchain from the project's version files and rewrite greyward-toolchain.toml, then sync",
+            ),
+            (
+                "--adopt [<ecosystem>]",
+                "have the resolver compile a lock it did not write, keeping the original as its source, and sign its record",
             ),
             (
                 "--self",

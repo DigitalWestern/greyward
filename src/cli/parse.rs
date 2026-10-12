@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::spec::{
     canonical_name, fmt_words, help, inputs, listed, spec, toolchain_aliases, toolchain_section,
-    usage, BUILD_WORDS, HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS,
+    usage, BUILD_WORDS, ECOSYSTEM_IDS, HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS,
 };
 use super::{
     Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, SyncFlags, ToolchainUpdate,
@@ -735,6 +735,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     let mut dev = false;
     let mut no_sync = false;
     let mut toolchain = false;
+    let mut adopt = false;
     let mut self_update = false;
     let mut positional = Vec::new();
     let mut passthrough = false;
@@ -749,13 +750,15 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             "-h" | "--help" => return Ok(None),
             "--no-sync" => no_sync = true,
             "--toolchain" if name == "update" => toolchain = true,
+            "--adopt" if name == "update" => adopt = true,
             "--self" if name == "update" => self_update = true,
             "--dev" | "-D" if matches!(name, "add" | "remove") => dev = true,
             other if other.starts_with('-') && other.len() > 1 => return Err(reject(name, other)),
             other => {
-                // A word after --toolchain names an ecosystem, not a
-                // package, so the dependency-spec grammar must not judge it.
-                if toolchain {
+                // A word after --toolchain or --adopt names an ecosystem,
+                // not a package, so the dependency-spec grammar must not
+                // judge it.
+                if toolchain || adopt {
                     positional.push(other.to_string());
                     continue;
                 }
@@ -766,9 +769,12 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     }
     if self_update {
         // `--self` updates ward itself and nothing in the project, so a
-        // package, `--toolchain`, or `--no-sync` beside it has no meaning.
+        // package, `--toolchain`, `--adopt`, or `--no-sync` beside it has
+        // no meaning.
         let stray = if toolchain {
             Some("--toolchain".to_string())
+        } else if adopt {
+            Some("--adopt".to_string())
         } else if no_sync {
             Some("--no-sync".to_string())
         } else {
@@ -784,8 +790,18 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
         }
         return Ok(Some(Command::SelfUpdate));
     }
+    if toolchain && adopt {
+        return Err(UsageError::new(
+            "update --toolchain re-selects a toolchain and update --adopt adopts a lock; run them \
+             one at a time",
+            Some("update"),
+        ));
+    }
     if toolchain {
         return parse_update_toolchain(&positional, no_sync).map(Some);
+    }
+    if adopt {
+        return parse_update_adopt(&positional, no_sync).map(Some);
     }
 
     match name {
@@ -833,6 +849,31 @@ fn parse_update_toolchain(positional: &[String], no_sync: bool) -> Result<Comman
         no_sync,
         toolchain: Some(ToolchainUpdate { ecosystem }),
     })
+}
+
+/// `update --adopt [<ecosystem>]`. Like `--toolchain`, the one positional
+/// is an ecosystem (a tailor id, the words `attest` takes), never a
+/// package: adoption keeps every pin the original lock states.
+fn parse_update_adopt(positional: &[String], no_sync: bool) -> Result<Command, UsageError> {
+    let ecosystem = match positional {
+        [] => None,
+        [word] if ECOSYSTEM_IDS.contains(&word.as_str()) => Some(word.clone()),
+        [word] | [_, word, ..] => {
+            return Err(UsageError::new(
+                with_suggestion(
+                    format!(
+                        "update --adopt takes one ecosystem name, not a package; '{word}' is not \
+                         one of {}",
+                        ECOSYSTEM_IDS.join(", ")
+                    ),
+                    word,
+                    ECOSYSTEM_IDS.iter().copied(),
+                ),
+                Some("update"),
+            ))
+        }
+    };
+    Ok(Command::Adopt { ecosystem, no_sync })
 }
 
 fn not_an_ecosystem(word: &str) -> UsageError {
@@ -2269,6 +2310,50 @@ mod tests {
         assert_eq!(
             message(&["add", "--toolchain"]),
             "add: unknown option '--toolchain'"
+        );
+        // `--adopt` names an ecosystem, never a package, and mixes with
+        // neither the other update modes nor another verb.
+        assert_eq!(
+            command(&["update", "--adopt"]),
+            Command::Adopt {
+                ecosystem: None,
+                no_sync: false
+            }
+        );
+        assert_eq!(
+            command(&["update", "--no-sync", "--adopt", "python"]),
+            Command::Adopt {
+                ecosystem: Some("python".into()),
+                no_sync: true
+            }
+        );
+        let refused = message(&["update", "--adopt", "pyhton"]);
+        assert!(
+            refused.contains("update --adopt takes one ecosystem name")
+                && refused.contains("did you mean 'python'?"),
+            "{refused}"
+        );
+        assert!(message(&["update", "--adopt", "python", "node"]).contains("'node'"));
+        assert!(message(&["update", "--adopt", "--toolchain"]).contains("one at a time"));
+        assert!(message(&["update", "--self", "--adopt"]).contains("drop --adopt"));
+        for name in ["add", "remove"] {
+            assert_eq!(
+                message(&[name, "--adopt"]),
+                format!("{name}: unknown option '--adopt'")
+            );
+        }
+        // It syncs after the compile, so it takes `--strict` and, like
+        // every lock-writing update, refuses `--frozen`.
+        assert!(message(&["--frozen", "update", "--adopt"]).contains("exists to write it"));
+        assert_eq!(
+            flagged(&["--strict", "update", "--adopt"]),
+            (
+                Command::Adopt {
+                    ecosystem: None,
+                    no_sync: false
+                },
+                sync_flags(false, true)
+            )
         );
         for name in ["add", "remove", "update", "x"] {
             assert_eq!(printed(&[name, "--help"]), help(spec(name).unwrap()));

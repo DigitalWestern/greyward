@@ -31,7 +31,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub use edit::{
-    CachedTool, DepSpec, EditHost, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
+    Adopted, Adoption, CachedTool, DepSpec, EditHost, EditOutcome, EditVerb, LockAdoption,
+    ManifestEdit, PackageRegistry, Pin, Pins,
 };
 
 /// One row of `ward ls`.
@@ -555,6 +556,26 @@ pub trait Tailor: Sync {
         _door: &mut ResolutionDoor<'_>,
     ) -> io::Result<EditOutcome> {
         Err(unsupported(self.id(), "add, remove, and update"))
+    }
+
+    /// `ward update --adopt`: turn a lock no resolver wrote into one this
+    /// ecosystem's resolver compiles through `door` (an edit door), so the
+    /// door publishes it with its signed resolution record. The original
+    /// stays as the resolver's source and its pins are the resolver's
+    /// preferences, never upgraded. A project whose lock already comes from
+    /// a resolver has nothing to adopt; the default says so, since every
+    /// other ecosystem's lock is written by its own tool.
+    fn adopt_lock(
+        &self,
+        _ctx: &Context,
+        _adoption: &LockAdoption<'_>,
+        _door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<Adoption> {
+        Ok(Adoption::Nothing(format!(
+            "its lock is written by its own resolver, so there is nothing to adopt; \
+             `ward attest {}` signs a resolution record for it",
+            self.id()
+        )))
     }
 
     /// `ward x`: how this ecosystem runs a tool straight from its public

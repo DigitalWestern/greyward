@@ -170,6 +170,7 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
                 &output,
                 &upgrade,
                 door::COMPILE_COMMAND,
+                None,
             )?;
             Ok(vec![
                 "requirements.in".to_string(),
@@ -194,9 +195,10 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             let external = resolve::has_external_includes(&ProjectRoot::open(project)?)?;
             if verb == EditVerb::Update && lock.is_file() && !external {
                 // The header names the source these inputs give, as the
-                // sync's own compile does, so the next sync reads this lock.
+                // sync's own compile does, so the next sync reads this lock,
+                // and a lock that lost a hash pin is never published.
                 let toolchain = edit.host.toolchain(edit.project, "python")?;
-                let command =
+                let (command, check) =
                     super::inputs::lock_command(&ProjectRoot::open(project)?, &toolchain, door)?;
                 uv_compile(
                     edit,
@@ -205,6 +207,7 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
                     &lock,
                     &upgrade_flags(verb, names),
                     &command,
+                    Some(check),
                 )?;
                 files.push("requirements.lock.txt".to_string());
             } else if verb == EditVerb::Update && !lock.is_file() {
@@ -513,6 +516,7 @@ fn edit_run(
     args: Vec<OsString>,
     index: Index,
     what: &str,
+    check: Option<door::OutputCheck>,
 ) -> io::Result<()> {
     let held = ProjectRoot::open(lock_root)?;
     let outputs = resolve::resolution_outputs(&held)?;
@@ -543,6 +547,7 @@ fn edit_run(
             target: UvTarget::Project {
                 record,
                 slot: Default::default(),
+                check,
             },
             builds: Builds::Probe,
             capture: false,
@@ -563,6 +568,7 @@ fn uv_compile(
     output: &Path,
     extra: &[String],
     command: &str,
+    check: Option<door::OutputCheck>,
 ) -> io::Result<()> {
     let held = ProjectRoot::open(edit.project)?;
     if resolve::has_external_includes(&held)? {
@@ -590,6 +596,7 @@ fn uv_compile(
         args,
         Index::PipCompile,
         "store uv pip compile",
+        check,
     )
 }
 
@@ -636,7 +643,16 @@ fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resu
         .ok()
         .filter(|relative| !relative.as_os_str().is_empty())
         .map(Path::to_path_buf);
-    edit_run(door, &uv, &lock_root, cwd, args, Index::Project, "store uv")?;
+    edit_run(
+        door,
+        &uv,
+        &lock_root,
+        cwd,
+        args,
+        Index::Project,
+        "store uv",
+        None,
+    )?;
     Ok(vec!["pyproject.toml".to_string(), "uv.lock".to_string()])
 }
 

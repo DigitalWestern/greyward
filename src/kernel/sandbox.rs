@@ -214,7 +214,8 @@ fn status_with_stderr(
 // Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
 #[allow(clippy::disallowed_methods)]
 fn spawn_unmanaged(command: &mut Command) -> io::Result<std::process::Child> {
-    command.spawn()
+    // A child that never started ran no build (#679).
+    command.spawn().map_err(crate::kernel::error::sandbox_setup)
 }
 
 /// The child's status, unless its stderr shows the sandbox itself failed
@@ -425,7 +426,9 @@ impl Sandbox<'_> {
     ) -> io::Result<(Command, BwrapInvocation)> {
         // Every failure before bubblewrap starts is a sandbox that could not
         // be set up, never a failed build (#679). The preflight's own
-        // verdicts already say so (`Unsupported`, or an interrupt).
+        // verdicts already say so (`Unsupported`, or an interrupt). The
+        // spawn itself is marked where it happens (`spawn_unmanaged`,
+        // `supervise::status_with_stderr`).
         let setup = crate::kernel::error::sandbox_setup;
         let held = HeldRoots::resolve(self, cwd).map_err(setup)?;
         self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)
@@ -434,7 +437,7 @@ impl Sandbox<'_> {
         let mut invocation = self
             .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
             .map_err(setup)?;
-        let mut command = bwrap_command(bwrap)?;
+        let mut command = bwrap_command(bwrap).map_err(setup)?;
         command.args(&invocation.args);
         pass_fds(&mut command, held.passed());
         // The descriptors are duplicated only when the child is spawned.
@@ -2378,6 +2381,36 @@ mod tests {
             find_bwrap_in(&missing, Some(bin.clone().into_os_string())),
             Some(fs::canonicalize(&fake).unwrap())
         );
+    }
+
+    /// A sandbox engine that could not be started ran no build, supervised
+    /// or not; one that ran and failed returns its status (#679).
+    #[test]
+    fn a_sandbox_engine_that_never_started_is_a_setup_failure() {
+        let root = temp_dir("never-started");
+        let store_root = root.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = crate::kernel::store::Store::for_test(store_root);
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let missing = root.0.join("no-such-engine");
+        for supervised in [None, Some(&activity)] {
+            let mut command = Command::new(&missing);
+            command.stderr(std::process::Stdio::piped());
+            let error = status_with_stderr(&mut command, supervised).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "exit 3"])
+                .stderr(std::process::Stdio::piped());
+            let (status, _) = status_with_stderr(&mut command, supervised).unwrap();
+            assert_eq!(status.code(), Some(3));
+        }
     }
 
     const UNWRITABLE_TMPDIR_CHILD: &str = "GREYWARD_TEST_UNWRITABLE_TMPDIR_SCRATCH";

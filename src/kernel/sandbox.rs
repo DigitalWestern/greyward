@@ -3135,16 +3135,28 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
                 seen("-lz=no"),
                 "-lz linked against a host library: {lines:?}"
             );
-            let nss = Path::new("/usr/lib64/libnss3.so");
-            let nss_is_elf = fs::symlink_metadata(nss).is_ok_and(|metadata| metadata.is_file())
-                && fs::read(nss).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF"));
+            // NSS's runtime soname is the unversioned libnss3.so: Fedora
+            // keeps it in /usr/lib64, Debian and Ubuntu in the multiarch
+            // directory.
+            let nss_is_elf = [
+                "/usr/lib64",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/aarch64-linux-gnu",
+            ]
+            .iter()
+            .filter(|dir| !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_symlink()))
+            .map(|dir| Path::new(dir).join("libnss3.so"))
+            .any(|nss| {
+                fs::symlink_metadata(&nss).is_ok_and(|metadata| metadata.is_file())
+                    && fs::read(&nss).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF"))
+            });
             if nss_is_elf {
                 assert!(
                     seen("-lnss3=no"),
                     "-lnss3 linked the host's runtime libnss3.so: {lines:?}"
                 );
             } else {
-                eprintln!("skip -lnss3: host has no regular ELF /usr/lib64/libnss3.so");
+                eprintln!("skip -lnss3: host has no regular ELF libnss3.so");
             }
         } else {
             eprintln!("skip C checks: host has no /usr/bin/cc");

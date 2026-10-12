@@ -314,16 +314,18 @@ fn read_archive(archive: &Path, compression: Compression) -> io::Result<Vec<Entr
     let file = io::BufReader::new(File::open(archive)?);
     match compression {
         Compression::None => read_entries(file, None),
-        // Multi-member, matching what `tar -z` accepts.
+        // Multi-member or multi-stream, matching what `tar -z`, `-j` and
+        // `-J` accept (pigz, pbzip2 and parallel xz write several).
         Compression::Gzip => read_entries(
             io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
             None,
         ),
-        Compression::Bzip2 => {
-            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), None)
-        }
+        Compression::Bzip2 => read_entries(
+            io::BufReader::new(bzip2::read::MultiBzDecoder::new(file)),
+            None,
+        ),
         Compression::Xz => read_entries(
-            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            io::BufReader::new(liblzma::read::XzDecoder::new_multi_decoder(file)),
             None,
         ),
     }
@@ -1190,11 +1192,12 @@ fn capture(
             io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
             want,
         ),
-        Compression::Bzip2 => {
-            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), want)
-        }
+        Compression::Bzip2 => read_entries(
+            io::BufReader::new(bzip2::read::MultiBzDecoder::new(file)),
+            want,
+        ),
         Compression::Xz => read_entries(
-            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            io::BufReader::new(liblzma::read::XzDecoder::new_multi_decoder(file)),
             want,
         ),
     }
@@ -2683,6 +2686,49 @@ mod tests {
         let compressed = temp.0.join("pkg.tar.xz");
         fs::write(&compressed, encoder.finish().unwrap()).unwrap();
         assert_eq!(list(&compressed, Compression::Xz).unwrap(), expected);
+
+        // Two concatenated xz streams, as parallel xz writes them (#708).
+        let split = 512 * 2;
+        let mut concatenated = Vec::new();
+        for half in [&bytes[..split], &bytes[split..]] {
+            let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), 6);
+            encoder.write_all(half).unwrap();
+            concatenated.extend(encoder.finish().unwrap());
+        }
+        let multi = temp.0.join("multi.tar.xz");
+        fs::write(&multi, &concatenated).unwrap();
+        assert_eq!(list(&multi, Compression::Xz).unwrap(), expected);
+        let out = temp.0.join("multi-xz");
+        fs::create_dir(&out).unwrap();
+        extract(&multi, &out, 1, Compression::Xz).unwrap();
+        assert!(out.join("bin/tool").is_file());
+    }
+
+    /// pbzip2 writes one bzip2 stream per block, which `tar -j` reads
+    /// whole and a single-stream decoder would stop after the first (#708).
+    #[test]
+    fn a_multi_stream_bzip2_lists_identically_to_the_plain_tar() {
+        let temp = temp_dir("bzip2-inproc");
+        let bytes = joined(&sample_members());
+        let plain = temp.0.join("pkg.tar");
+        fs::write(&plain, &bytes).unwrap();
+        let expected = list(&plain, Compression::None).unwrap();
+
+        let split = 512 * 2;
+        let mut concatenated = Vec::new();
+        for half in [&bytes[..split], &bytes[split..]] {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            encoder.write_all(half).unwrap();
+            concatenated.extend(encoder.finish().unwrap());
+        }
+        let multi = temp.0.join("multi.tar.bz2");
+        fs::write(&multi, &concatenated).unwrap();
+        assert_eq!(list(&multi, Compression::Bzip2).unwrap(), expected);
+        let out = temp.0.join("multi-bz2");
+        fs::create_dir(&out).unwrap();
+        extract(&multi, &out, 1, Compression::Bzip2).unwrap();
+        assert!(out.join("bin/tool").is_file());
     }
 
     // ---- end to end with the real tar ------------------------------------

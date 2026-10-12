@@ -1302,6 +1302,27 @@ pub(crate) fn test_host_dev_files() -> Option<PathBuf> {
     None
 }
 
+/// Add the test-only stand-in for host development packages at `dev`
+/// (`test_host_dev_files`) to a whole-host attempt's `env`: its
+/// `usr/include` and `usr/lib` go after whatever `CPATH` and `LIBRARY_PATH`
+/// already name, so a native library set still wins where it has a
+/// library, and the host's own directories, which gcc searches last, come
+/// after both. Every tailor that falls back to the whole host (gems, sdists,
+/// npm install scripts) calls this for its `HostView::Full` attempt and
+/// mounts `dev` read-only beside it.
+pub(crate) fn add_host_dev_files(env: &mut Vec<(String, String)>, dev: &Path) {
+    for (key, subdir) in [("CPATH", "usr/include"), ("LIBRARY_PATH", "usr/lib")] {
+        let dir = dev.join(subdir).display().to_string();
+        match env.iter_mut().find(|(k, _)| k == key) {
+            Some((_, value)) => {
+                value.push(':');
+                value.push_str(&dir);
+            }
+            None => env.push((key.to_string(), dir)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

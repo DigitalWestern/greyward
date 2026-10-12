@@ -347,9 +347,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
-  Every `--hash` the pinned file writes must still be in the new lock for that package, or
-  the plan is refused naming the line. A hash that is not a well-formed sha256 (`md5:`,
-  a short hex) is refused by line before any re-lock.
+  Every `--hash` the requirements write, in any file of their include tree and beside
+  unpinned lines too, must still be in the lock for that package, or the plan is refused
+  naming the file and line, and the plan uses only the files those hashes name. A hash
+  that is not a well-formed sha256 (`md5:`, a short hex) is refused by line before any
+  re-lock.
   **Resolving can build a source distribution that has no wheel** (its build backend runs,
   confined, through the resolution door): it is recorded as `resolution-build`, which a
   policy can deny to refuse it. This also covers metadata preparation by

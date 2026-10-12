@@ -263,6 +263,28 @@ pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Every `--hash` pin of `path`'s `-r`/`-c` include closure, each naming
+/// the file it is in (its path in the project, or its own path when it
+/// lies outside) and its line there: a lock compiled from the tree must
+/// keep all of them, wherever in the tree they are (#689). A hash ward
+/// cannot check is refused here, by file and line.
+pub fn requirements_hash_pins(
+    project: &ProjectRoot,
+    path: &Path,
+) -> io::Result<Vec<pypi::HashPin>> {
+    let project_root = project.path().canonicalize()?;
+    let mut pins = Vec::new();
+    for file in include_closure(project, path)? {
+        let name = file
+            .strip_prefix(&project_root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        pins.extend(pypi::hash_pins(&read_text(project, &file)?, &name)?);
+    }
+    Ok(pins)
+}
+
 /// Why a lock holding `locked` (name, version) does not satisfy
 /// `manifest`, or `None` when it does: every requirement that applies on
 /// `platform` under `python_version` must name a locked package at a

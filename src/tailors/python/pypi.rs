@@ -437,6 +437,8 @@ pub fn parse_requirements(text: &str) -> io::Result<Vec<Requirement>> {
 /// The `--hash` pins one requirements line writes, by the package it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HashPin {
+    /// The file the line is in, as messages name it.
+    pub file: String,
     /// The 1-based line the requirement starts on.
     pub line: usize,
     /// PEP 503 normalized.
@@ -510,6 +512,7 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
             })
             .filter(|version| !version.is_empty());
         pins.push(HashPin {
+            file: file.to_string(),
             line,
             name: normalize_name(&name),
             version,
@@ -519,24 +522,36 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
     Ok(pins)
 }
 
-/// Refuse a compiled `lock` that drops a hash `source` pins. A hash-pinned
-/// file the planner cannot read as it is (markers, extras) is re-locked by
-/// uv, which takes the index's hashes: every hash the user wrote for a
-/// package the lock keeps must still be one the lock allows, or the pin
-/// that guarded against an upstream change would be gone. A package the
-/// lock leaves out, or keeps at another version than the line's `==` (a
-/// marker false on this platform, the package reached another way), is not
-/// what the line pinned, and has nothing to check.
-pub fn check_hash_pins(source: &str, file: &str, lock: &str) -> io::Result<()> {
+/// Whether `pin` is the pin of a locked `name` at `version`: the same
+/// package, at the version the line's `==` names when it names one.
+fn pin_applies(pin: &HashPin, name: &str, version: &str) -> bool {
+    pin.name == name
+        && pin
+            .version
+            .as_deref()
+            .is_none_or(|pinned| pinned == version)
+}
+
+/// Refuse a compiled `lock` that drops a hash one of `pins` names. uv
+/// compiles requirements the planner cannot read as they are (markers,
+/// extras, an unpinned line beside a hashed one, an include) into a lock
+/// with the index's hashes, and does not check the ones the input wrote:
+/// every hash the user wrote for a package the lock keeps must still be
+/// one the lock allows, or the pin that guarded against an upstream change
+/// would be gone (#689). A package the lock leaves out, or keeps at another
+/// version than the line's `==` (a marker false on this platform, the
+/// package reached another way), is not what the line pinned, and has
+/// nothing to check.
+pub fn check_hash_pins(pins: &[HashPin], lock: &str) -> io::Result<()> {
+    if pins.is_empty() {
+        return Ok(());
+    }
     let locked = parse_requirements(lock)?;
-    for pin in hash_pins(source, file)? {
-        let Some(requirement) = locked.iter().find(|locked| {
-            locked.name == pin.name
-                && pin
-                    .version
-                    .as_ref()
-                    .is_none_or(|version| *version == locked.version)
-        }) else {
+    for pin in pins {
+        let Some(requirement) = locked
+            .iter()
+            .find(|locked| pin_applies(pin, &locked.name, &locked.version))
+        else {
             continue;
         };
         if let Some(dropped) = pin
@@ -545,14 +560,64 @@ pub fn check_hash_pins(source: &str, file: &str, lock: &str) -> io::Result<()> {
             .find(|hash| !requirement.sha256s.contains(hash))
         {
             return Err(err(format!(
-                "{file} line {}: {} is pinned to sha256:{dropped}, which the compiled \
+                "{} line {}: {} is pinned to sha256:{dropped}, which the compiled \
                  lock does not allow for {} {}; correct the hash, or drop the pin to \
                  accept the index's files",
-                pin.line, pin.name, requirement.name, requirement.version
+                pin.file, pin.line, pin.name, requirement.name, requirement.version
             )));
         }
     }
     Ok(())
+}
+
+/// The lock planning reads: `lock` with every requirement one of `pins`
+/// applies to narrowed to the hashes those pins allow. The compiled lock
+/// lists every file of a version, so a file the user never approved (a
+/// wheel beside the sdist they pinned) would otherwise be one the planner
+/// may pick (#689). [`check_hash_pins`] has already refused a lock that
+/// lacks one of them. A line no pin applies to is kept as it is; comments
+/// and continuations are not, which the planner never reads.
+pub fn narrow_to_pins(lock: &str, pins: &[HashPin]) -> String {
+    if pins.is_empty() {
+        return lock.to_string();
+    }
+    let mut narrowed = String::new();
+    for line in logical_lines(lock) {
+        narrowed.push_str(narrow_line(&line, pins).as_deref().unwrap_or(&line));
+        narrowed.push('\n');
+    }
+    narrowed
+}
+
+/// One logical lock line narrowed to the hashes `pins` allow for it, or
+/// `None` when it is not an `==` requirement a pin applies to.
+fn narrow_line(line: &str, pins: &[HashPin]) -> Option<String> {
+    if is_requirement_option(line) {
+        return None;
+    }
+    let (hashes, spec): (Vec<&str>, Vec<&str>) = line
+        .split_whitespace()
+        .partition(|token| token.starts_with("--hash="));
+    let spec = spec.join(" ");
+    let (name, version) = spec.split_once("==")?;
+    let (name, version) = (normalize_name(name.trim()), version.trim());
+    let allowed: std::collections::BTreeSet<&str> = pins
+        .iter()
+        .filter(|pin| pin_applies(pin, &name, version))
+        .flat_map(|pin| pin.sha256s.iter().map(String::as_str))
+        .collect();
+    if allowed.is_empty() {
+        return None;
+    }
+    let kept: Vec<&str> = hashes
+        .into_iter()
+        .filter(|token| {
+            token
+                .strip_prefix("--hash=sha256:")
+                .is_some_and(|hex| allowed.contains(hex.to_ascii_lowercase().as_str()))
+        })
+        .collect();
+    Some(format!("{spec} {}", kept.join(" ")))
 }
 
 /// One downloadable file for a (name, version), from the PyPI JSON API.
@@ -1787,6 +1852,7 @@ mod requirement_hash_pin_tests {
         assert_eq!(
             hash_pins(&text, "requirements.txt").unwrap(),
             vec![HashPin {
+                file: "requirements.txt".into(),
                 line: 2,
                 name: "six-pkg".into(),
                 version: Some("1.17.0".into()),
@@ -1795,23 +1861,31 @@ mod requirement_hash_pin_tests {
         );
     }
 
+    fn pins(text: &str) -> Vec<HashPin> {
+        hash_pins(text, "requirements.txt").unwrap()
+    }
+
     /// The re-lock may keep a hash-pinned package only with every hash the
     /// user wrote; a package the lock leaves out has nothing to check.
     #[test]
     fn a_relock_that_drops_a_user_hash_is_refused() {
-        let source = format!("six==1.17.0 ; python_version >= \"3\" --hash=sha256:{A}\n");
+        let source = pins(&format!(
+            "six==1.17.0 ; python_version >= \"3\" --hash=sha256:{A}\n"
+        ));
         let kept = format!("six==1.17.0 --hash=sha256:{A} --hash=sha256:{B}\n");
-        check_hash_pins(&source, "requirements.txt", &kept).unwrap();
+        check_hash_pins(&source, &kept).unwrap();
         let other = format!("idna==3.10 --hash=sha256:{B}\n");
-        check_hash_pins(&source, "requirements.txt", &other).unwrap();
+        check_hash_pins(&source, &other).unwrap();
         // A pin whose marker is false here, for a package the lock keeps at
         // another version: not the line's pin, so nothing to check.
         let elsewhere = format!("six==1.16.0 --hash=sha256:{B}\n");
-        check_hash_pins(&source, "requirements.txt", &elsewhere).unwrap();
-        let ranged = format!("six>=1 ; python_version >= \"3\" --hash=sha256:{A}\n");
-        check_hash_pins(&ranged, "requirements.txt", &elsewhere).unwrap_err();
+        check_hash_pins(&source, &elsewhere).unwrap();
+        let ranged = pins(&format!(
+            "six>=1 ; python_version >= \"3\" --hash=sha256:{A}\n"
+        ));
+        check_hash_pins(&ranged, &elsewhere).unwrap_err();
         let dropped = format!("six==1.17.0 --hash=sha256:{B}\n");
-        let error = check_hash_pins(&source, "requirements.txt", &dropped).unwrap_err();
+        let error = check_hash_pins(&source, &dropped).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let message = error.to_string();
         assert!(
@@ -1821,5 +1895,61 @@ mod requirement_hash_pin_tests {
             )),
             "{message}"
         );
+    }
+
+    /// The compiled lock lists every file of a version. The user pinned the
+    /// sdist (A); a wheel (B) is the better fit, so planning the lock as uv
+    /// wrote it would pick a file the user never approved. Narrowed to the
+    /// pins, the planner can pick only A (#689). A package no pin names, a
+    /// pin for another version, and the lock's comments and continuations
+    /// read the same way.
+    #[test]
+    fn the_lock_is_narrowed_to_the_files_the_user_pinned() {
+        let lock = format!(
+            "# header\nsix==1.17.0 \\\n    --hash=sha256:{A} \\\n    --hash=sha256:{}\n    \
+             # via -r requirements.txt\nidna==3.10 --hash=sha256:{B}\n",
+            B.to_ascii_uppercase()
+        );
+        let user = pins(&format!(
+            "six==1.17.0 ; python_version >= \"3\" --hash=sha256:{A}\nidna>=3\n\
+             idna==3.9 --hash=sha256:{A}\n"
+        ));
+        check_hash_pins(&user, &lock).unwrap();
+        let narrowed = narrow_to_pins(&lock, &user);
+        assert_eq!(
+            narrowed,
+            format!("six==1.17.0 --hash=sha256:{A}\nidna==3.10 --hash=sha256:{B}\n")
+        );
+        let files = [
+            FileCandidate {
+                filename: "six-1.17.0.tar.gz".into(),
+                url: "https://files.example/six-1.17.0.tar.gz".into(),
+                sha256: A.into(),
+            },
+            FileCandidate {
+                filename: "six-1.17.0-py3-none-any.whl".into(),
+                url: "https://files.example/six-1.17.0-py3-none-any.whl".into(),
+                sha256: B.into(),
+            },
+        ];
+        let pick = |text: &str| {
+            let six = parse_requirements(text)
+                .unwrap()
+                .into_iter()
+                .find(|requirement| requirement.name == "six")
+                .unwrap();
+            lock_from_candidates(
+                &six,
+                &files,
+                "cp312",
+                Platform::X86_64UnknownLinuxGnu,
+                Glibc(2, 39),
+            )
+            .unwrap()
+            .filename
+        };
+        assert_eq!(pick(&lock), "six-1.17.0-py3-none-any.whl");
+        assert_eq!(pick(&narrowed), "six-1.17.0.tar.gz");
+        assert_eq!(narrow_to_pins(&lock, &[]), lock);
     }
 }

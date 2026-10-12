@@ -2637,6 +2637,109 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         ));
     }
 
+    fn discover_in(dir: &Path) -> io::Result<Manifest> {
+        discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(dir).unwrap(),
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+    }
+
+    /// setuptools prefers the `install_requires` passed to `setup()` over
+    /// setup.cfg's (setuptools 84 `egg_info` writes `requests` here), so a
+    /// setup.py that may pass one is probed; the plain `setup()` shim leaves
+    /// setup.cfg authoritative (#690).
+    #[test]
+    fn setup_py_install_requires_wins_over_setup_cfg() {
+        let dir = temp_project("setupcfg-precedence");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = six\n",
+        )
+        .unwrap();
+        for setup_py in [
+            "from setuptools import setup\nsetup(install_requires=[\"requests\"])\n",
+            "from setuptools import setup\nsetup(**{\"install_requires\": [\"requests\"]})\n",
+            "from setuptools import setup\nfrom meta import kwargs\nsetup(**kwargs)\n",
+        ] {
+            fs::write(dir.0.join("setup.py"), setup_py).unwrap();
+            let manifest = discover_in(&dir.0).unwrap();
+            assert_eq!(manifest.input, "setup.py", "{setup_py}");
+            assert!(manifest.requires_setup(), "{setup_py}");
+        }
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        assert_eq!(manifest.input, "setup.cfg");
+        assert_eq!(manifest.requirements, ["six"]);
+    }
+
+    /// The dashed spellings setuptools accepts are dependencies too, so the
+    /// environment is not built empty (#690).
+    #[test]
+    fn dashed_setup_cfg_keys_are_dependencies() {
+        let dir = temp_project("setupcfg-dashes");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall-requires =\n    six\n",
+        )
+        .unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        assert_eq!(manifest.input, "setup.cfg");
+        assert_eq!(manifest.requirements, ["six"]);
+    }
+
+    /// `install_requires = file: ...` (setuptools 62.6+) reads each named
+    /// file in the project as requirement lines; a missing file adds
+    /// nothing, as in setuptools; a file outside the project and a pip
+    /// option inside one are refused (#690).
+    #[test]
+    fn setup_cfg_file_directive_reads_the_named_requirements() {
+        let dir = temp_project("setupcfg-file");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = file: reqs.txt, absent.txt\n\
+             [options.extras_require]\nfast = file: fast.txt\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("reqs.txt"), "six\n# a comment\n\n  idna>=3  \n").unwrap();
+        fs::write(dir.0.join("fast.txt"), "uvloop\n").unwrap();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        // The extra is read from its file too, and left out: not requested.
+        assert_eq!(manifest.requirements, ["six", "idna>=3"]);
+        let root = ProjectRoot::open(&dir.0).unwrap();
+        assert_eq!(
+            setup_cfg_file_inputs(&root).unwrap(),
+            [
+                PathBuf::from("reqs.txt"),
+                "absent.txt".into(),
+                "fast.txt".into()
+            ]
+        );
+        assert!(crate::tailors::python::resolve::resolution_inputs(&root)
+            .unwrap()
+            .contains(&PathBuf::from("reqs.txt")));
+
+        fs::write(dir.0.join("reqs.txt"), "-r other.txt\n").unwrap();
+        let error = discover_in(&dir.0).unwrap_err().to_string();
+        assert!(error.contains("`-r other.txt` is a pip option"), "{error}");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = file: ../shared.txt\n",
+        )
+        .unwrap();
+        let error = discover_in(&dir.0).unwrap_err().to_string();
+        assert!(
+            error.contains("file: ../shared.txt names a file outside the project"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn indented_setup_cfg_install_requires_is_a_manifest_dependency() {
         let dir = temp_project("setupcfg-indented-manifest");

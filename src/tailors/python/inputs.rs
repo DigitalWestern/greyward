@@ -89,6 +89,9 @@ pub fn python_input_records(
     ] {
         candidates.push(dir.join(extra));
     }
+    for file in manifest::setup_cfg_file_inputs(project)? {
+        candidates.push(dir.join(file));
+    }
     comforter::input_records(project, &candidates)
 }
 

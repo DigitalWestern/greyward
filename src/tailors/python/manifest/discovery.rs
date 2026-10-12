@@ -220,6 +220,95 @@ pub(crate) fn resolution_requirements_source(project: &ProjectRoot) -> io::Resul
     requirements_directory_candidate(project, &config(project)?)
 }
 
+/// A setup.cfg requirement list (`install_requires`, or one extra's), with
+/// setuptools' `file:` directive (62.6+) expanded: the requirements of each
+/// comma-separated file, relative to the project, one per stripped line,
+/// blank and `#` lines dropped. A file that does not exist adds nothing, as
+/// in setuptools, and one outside the project is refused, as setuptools
+/// refuses it. A pip option in such a file is refused: setuptools would not
+/// read it, and uv would follow it.
+fn setup_cfg_requirement_list(
+    project: &ProjectRoot,
+    key: &str,
+    values: &[String],
+) -> io::Result<Vec<String>> {
+    let Some(files) = setup_cfg_file_directive(values) else {
+        return Ok(values.to_vec());
+    };
+    let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
+    let mut requirements = Vec::new();
+    for name in files {
+        let relative = setup_cfg_directive_path(name).ok_or_else(|| {
+            invalid(format!(
+                "setup.cfg {key} = file: {name} names a file outside the project"
+            ))
+        })?;
+        let path = project.path().join(relative);
+        if !is_project_file(project, &path)? {
+            continue;
+        }
+        for line in read_text(project, &path)?.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('-') {
+                return Err(invalid(format!(
+                    "setup.cfg {key} = file: {name}: `{line}` is a pip option, not a \
+                     requirement setuptools reads"
+                )));
+            }
+            requirements.push(line.to_string());
+        }
+    }
+    Ok(requirements)
+}
+
+/// The files a setup.cfg value names with `file:`, or `None` when it is a
+/// plain list.
+fn setup_cfg_file_directive(values: &[String]) -> Option<impl Iterator<Item = &str>> {
+    let [only] = values else {
+        return None;
+    };
+    let files = only.strip_prefix("file:")?;
+    Some(
+        files
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty()),
+    )
+}
+
+/// A `file:` name as a path inside the project, or `None` for one outside.
+fn setup_cfg_directive_path(name: &str) -> Option<&Path> {
+    let path = Path::new(name);
+    (!path.is_absolute()
+        && !path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir))
+    .then_some(path)
+}
+
+/// The files setup.cfg's requirement lists name with `file:`, inside the
+/// project: inputs of the lock compiled from it, like setup.cfg itself.
+pub(crate) fn setup_cfg_file_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    let path = project.path().join("setup.cfg");
+    if !is_project_file(project, &path)? {
+        return Ok(Vec::new());
+    }
+    let parsed = pyselect::parse_setup_cfg(&read_text(project, &path)?);
+    let mut files = Vec::new();
+    for values in std::iter::once(&parsed.install_requires).chain(parsed.extras_require.values()) {
+        for name in setup_cfg_file_directive(values).into_iter().flatten() {
+            if let Some(relative) = setup_cfg_directive_path(name) {
+                if !files.iter().any(|file: &PathBuf| file == relative) {
+                    files.push(relative.to_path_buf());
+                }
+            }
+        }
+    }
+    Ok(files)
+}
+
 pub(super) fn setup_or_requirements_manifest(
     project: &ProjectRoot,
     cfg: &GreywardPythonConfig,
@@ -230,12 +319,14 @@ pub(super) fn setup_or_requirements_manifest(
     if is_project_file(project, &setup_cfg_path)? {
         let text = read_text(project, &setup_cfg_path)?;
         let parsed = pyselect::parse_setup_cfg(&text);
-        let mut requirements = parsed.install_requires.clone();
+        let mut requirements =
+            setup_cfg_requirement_list(project, "install_requires", &parsed.install_requires)?;
         for (extra, values) in &parsed.extras_require {
+            let values = setup_cfg_requirement_list(project, extra, values)?;
             if cfg.extras.contains(extra) {
-                requirements.extend(values.iter().cloned());
+                requirements.extend(values);
             } else {
-                for value in values {
+                for value in &values {
                     crate::kernel::policy::skip_optional(
                         extra,
                         "setup.cfg extra, not requested",
@@ -248,11 +339,16 @@ pub(super) fn setup_or_requirements_manifest(
             true
         } else {
             let setup_py = read_text(project, &setup_py_path)?;
-            // A declarative install_requires list is authoritative. An empty
-            // list is not: setup.py may provide the real dependencies, and a
-            // call through an alias (for example `s(...)`) must be probed.
+            // A declarative install_requires list is authoritative only
+            // while setup.py cannot set its own: a value passed to `setup()`
+            // wins over setup.cfg's in setuptools (#690). An empty list is
+            // not authoritative either: setup.py may provide the real
+            // dependencies, and a call through an alias (for example
+            // `s(...)`) must be probed.
             setup_py_is_provably_trivial(&setup_py)
-                || (parsed.install_requires_found && !parsed.install_requires.is_empty())
+                || (parsed.install_requires_found
+                    && !parsed.install_requires.is_empty()
+                    && !setup_py_may_pass_install_requires(&setup_py))
         };
         if setup_py_safe {
             return Ok(Manifest {

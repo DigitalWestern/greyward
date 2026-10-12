@@ -3605,8 +3605,9 @@ uv rows onto the door:
 - **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,
   `requirements.in`, `requirements.txt`, `requirements.lock.txt`, and each
   uv workspace member's `pyproject.toml` (`[tool.uv.workspace]` members
-  globs minus `exclude`). Inputs: `setup.cfg`, `setup.py`, and every file
-  a top-level requirements file includes inside the project. An include
+  globs minus `exclude`). Inputs: `setup.cfg`, `setup.py`, every file
+  a top-level requirements file includes inside the project, and every
+  file setup.cfg's requirement lists name with `file:`. An include
   outside the project means the door publishes with no record (the
   missing-lock door already compiles the flattened text then) and attest
   refuses it. The sync takes the basis right after planning.

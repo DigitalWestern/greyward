@@ -323,9 +323,9 @@ place of uv's command line (`--custom-compile-command`), so the same
 resolution writes the same bytes on every machine. Python's resolution
 outputs are `pyproject.toml`, `uv.lock`, `requirements.in`,
 `requirements.txt`, `requirements.lock.txt`, and every uv workspace
-member's `pyproject.toml`; its inputs are `setup.cfg`, `setup.py`, and
-every file a requirements file includes inside the project
-(`tailors/python/resolve.rs`).
+member's `pyproject.toml`; its inputs are `setup.cfg`, `setup.py`,
+every file a requirements file includes inside the project, and every
+file setup.cfg names with `file:` (`tailors/python/resolve.rs`).
 
 `targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):

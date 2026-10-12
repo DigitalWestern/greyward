@@ -237,7 +237,7 @@ fn setup_cfg_requirement_list(
     };
     let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
     let mut requirements = Vec::new();
-    for name in files {
+    for name in &files {
         let relative = setup_cfg_directive_path(name).ok_or_else(|| {
             invalid(format!(
                 "setup.cfg {key} = file: {name} names a file outside the project"
@@ -264,17 +264,25 @@ fn setup_cfg_requirement_list(
 }
 
 /// The files a setup.cfg value names with `file:`, or `None` when it is a
-/// plain list.
-fn setup_cfg_file_directive(values: &[String]) -> Option<impl Iterator<Item = &str>> {
-    let [only] = values else {
-        return None;
-    };
-    let files = only.strip_prefix("file:")?;
+/// plain list. setuptools reads the whole value, its continuation lines
+/// joined by newlines, and splits what follows `file:` on commas, so a
+/// directive may carry on across lines after a trailing comma. A name
+/// that spans a line break without a comma names no file that exists,
+/// and adds nothing, as in setuptools.
+fn setup_cfg_file_directive(values: &[String]) -> Option<Vec<String>> {
+    let files = values.first()?.strip_prefix("file:")?;
+    let rest = values[1..].iter().map(String::as_str);
+    let joined = std::iter::once(files)
+        .chain(rest)
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(
-        files
+        joined
             .split(',')
             .map(str::trim)
-            .filter(|name| !name.is_empty()),
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect(),
     )
 }
 
@@ -299,7 +307,7 @@ pub(crate) fn setup_cfg_file_inputs(project: &ProjectRoot) -> io::Result<Vec<Pat
     let mut files = Vec::new();
     for values in std::iter::once(&parsed.install_requires).chain(parsed.extras_require.values()) {
         for name in setup_cfg_file_directive(values).into_iter().flatten() {
-            if let Some(relative) = setup_cfg_directive_path(name) {
+            if let Some(relative) = setup_cfg_directive_path(&name) {
                 if !files.iter().any(|file: &PathBuf| file == relative) {
                     files.push(relative.to_path_buf());
                 }

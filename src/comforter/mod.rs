@@ -336,11 +336,15 @@ fn write_closure_inner(
     // holds the lock supplies it: a second `project_lock_in` from this
     // process would wait on it forever.
     let owned_project_lock = if supplied_project_lock.is_none() {
+        #[cfg(test)]
+        attribution.pause(crate::kernel::resolve::pause::PausePoint::Publishing);
         Some(store.project_lock_in(project)?)
     } else {
         None
     };
     let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
+    #[cfg(test)]
+    attribution.pause(crate::kernel::resolve::pause::PausePoint::Joining);
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
     // them before anything of this sync becomes visible.
@@ -439,6 +443,8 @@ fn write_closure_inner(
     // swap in that window fails the sync instead of passing silently.
     project.check_still_named()?;
     attribution.mark_published()?;
+    #[cfg(test)]
+    attribution.pause(crate::kernel::resolve::pause::PausePoint::Published);
     Ok(())
 }
 

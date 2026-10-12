@@ -14,6 +14,8 @@ pub mod edit;
 pub mod elixir;
 pub mod go;
 pub mod node;
+#[cfg(test)]
+pub(crate) mod pipeline;
 pub mod python;
 pub mod ruby;
 

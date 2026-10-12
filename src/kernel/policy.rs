@@ -1017,6 +1017,10 @@ pub struct Attribution {
     // policy in force.
     #[cfg(test)]
     policy: Option<Policy>,
+    // The pause points of the invocation that owns this frame, shared by
+    // its nested frames. Only a test sets them (`with_pauses`).
+    #[cfg(test)]
+    pauses: Option<Arc<crate::kernel::resolve::pause::PausePoints>>,
 }
 
 impl Attribution {
@@ -1052,8 +1056,30 @@ impl Attribution {
                 active: true,
                 #[cfg(test)]
                 policy: None,
+                #[cfg(test)]
+                pauses: None,
             })
         })
+    }
+
+    /// This frame with `pauses` fired at every stage its invocation
+    /// reaches: the planner's doors, the publication lock, the join and
+    /// the closure write. Test-only, and scoped to this invocation.
+    #[cfg(test)]
+    pub(crate) fn with_pauses(
+        mut self,
+        pauses: Arc<crate::kernel::resolve::pause::PausePoints>,
+    ) -> Self {
+        self.pauses = Some(pauses);
+        self
+    }
+
+    /// Run this invocation's hooks for `point`, if a test set any.
+    #[cfg(test)]
+    pub(crate) fn pause(&self, point: crate::kernel::resolve::pause::PausePoint) {
+        if let Some(pauses) = &self.pauses {
+            pauses.reach(point);
+        }
     }
 
     /// This frame with `policy` in place of the policy in force for what
@@ -1114,6 +1140,8 @@ impl Attribution {
                 active: true,
                 #[cfg(test)]
                 policy: None,
+                #[cfg(test)]
+                pauses: self.pauses.clone(),
             })
         })
     }

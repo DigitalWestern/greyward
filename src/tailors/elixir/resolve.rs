@@ -198,6 +198,8 @@ pub fn plan_elixir(
     }
     require_lock(project)?;
     let lock = read_mix_lock(project)?;
+    #[cfg(test)]
+    door.pause(crate::kernel::resolve::pause::PausePoint::Captured);
     let bind = |input: String, basis: &crate::comforter::join::Digests| {
         format!(
             "canonical-project-v1:{input}:{}",
@@ -247,6 +249,8 @@ pub fn plan_elixir(
             "Elixir resolution inputs changed while planning; run `ward` again",
         ));
     }
+    #[cfg(test)]
+    door.pause(crate::kernel::resolve::pause::PausePoint::Planned);
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 

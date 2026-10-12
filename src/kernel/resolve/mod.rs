@@ -35,6 +35,8 @@ pub mod keyscrub;
 pub mod ledger;
 pub mod mirror;
 pub mod outputs;
+#[cfg(test)]
+pub(crate) mod pause;
 pub mod proxy;
 pub mod record;
 pub mod redact;
@@ -176,6 +178,12 @@ impl<'a> ResolutionDoor<'a> {
     /// tool's projection claims it).
     pub fn attribution(&mut self) -> &mut Attribution {
         self.attribution
+    }
+
+    /// Run the hooks a test set on this door's invocation for `point`.
+    #[cfg(test)]
+    pub(crate) fn pause(&self, point: pause::PausePoint) {
+        self.attribution.pause(point);
     }
 
     pub fn store(&self) -> &'a Store {

@@ -587,6 +587,83 @@ pub(crate) fn proxy_authorization(token: &str) -> String {
     format!("Proxy-Authorization: Basic {encoded}\r\n")
 }
 
+/// A proxy with no upstream, built once per test process: for an online
+/// door whose stand-in tool makes no request, so its session opens and
+/// closes with nothing to answer. It holds no files.
+#[cfg(test)]
+pub(crate) fn idle_proxy() -> &'static Proxy {
+    static PROXY: std::sync::OnceLock<Proxy> = std::sync::OnceLock::new();
+    PROXY.get_or_init(|| {
+        let reach = Reach::loopback();
+        Proxy::new(ProxyConfig {
+            roots: FixtureCa::new().roots(),
+            lookup: reach.lookup.clone(),
+            workers: 2,
+            connect_timeout: Duration::from_secs(2),
+            io_timeout: Duration::from_secs(2),
+            idle_timeout: Duration::from_secs(2),
+            request_timeout: reach.request_timeout,
+            min_response_rate: reach.min_response_rate,
+            allow_loopback: false,
+            connect_to: None,
+        })
+        .unwrap()
+    })
+}
+
+/// Publish `outputs` and `receipt` into `project` through a resolution
+/// transaction of its own, under a store lease of its own: what a
+/// concurrent ward command's door does to the project when it publishes.
+/// It takes the project lock like every door, so it waits for any
+/// publication that holds it.
+#[cfg(test)]
+pub(crate) fn publish_through_transaction(
+    store_root: &std::path::Path,
+    project: &std::path::Path,
+    ecosystem: &str,
+    outputs: &[(std::path::PathBuf, Vec<u8>)],
+    receipt: &[u8],
+) -> io::Result<()> {
+    use super::outputs::Outputs;
+    use super::snapshot::{Snapshot, SnapshotSpec};
+    use super::transaction::{HoldSpec, Transaction};
+    use crate::kernel::fsroot::ProjectRoot;
+    let store = Store::for_test(store_root.to_path_buf());
+    let activity = StoreActivity::acquire(store_root, ActivityMode::Shared)?;
+    let declared: Vec<std::path::PathBuf> = outputs.iter().map(|(path, _)| path.clone()).collect();
+    let transaction = Transaction::hold(
+        &store,
+        &activity,
+        ProjectRoot::open(project)?,
+        &HoldSpec {
+            ecosystem,
+            outputs: &declared,
+            receipt: true,
+        },
+    )?;
+    let snapshot = Snapshot::build(
+        &store,
+        &activity,
+        &SnapshotSpec {
+            lock_root: &ProjectRoot::open(project)?,
+            extra_roots: &[],
+            exclude: &[],
+            forbidden: &[],
+        },
+    )?;
+    let staged = snapshot.lock_root().staged.clone();
+    for (relative, bytes) in outputs {
+        if let Some(parent) = staged.join(relative).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(staged.join(relative), bytes)?;
+    }
+    let changes = snapshot.diff()?;
+    let classified = snapshot.classify(&changes, &declared, &[])?;
+    let copied = Outputs::copy(&store, &activity, &snapshot, &classified.outputs, &[])?;
+    transaction.publish(&copied, Some(receipt)).map(|_| ())
+}
+
 /// The sandbox-host checks. A module of its own, last in the file, so the
 /// architecture test reads it as test code: a skip message is for whoever
 /// ran the suite.

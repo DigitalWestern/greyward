@@ -318,6 +318,8 @@ pub(super) fn run(
             forbidden: &key_ids,
         },
     )?;
+    #[cfg(test)]
+    door.pause(super::pause::PausePoint::Staged);
     check_planning_inputs(&snapshot, &confined.expected_inputs)?;
     if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
         return Err(io::Error::other(

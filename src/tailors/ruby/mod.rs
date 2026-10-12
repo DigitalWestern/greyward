@@ -769,6 +769,8 @@ pub fn plan_ruby(
     require_lock(project)?;
     let basis = resolve::resolution_basis(project)?;
     let lock = read_gemfile_lock(project)?;
+    #[cfg(test)]
+    door.pause(crate::kernel::resolve::pause::PausePoint::Captured);
     // No plan cache in the project: an editable cache with a predictable
     // key is forgeable authority. Planning re-derives from the lock every
     // sync; the store's digest records keep an unchanged lock off the
@@ -876,6 +878,8 @@ pub fn plan_ruby(
             "Ruby resolution inputs changed while planning; run `ward` again",
         ));
     }
+    #[cfg(test)]
+    door.pause(crate::kernel::resolve::pause::PausePoint::Planned);
     Ok((plan, hex::encode(Sha256::digest(lock.as_bytes())), basis))
 }
 
@@ -2410,3 +2414,6 @@ mod rubygems_check_tests {
         assert!(native);
     }
 }
+
+#[cfg(test)]
+mod pipeline_tests;

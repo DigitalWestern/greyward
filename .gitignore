@@ -1,10 +1,12 @@
 /target
-# .greyward/ is half record, half cache. The two records `ward audit` reads are
-# committed; everything else in there is machine-local. The `**/` matters:
-# a monorepo has a .greyward/ per subproject, and so does tests/fixtures/*.
+# .greyward/ is half record, half cache. The records `ward audit` and a
+# sync's join read are committed; everything else in there is
+# machine-local. The `**/` matters: a monorepo has a .greyward/ per
+# subproject, and so does tests/fixtures/*.
 # README.md has the table.
 **/.greyward/*
 !**/.greyward/closures/
+!**/.greyward/resolution/
 !**/.greyward/policy.toml
 .venv
 __pycache__/

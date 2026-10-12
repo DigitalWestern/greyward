@@ -51,8 +51,10 @@ const GIT_METHODS: &[&str] = &["GET", "HEAD", "POST"];
 const READ_METHODS: &[&str] = &["GET", "HEAD"];
 
 /// The tool's side of the tunnel under TLS: the connection's buffered
-/// reader (it may already hold the client's first TLS bytes) and its
-/// writer.
+/// reader and its writer. The reader holds nothing yet when TLS starts: a
+/// tool that sends its first TLS bytes before the `CONNECT` is answered
+/// gets a 400, since `read_body` refuses any bytes behind a request as
+/// pipelining.
 pub(super) struct Plain<'a, S: Stream> {
     inner: &'a mut BufReader<Timed<S>>,
 }
@@ -143,7 +145,8 @@ pub(super) fn serve_tunnel<S: Stream>(
         origin: Endpoint::intercepted(tunnel.host, tunnel.port).origin(),
     };
     let mut first = true;
-    while let Some(request) = next_request(&mut tls, context, first, |head| body_cap(&target, head))
+    while let Some((request, _held)) =
+        next_request(&mut tls, context, first, |head| body_cap(&target, head))
     {
         first = false;
         tls.get_mut().start_response();
@@ -276,7 +279,7 @@ fn serve(
             }
             let detail = "a git fetch through the resolution proxy";
             if let Err(refusal) =
-                state.refuse_if_denied(policy::GIT_DEPENDENCY, &repository, detail)
+                state.check(policy::GIT_DEPENDENCY, &git_subject(&repository), detail)
             {
                 return refuse(out, shown, 403, &refusal, keep_alive);
             }
@@ -363,21 +366,20 @@ fn hop_allowed(
     if std::mem::discriminant(&class) == std::mem::discriminant(first) {
         return Ok(());
     }
-    let origin = next.origin().ascii_serialization();
+    let origin = redact::origin(next);
     match &class {
         Class::Route => Ok(()),
-        Class::Git { repository } => state.refuse_if_denied(
+        Class::Git { repository } => state.check(
             policy::GIT_DEPENDENCY,
-            repository,
+            &git_subject(repository),
             "a redirect to a git fetch through the resolution proxy",
         ),
         Class::Unattested => state.check(
             policy::UNATTESTED_INDEX,
             &origin,
             &format!(
-                "a redirect led to {}, which is not one of this door's registries; it was \
-                 forwarded through interception and recorded",
-                redact::url(next.as_str(), &[])
+                "a redirect led to {origin}, which is not one of this door's registries; it \
+                 was forwarded through interception and recorded"
             ),
         ),
     }
@@ -393,6 +395,7 @@ fn exchange<'a>(
     Exchange {
         state: &context.state,
         client: &context.shared.client,
+        budget: &context.shared.budget,
         route,
         address: &context.address,
         method: &request.method,
@@ -431,6 +434,17 @@ fn host_matches(header: Option<&str>, target: &Target<'_>) -> bool {
         && parsed.port_or_known_default() == Some(target.port)
         && parsed.path() == "/"
         && parsed.username().is_empty()
+}
+
+/// The subject a git fetch's `git-dependency` fact names: the
+/// repository's origin. Every git-shaped request is recorded, whether or
+/// not the lock ends up naming a git dependency, since code that runs
+/// during resolution can make one without adding any. The path is left
+/// out: some hosts carry a token there, and the record is committed.
+fn git_subject(repository: &str) -> String {
+    Url::parse(repository)
+        .map(|url| redact::origin(&url))
+        .unwrap_or_else(|_| repository.to_string())
 }
 
 /// What a git fetch request asks for: `Some(Ok(repository))` for a fetch,
@@ -728,6 +742,44 @@ mod tests {
         assert!(harness.upstream.seen().is_empty());
     }
 
+    /// An account token in the path of a host no route serves (Gemfury's
+    /// `/<token>/<account>/`) never reaches the portable ledger, which
+    /// leaves the machine: the entry names the origin and the file. The
+    /// diagnostics row, which stays on the machine, keeps the whole path.
+    #[test]
+    fn a_path_token_on_an_unrouted_host_stays_out_of_the_portable_ledger() {
+        const TOKEN: &str = "s3cr3tAcc0untT0ken";
+        let harness = Harness::new("intercept-path-token");
+        let path = format!("/{TOKEN}/acme/meta/pkg.json");
+        harness
+            .upstream
+            .set(&path, Behavior::Reply(Reply::new(200, b"{}")));
+        let (session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let answer = tunnel_request(&mut tunnel, &get(&authority, &path), b"");
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        drop(tunnel);
+        let report = session.finish();
+        let portable = serde_json::to_string(&entries(&report)).unwrap();
+        assert!(!portable.contains(TOKEN), "{portable}");
+        assert!(
+            entries(&report)
+                .iter()
+                .any(|entry| entry.url == format!("https://{authority}/.../pkg.json")),
+            "{portable}"
+        );
+        assert!(
+            report
+                .diagnostics
+                .requests
+                .iter()
+                .any(|row| row.url.contains(TOKEN)),
+            "the local row keeps the path"
+        );
+    }
+
     /// A host no route serves is `unattested-index`: forwarded and recorded
     /// under permissive policy, refused when the kind is denied.
     #[test]
@@ -750,10 +802,11 @@ mod tests {
                 assert_eq!(facts.len(), 1, "{facts:?}");
                 assert_eq!(facts[0].kind, policy::UNATTESTED_INDEX);
                 assert_eq!(facts[0].subject, origin);
+                // Off every route, the ledger names origin and file only.
                 assert!(entries(&report)
                     .iter()
                     .any(|entry| entry.class == "artifact"
-                        && entry.url == format!("{origin}/meta/pkg.json")
+                        && entry.url == format!("{origin}/.../pkg.json")
                         && entry.status == 200));
             } else {
                 assert_eq!(answer.status, 403, "{}", answer.text());
@@ -823,7 +876,9 @@ mod tests {
             if denied {
                 assert!(!output.status.success(), "{stderr}");
                 assert_eq!(report.facts.refusals.len(), 1, "{:?}", report.facts);
-                assert!(report.facts.refusals[0].contains("https://github.com/dtolnay/itoa"));
+                let refusal = &report.facts.refusals[0];
+                assert!(refusal.contains("https://github.com"), "{refusal}");
+                assert!(!refusal.contains("dtolnay"), "{refusal}");
                 continue;
             }
             let bodies: Vec<String> = harness
@@ -838,7 +893,12 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stdout)
             );
-            assert!(report.facts.exceptions.is_empty(), "{:?}", report.facts);
+            // Recorded for the host, whether or not a lock names the
+            // repository: the record's evidence never rests on the lock.
+            let facts: Vec<_> = report.facts.exceptions.iter().collect();
+            assert_eq!(facts.len(), 1, "{facts:?}");
+            assert_eq!(facts[0].kind, policy::GIT_DEPENDENCY);
+            assert_eq!(facts[0].subject, "https://github.com");
             let git: Vec<(String, String, u16)> = entries(&report)
                 .into_iter()
                 .filter(|entry| entry.class == "git")
@@ -847,13 +907,14 @@ mod tests {
             assert!(
                 git.contains(&(
                     "GET".into(),
-                    // `service` names content for the git row, so the
-                    // ledger keeps its value.
-                    "https://github.com/dtolnay/itoa/info/refs?service=git-upload-pack".into(),
+                    // A git host is off every route, so the path is
+                    // reduced to its file name; `service` names content for
+                    // the git row, so the ledger keeps its value.
+                    "https://github.com/.../refs?service=git-upload-pack".into(),
                     200
                 )) && git.contains(&(
                     "POST".into(),
-                    "https://github.com/dtolnay/itoa/git-upload-pack".into(),
+                    "https://github.com/.../git-upload-pack".into(),
                     200
                 )),
                 "{git:?}"
@@ -863,6 +924,45 @@ mod tests {
                 "git's first CONNECT carries no credentials"
             );
         }
+    }
+
+    /// A git negotiation body is read under the process's in-flight byte
+    /// budget, taken before a byte of it is read: a body that would pass
+    /// the budget is answered 503 with `Retry-After` and never reaches
+    /// upstream, and a served body gives its share back (two bodies that
+    /// each fit alone are both served, one after the other).
+    #[test]
+    fn a_git_post_past_the_in_flight_budget_is_a_503_and_the_budget_is_released() {
+        let harness = Harness::with(
+            "intercept-git-budget",
+            Reach {
+                buffer_budget: 1 << 20,
+                ..Reach::loopback()
+            },
+        );
+        let (_session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let pack = "/a/repo.git/git-upload-pack";
+        harness
+            .upstream
+            .set(pack, Behavior::Reply(Reply::new(200, b"0000")));
+        let roots = harness.proxy.authority().roots();
+        let fits = vec![b'0'; 700 << 10];
+        for _ in 0..2 {
+            let mut tunnel =
+                open_tunnel(&address, &authority, "third.test", roots.clone(), &[]).unwrap();
+            let answer = tunnel_request(&mut tunnel, &post(&authority, pack, &fits, false), &fits);
+            assert_eq!(answer.status, 200, "{}", answer.text());
+        }
+        assert_eq!(harness.upstream.hits(pack), 2);
+        // Declared past the budget: refused from the head alone, so the
+        // body is never sent.
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let head = post(&authority, pack, &vec![0; 2 << 20], false);
+        let answer = tunnel_request(&mut tunnel, &head, b"");
+        assert_eq!(answer.status, 503, "{}", answer.text());
+        assert_eq!(answer.headers.get("retry-after"), Some("1"));
+        assert_eq!(harness.upstream.hits(pack), 2);
     }
 
     /// A git `POST` inside a tunnel to `third.test` (no route serves it).
@@ -924,11 +1024,13 @@ mod tests {
             assert_eq!(at(target).body, body, "{target}");
             assert_eq!(at(target).headers.get("content-encoding"), Some("gzip"));
         }
-        let origin = format!("https://{authority}");
+        // Both name the file only: the ledger names an off-route URL by
+        // origin and file name.
+        let reduced = format!("https://{authority}/.../git-upload-pack");
         assert!(
             entries(&report).iter().any(|entry| entry.class == "git"
-                && entry.url == format!("{origin}{from}")
-                && entry.redirected_to.as_deref() == Some(&format!("{origin}{to}"))
+                && entry.url == reduced
+                && entry.redirected_to.as_deref() == Some(&reduced)
                 && entry.status == 200),
             "{:?}",
             entries(&report)
@@ -1011,20 +1113,80 @@ mod tests {
             drop(tunnel);
             let report = session.finish();
             let origin = format!("https://{authority}");
+            let facts: Vec<_> = report.facts.exceptions.iter().collect();
+            let fact = |kind: &str| {
+                facts
+                    .iter()
+                    .any(|fact| fact.kind == kind && fact.subject == origin)
+            };
+            // The first request, a git fetch, is recorded either way.
+            assert!(fact(policy::GIT_DEPENDENCY), "{facts:?}");
             if served {
                 assert_eq!(answer.status, 200, "{}", answer.text());
-                let facts: Vec<_> = report.facts.exceptions.iter().collect();
-                assert_eq!(facts.len(), 1, "{facts:?}");
-                assert_eq!(facts[0].kind, policy::UNATTESTED_INDEX);
-                assert_eq!(facts[0].subject, origin);
+                assert_eq!(facts.len(), 2, "{facts:?}");
+                assert!(fact(policy::UNATTESTED_INDEX), "{facts:?}");
                 assert!(entries(&report).iter().any(|entry| entry.class == "git"
-                    && entry.redirected_to.as_deref() == Some(&format!("{origin}/meta/pkg.json"))));
+                    && entry.redirected_to.as_deref() == Some(&format!("{origin}/.../pkg.json"))));
             } else {
                 assert_eq!(answer.status, 403, "{}", answer.text());
                 assert_eq!(harness.upstream.hits("/meta/pkg.json"), 0);
-                assert!(report.facts.exceptions.is_empty(), "{:?}", report.facts);
+                assert_eq!(facts.len(), 1, "{facts:?}");
                 assert_eq!(report.facts.refusals.len(), 1, "{:?}", report.facts);
             }
+        }
+    }
+
+    /// A git-shaped request to a host no lock names, under a policy that
+    /// denies `unattested-index` only: it is served, and the record carries
+    /// a `git-dependency` fact naming the host (never the path), so a policy
+    /// that denies `git-dependency` sees it. Denying `git-dependency`
+    /// refuses it before upstream is reached.
+    #[test]
+    fn every_git_shaped_request_is_recorded_as_a_git_dependency() {
+        for denied in [false, true] {
+            let harness = Harness::new("intercept-git-recorded");
+            let policy = if denied {
+                deny(policy::GIT_DEPENDENCY)
+            } else {
+                deny(policy::UNATTESTED_INDEX)
+            };
+            let (session, address) = intercepting(&harness, policy);
+            let authority = format!("third.test:{}", harness.upstream.port());
+            let refs = "/secret-token/repo.git/info/refs?service=git-upload-pack";
+            let pack = "/secret-token/repo.git/git-upload-pack";
+            harness
+                .upstream
+                .set(refs, Behavior::Reply(Reply::new(200, b"refs")));
+            harness
+                .upstream
+                .set(pack, Behavior::Reply(Reply::new(200, b"0000")));
+            let roots = harness.proxy.authority().roots();
+            let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+            let fetched = tunnel_request(&mut tunnel, &get(&authority, refs), b"");
+            let body = b"0014command=ls-refs\n0000";
+            let posted = tunnel_request(&mut tunnel, &post(&authority, pack, body, false), body);
+            drop(tunnel);
+            let report = session.finish();
+            let origin = format!("https://{authority}");
+            if denied {
+                assert_eq!(fetched.status, 403, "{}", fetched.text());
+                assert_eq!(harness.upstream.hits(refs), 0);
+                assert!(report.facts.exceptions.is_empty(), "{:?}", report.facts);
+                assert!(!report.facts.refusals.is_empty(), "{:?}", report.facts);
+                assert!(report
+                    .facts
+                    .refusals
+                    .iter()
+                    .all(|text| !text.contains("secret-token")));
+                continue;
+            }
+            assert_eq!(fetched.status, 200, "{}", fetched.text());
+            assert_eq!(posted.status, 200, "{}", posted.text());
+            let facts: Vec<_> = report.facts.exceptions.iter().collect();
+            assert_eq!(facts.len(), 1, "{facts:?}");
+            assert_eq!(facts[0].kind, policy::GIT_DEPENDENCY);
+            assert_eq!(facts[0].subject, origin);
+            assert!(!facts[0].detail.contains("secret-token"), "{facts:?}");
         }
     }
 

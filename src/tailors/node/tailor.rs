@@ -367,8 +367,8 @@ impl Tailor for Node {
         &self,
         root: &Path,
         name: &str,
-        args: &[String],
-    ) -> io::Result<Option<Vec<(String, String)>>> {
+        args: &[std::ffi::OsString],
+    ) -> io::Result<Option<Vec<(String, std::ffi::OsString)>>> {
         let package_json = root.join("package.json");
         if !package_json.is_file() {
             return Ok(None);
@@ -381,9 +381,14 @@ impl Tailor for Node {
         &self,
         dir: &Path,
         cwd: &Path,
-        cmd: &[String],
+        cmd: &[std::ffi::OsString],
     ) -> io::Result<Option<ScriptRun>> {
+        // A script's name is a package.json key, so text; its arguments
+        // are the script's, whatever their bytes.
         let Some((name, args)) = cmd.split_first() else {
+            return Ok(None);
+        };
+        let Some(name) = name.to_str() else {
             return Ok(None);
         };
         let Some((path, json)) = projected_package_json(dir, cwd)? else {
@@ -857,13 +862,14 @@ mod tests {
                 "scripts": {"pretest": "echo pre", "test": "vitest", "posttest": "echo post"}}"#,
         )
         .unwrap();
-        let cmd = ["test".to_string(), "--run".to_string()];
+        let cmd = ["test".into(), "--run".into()];
         let run = Node.projected_script(&dir, &cwd, &cmd).unwrap().unwrap();
         let labels: Vec<&str> = run.steps.iter().map(|(label, _)| label.as_str()).collect();
         assert_eq!(labels, ["pretest", "test", "posttest"]);
-        assert!(run.steps[1].1.starts_with("vitest"), "{:?}", run.steps[1]);
-        assert!(run.steps[1].1.contains("--run"), "{:?}", run.steps[1]);
-        assert!(!run.steps[0].1.contains("--run"), "{:?}", run.steps[0]);
+        let text = |step: usize| run.steps[step].1.to_str().unwrap().to_string();
+        assert!(text(1).starts_with("vitest"), "{:?}", run.steps[1]);
+        assert!(text(1).contains("--run"), "{:?}", run.steps[1]);
+        assert!(!text(0).contains("--run"), "{:?}", run.steps[0]);
         assert_eq!(run.scrubbed_prefix, "npm_");
         assert_eq!(run.step_label_var, Some("npm_lifecycle_event"));
         let env: std::collections::BTreeMap<String, std::ffi::OsString> =
@@ -878,7 +884,7 @@ mod tests {
 
         // A name with no script, and a project ward has not projected, run
         // nothing here.
-        let missing = ["lint".to_string()];
+        let missing = ["lint".into()];
         assert!(Node
             .projected_script(&dir, &cwd, &missing)
             .unwrap()

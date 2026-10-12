@@ -1058,6 +1058,33 @@ fn a_first_scoped_build_explains_why_another_ecosystem_stops_it() {
     assert!(!project.0.join("greyward-toolchain.toml").exists());
 }
 
+/// The offline Python projection `env` and `run` read: a `.venv` symlink
+/// to a directory with a `bin`, and the closure record that names it.
+fn python_env_fixture(project: &Path) {
+    let object = project.join("env-object");
+    std::fs::create_dir_all(object.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&object, project.join(".venv")).unwrap();
+    let platform = greyward::kernel::platform::Platform::host().unwrap();
+    let closures = project.join(".greyward/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    std::fs::write(
+        closures.join("python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": platform.triple(),
+            "projected_at": 1,
+            "body": {
+                "env_object": object,
+                "python": {"version": "3.12.14"},
+                "plan": {"packages": []},
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 /// `ward env` prints the environment `ward run` would give a child, so the
 /// shell that evals it sees exactly what a greyward-run command sees. Offline:
 /// the `.venv` symlink and a closure record are the whole projection the
@@ -1076,28 +1103,7 @@ fn env_prints_the_run_environment_as_shell_lines() {
     assert!(stderr.contains("no environment projected here"), "{stderr}");
     assert!(stderr.contains("no manifest to sync one from"), "{stderr}");
 
-    let object = project.0.join("env-object");
-    std::fs::create_dir_all(object.join("bin")).unwrap();
-    std::os::unix::fs::symlink(&object, project.0.join(".venv")).unwrap();
-    let platform = greyward::kernel::platform::Platform::host().unwrap();
-    let closures = project.0.join(".greyward/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    std::fs::write(
-        closures.join("python.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "platform": platform.triple(),
-            "projected_at": 1,
-            "body": {
-                "env_object": object,
-                "python": {"version": "3.12.14"},
-                "plan": {"packages": []},
-            },
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    python_env_fixture(&project.0);
     // The command reads the cwd the kernel resolves, not the fixture path.
     let venv = project.0.canonicalize().unwrap().join(".venv");
 
@@ -1110,7 +1116,7 @@ fn env_prints_the_run_environment_as_shell_lines() {
         "{stdout}"
     );
     // The inherited PATH is referenced, not frozen into the line.
-    assert!(stdout.contains(":\"$PATH\"\n"), "{stdout}");
+    assert!(stdout.contains("'\"${PATH:+:$PATH}\"\n"), "{stdout}");
     assert!(
         stdout.contains(&format!("export VIRTUAL_ENV='{}'\n", venv.display())),
         "{stdout}"
@@ -1151,6 +1157,179 @@ fn env_prints_the_run_environment_as_shell_lines() {
         let stdout = text(&out.stdout);
         assert!(stdout.starts_with(first_word), "{shell}: {stdout}");
     }
+}
+
+/// A child's PATH is the projection's prefixes and the host PATH: with no
+/// host PATH there is no trailing empty entry (which would run a program
+/// from the current directory), and a project whose path holds ':' is
+/// refused rather than split into two entries naming other directories.
+#[test]
+fn the_child_path_never_names_the_current_directory_or_a_split_entry() {
+    let home = TempDir::boundary("cli-child-path-home");
+    let project = TempDir::boundary("cli-child-path-project");
+    python_env_fixture(&project.0);
+    let venv = project.0.canonicalize().unwrap().join(".venv");
+    let mut command = common::command(&project.0, &home.0, &home.0.join("store"));
+    command
+        .args(["run", "/bin/sh", "-c", "printf %s \"$PATH\""])
+        .env_remove("PATH");
+    let out = command.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), format!("{}/bin", venv.display()));
+
+    let colon = project.0.join("co:lon");
+    std::fs::create_dir_all(colon.join(".greyward")).unwrap();
+    python_env_fixture(&colon);
+    for args in [&["env"][..], &["run", "/bin/true"]] {
+        let out = ward(&colon, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("co:lon"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("':' separates PATH entries"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+/// `ward run <missing program>` names the program and exits 127, as a
+/// shell does, instead of a bare "No such file or directory".
+#[test]
+fn run_names_a_program_it_cannot_find() {
+    let home = TempDir::boundary("cli-run-missing-home");
+    let project = TempDir::boundary("cli-run-missing-project");
+    python_env_fixture(&project.0);
+    let out = ward(&project.0, &home.0, &["run", "pytset", "-x"]);
+    assert_eq!(out.status.code(), Some(127), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'pytset' not found on the environment's PATH"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("os error"), "{stderr}");
+}
+
+/// `-q` is "errors and results only": the user's own program keeps its
+/// stderr (a traceback, a compiler error), while ward's narration stays
+/// silent, and its status still passes through.
+#[test]
+fn quiet_keeps_the_users_programs_stderr() {
+    let home = TempDir::boundary("cli-quiet-child-home");
+    let project = TempDir::boundary("cli-quiet-child-project");
+    python_env_fixture(&project.0);
+    let out = ward(
+        &project.0,
+        &home.0,
+        &["-q", "run", "sh", "-c", "echo CE >&2; echo CO; exit 3"],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "CO\n");
+    assert_eq!(text(&out.stderr), "CE\n");
+}
+
+/// A shell can sit in a directory something else removed. Every command
+/// that needs the project fails saying so (in JSON under `--json`), never
+/// with ward's internal-error panic, and `doctor` still checks the host.
+#[test]
+fn a_removed_working_directory_is_an_error_not_a_panic() {
+    let home = TempDir::boundary("cli-gone-home");
+    let gone_from = |args: &[&str]| {
+        let gone = home.0.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        common::command_for(Path::new("/bin/sh"), &gone, &home.0, &home.0.join("store"))
+            .arg("-c")
+            .arg("rmdir \"$PWD\" && exec \"$0\" \"$@\"")
+            .arg(env!("CARGO_BIN_EXE_ward"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for args in [
+        &["status"][..],
+        &["plan"],
+        &["ls"],
+        &["env"],
+        &["audit"],
+        &[],
+    ] {
+        let out = gone_from(args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("the current directory no longer exists"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stderr.contains("internal error"), "{args:?}: {stderr}");
+    }
+    let out = gone_from(&["status", "--json"]);
+    let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+    assert!(failure["error"]
+        .as_str()
+        .unwrap()
+        .contains("no longer exists"));
+    let out = gone_from(&["doctor", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+    let checks = report["checks"].as_array().unwrap();
+    let project = checks.iter().find(|row| row["name"] == "project").unwrap();
+    assert_eq!(project["level"], "warn", "{report}");
+    assert!(project["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no longer exists"));
+    assert!(checks.iter().any(|row| row["name"] == "store"), "{report}");
+}
+
+/// A Linux file name can be any bytes. A program's argument that is not
+/// UTF-8 reaches the program as typed, so does `-C`'s directory, and a
+/// word ward reads itself is a usage error (exit 2), never a panic.
+#[test]
+fn an_argument_that_is_not_utf8_is_passed_on_or_refused() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let home = TempDir::boundary("cli-bytes-home");
+    let project = TempDir::boundary("cli-bytes-project");
+    python_env_fixture(&project.0);
+    let name = OsString::from_vec(b"caf\xe9".to_vec());
+    let ward_os = |cwd: &Path, args: &[&std::ffi::OsStr]| {
+        command(cwd, &home.0, &common::home_store(cwd, &home.0))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = ward_os(
+        &project.0,
+        &["run".as_ref(), "printf".as_ref(), "%s".as_ref(), &name],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.stdout, b"caf\xe9");
+    // Spelled like ward's -C, it is still the program's argument, whole.
+    for arg in [&b"-C\xe9"[..], b"--directory=\xe9"] {
+        let arg = OsString::from_vec(arg.to_vec());
+        let out = ward_os(
+            &project.0,
+            &["run".as_ref(), "printf".as_ref(), "%s".as_ref(), &arg],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(out.stdout, arg.as_encoded_bytes());
+    }
+
+    let out = ward_os(&project.0, &["status".as_ref(), &name]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("internal error"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    let elsewhere = home.0.join(&name);
+    std::fs::create_dir(&elsewhere).unwrap();
+    let out = ward_os(&home.0, &["-C".as_ref(), &name, "status".as_ref()]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("no project in"), "{stderr}");
 }
 
 #[test]
@@ -2462,6 +2641,129 @@ fn x_clean_is_offline_and_strict_about_trailing_arguments() {
             }),
             "{shell}"
         );
+    }
+}
+
+/// The bash completion, sourced and run as bash runs it, offers exactly
+/// the package.json script names: ward reads the file as JSON, so a
+/// one-line file with later blocks, a `:` in a name and a `}` in a command
+/// come out right, and the `scripts` key itself is never offered.
+#[test]
+fn bash_completion_offers_the_package_json_scripts_and_nothing_else() {
+    let home = TempDir::boundary("cli-completion-scripts");
+    std::fs::write(
+        home.0.join("package.json"),
+        r#"{"scripts": {"test:unit": "jest", "lint": "echo }"}, "dependencies": {"react": "1"}}"#,
+    )
+    .unwrap();
+    let completion = text(&ward(&home.0, &home.0, &["completions", "bash"]).stdout);
+    std::fs::write(home.0.join("ward.bash"), completion).unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_ward")).parent().unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = common::child("bash", &home.0)
+        .current_dir(&home.0)
+        .env("PATH", path)
+        .arg("-c")
+        .arg(
+            "source ./ward.bash; _ward_scripts; echo ---; \
+             COMP_WORDS=(ward run ''); COMP_CWORD=2; _ward; printf '%s\\n' \"${COMPREPLY[@]}\" | grep -x -e lint -e test:unit -e scripts -e react",
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        text(&out.stdout),
+        "lint\ntest:unit\n---\nlint\ntest:unit\n",
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// A script name is data from a package.json anyone can write: completing
+/// it never runs it as shell text, and a name with a space, a `:` or a `\`
+/// is one candidate, spelled as written. Each installed shell is checked.
+#[test]
+fn completion_never_evaluates_a_script_name() {
+    let home = TempDir::boundary("cli-completion-hostile");
+    let names = [
+        "$(printf RAN >&2)",
+        "`printf RAN >&2`",
+        "a b",
+        "c:d",
+        "e\\f",
+    ];
+    let scripts: serde_json::Map<String, serde_json::Value> = names
+        .iter()
+        .map(|name| (name.to_string(), serde_json::json!("true")))
+        .collect();
+    std::fs::write(
+        home.0.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({ "scripts": scripts })).unwrap(),
+    )
+    .unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_ward")).parent().unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let shell = |program: &str, script: &str| {
+        common::child(program, &home.0)
+            .current_dir(&home.0)
+            .env("PATH", &path)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap()
+    };
+    let mut expected: Vec<String> = names.iter().map(|name| format!("[{name}]")).collect();
+    expected.sort();
+    let bracketed = |out: &std::process::Output| {
+        let mut lines: Vec<String> = text(&out.stdout).lines().map(String::from).collect();
+        lines.sort();
+        lines
+    };
+
+    let completion = text(&ward(&home.0, &home.0, &["completions", "bash"]).stdout);
+    std::fs::write(home.0.join("ward.bash"), completion).unwrap();
+    for line in ["ward ''", "ward run ''"] {
+        let out = shell(
+            "bash",
+            &format!(
+                "source ./ward.bash; COMP_WORDS=({line}); COMP_CWORD=$((${{#COMP_WORDS[@]}} - 1)); \
+                 _ward; printf '[%s]\\n' \"${{COMPREPLY[@]}}\" | grep -F -x -e '[a b]' -e '[c:d]' \
+                 -e '[e\\f]' -e '[$(printf RAN >&2)]' -e '[`printf RAN >&2`]'"
+            ),
+        );
+        assert!(
+            !text(&out.stderr).contains("RAN"),
+            "bash {line}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            bracketed(&out),
+            expected,
+            "bash {line}: {}",
+            text(&out.stderr)
+        );
+    }
+
+    // zsh: `_describe` is stood in for by a printer of the candidates it
+    // is handed, which are `name` with `\` and `:` escaped for it.
+    if Path::new("/usr/bin/zsh").exists() || Path::new("/bin/zsh").exists() {
+        let completion = text(&ward(&home.0, &home.0, &["completions", "zsh"]).stdout);
+        let body = completion.trim_end().trim_end_matches("_ward \"$@\"");
+        std::fs::write(home.0.join("ward.zsh"), body).unwrap();
+        let out = shell(
+            "zsh",
+            "source ./ward.zsh; _describe() { print -rl -- \"${(@P)4}\" | sed 's/.*/[&]/' }; _ward_scripts",
+        );
+        assert!(
+            !text(&out.stderr).contains("RAN"),
+            "zsh: {}",
+            text(&out.stderr)
+        );
+        let mut escaped: Vec<String> = names
+            .iter()
+            .map(|name| format!("[{}]", name.replace('\\', "\\\\").replace(':', "\\:")))
+            .collect();
+        escaped.sort();
+        assert_eq!(bracketed(&out), escaped, "zsh: {}", text(&out.stderr));
     }
 }
 

@@ -25,7 +25,7 @@ pub fn run(
     args: &[String],
     frozen: bool,
 ) -> io::Result<i32> {
-    let cwd = project_dir();
+    let cwd = project_dir()?;
     let _policy = policy::init(&cwd)?;
 
     // `--eco` is ward's own ecosystem selector, not something a script can
@@ -60,11 +60,11 @@ pub fn run(
                 // it runs the script, so there is nothing to refuse here.
                 // `--frozen` governs that sync as it would `ward run fmt`,
                 // and `--strict` already holds for the whole process.
-                let mut command = vec!["fmt".to_string()];
+                let mut command = vec!["fmt".into()];
                 if check {
                     command.push("--check".into());
                 }
-                command.extend(args.iter().cloned());
+                command.extend(args.iter().map(Into::into));
                 let ctx = Context::open(platform)?;
                 return run::run(&ctx, &command, frozen);
             }
@@ -132,7 +132,8 @@ pub fn run(
     } else {
         resolve_at(&decides)?
     };
-    let status = formatter.run(&ctx, &cwd, check, args, &selected)?;
+    // The formatter's diagnostics are the user's, even under `--quiet`.
+    let status = ui::with_users_stderr(|| formatter.run(&ctx, &cwd, check, args, &selected))?;
     attribution.discard();
     Ok(status)
 }

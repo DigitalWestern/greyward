@@ -55,8 +55,9 @@ pub struct ClosureListing {
 /// `post` hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptRun {
-    /// (label, shell text) per step, in the order they run.
-    pub steps: Vec<(String, String)>,
+    /// (label, shell text) per step, in the order they run. The text is
+    /// bytes: the arguments quoted onto it need not be UTF-8.
+    pub steps: Vec<(String, std::ffi::OsString)>,
     /// Variables with this prefix, inherited or set by a projection, are
     /// removed from every step before `env` is applied.
     pub scrubbed_prefix: &'static str,
@@ -425,8 +426,8 @@ pub trait Tailor: Sync {
         &self,
         _root: &Path,
         _name: &str,
-        _args: &[String],
-    ) -> io::Result<Option<Vec<(String, String)>>> {
+        _args: &[std::ffi::OsString],
+    ) -> io::Result<Option<Vec<(String, std::ffi::OsString)>>> {
         Ok(None)
     }
 
@@ -437,7 +438,7 @@ pub trait Tailor: Sync {
         &self,
         _dir: &Path,
         _cwd: &Path,
-        _cmd: &[String],
+        _cmd: &[std::ffi::OsString],
     ) -> io::Result<Option<ScriptRun>> {
         Ok(None)
     }

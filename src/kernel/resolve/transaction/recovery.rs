@@ -329,7 +329,11 @@ pub(super) fn finish_committed(
         };
         match current_at(dir.as_raw_fd(), &name)? {
             Current::Absent => {}
-            Current::File(digest) if hex::encode(digest) == target.original => {
+            // The pre-run bytes the exchange displaced, or the hard link a
+            // create left if the crash came before it was removed.
+            Current::File(digest)
+                if hex::encode(digest) == target.original || hex::encode(digest) == target.new =>
+            {
                 unlink_at(dir.as_raw_fd(), &name)?;
             }
             _ => kept.push(root.path().join(&temp).display().to_string()),
@@ -476,10 +480,22 @@ fn undo_target(
     };
     let now = current_at(dir.as_raw_fd(), &name)?;
     let at_temp = current_at(dir.as_raw_fd(), temp)?;
-    // A pending target whose temporary still holds the new bytes was never
-    // swapped (an exchange leaves the displaced file there, a create leaves
-    // nothing): like a foreign one, the file at the target is not ours.
-    let ours = !foreign && !(target.state == TargetState::Pending && at_temp == new);
+    // Whether the journal proves ward put the file at the target there.
+    // Swapped: yes. Pending: only if the swap left its mark, since another
+    // process may have written the target, even with the new bytes. An
+    // exchange leaves the displaced file at the temporary (anything but the
+    // new bytes, which were there before it); a create leaves the
+    // temporary a hard link to the target. A pending target with no such
+    // mark (no temporary, a journal from a release that renamed instead of
+    // linking) is left alone and reported. Taken: never.
+    let ours = match target.state {
+        TargetState::Swapped => true,
+        TargetState::Taken => false,
+        TargetState::Pending => match original {
+            Current::Absent => same_file(dir.as_raw_fd(), temp, &name)?,
+            _ => matches!(at_temp, Current::File(_)) && at_temp != new,
+        },
+    };
     // Where undo moves files when it needs a free name: the temporary,
     // unless it holds something ward cannot account for, which stays put.
     let scratch = if accounted(at_temp) {

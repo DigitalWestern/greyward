@@ -2376,8 +2376,8 @@ mod tests {
         assert_eq!(
             closure["packages"],
             serde_json::json!([
-                {"path": "node_modules/c", "version": "1.0.0", "integrity": TEST_SRI},
-                {"path": "packages/lib/node_modules/c", "version": "2.0.0", "integrity": TEST_SRI},
+                {"path": "node_modules/c", "name": "c", "version": "1.0.0", "integrity": TEST_SRI},
+                {"path": "packages/lib/node_modules/c", "name": "c", "version": "2.0.0", "integrity": TEST_SRI},
             ])
         );
         assert_eq!(

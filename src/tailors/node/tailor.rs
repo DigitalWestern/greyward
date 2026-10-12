@@ -6,7 +6,8 @@ use crate::comforter::status::{recorded_inputs_state, string, State};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
-    component, list, purl_encode, push_property, required, toolchain_component, version_of,
+    component, list, purl_encode, purl_encode_path, push_property, required, toolchain_component,
+    version_of,
 };
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
@@ -484,10 +485,12 @@ impl Tailor for Node {
             .push(("node".into(), string(&body["node_version"])));
         for package in body["packages"].as_array().unwrap_or(&empty) {
             let path = string(&package["path"]);
-            let name = path
-                .rsplit_once("node_modules/")
-                .map(|(_, name)| name.to_string())
-                .unwrap_or_else(|| path.clone());
+            // A closure written before rows named the package has only the
+            // path, which is the name except under an npm alias.
+            let name = package["name"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| npm_name_from_path(&path).to_string());
             out.packages.push(PackageRow {
                 name,
                 version: string(&package["version"]),
@@ -529,7 +532,12 @@ impl Tailor for Node {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "packages")? {
             let path = required(eco, &p, "path")?;
-            let name = npm_name_from_path(&path).to_string();
+            // The row's `name` is the package the bytes are; a closure
+            // written before rows carried it has only the install path.
+            let name = match p.get("name") {
+                Some(_) => required(eco, &p, "name")?,
+                None => npm_name_from_path(&path).to_string(),
+            };
             let ver = required(eco, &p, "version")?;
             // Scoped names: '@scope/x' -> '%40scope/x' per the purl spec.
             let purl_name = match name.strip_prefix('@') {
@@ -541,19 +549,37 @@ impl Tailor for Node {
                 },
                 None => purl_encode(&name),
             };
-            let mut c = component(
-                &name,
-                &ver,
-                format!("pkg:npm/{}@{}", purl_name, purl_encode(&ver)),
-                eco,
-            );
-            // integrity is an SRI string (base64), not a hex digest;
-            // recorded as a property rather than a malformed hash entry.
-            push_property(
-                &mut c,
-                "greyward:integrity",
-                &required(eco, &p, "integrity")?,
-            );
+            let mut purl = format!("pkg:npm/{}@{}", purl_name, purl_encode(&ver));
+            // A git package is not the registry's: the purl says which
+            // repository and commit it is (`vcs_url`, per the purl spec).
+            if let Some(git) = p.get("git").filter(|git| !git.is_null()) {
+                let git: crate::kernel::gitsrc::GitSource = serde_json::from_value(git.clone())
+                    .map_err(|e| {
+                        crate::kernel::cyclonedx::err(format!("{eco} closure: {path}: git: {e}"))
+                    })?;
+                purl.push_str(&format!(
+                    "?vcs_url={}",
+                    purl_encode(&format!("git+{}@{}", git.url, git.commit))
+                ));
+                if let Some(subdirectory) = &git.subdirectory {
+                    purl.push_str(&format!("#{}", purl_encode_path(subdirectory)));
+                }
+            }
+            let mut c = component(&name, &ver, purl, eco);
+            if npm_name_from_path(&path) != name {
+                push_property(&mut c, "greyward:path", &path);
+            }
+            let integrity = required(eco, &p, "integrity")?;
+            // An SRI is base64 of the digest: each candidate is the same
+            // digest a CycloneDX hash carries in hex. A git package's
+            // `git:<commit>` is not a digest of a file; its commit is in the
+            // purl. An empty integrity names no digest at all.
+            if !integrity.is_empty() && !integrity.starts_with("git:") {
+                push_sri_hashes(&mut c, &integrity).map_err(|e| {
+                    crate::kernel::cyclonedx::err(format!("{eco} closure: {path}: integrity: {e}"))
+                })?;
+            }
+            push_property(&mut c, "greyward:integrity", &integrity);
             // A `file:` directory package is packed from the project, not
             // fetched from the registry: a registry purl would name a
             // package that may exist there with other contents. Its
@@ -665,6 +691,24 @@ fn closure_runtime(
         ));
     }
     comforter::toolchain::runtime_object(store, activity, &closure, "bin/node")
+}
+
+/// Each SRI candidate as a CycloneDX hash: the algorithm by its CycloneDX
+/// name and the digest in hex, the same digest the SRI spells in base64.
+fn push_sri_hashes(c: &mut Value, integrity: &str) -> io::Result<()> {
+    let hashes = crate::kernel::digest::sri_candidates(integrity)?
+        .iter()
+        .map(|digest| {
+            let alg = match digest.algo() {
+                "sha1" => "SHA-1",
+                "sha256" => "SHA-256",
+                _ => "SHA-512",
+            };
+            json!({"alg": alg, "content": digest.hex()})
+        })
+        .collect();
+    c["hashes"] = Value::Array(hashes);
+    Ok(())
 }
 
 /// npm lockfile path ("node_modules/a/node_modules/@s/b") -> package name.
@@ -1340,11 +1384,11 @@ mod tests {
             "env_object": "/store/objects/abc123",
             "node_version": "22.0.0",
             "packages": [
-                {"path": "node_modules/b", "version": "1.0.0", "integrity": "sha512-b"},
+                {"path": "node_modules/b", "version": "1.0.0", "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
                 {
                     "path": "node_modules/local",
                     "version": "2.1.0",
-                    "integrity": "sha256-l",
+                    "integrity": "sha256-rKyGwOYJypBvYysOLazMsrd9IrBiHyDr7OGkg1uT9vA=",
                     "local": "vendor/local",
                 },
             ],
@@ -1371,8 +1415,84 @@ mod tests {
         );
         assert_eq!(
             property(local, "greyward:integrity").as_deref(),
-            Some("sha256-l")
+            Some("sha256-rKyGwOYJypBvYysOLazMsrd9IrBiHyDr7OGkg1uT9vA=")
         );
+    }
+
+    /// A component names the package its bytes are, and says where they
+    /// came from (#688). An alias is the real package, with its install
+    /// path kept as a property; a git package's purl carries its repository
+    /// and commit, and its `git:` integrity is no file hash; an SRI becomes
+    /// CycloneDX hashes in hex, one per candidate. A row written before
+    /// rows named the package still reads its name from the path.
+    #[test]
+    fn sbom_components_name_the_real_package_and_its_source() {
+        let body = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [
+                {"path": "node_modules/@s/alias", "name": "@t/real", "version": "2.0.0",
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
+                {"path": "node_modules/gitdep", "name": "gitdep", "version": "1.0.0",
+                 "integrity": "git:0123456789abcdef0123456789abcdef01234567",
+                 "git": {"url": "https://github.com/o/gitdep.git",
+                         "commit": "0123456789abcdef0123456789abcdef01234567",
+                         "subdirectory": "packages/core"}},
+                {"path": "node_modules/a/node_modules/old", "version": "1.0.0",
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
+            ],
+        });
+        let mut out = Vec::new();
+        Node.sbom_components("node", &body, &mut out).unwrap();
+        let property = |c: &Value, name: &str| -> Option<String> {
+            c["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .map(|p| p["value"].as_str().unwrap().to_string())
+        };
+        let alias = &out[0];
+        assert_eq!(alias["name"], "@t/real");
+        assert_eq!(alias["purl"], "pkg:npm/%40t/real@2.0.0");
+        assert_eq!(
+            property(alias, "greyward:path").as_deref(),
+            Some("node_modules/@s/alias")
+        );
+        let hashes = alias["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 2, "{hashes:?}");
+        assert!(
+            hashes
+                .iter()
+                .all(|hash| hash["alg"] == "SHA-512"
+                    && hash["content"].as_str().unwrap().len() == 128)
+        );
+        assert!(hashes.iter().any(|hash| hash["content"] == "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"));
+
+        let git = &out[1];
+        assert_eq!(
+            git["purl"],
+            "pkg:npm/gitdep@1.0.0?vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2Fo%2Fgitdep.git%400123456789abcdef0123456789abcdef01234567#packages/core"
+        );
+        assert!(git.get("hashes").is_none(), "{git}");
+        assert_eq!(property(git, "greyward:path"), None);
+
+        let old = &out[2];
+        assert_eq!(old["name"], "old");
+        assert_eq!(old["purl"], "pkg:npm/old@1.0.0");
+        assert_eq!(old["hashes"][0]["content"], "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75");
+
+        let mut out = Vec::new();
+        let malformed = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [{"path": "node_modules/x", "version": "1.0.0", "integrity": "sha512-xyz"}],
+        });
+        let error = Node
+            .sbom_components("node", &malformed, &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("node_modules/x: integrity"), "{error}");
     }
 
     /// npm runs the root's and each workspace member's install lifecycle

@@ -14,6 +14,7 @@
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The request line plus every header line, CRLFs included.
 pub const MAX_HEAD: usize = 64 * 1024;
@@ -23,6 +24,108 @@ pub const MAX_HEAD: usize = 64 * 1024;
 /// the route's own, much smaller cap. Larger bodies are refused, not
 /// truncated.
 pub const MAX_BODY: u64 = 64 << 20;
+
+/// How many body bytes every connection of the process together may hold
+/// in memory at once: request bodies (git negotiations) and buffered
+/// metadata responses. Each is capped at [`MAX_BODY`], and with 64 workers
+/// that alone would allow 8 GiB; past this budget a request is answered
+/// 503 with `Retry-After`, which the tools retry.
+pub const BUFFER_BUDGET: u64 = 512 << 20;
+
+/// The process's in-flight byte budget ([`BUFFER_BUDGET`]). A body's
+/// bytes are taken from it by a [`Reservation`] before they are read into
+/// memory, and given back when the reservation is dropped.
+#[derive(Debug)]
+pub struct Budget {
+    limit: u64,
+    used: AtomicU64,
+}
+
+impl Budget {
+    pub fn new(limit: u64) -> Budget {
+        Budget {
+            limit,
+            used: AtomicU64::new(0),
+        }
+    }
+
+    /// An empty reservation, grown as a body is read.
+    pub fn reservation(&self) -> Reservation<'_> {
+        Reservation {
+            budget: self,
+            held: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::SeqCst)
+    }
+}
+
+/// Bytes held from a [`Budget`] for one body, released on drop.
+#[derive(Debug)]
+pub struct Reservation<'a> {
+    budget: &'a Budget,
+    held: u64,
+}
+
+impl Reservation<'_> {
+    /// Take `bytes` more. `Err` (nothing taken) when the budget would be
+    /// exceeded.
+    pub fn grow(&mut self, bytes: u64) -> Result<(), OverBudget> {
+        let budget = self.budget;
+        budget
+            .used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                used.checked_add(bytes)
+                    .filter(|total| *total <= budget.limit)
+            })
+            .map_err(|_| OverBudget)?;
+        self.held += bytes;
+        Ok(())
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.held, Ordering::SeqCst);
+    }
+}
+
+/// The process's in-flight byte budget is spent: the request is answered
+/// 503 with `Retry-After`.
+#[derive(Debug)]
+pub struct OverBudget;
+
+impl fmt::Display for OverBudget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the proxy is holding its {} MiB of in-flight bodies; retry shortly",
+            BUFFER_BUDGET >> 20
+        )
+    }
+}
+
+impl std::error::Error for OverBudget {}
+
+impl OverBudget {
+    /// As an `io::Error`, for a reader's caller; [`OverBudget::is`] finds
+    /// it again.
+    pub fn into_io(self) -> io::Error {
+        io::Error::other(self)
+    }
+
+    pub fn is(error: &io::Error) -> bool {
+        error
+            .get_ref()
+            .is_some_and(|inner| inner.is::<OverBudget>())
+    }
+}
+
+/// How long a tool is told to wait before retrying a 503 for the budget.
+pub const RETRY_AFTER_SECONDS: &str = "1";
 
 /// The header fields of one message, in the order they arrived. Names
 /// compare case-insensitively.
@@ -112,6 +215,9 @@ pub enum ParseError {
     Malformed(String),
     /// The head or the body is over its cap. Answered with 431 or 413.
     TooLarge { head: bool },
+    /// The process's in-flight byte budget is spent. Answered with 503
+    /// and `Retry-After`.
+    Busy,
     /// The transport failed mid-request (a reset, a read timeout).
     Io(io::Error),
 }
@@ -127,6 +233,7 @@ impl fmt::Display for ParseError {
             ParseError::TooLarge { head: false } => {
                 write!(f, "request body over the cap for this request")
             }
+            ParseError::Busy => write!(f, "{OverBudget}"),
             ParseError::Io(error) => write!(f, "reading the request failed: {error}"),
         }
     }
@@ -295,7 +402,9 @@ fn framing(headers: &Headers, http10: bool) -> Result<Framing, ParseError> {
 /// Only bytes already buffered count as pipelined: the check never waits on
 /// the socket for more.
 pub fn read_request<R: Read>(reader: &mut BufReader<R>) -> Result<Request, ParseError> {
-    read_head(reader)?.read_body(reader, MAX_BODY)
+    let budget = Budget::new(u64::MAX);
+    let request = read_head(reader)?.read_body(reader, MAX_BODY, &mut budget.reservation());
+    request
 }
 
 /// Read a request head, leaving its body unread.
@@ -344,17 +453,21 @@ pub fn read_head<R: Read>(reader: &mut BufReader<R>) -> Result<Head, ParseError>
 
 impl Head {
     /// Read the body, refusing one over `cap` bytes before reading it (a
-    /// declared length) or as soon as it passes the cap (chunked).
+    /// declared length) or as soon as it passes the cap (chunked). Every
+    /// byte is taken from `held` before it is read: a declared length at
+    /// once, so a refusal leaves the body unread, and a chunk as its size
+    /// arrives.
     pub fn read_body<R: Read>(
         self,
         reader: &mut BufReader<R>,
         cap: u64,
+        held: &mut Reservation<'_>,
     ) -> Result<Request, ParseError> {
         let cap = cap.min(MAX_BODY);
         let body = match self.framing {
             Framing::None => Vec::new(),
-            Framing::Length(length) => read_sized(reader, length, cap)?,
-            Framing::Chunked => read_chunked(reader, cap)?,
+            Framing::Length(length) => read_sized(reader, length, cap, held)?,
+            Framing::Chunked => read_chunked(reader, cap, held)?,
         };
         if !reader.buffer().is_empty() {
             return Err(malformed(
@@ -372,10 +485,16 @@ impl Head {
     }
 }
 
-fn read_sized(reader: &mut impl Read, length: u64, cap: u64) -> Result<Vec<u8>, ParseError> {
+fn read_sized(
+    reader: &mut impl Read,
+    length: u64,
+    cap: u64,
+    held: &mut Reservation<'_>,
+) -> Result<Vec<u8>, ParseError> {
     if length > cap {
         return Err(ParseError::TooLarge { head: false });
     }
+    held.grow(length).map_err(|_| ParseError::Busy)?;
     let mut body = Vec::with_capacity(length.min(1 << 20) as usize);
     reader
         .take(length)
@@ -389,7 +508,11 @@ fn read_sized(reader: &mut impl Read, length: u64, cap: u64) -> Result<Vec<u8>, 
 
 /// Decode a chunked body. Chunk extensions are ignored; trailer fields are
 /// read and dropped, and count against the head budget.
-fn read_chunked(reader: &mut impl BufRead, cap: u64) -> Result<Vec<u8>, ParseError> {
+fn read_chunked(
+    reader: &mut impl BufRead,
+    cap: u64,
+    held: &mut Reservation<'_>,
+) -> Result<Vec<u8>, ParseError> {
     let mut body = Vec::new();
     let mut budget = MAX_HEAD;
     let mut line = Vec::new();
@@ -416,6 +539,7 @@ fn read_chunked(reader: &mut impl BufRead, cap: u64) -> Result<Vec<u8>, ParseErr
         if total.is_none_or(|total| total > cap) {
             return Err(ParseError::TooLarge { head: false });
         }
+        held.grow(size).map_err(|_| ParseError::Busy)?;
         let before = body.len();
         reader
             .by_ref()
@@ -743,6 +867,46 @@ mod tests {
         let sized = parse(b"POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nxyz").unwrap();
         assert_eq!(sized.body, b"xyz");
         assert!(sized.keep_alive);
+    }
+
+    #[test]
+    fn a_body_past_the_in_flight_budget_is_refused_and_released() {
+        // Past the in-flight budget: refused before the body is read, and
+        // a reservation gives its bytes back when dropped.
+        let budget = Budget::new(10);
+        let sized = b"POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 11\r\n\r\nhello world";
+        let mut reader = BufReader::new(&sized[..]);
+        let head = read_head(&mut reader).unwrap();
+        assert!(matches!(
+            head.read_body(&mut reader, MAX_BODY, &mut budget.reservation()),
+            Err(ParseError::Busy)
+        ));
+        assert_eq!(budget.used(), 0);
+        let chunked = b"POST /a HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n\
+              6\r\nhello \r\n5\r\nworld\r\n0\r\n\r\n";
+        let mut reader = BufReader::new(&chunked[..]);
+        let head = read_head(&mut reader).unwrap();
+        let mut held = budget.reservation();
+        assert!(matches!(
+            head.read_body(&mut reader, MAX_BODY, &mut held),
+            Err(ParseError::Busy)
+        ));
+        assert_eq!(budget.used(), 6, "the first chunk's share is held");
+        drop(held);
+        assert_eq!(budget.used(), 0);
+        let mut reader =
+            BufReader::new(&b"POST /a HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"[..]);
+        let head = read_head(&mut reader).unwrap();
+        let mut held = budget.reservation();
+        assert_eq!(
+            head.read_body(&mut reader, MAX_BODY, &mut held)
+                .unwrap()
+                .body,
+            b"hello"
+        );
+        assert_eq!(budget.used(), 5);
+        drop(held);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

@@ -394,13 +394,18 @@ impl<'a> Transaction<'a> {
         );
         journal.created_dirs = created;
         let journals = self.journal_dir()?;
+        // The target being swapped when a failure came, if any.
+        let mut swapping = None;
         let outcome = (|| {
             write_journal(&journals, &journal)?;
             fault(FaultPoint::Journaled)?;
             for (index, entry) in plan.iter().enumerate() {
+                swapping = Some(index);
                 self.swap(entry, index)?;
+                swapping = None;
                 journal.targets[index].state = TargetState::Swapped;
                 write_journal(&journals, &journal)?;
+                self.unlink_created(entry)?;
                 fault(FaultPoint::Marked(index))?;
             }
             self.verify_unpublished(&plan)?;
@@ -425,6 +430,37 @@ impl<'a> Transaction<'a> {
                 Err(error)
             }
             Err(error) => {
+                // A no-replace create that found its name taken: what is
+                // there is another writer's, even with the new bytes. The
+                // journal says so before anything is undone, so a later
+                // recovery leaves it too. If that write fails, this undo
+                // still knows from the journal in memory.
+                if let Some(index) =
+                    swapping.filter(|_| error.kind() == io::ErrorKind::AlreadyExists)
+                {
+                    journal.targets[index].state = TargetState::Taken;
+                    if let Err(write_error) = write_journal(&journals, &journal) {
+                        // Nothing is undone on a journal that may not say
+                        // so: the next recovery undoes it from the journal
+                        // on disk, where the target is pending with no
+                        // proof ward published it, and so is left alone.
+                        self.finished = true;
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "{error}; recording that in the journal also failed \
+                                 ({write_error}), so nothing was undone yet: the journal {} \
+                                 was kept and the next ward command in this project will \
+                                 undo the partial publication",
+                                self.root
+                                    .path()
+                                    .join(JOURNAL_DIR)
+                                    .join(journal_name(&self.ecosystem))
+                                    .display()
+                            ),
+                        ));
+                    }
+                }
                 let undone = undo(self.store, &self.root, &journal);
                 match undone {
                     Ok(notes) => {
@@ -571,20 +607,32 @@ impl<'a> Transaction<'a> {
         fault(FaultPoint::TempWritten(index))?;
         let shown = self.root.path().join(&held.relative);
         match &held.original {
-            None => create_noreplace(dir.as_raw_fd(), temp, &name).map_err(|error| {
-                let _ = unlink_at(dir.as_raw_fd(), temp);
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!(
-                            "{} appeared while the resolution ran; nothing was published",
-                            shown.display()
-                        ),
-                    )
-                } else {
-                    error
-                }
-            })?,
+            // A hard link, so the temporary stays the same file as the
+            // target until the journal says swapped: that is the proof, to
+            // a recovery after a crash in between, that ward created it.
+            None => link_noreplace(dir.as_raw_fd(), temp, &name)
+                .map_err(|error| {
+                    let _ = unlink_at(dir.as_raw_fd(), temp);
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "{} appeared while the resolution ran; nothing was published",
+                                shown.display()
+                            ),
+                        )
+                    } else {
+                        crate::kernel::error::context(
+                            error,
+                            format_args!(
+                                "create {} as a hard link to its temporary (the project's \
+                                 filesystem must support hard links); nothing was published",
+                                shown.display()
+                            ),
+                        )
+                    }
+                })
+                .and_then(|()| fault(FaultPoint::Swapped(index)))?,
             Some(original) => {
                 exchange(dir.as_raw_fd(), temp, &name)?;
                 fault(FaultPoint::Swapped(index))?;
@@ -598,6 +646,18 @@ impl<'a> Transaction<'a> {
                 }
             }
         }
+        store::fsync_directory(dir.as_raw_fd())
+    }
+
+    /// A created target is swapped once the journal says so: its
+    /// temporary, the hard link that proved ward made it, goes.
+    fn unlink_created(&self, entry: &Planned) -> io::Result<()> {
+        let held = &self.targets[entry.target];
+        if held.original.is_some() {
+            return Ok(());
+        }
+        let (dir, _) = parent_of(&self.root, &held.relative)?;
+        unlink_at(dir.as_raw_fd(), file_name(Path::new(&entry.journal.temp)))?;
         store::fsync_directory(dir.as_raw_fd())
     }
 
@@ -697,6 +757,11 @@ enum JournalState {
 enum TargetState {
     Pending,
     Swapped,
+    /// Its no-replace create found the name taken: what is there is
+    /// another writer's, whatever its bytes, and undo never touches it.
+    /// Written before the undo, so a recovery after a failed undo knows
+    /// it too.
+    Taken,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -742,6 +807,10 @@ pub enum Restored {
     Unchanged(PathBuf),
     /// At neither the pre-run nor the new bytes: edited since, left alone.
     LeftEdited(PathBuf),
+    /// A file at a temporary's name holding bytes ward did not write
+    /// (perhaps a save made while undo moved files): kept, not deleted.
+    /// The path is the temporary's.
+    Kept(PathBuf),
 }
 
 /// Remove the directories `journal` says its transaction created, deepest
@@ -752,8 +821,10 @@ fn remove_created_dirs(root: &ProjectRoot, journal: &Journal) -> io::Result<()> 
     for dir in dirs {
         let dir = Path::new(dir.as_str());
         check_target(dir)?;
-        if let Ok((parent, name)) = parent_of(root, dir) {
-            remove_empty_dir(parent.as_raw_fd(), &name)?;
+        match parent_of(root, dir) {
+            Ok((parent, name)) => remove_empty_dir(parent.as_raw_fd(), &name)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -1144,6 +1215,50 @@ fn create_noreplace(dirfd: RawFd, temp: &OsStr, target: &OsStr) -> io::Result<()
     }
 }
 
+/// Give `temp`'s file the name `target` too, only if `target` does not
+/// exist (a hard link never replaces).
+fn link_noreplace(dirfd: RawFd, temp: &OsStr, target: &OsStr) -> io::Result<()> {
+    let (old, new) = (cstring(temp)?, cstring(target)?);
+    // SAFETY: as in rename_at; flags 0 never follows a symlink.
+    if unsafe { libc::linkat(dirfd, old.as_ptr(), dirfd, new.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` name the same file (neither followed if a
+/// symlink). A missing name is never the same.
+fn same_file(dirfd: RawFd, a: &OsStr, b: &OsStr) -> io::Result<bool> {
+    let stat = |name: &OsStr| -> io::Result<Option<(libc::dev_t, libc::ino_t)>> {
+        let name = cstring(name)?;
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a held directory, a NUL-terminated relative name, and a
+        // stat buffer the call fills on success.
+        if unsafe {
+            libc::fstatat(
+                dirfd,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            return match error.kind() {
+                io::ErrorKind::NotFound => Ok(None),
+                _ => Err(error),
+            };
+        }
+        // SAFETY: fstatat succeeded, so the buffer is initialized.
+        let st = unsafe { st.assume_init() };
+        Ok(Some((st.st_dev, st.st_ino)))
+    };
+    Ok(match (stat(a)?, stat(b)?) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    })
+}
+
 fn rename_replace(dirfd: RawFd, old: &OsStr, new: &OsStr) -> io::Result<()> {
     rename_at(dirfd, old, new, Rename::Replace)
 }
@@ -1190,6 +1305,13 @@ pub enum FaultPoint {
     Releasing,
     /// In `finish`, after the release and before the journal is deleted.
     Released,
+    /// In undo, after a target was looked at and before it is acted on.
+    Undoing,
+    /// In undo, after a target was moved aside and before what moved is
+    /// compared.
+    UndoMoved,
+    /// In undo, after the compare found a save and before it is moved back.
+    UndoMismatched,
 }
 
 #[cfg(test)]
@@ -1553,6 +1675,395 @@ mod tests {
         assert_clean(&fx);
     }
 
+    /// A created target that another process writes during the run with
+    /// the very bytes the tool produced: the no-replace create refuses, and
+    /// undo leaves the other process's file, though its bytes are ours.
+    #[test]
+    fn a_created_target_that_appears_with_the_same_bytes_is_kept() {
+        let fx = fixture("created-appears-same", true);
+        let project = fx.project.clone();
+        let error = run_door(
+            &fx,
+            |_| {},
+            move |point| {
+                if point == FaultPoint::TempWritten(1) {
+                    fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                }
+                Fault::Continue
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("appeared"), "{error}");
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(OLD_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
+    /// The same, but the undo after the failed create cannot open the
+    /// receipt's folder, so the journal stays: it records the lock as taken,
+    /// and the recovery that runs once the folder is back still leaves the
+    /// other process's file, though no temporary of ours is beside it.
+    #[test]
+    fn a_taken_target_survives_a_failed_undo_in_the_journal() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("created-appears-retry", true);
+        let project = fx.project.clone();
+        let resolution = fx.project.join(RESOLUTION_DIR);
+        let locked = resolution.clone();
+        let error = run_door(
+            &fx,
+            |_| {},
+            move |point| {
+                if point == FaultPoint::TempWritten(1) {
+                    fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+                }
+                Fault::Continue
+            },
+        )
+        .unwrap_err();
+        let opened = fs::read_dir(&resolution).is_ok();
+        fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+        if opened {
+            // Running as root: permissions do not bind, nothing to prove.
+            return;
+        }
+        assert!(error.to_string().contains("undoing"), "{error}");
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(&fx)).unwrap()).unwrap();
+        let lock = journal["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["target"] == "package-lock.json")
+            .unwrap();
+        assert_eq!(lock["state"], "taken", "{journal}");
+        recover(&fx);
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(OLD_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
+    /// Another process creates the lock with the very bytes the tool
+    /// produced, and publication fails (or crashes) on the manifest before
+    /// it reaches the lock: the journal holds the lock as pending with no
+    /// mark of a swap, so undo leaves the file and reports it, rather than
+    /// deleting another writer's file.
+    #[test]
+    fn a_pending_created_target_ward_never_created_is_kept() {
+        for fault in [Fault::Fail, Fault::Crash] {
+            let fx = fixture("pending-not-ours", true);
+            let project = fx.project.clone();
+            let _ = run_door(
+                &fx,
+                |_| {},
+                move |point| match point {
+                    FaultPoint::TempWritten(0) => {
+                        fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                        Fault::Continue
+                    }
+                    FaultPoint::Marked(0) => fault,
+                    _ => Fault::Continue,
+                },
+            )
+            .unwrap_err();
+            if fault == Fault::Crash {
+                let notes = recover(&fx);
+                assert!(
+                    notes.contains(&Restored::LeftEdited(fx.project.join("package-lock.json"))),
+                    "{notes:?}"
+                );
+            }
+            assert_eq!(
+                read(&fx, "package-lock.json").as_deref(),
+                Some(NEW_LOCK),
+                "{fault:?}"
+            );
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT)
+            );
+            assert_clean(&fx);
+        }
+    }
+
+    /// The create finds the lock taken, and the journal cannot record it:
+    /// nothing is undone on a journal that does not say so. The next
+    /// recovery undoes the rest and leaves the other process's lock.
+    #[test]
+    fn a_taken_target_the_journal_cannot_record_stops_the_undo() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("taken-unrecorded", true);
+        let project = fx.project.clone();
+        let journals = fx.project.join(JOURNAL_DIR);
+        let locked = journals.clone();
+        let error = run_door(
+            &fx,
+            |_| {},
+            move |point| {
+                if point == FaultPoint::TempWritten(1) {
+                    fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+                }
+                Fault::Continue
+            },
+        )
+        .unwrap_err();
+        let probe = journals.join("probe");
+        let writable = fs::write(&probe, b"").is_ok();
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&journals, fs::Permissions::from_mode(0o755)).unwrap();
+        if writable {
+            // Running as root: permissions do not bind, nothing to prove.
+            return;
+        }
+        assert!(
+            error.to_string().contains("nothing was undone yet"),
+            "{error}"
+        );
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert!(has_pending_journal(&fx.project));
+        let notes = recover(&fx);
+        assert!(
+            notes.contains(&Restored::LeftEdited(fx.project.join("package-lock.json"))),
+            "{notes:?}"
+        );
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(OLD_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
+    /// The temporary of `relative` named by the journal.
+    fn journal_temp(fx: &Fixture, relative: &str) -> PathBuf {
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(fx)).unwrap()).unwrap();
+        let temp = journal["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["target"] == relative)
+            .unwrap()["temp"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        fx.project.join(temp)
+    }
+
+    /// A save that lands after undo looked at a target and before it acts:
+    /// for a replaced target put back by exchange, one restored from the
+    /// stored copy, and a created one, the save is kept and reported, and
+    /// the rest is still undone.
+    #[test]
+    fn a_save_during_undo_is_kept_and_reported() {
+        for (edited, from_copy) in [
+            ("package.json", false),
+            ("package.json", true),
+            ("package-lock.json", false),
+        ] {
+            let fx = fixture("undo-race", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            if from_copy {
+                fs::remove_file(journal_temp(&fx, "package.json")).unwrap();
+            }
+            // Undo runs last target first: the receipt, the lock, then the
+            // manifest.
+            let at = if edited == "package.json" { 3 } else { 2 };
+            let path = fx.project.join(edited);
+            let mut seen = 0;
+            let notes = recover_with(&fx, move |point| {
+                if point == FaultPoint::Undoing {
+                    seen += 1;
+                    if seen == at {
+                        fs::write(&path, USER_EDIT).unwrap();
+                    }
+                }
+                Fault::Continue
+            })
+            .unwrap();
+            let case = format!("{edited} from_copy={from_copy}");
+            assert!(
+                notes.contains(&Restored::LeftEdited(fx.project.join(edited))),
+                "{case}: {notes:?}"
+            );
+            assert_eq!(read(&fx, edited).as_deref(), Some(USER_EDIT), "{case}");
+            if edited == "package.json" {
+                assert_eq!(read(&fx, "package-lock.json"), None, "{case}");
+            } else {
+                assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            }
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT),
+                "{case}"
+            );
+            assert_clean(&fx);
+        }
+    }
+
+    /// Every temporary-named file left in the project, sorted.
+    fn temporaries(fx: &Fixture) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for dir in [fx.project.clone(), fx.project.join(RESOLUTION_DIR)] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.to_string_lossy().ends_with(".tmp") {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Recovery finished (no journal, no originals rooted), and the only
+    /// temporaries left are `kept`.
+    fn assert_undone_keeping(fx: &Fixture, kept: &[PathBuf]) {
+        assert!(!has_pending_journal(&fx.project));
+        assert!(rooted_originals(fx).is_empty(), "originals still rooted");
+        let mut kept = kept.to_vec();
+        kept.sort();
+        assert_eq!(temporaries(fx), kept);
+    }
+
+    /// Recovery crashes after undo moved a target aside and before it
+    /// compared what moved, with a save landed just before the move: the
+    /// save is at the temporary, and the next recovery keeps it there and
+    /// reports it rather than deleting it. For a replaced target (put back
+    /// by exchange) and a created one (moved aside).
+    #[test]
+    fn a_save_moved_aside_by_an_interrupted_undo_is_kept() {
+        // Undo runs last target first: the receipt, the lock, then the
+        // manifest. Each moves its target aside once.
+        for (edited, at) in [("package.json", 3), ("package-lock.json", 2)] {
+            let fx = fixture("undo-crash-save", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            let temp = journal_temp(&fx, edited);
+            let path = fx.project.join(edited);
+            let (mut looked, mut moved) = (0, 0);
+            let error = recover_with(&fx, move |point| match point {
+                FaultPoint::Undoing => {
+                    looked += 1;
+                    if looked == at {
+                        fs::write(&path, USER_EDIT).unwrap();
+                    }
+                    Fault::Continue
+                }
+                FaultPoint::UndoMoved => {
+                    moved += 1;
+                    if moved == at {
+                        Fault::Crash
+                    } else {
+                        Fault::Continue
+                    }
+                }
+                _ => Fault::Continue,
+            })
+            .unwrap_err();
+            assert!(is_crash(&error), "{edited}: {error}");
+            assert_eq!(fs::read(&temp).unwrap(), USER_EDIT, "{edited}");
+            let notes = recover(&fx);
+            assert!(
+                notes.contains(&Restored::Kept(temp.clone())),
+                "{edited}: {notes:?}"
+            );
+            assert_eq!(fs::read(&temp).unwrap(), USER_EDIT, "{edited}");
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            assert_eq!(read(&fx, "package-lock.json"), None);
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT)
+            );
+            assert_undone_keeping(&fx, &[temp]);
+        }
+    }
+
+    /// Two saves during one undo: the first lands before undo moves the
+    /// target aside, so the compare finds it; the second lands before the
+    /// first is moved back. Neither is lost: one ends at the target, which
+    /// is reported edited, the other at the temporary, which is kept.
+    #[test]
+    fn a_second_save_during_undo_is_kept() {
+        const FIRST: &[u8] = b"first save\n";
+        const SECOND: &[u8] = b"second save\n";
+        for (edited, at, at_target) in [
+            // An exchange back swaps the two saves.
+            ("package.json", 3, FIRST),
+            // A created target: the second save holds the name, so the
+            // first stays aside.
+            ("package-lock.json", 2, SECOND),
+        ] {
+            let fx = fixture("undo-two-saves", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            let temp = journal_temp(&fx, edited);
+            let path = fx.project.join(edited);
+            let mut looked = 0;
+            let notes = recover_with(&fx, move |point| {
+                match point {
+                    FaultPoint::Undoing => {
+                        looked += 1;
+                        if looked == at {
+                            fs::write(&path, FIRST).unwrap();
+                        }
+                    }
+                    FaultPoint::UndoMismatched => fs::write(&path, SECOND).unwrap(),
+                    _ => {}
+                }
+                Fault::Continue
+            })
+            .unwrap();
+            let at_temp = if at_target == FIRST { SECOND } else { FIRST };
+            assert_eq!(read(&fx, edited).as_deref(), Some(at_target), "{edited}");
+            assert_eq!(fs::read(&temp).unwrap(), at_temp, "{edited}");
+            assert!(
+                notes.contains(&Restored::LeftEdited(fx.project.join(edited))),
+                "{edited}: {notes:?}"
+            );
+            assert!(
+                notes.contains(&Restored::Kept(temp.clone())),
+                "{edited}: {notes:?}"
+            );
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT)
+            );
+            assert_undone_keeping(&fx, &[temp]);
+        }
+    }
+
+    /// A crash after a target's temporary was written and before its swap,
+    /// then a save of the same bytes at the target: the swap never
+    /// happened, so the file is the user's, kept and reported, never
+    /// exchanged with the temporary.
+    #[test]
+    fn an_unswapped_pending_target_is_left_to_the_user() {
+        let fx = fixture("pending-unswapped", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::TempWritten(0)));
+        fs::write(fx.project.join("package.json"), NEW_MANIFEST).unwrap();
+        let notes = recover(&fx);
+        assert!(
+            notes.contains(&Restored::LeftEdited(fx.project.join("package.json"))),
+            "{notes:?}"
+        );
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert_clean(&fx);
+    }
+
     /// A failure before publication (the ledger commit, in the door) is
     /// `abandon`: the project is untouched and the originals released.
     #[test]
@@ -1599,6 +2110,7 @@ mod tests {
             FaultPoint::Swapped(0),
             FaultPoint::Marked(0),
             FaultPoint::TempWritten(1),
+            FaultPoint::Swapped(1),
             FaultPoint::Marked(1),
             FaultPoint::TempWritten(2),
             FaultPoint::Swapped(2),
@@ -1676,10 +2188,13 @@ mod tests {
             .unwrap();
         fs::remove_file(&temp).unwrap();
         symlink("/etc/passwd", &temp).unwrap();
-        recover(&fx);
+        let notes = recover(&fx);
         let meta = fs::symlink_metadata(fx.project.join("package.json")).unwrap();
         assert!(meta.file_type().is_file());
-        assert_original(&fx, Some(OLD_RECEIPT));
+        // Not ward's: kept as it is, and reported.
+        assert!(notes.contains(&Restored::Kept(temp.clone())), "{notes:?}");
+        assert_eq!(fs::read_link(&temp).unwrap(), Path::new("/etc/passwd"));
+        assert_undone_keeping(&fx, &[temp]);
     }
 
     /// A crash at every point of publication: afterwards the journal is
@@ -1694,6 +2209,7 @@ mod tests {
             (FaultPoint::Swapped(0), false),
             (FaultPoint::Marked(0), false),
             (FaultPoint::TempWritten(1), false),
+            (FaultPoint::Swapped(1), false),
             (FaultPoint::Marked(1), false),
             (FaultPoint::TempWritten(2), false),
             (FaultPoint::Swapped(2), false),
@@ -1759,6 +2275,82 @@ mod tests {
         recover(&fx);
         assert_eq!(read(&fx, "package.json").as_deref(), Some(USER_EDIT));
         assert_clean(&fx);
+    }
+
+    /// A crash after the receipt's swap, then a parent folder recovery
+    /// cannot open (no permission) or will not follow (a symlink): recovery
+    /// refuses and keeps the journal and the originals, rather than taking
+    /// the folder as gone and finishing with the project half published.
+    /// Once the folder is back, the next recovery undoes everything.
+    #[test]
+    fn recovery_through_an_unopenable_or_symlinked_parent_keeps_the_journal() {
+        use std::os::unix::fs::PermissionsExt;
+        for symlinked in [false, true] {
+            let fx = fixture("recover-parent", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            let resolution = fx.project.join(RESOLUTION_DIR);
+            let moved = fx.project.join("elsewhere");
+            if symlinked {
+                fs::rename(&resolution, &moved).unwrap();
+                symlink(&moved, &resolution).unwrap();
+            } else {
+                fs::set_permissions(&resolution, fs::Permissions::from_mode(0o000)).unwrap();
+                if fs::read_dir(&resolution).is_ok() {
+                    // Running as root: permissions do not bind, nothing to prove.
+                    fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+                    continue;
+                }
+            }
+            let error = recover_err(&fx);
+            assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            assert!(
+                has_pending_journal(&fx.project),
+                "symlinked {symlinked}: {error}"
+            );
+            assert_eq!(rooted_originals(&fx).len(), 1, "symlinked {symlinked}");
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+            if symlinked {
+                fs::remove_file(&resolution).unwrap();
+                fs::rename(&moved, &resolution).unwrap();
+            } else {
+                fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            recover(&fx);
+            assert_original(&fx, Some(OLD_RECEIPT));
+        }
+    }
+
+    /// The unopenable folder belongs to the target undo reaches last (the
+    /// journal is reordered so the receipt comes first): recovery still
+    /// refuses before it touches any target, so the lock and the manifest
+    /// stay published rather than half undone.
+    #[test]
+    fn recovery_opens_every_folder_before_it_undoes_any_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("recover-parent-last", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+        edit_journal(&fx, |journal| {
+            let targets = journal["targets"].as_array_mut().unwrap();
+            let receipt = targets.pop().unwrap();
+            assert_eq!(receipt["target"], ".greyward/resolution/npm.json");
+            targets.insert(0, receipt);
+        });
+        let resolution = fx.project.join(RESOLUTION_DIR);
+        fs::set_permissions(&resolution, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&resolution).is_ok() {
+            // Running as root: permissions do not bind, nothing to prove.
+            fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let error = recover_err(&fx);
+        fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert!(has_pending_journal(&fx.project));
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
     }
 
     /// After a crash the user edits a swapped target: recovery leaves it,
@@ -2023,8 +2615,11 @@ mod tests {
             .find(|path| path.to_string_lossy().ends_with(".tmp"))
             .unwrap();
         fs::write(&temp, b"planted\n").unwrap();
-        recover(&fx);
-        assert_original(&fx, Some(OLD_RECEIPT));
+        let notes = recover(&fx);
+        // Ward did not write those bytes, so it keeps them where they are.
+        assert!(notes.contains(&Restored::Kept(temp.clone())), "{notes:?}");
+        assert_eq!(fs::read(&temp).unwrap(), b"planted\n");
+        assert_undone_keeping(&fx, &[temp]);
     }
 
     /// Cleanup failing after the commit point is not a failed publication:

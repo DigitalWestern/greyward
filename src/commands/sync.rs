@@ -28,13 +28,15 @@ use std::path::{Path, PathBuf};
 pub enum Scope<'a> {
     All,
     Only(&'a str),
+    Selected(&'a [&'a str]),
 }
 
 impl Scope<'_> {
-    fn covers(self, tailor: &dyn Tailor) -> bool {
+    pub(super) fn covers(self, tailor: &dyn Tailor) -> bool {
         match self {
             Scope::All => true,
             Scope::Only(id) => tailor.id() == id,
+            Scope::Selected(ids) => ids.contains(&tailor.id()),
         }
     }
 }

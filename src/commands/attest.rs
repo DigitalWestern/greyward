@@ -145,11 +145,8 @@ fn select_then_open<T, C>(
     open: impl FnOnce() -> io::Result<C>,
 ) -> io::Result<(Vec<Target>, T, C)> {
     let targets = targets(project, present, named)?;
-    let scope = match named {
-        [one] => Scope::Only(one),
-        _ => Scope::All,
-    };
-    let toolchain = preflight(scope)?;
+    let ids: Vec<&str> = targets.iter().map(|target| target.tailor.id()).collect();
+    let toolchain = preflight(Scope::Selected(&ids))?;
     let ctx = open()?;
     Ok((targets, toolchain, ctx))
 }
@@ -617,6 +614,11 @@ mod tests {
         lock: Some("alpha.lock"),
         checks: true,
     };
+    static BETA: Future = Future {
+        id: "beta",
+        lock: Some("beta.lock"),
+        checks: true,
+    };
     /// Has a lock check but declares no lock a resolution door produces.
     static BARE: Future = Future {
         id: "bare",
@@ -724,7 +726,12 @@ mod tests {
             present,
             &named,
             |scope| {
-                steps.borrow_mut().push(format!("preflight {scope:?}"));
+                let ids: Vec<&str> = present
+                    .iter()
+                    .filter(|tailor| scope.covers(**tailor))
+                    .map(|tailor| tailor.id())
+                    .collect();
+                steps.borrow_mut().push(format!("preflight {ids:?}"));
                 Ok(())
             },
             || {
@@ -793,9 +800,13 @@ mod tests {
         let all: [&'static dyn Tailor; 3] = [&BARE, &ALPHA, &DOORLESS];
         let (result, steps) = front(&all, &[]);
         assert_eq!(result.unwrap(), ["alpha"]);
-        assert_eq!(steps, ["preflight All", "open store"]);
+        assert_eq!(steps, [r#"preflight ["alpha"]"#, "open store"]);
         let (result, steps) = front(&all, &["alpha"]);
         assert_eq!(result.unwrap(), ["alpha"]);
-        assert_eq!(steps, ["preflight Only(\"alpha\")", "open store"]);
+        assert_eq!(steps, [r#"preflight ["alpha"]"#, "open store"]);
+        let all: [&'static dyn Tailor; 4] = [&BARE, &ALPHA, &DOORLESS, &BETA];
+        let (result, steps) = front(&all, &["beta", "alpha"]);
+        assert_eq!(result.unwrap(), ["beta", "alpha"]);
+        assert_eq!(steps, [r#"preflight ["alpha", "beta"]"#, "open store"]);
     }
 }

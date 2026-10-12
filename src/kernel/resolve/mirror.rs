@@ -766,10 +766,11 @@ impl Exchange<'_> {
         record.claimed = Some(claim.describe());
         if claim.is_weak() {
             let detail = "the registry claims only a SHA-1 digest";
-            if let Err(refusal) = self
-                .state
-                .check(policy::WEAK_INTEGRITY, &record.url, detail)
-            {
+            if let Err(refusal) = self.state.check(
+                policy::WEAK_INTEGRITY,
+                &redact::origin_and_file(url),
+                detail,
+            ) {
                 return self.refuse(out, record, 403, &refusal);
             }
         }
@@ -936,10 +937,11 @@ impl Exchange<'_> {
     ) -> io::Result<()> {
         if self.route.protocol.expects_claim(url) {
             let detail = "the registry publishes no digest for this artifact";
-            if let Err(refusal) = self
-                .state
-                .check(policy::WEAK_INTEGRITY, &record.url, detail)
-            {
+            if let Err(refusal) = self.state.check(
+                policy::WEAK_INTEGRITY,
+                &redact::origin_and_file(url),
+                detail,
+            ) {
                 return self.refuse(out, record, 403, &refusal);
             }
         }
@@ -1294,7 +1296,9 @@ mod tests {
             weak,
             [(
                 policy::WEAK_INTEGRITY,
-                harness.upstream_url("/art/weak-pkg-1.0.tgz")
+                // The origin and file name only: a token in the path never
+                // reaches the committed record.
+                harness.upstream_url("/.../weak-pkg-1.0.tgz")
             )]
         );
 

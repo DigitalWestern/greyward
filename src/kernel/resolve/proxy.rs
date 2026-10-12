@@ -946,7 +946,9 @@ fn absolute_form(context: &Context, request: &Request, out: &mut dyn Write) -> i
             ),
         ),
     };
-    let reason = match state.check(kind, &shown, &why) {
+    // The fact names the origin: a path may carry a token, and the record
+    // is committed.
+    let reason = match state.check(kind, &redact::origin(&url), &why) {
         Ok(()) => format!("refused {shown}: {why}"),
         Err(refusal) => format!("refused {shown}: {why}; {refusal}"),
     };

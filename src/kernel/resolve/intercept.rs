@@ -363,7 +363,7 @@ fn hop_allowed(
     if std::mem::discriminant(&class) == std::mem::discriminant(first) {
         return Ok(());
     }
-    let origin = next.origin().ascii_serialization();
+    let origin = redact::origin(next);
     match &class {
         Class::Route => Ok(()),
         Class::Git { repository } => state.check(
@@ -375,9 +375,8 @@ fn hop_allowed(
             policy::UNATTESTED_INDEX,
             &origin,
             &format!(
-                "a redirect led to {}, which is not one of this door's registries; it was \
-                 forwarded through interception and recorded",
-                redact::url(next.as_str(), &[])
+                "a redirect led to {origin}, which is not one of this door's registries; it \
+                 was forwarded through interception and recorded"
             ),
         ),
     }
@@ -440,7 +439,7 @@ fn host_matches(header: Option<&str>, target: &Target<'_>) -> bool {
 /// out: some hosts carry a token there, and the record is committed.
 fn git_subject(repository: &str) -> String {
     Url::parse(repository)
-        .map(|url| url.origin().ascii_serialization())
+        .map(|url| redact::origin(&url))
         .unwrap_or_else(|_| repository.to_string())
 }
 

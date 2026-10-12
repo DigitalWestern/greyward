@@ -298,7 +298,13 @@ impl JobNote {
 /// arguments, control characters replaced, cut at 120 characters.
 fn command_line() -> String {
     let mut words = vec!["ward".to_string()];
-    words.extend(std::env::args().skip(1));
+    // `args_os`: an argument that is not UTF-8 is shown lossily, never a
+    // panic (`args` panics on one).
+    words.extend(
+        std::env::args_os()
+            .skip(1)
+            .map(|word| word.to_string_lossy().into_owned()),
+    );
     let line: String = words
         .join(" ")
         .chars()

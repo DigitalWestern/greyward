@@ -1305,6 +1305,16 @@ fn an_argument_that_is_not_utf8_is_passed_on_or_refused() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(out.stdout, b"caf\xe9");
+    // Spelled like ward's -C, it is still the program's argument, whole.
+    for arg in [&b"-C\xe9"[..], b"--directory=\xe9"] {
+        let arg = OsString::from_vec(arg.to_vec());
+        let out = ward_os(
+            &project.0,
+            &["run".as_ref(), "printf".as_ref(), "%s".as_ref(), &arg],
+        );
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert_eq!(out.stdout, arg.as_encoded_bytes());
+    }
 
     let out = ward_os(&project.0, &["status".as_ref(), &name]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));

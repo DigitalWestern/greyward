@@ -316,8 +316,8 @@ pub trait Tailor: Sync {
 
     /// `ward plan`: the plan as pretty-printed JSON text. Planning realizes
     /// no dependency environment, but it may fetch the pinned toolchain
-    /// into the store and write ward's own caches under `.greyward`; it
-    /// writes no project input. `None` when, after `prepare`, there is nothing of
+    /// into the store and write ward's own caches under `.greyward`
+    /// (Python's writes no dependency lock: `prepare` does). `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
     /// A planner that asks the ecosystem's tool (a consistency gate, a lock

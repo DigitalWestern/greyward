@@ -2975,3 +2975,127 @@ fn the_heavy_gate_watches_the_archive_homes() {
         assert!(!watched.contains(path), "{path} is watched");
     }
 }
+
+/// Every production file that names the store's `tmp/` namespace, with each
+/// temporary name it makes there: the literal the file spells (a whole
+/// string, or the start of one) and the name prefix it yields. A file that
+/// only reads `tmp/` lists none.
+const STORE_TMP_WRITERS: &[(&str, &[(&str, &str)])] = &[
+    ("src/commands/inspect.rs", &[("\".doctor-", ".doctor-")]),
+    (
+        "src/kernel/fetch.rs",
+        &[
+            ("\"dl-", "dl-"),
+            ("\"ins-", "ins-"),
+            ("\"poisoned-\"", "poisoned-"),
+        ],
+    ),
+    ("src/kernel/gc/read.rs", &[]),
+    ("src/kernel/gc/reset.rs", &[]),
+    (
+        "src/kernel/resolve/cache.rs",
+        &[("\"resolve-meta-", "resolve-meta-")],
+    ),
+    ("src/kernel/resolve/ledger.rs", &[("\"diag-", "diag-")]),
+    (
+        "src/kernel/resolve/outputs.rs",
+        &[("\"resolve-out\"", "resolve-out-")],
+    ),
+    (
+        "src/kernel/resolve/snapshot.rs",
+        &[("\"resolve\"", "resolve-")],
+    ),
+    ("src/kernel/resolve/tripwire.rs", &[]),
+    (
+        "src/kernel/store/objects.rs",
+        &[("\"stage-", "stage-"), ("\"meta-", "meta-")],
+    ),
+    ("src/kernel/store/records.rs", &[("\"record-", "record-")]),
+    (
+        "src/tailors/cargo/mod.rs",
+        &[("\"stage-cargo-build\"", "stage-")],
+    ),
+    (
+        "src/tailors/cargo/rustfmt.rs",
+        &[
+            ("\"stage-rustfmt-probe\"", "stage-"),
+            ("\"stage-rustfmt-run\"", "stage-"),
+        ],
+    ),
+    (
+        "src/tailors/node/classify.rs",
+        &[(
+            "\"npm-archive-classification-",
+            "npm-archive-classification-",
+        )],
+    ),
+    (
+        "src/tailors/node/local_package.rs",
+        &[("\"local-", "local-")],
+    ),
+];
+
+/// What marks a file as one that works in the store's `tmp/`.
+const STORE_TMP_MARKS: &[&str] = &[
+    "join(\"tmp\")",
+    "&[\"tmp\"]",
+    "store_tmp",
+    "Path::new(\"tmp\")",
+];
+
+/// Every name ward writes under the store's `tmp/` is one GC and
+/// `gc --reset` know (`TMP_LEFTOVERS` in `src/kernel/gc/read.rs`), so what a
+/// killed ward leaves there is swept, never kept forever (#676 review: the
+/// node tailor's `local-<random>.tgz` was missing). A new file that names
+/// `tmp/` fails here until its names are listed in `STORE_TMP_WRITERS` and
+/// covered by `TMP_LEFTOVERS`.
+#[test]
+fn every_store_temporary_is_one_gc_knows() {
+    let read = fs::read_to_string(src().join("kernel/gc/read.rs")).unwrap();
+    let start = read
+        .find("const TMP_LEFTOVERS")
+        .expect("TMP_LEFTOVERS in gc/read.rs");
+    let block = &read[start..start + read[start..].find("];").unwrap()];
+    let mut known: Vec<String> = block
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    if block.contains("POISONED_PREFIX") {
+        known.push("poisoned-".to_string());
+    }
+    let mut problems = Vec::new();
+    let registered: Vec<&str> = STORE_TMP_WRITERS.iter().map(|(file, _)| *file).collect();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") {
+            continue;
+        }
+        let production = outside_test_modules(&text);
+        let marked = STORE_TMP_MARKS.iter().any(|mark| production.contains(mark));
+        match (marked, registered.contains(&relative.as_str())) {
+            (true, false) => problems.push(format!(
+                "{relative} names the store's tmp/ but is not in STORE_TMP_WRITERS: list each \
+                 name it makes there, and add any new prefix to TMP_LEFTOVERS"
+            )),
+            (false, true) => problems.push(format!(
+                "{relative} no longer names the store's tmp/: remove it from STORE_TMP_WRITERS"
+            )),
+            _ => {}
+        }
+        let Some((_, names)) = STORE_TMP_WRITERS.iter().find(|(file, _)| *file == relative) else {
+            continue;
+        };
+        for (literal, prefix) in *names {
+            if !production.contains(literal) {
+                problems.push(format!("{relative} no longer spells {literal}"));
+            }
+            if !known.iter().any(|known| prefix.starts_with(known.as_str())) {
+                problems.push(format!(
+                    "{relative} writes tmp/{prefix}*, which TMP_LEFTOVERS does not list"
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

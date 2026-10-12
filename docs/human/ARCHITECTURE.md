@@ -775,21 +775,27 @@ refused, and the fix is to empty it.
 - No directory, or an empty one (or one holding only empty store
   namespaces): a new store is created, marker first.
 - The marker says `greyward-store 1`: the store opens.
-- No marker, and something only a ward writes into a store: its lease
-  files (`activity.lock`, `gc.lock`), an `objects/` entry named as an
-  object id, or a `meta/<object id>.json`. A store written before the
-  marker existed, or one a reset did not finish. Refused, with
-  `ward gc --reset` as the fix.
+- No marker, and something only a ward writes into a store, read through
+  the held root without following a link: an empty regular lease file
+  (`activity.lock`, `gc.lock`), or a `meta/<object id>.json` that parses as
+  that object's record. A store written before the marker existed, or one
+  a reset did not finish. Refused, with `ward gc --reset` as the fix.
 - No marker and none of that, but other files: not a store at all (a
-  `GREYWARD_STORE` pointed at a home or a project by mistake). Directory
-  names alone prove nothing, since `tmp/`, `records/` or `objects/` can be
-  anyone's. Refused with no `fix:` line, no store is created beside those
-  files, no lease file is written into the directory, and `ward gc --reset`
-  refuses it too (#676).
+  `GREYWARD_STORE` pointed at a home or a project by mistake). Names alone
+  prove nothing: `tmp/`, `records/` and `objects/` can be anyone's, and so
+  can an object-shaped filename or a record-shaped directory, and a `meta`
+  linked to another store's holds none of this directory's records.
+  Refused with no `fix:` line, no store is created beside those files, no
+  lease file is written into the directory, and `ward gc --reset` refuses
+  it too (#676).
 - A higher number: a newer Greyward wrote it. Refused, and the fix is to update
   this Greyward.
 - Anything else in the marker, or a marker that cannot be read (its mode,
-  an I/O error): refused.
+  an I/O error): refused, with `ward gc --reset` as the fix when the store
+  evidence above is beside it. Without it, the `format` is anyone's file
+  (or directory, or link) and the directory is not a store, as above.
+  `ward gc --reset` empties only a root whose marker is current or that
+  holds that evidence.
 
 The marker is read twice. `Store::open` reads it when a command starts, and
 every activity lease (`Store::activity`, `Store::try_activity_exclusive`)

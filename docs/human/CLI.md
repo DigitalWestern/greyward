@@ -1191,9 +1191,10 @@ margin for a ward from before the lease. Sharp edges:
   rather than the network where it can. It never reads the marker, so it
   works on any store, readable or not. Under `tmp/` it removes only the
   temporaries ward names there. It refuses a directory that is not a store
-  at all: one with no marker and nothing a ward stores (no lease file, no
-  object, no object record), such as a `GREYWARD_STORE` pointed at a home or
-  a project by mistake. Every other command refuses that directory as well,
+  at all: one with no current marker and nothing a ward stores (no empty
+  lease file, no object record that parses, nothing reached through a
+  link), such as a `GREYWARD_STORE` pointed at a home or a project by
+  mistake, even with a `format` file of its own. Every other command refuses that directory as well,
   without a `fix:` line, and creates nothing in it. It refuses while another Greyward job is
   using the store, takes `--dry-run` (which lists what it would remove and
   writes nothing) and no other option. A reset that is interrupted leaves

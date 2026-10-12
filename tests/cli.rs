@@ -2376,6 +2376,77 @@ fn a_directory_that_is_no_store_is_refused_and_never_reset() {
     assert_eq!(names, ["docs", "records", "tmp"], "ward wrote into it");
 }
 
+/// An unrelated `format` beside the same files reads as a marker ward cannot
+/// read, which used to skip the refusal above and let `gc --reset` empty
+/// `records/` and `meta/` (#676 review). Without store evidence beside it,
+/// a `format` file, directory or link makes no store: every command refuses
+/// the directory and the reset removes nothing. So does a `meta` or
+/// `objects` linked to another store's, whose records are not this
+/// directory's.
+#[test]
+fn an_unrelated_format_or_linked_namespace_is_no_store_to_reset() {
+    let home = TempDir::boundary("cli-not-a-store-format");
+    let (real_store, _) = pre_epoch_store(&home.0);
+    type Plant = Box<dyn Fn(&std::path::Path)>;
+    let plants: Vec<(&str, Plant)> = vec![
+        (
+            "a format file",
+            Box::new(|dir| std::fs::write(dir.join("format"), "A4\n").unwrap()),
+        ),
+        (
+            "a format directory",
+            Box::new(|dir| std::fs::create_dir(dir.join("format")).unwrap()),
+        ),
+        (
+            "a format link",
+            Box::new(|dir| std::os::unix::fs::symlink("/nowhere", dir.join("format")).unwrap()),
+        ),
+        (
+            "meta linked to a store's",
+            Box::new({
+                let target = real_store.join("meta");
+                move |dir| std::os::unix::fs::symlink(&target, dir.join("meta")).unwrap()
+            }),
+        ),
+        (
+            "objects linked to a store's",
+            Box::new({
+                let target = real_store.join("objects");
+                move |dir| std::os::unix::fs::symlink(&target, dir.join("objects")).unwrap()
+            }),
+        ),
+    ];
+    for (index, (what, plant)) in plants.iter().enumerate() {
+        let dir = home.0.join(format!("notastore-{index}"));
+        std::fs::create_dir_all(dir.join("records")).unwrap();
+        std::fs::write(dir.join("records/2026.csv"), "a,b\n").unwrap();
+        plant(&dir);
+        let before = common::snapshot(&dir);
+        for args in [
+            &["gc", "--reset", "--dry-run"][..],
+            &["gc", "--reset"],
+            &["store", "roots"],
+        ] {
+            let out = ward_at(&home.0, &home.0, &dir, args);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{what} {args:?}: {stderr}");
+            assert!(
+                stderr.contains("is not a ward store"),
+                "{what} {args:?}: {stderr}"
+            );
+            assert!(!stderr.contains("fix:"), "{what} {args:?}: {stderr}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("records/2026.csv")).unwrap(),
+            "a,b\n",
+            "{what}"
+        );
+        assert_eq!(common::snapshot(&dir), before, "{what}: ward changed it");
+    }
+    // The linked store itself is untouched.
+    assert!(real_store.join("meta").is_dir());
+}
+
 /// `gc --reset` takes no other option: a reset that also swept, registered
 /// or forgot would be two commands' worth of deletion under one name.
 #[test]

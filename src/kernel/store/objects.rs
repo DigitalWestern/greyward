@@ -467,7 +467,7 @@ impl Store {
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(perms.mode() & !0o222);
+            perms.set_mode(perms.mode() & !COMMIT_CLEARED_MODE);
             fs::set_permissions(&dest, perms)?;
         }
         // Meta is the completion marker: write via tmp + atomic rename so a
@@ -619,7 +619,15 @@ pub(crate) fn make_read_only_for_test(path: &Path) -> io::Result<()> {
     make_read_only(path)
 }
 
-/// Recursively remove write permission (files and dirs). Symlinks untouched.
+/// The mode bits commit clears: write permission, and the setuid, setgid
+/// and sticky bits. An extractor running as root (GNU tar's default
+/// `--same-permissions`, a zip member's mode, a copy's `set_permissions`)
+/// can carry a setuid bit from an archive, and an object's identity covers
+/// only names, bytes and the executable bit, so no object keeps one (#674).
+const COMMIT_CLEARED_MODE: u32 = 0o7222;
+
+/// Recursively remove write permission and the setuid, setgid and sticky
+/// bits (files and dirs). Symlinks untouched.
 pub(super) fn make_read_only(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let md = fs::symlink_metadata(path)?;
@@ -632,7 +640,7 @@ pub(super) fn make_read_only(path: &Path) -> io::Result<()> {
         }
     }
     let mut perms = md.permissions();
-    perms.set_mode(perms.mode() & !0o222);
+    perms.set_mode(perms.mode() & !COMMIT_CLEARED_MODE);
     fs::set_permissions(path, perms)
         .map_err(|e| io::Error::new(e.kind(), format!("chmod {}: {e}", path.display())))
 }

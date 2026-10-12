@@ -480,7 +480,7 @@ fn reject_mixed_sync_roots(
 /// `add` / `remove` / `update`: delegate the edit, report it, then the
 /// ordinary sync in the project the edit landed in.
 pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
-    let cwd = project_dir();
+    let cwd = project_dir()?;
     // Dependency edits ensure pinned tools before the ordinary sync. Load
     // the policy chain first: a cached toolchain object read before it
     // would be judged by the default policy, without the files' deny

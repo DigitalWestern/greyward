@@ -38,9 +38,13 @@ inputs:
     description: >-
       Machine policy for the job. Empty uses the company deny list that
       ships with Greyward (docs/human/policy-company.toml), anything else is the
-      path of a policy file in the workspace. 'none' sets nothing: a
+      path of a policy file. 'none' sets nothing: a
       GREYWARD_POLICY already in the job's environment, ~/.greyward/policy.toml and
-      the project's own .greyward/policy.toml still apply.
+      the project's own .greyward/policy.toml still apply. On a pull_request
+      event the workspace is the pull request's checkout, which can edit a
+      policy file there to drop a denial or trust its own key, so a file in
+      the workspace is refused: name one outside it (the base branch's copy,
+      written under $RUNNER_TEMP by an earlier step).
     default: ""
   frozen:
     description: >-
@@ -232,7 +236,22 @@ runs:
           exit 1
         fi
         # Under `uses: ./` the action path is spelled `<workspace>/./`.
-        echo "GREYWARD_POLICY=$(realpath "$policy")" >> "$GITHUB_ENV"
+        policy=$(realpath "$policy")
+        # On a pull_request event the workspace is the pull request's
+        # checkout, so a policy file in it is the pull request's to edit:
+        # it could drop a denial or trust its own key. The default (the
+        # deny list shipped with the action) is not read from the
+        # workspace input, so only a named file is checked.
+        workspace=$(realpath "$GITHUB_WORKSPACE")
+        if [ -n "$GREYWARD_ACTION_POLICY" ] && [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          case "$policy/" in
+            "$workspace"/*)
+              echo "::error::policy file $policy is in the pull request's own checkout, so the pull request can edit the policy that judges it; on pull_request leave 'policy' empty for the shipped deny list, or copy the base branch's version of the file outside the workspace (under \$RUNNER_TEMP) in an earlier step and name that path"
+              exit 1
+              ;;
+          esac
+        fi
+        echo "GREYWARD_POLICY=$policy" >> "$GITHUB_ENV"
 
     # The store as an earlier run left it. The key names the ward version,
     # since a store written by another version can be refused, and the

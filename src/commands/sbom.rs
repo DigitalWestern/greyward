@@ -121,7 +121,7 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
 }
 
 pub fn run(output: Option<&Path>) -> io::Result<()> {
-    let doc = generate(&project_dir())?;
+    let doc = generate(&project_dir()?)?;
     let text = serde_json::to_string_pretty(&doc)?;
     match output {
         Some(path) => {

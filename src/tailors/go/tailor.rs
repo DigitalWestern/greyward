@@ -228,7 +228,7 @@ impl Tailor for Go {
         _extension: &str,
     ) -> io::Result<Option<LoneFile>> {
         let runtime = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        let scratch = ctx.store.run_home(&ctx.project_dir(), "go")?;
+        let scratch = ctx.store.run_home(&ctx.project_dir()?, "go")?;
         let mut lone = LoneFile::in_bin(&runtime, "go");
         lone.program.push("run".into());
         lone.env = go::lone_env(&runtime, &scratch)?;

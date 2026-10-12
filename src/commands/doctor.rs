@@ -37,7 +37,7 @@ pub fn run(json: bool, isolation: bool) -> io::Result<i32> {
         inspect::isolation_doctor(store)?
     } else {
         let mut checks = vec![selfupdate::doctor_check()];
-        checks.extend(inspect::doctor(&project_dir(), store));
+        checks.extend(inspect::doctor(project_dir().as_deref(), store));
         checks
     };
     print!("{}", inspect::render_doctor(&checks, json)?);

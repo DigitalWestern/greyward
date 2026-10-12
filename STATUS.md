@@ -45,8 +45,8 @@ cannot disagree.
 
 - After a pull request merges, every problem found along the way and not
   shipped in it becomes its own GitHub issue (file paths, the options, the
-  pick), with a one-line pointer in FOLLOW-UPS.md (see CLAUDE.md or
-  AGENTS.md, which say the same).
+  pick), with a one-line pointer in FOLLOW-UPS.md (see CLAUDE.md and
+  AGENTS.md).
 - An agent implements; a *different* agent reviews adversarially; the review
   outcome (rounds, findings, what was fixed or declined) goes in the pull
   request description. Self-review does not count.

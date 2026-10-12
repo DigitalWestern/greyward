@@ -234,8 +234,9 @@ pub(crate) struct Attempt<R, D, F, B> {
 /// attempt runs, so a policy that denies `host-build-inputs` stops here
 /// with nothing built against the host.
 ///
-/// A sandbox that could not be set up, or a run ward was asked to stop,
-/// says nothing about the build and is returned as is.
+/// A sandbox that could not be set up (`Unsupported`, or a host view that
+/// could not be built, `error::is_sandbox_setup`), or a run ward was asked
+/// to stop, says nothing about the build and is returned as is.
 ///
 /// Before the retry, `discard` removes what the failed attempt left
 /// behind; a refusal records nothing.
@@ -262,7 +263,8 @@ where
     if matches!(
         hermetic.kind(),
         io::ErrorKind::Unsupported | io::ErrorKind::Interrupted
-    ) {
+    ) || crate::kernel::error::is_sandbox_setup(&hermetic)
+    {
         return Err(hermetic);
     }
     let attempts = format!("the build against the C runtime alone failed ({hermetic})");

@@ -216,7 +216,11 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
         .iter()
         .partition(|exception| exception["kind"] == "unrecorded-resolution");
     assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
-    assert_eq!(exceptions.len(), 1, "cargo exceptions: {exceptions:?}");
+    // The fixture repository is a `file://` path, so the git dependency
+    // also records its transport, under the URL.
+    assert_eq!(exceptions.len(), 2, "cargo exceptions: {exceptions:?}");
+    assert_eq!(exceptions[1]["kind"], "host-git-transport");
+    assert_eq!(exceptions[1]["subject"].as_str(), Some(url.as_str()));
     assert_eq!(exceptions[0]["kind"], "git-dependency");
     assert_eq!(exceptions[0]["subject"], "gitdep@1.0.0");
     assert!(

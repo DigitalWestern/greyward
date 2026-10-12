@@ -1534,10 +1534,11 @@ field pass through one redactor:
   to list them. Intercepted hosts without a protocol get all values
   redacted.
 - Redirect chains are redacted hop by hop the same way.
-- Paths: a portable entry keeps the whole path of a URL a route serves
-  (a compiled-in public registry, whose paths name packages, never an
-  account). Any other URL (an intercepted git host or unattested
-  registry, a refused request) is named by its origin, its file name and
+- Paths: a portable entry keeps the whole path of a URL only when a
+  session route accepted that path (a compiled-in public registry, whose
+  accepted paths name packages, never an account). Any other URL (an
+  intercepted git host or unattested registry, a path a route's grammar
+  refused, even on the route's host) is named by its origin, its file name and
   its redacted query (`https://npm.fury.io/.../pkg-1.0.tgz`), since some
   registries carry an account token in the path (Gemfury's
   `/<token>/<account>/`) and the ledger leaves the machine. The

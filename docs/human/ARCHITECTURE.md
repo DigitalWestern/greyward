@@ -1028,7 +1028,12 @@ its own, so the lease that protects a stage directory is visibly the one held
 across its children and its commit (`tests/architecture.rs` lists the few raw
 children that touch no store path). Contention is a named
 outcome, not a hang: GC acquires exclusive activity and skips safely while a
-managed job holds the shared lease. Stage dirs and download temps use
+managed job holds the shared lease, naming it. The lease is a bare `flock`,
+so each holder also writes `jobs/<pid>-<random>`, one line with its command
+and pid, and holds an exclusive `flock` on that note's own descriptor until
+the lease ends and the note is removed. A note whose lock another descriptor
+can take was left by a killed ward and is not reported; the next note written
+removes it once it is a minute old. Stage dirs and download temps use
 collision-proof names.
 
 ## Layering rules

@@ -1,12 +1,14 @@
 //! Streamed atomic publication through a held project directory.
 
-use super::{refusal, split_relative, ProjectRoot, TEMP_ATTEMPTS};
+use super::{
+    read_dir_names_at, refusal, split_relative, ProjectRoot, DIRECTORY_FLAGS, TEMP_ATTEMPTS,
+};
 use crate::kernel::store::{
     fd_stat, fsync_directory, open_file_at, rename_at, same_inode, stat_at, unlink_if_same,
 };
 use std::ffi::OsStr;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -130,7 +132,60 @@ impl ProjectRoot {
         if result.is_err() && !renamed {
             let _ = unlink_if_same(parent_fd, &temp, &created, 0);
         }
+        if result.is_ok() {
+            remove_stale_temps(parent_fd);
+        }
         drop(file);
         result
+    }
+}
+
+/// How old a temporary of ours must be before a publication in the same
+/// directory removes it: far past any write, so one another ward is
+/// publishing right now is never taken.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Whether `name` is exactly a name `random_temp_name` makes.
+fn is_own_temp_name(name: &[u8]) -> bool {
+    name.strip_prefix(b".greyward-tmp.")
+        .is_some_and(|hex| hex.len() == 32 && hex.iter().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Remove the temporaries of ours a killed ward left in the held directory
+/// `dirfd` (#678): a file or link named exactly as `random_temp_name` names
+/// one, older than `STALE_TEMP_AGE`. Left alone, they pile up in the project
+/// beside `.venv` and the closures, where they can be committed. Only names
+/// of that exact shape are touched, each through the held descriptor and
+/// only while it is still the entry that was judged. Best effort: a
+/// publication never fails because a leftover could not be removed.
+pub(super) fn remove_stale_temps(dirfd: RawFd) {
+    // A fresh descriptor of the same directory to list: a listing reads
+    // from the descriptor's offset, which an earlier listing of `dirfd`
+    // left at the end, and `dirfd` may be an `O_PATH` one.
+    let Ok(listed) = open_file_at(dirfd, b".", DIRECTORY_FLAGS, 0) else {
+        return;
+    };
+    let Ok(names) = read_dir_names_at(listed.as_raw_fd()) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(STALE_TEMP_AGE)
+        .and_then(|cutoff| cutoff.duration_since(std::time::UNIX_EPOCH).ok());
+    let Some(cutoff) = cutoff else {
+        return;
+    };
+    for name in names {
+        let name = name.as_bytes();
+        if !is_own_temp_name(name) {
+            continue;
+        }
+        let Ok(stat) = stat_at(dirfd, name) else {
+            continue;
+        };
+        let kind = stat.st_mode & libc::S_IFMT;
+        let stale = u64::try_from(stat.st_mtime).is_ok_and(|mtime| mtime < cutoff.as_secs());
+        if stale && (kind == libc::S_IFREG || kind == libc::S_IFLNK) {
+            let _ = unlink_if_same(dirfd, name, &stat, 0);
+        }
     }
 }

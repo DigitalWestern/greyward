@@ -1120,8 +1120,22 @@ resolution tool unless metadata preparation or resolution is needed.
 
 **gc** follows every registered project closure and removes unreferenced
 store objects, stale artifacts (retention `--keep-days <n>`), and stale
-staging; objects touched in the last ten minutes are always kept so a
-concurrent sync cannot lose one. Sharp edges:
+staging. A sweep holds the store's exclusive lease, so no sync, build or
+`ward run` works in the store while it runs, and none of them can lose an
+object to it; objects touched in the last ten minutes are kept as well, as a
+margin for a ward from before the lease. Sharp edges:
+
+- A sweep needs the store to itself. While another Greyward job holds the
+  store, `ward gc` removes nothing, prints `ward: cleanup skipped: a Greyward
+  job is using this store: <command> (pid <n>)` naming each job, and exits 0.
+  `ward run` holds its shared lease for as long as its child runs, because a
+  later sync rewrites the project's root record and only the lease keeps the
+  running env's objects in the store; so a long `ward run` (a dev server, a
+  notebook) keeps every `ward gc`, a cron one too, from reclaiming anything
+  until it exits. The other way round, a new `ward run` or sync waits while a
+  sweep runs. Each held lease leaves a one-line note under `<store>/jobs/`
+  that its own process removes; a note a killed ward left is removed by the
+  next one.
 
 - `--forget <key>...` removes protection records by the exact keys printed
   by `ward store roots` (`<40-hex key>  <path>`, one line each), matched

@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 mod held;
 mod observed;
 mod publish;
+use publish::remove_stale_temps;
 mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
@@ -344,6 +345,8 @@ impl ProjectRoot {
             if let Ok(stat) = stat_at(parent_fd, &temp) {
                 let _ = unlink_if_same(parent_fd, &temp, &stat, 0);
             }
+        } else {
+            remove_stale_temps(parent_fd);
         }
         result
     }
@@ -1469,6 +1472,84 @@ mod tests {
         let dir = temp.0.join("proj");
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A publication removes the temporaries of ours a killed ward left
+    /// in the same directory, and only those (#678): a file or link named
+    /// exactly as ours, older than the window. A fresh one (another ward
+    /// publishing now), a directory, or a name of another shape stays.
+    #[test]
+    fn a_publication_removes_stale_temporaries_of_its_own_shape() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let ours = |n: u8| format!(".greyward-tmp.{}", format!("{n:x}").repeat(32));
+        let age = |path: &Path| {
+            let old = libc::timespec {
+                tv_sec: (SystemTimeNow::secs() - 3600) as libc::time_t,
+                tv_nsec: 0,
+            };
+            let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: name is NUL-terminated and the two timespecs live
+            // through the call.
+            let done = unsafe {
+                libc::utimensat(
+                    libc::AT_FDCWD,
+                    name.as_ptr(),
+                    [old, old].as_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            assert_eq!(done, 0, "{}", io::Error::last_os_error());
+        };
+        let stale_file = dir.join(ours(1));
+        fs::write(&stale_file, b"x").unwrap();
+        age(&stale_file);
+        let stale_link = dir.join(ours(2));
+        symlink("/nowhere", &stale_link).unwrap();
+        age(&stale_link);
+        let fresh = dir.join(ours(3));
+        fs::write(&fresh, b"x").unwrap();
+        let directory = dir.join(ours(4));
+        fs::create_dir(&directory).unwrap();
+        age(&directory);
+        let other_shape = dir.join(".greyward-tmp.fixed.0");
+        fs::write(&other_shape, b"x").unwrap();
+        age(&other_shape);
+        let users = dir.join("notes.greyward-tmp.txt");
+        fs::write(&users, b"x").unwrap();
+        age(&users);
+
+        let root = ProjectRoot::open(&dir).unwrap();
+        root.write_file(Path::new("published"), b"new").unwrap();
+        assert!(
+            fs::symlink_metadata(&stale_file).is_err(),
+            "stale file kept"
+        );
+        assert!(
+            fs::symlink_metadata(&stale_link).is_err(),
+            "stale link kept"
+        );
+        for kept in [&fresh, &directory, &other_shape, &users] {
+            assert!(fs::symlink_metadata(kept).is_ok(), "{}", kept.display());
+        }
+
+        // A link publication cleans its directory the same way.
+        let again = dir.join(ours(5));
+        fs::write(&again, b"x").unwrap();
+        age(&again);
+        root.replace_symlink(Path::new(".venv"), Path::new("/store/env"), "venv")
+            .unwrap();
+        assert!(fs::symlink_metadata(&again).is_err(), "stale file kept");
+    }
+
+    struct SystemTimeNow;
+    impl SystemTimeNow {
+        fn secs() -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        }
     }
 
     /// `held_at` returns a canonical path whatever spelling it is asked

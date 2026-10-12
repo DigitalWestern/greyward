@@ -430,11 +430,17 @@ impl<'a> Transaction<'a> {
             }
             Err(error) => {
                 // A no-replace create that found its name taken: what is
-                // there is another writer's, even with the new bytes.
-                let foreign = swapping
-                    .filter(|_| error.kind() == io::ErrorKind::AlreadyExists)
-                    .map(|index| journal.targets[index].target.as_str());
-                let undone = undo(self.store, &self.root, &journal, foreign);
+                // there is another writer's, even with the new bytes. The
+                // journal says so before anything is undone, so a later
+                // recovery leaves it too. If that write fails, this undo
+                // still knows from the journal in memory.
+                if let Some(index) =
+                    swapping.filter(|_| error.kind() == io::ErrorKind::AlreadyExists)
+                {
+                    journal.targets[index].state = TargetState::Taken;
+                    let _ = write_journal(&journals, &journal);
+                }
+                let undone = undo(self.store, &self.root, &journal);
                 match undone {
                     Ok(notes) => {
                         self.finished = true;
@@ -706,6 +712,11 @@ enum JournalState {
 enum TargetState {
     Pending,
     Swapped,
+    /// Its no-replace create found the name taken: what is there is
+    /// another writer's, whatever its bytes, and undo never touches it.
+    /// Written before the undo, so a recovery after a failed undo knows
+    /// it too.
+    Taken,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1585,6 +1596,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("appeared"), "{error}");
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(OLD_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
+    /// The same, but the undo after the failed create cannot open the
+    /// receipt's folder, so the journal stays: it records the lock as taken,
+    /// and the recovery that runs once the folder is back still leaves the
+    /// other process's file, though no temporary of ours is beside it.
+    #[test]
+    fn a_taken_target_survives_a_failed_undo_in_the_journal() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("created-appears-retry", true);
+        let project = fx.project.clone();
+        let resolution = fx.project.join(RESOLUTION_DIR);
+        let locked = resolution.clone();
+        let error = run_door(
+            &fx,
+            |_| {},
+            move |point| {
+                if point == FaultPoint::TempWritten(1) {
+                    fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+                }
+                Fault::Continue
+            },
+        )
+        .unwrap_err();
+        let opened = fs::read_dir(&resolution).is_ok();
+        fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+        if opened {
+            // Running as root: permissions do not bind, nothing to prove.
+            return;
+        }
+        assert!(error.to_string().contains("undoing"), "{error}");
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(&fx)).unwrap()).unwrap();
+        let lock = journal["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["target"] == "package-lock.json")
+            .unwrap();
+        assert_eq!(lock["state"], "taken", "{journal}");
+        recover(&fx);
         assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
         assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
         assert_eq!(

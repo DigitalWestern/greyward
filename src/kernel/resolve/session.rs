@@ -15,7 +15,7 @@
 use super::cache::MetaCache;
 use super::ledger::{DiagRequest, Diagnostics, Entry, PortableLedger};
 use super::redact;
-use super::routes::{Claim, Permitted, Route};
+use super::routes::{Claim, Permitted, Route, Upstream};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
@@ -146,9 +146,17 @@ struct Inner {
     stale_refused: BTreeSet<String>,
     /// Every (method, url) that was answered (something was served).
     answered: HashSet<(String, String)>,
-    /// Failed portable entries per (method, url), taken out of the ledger
-    /// when the same request is answered.
+    /// Failed portable entries per (method, whole url), taken out of the
+    /// ledger when the same request is answered.
     failed: HashMap<(String, String), Vec<Entry>>,
+    /// Per failed portable entry in the ledger, every (method, whole url)
+    /// still failing with it. Off-route URLs share an entry once reduced
+    /// (two `.../pkg.json` on one host): it leaves the ledger only when the
+    /// last of them is answered.
+    failing: HashMap<Entry, HashSet<(String, String)>>,
+    /// Portable entries a request that did not fail put in the ledger:
+    /// never taken out, even when a failure shares their bytes.
+    kept: HashSet<Entry>,
     /// The texts already in `facts.refusals` and `facts.hard_failures`.
     refusal_texts: HashSet<String>,
     failure_texts: HashSet<String>,
@@ -321,21 +329,36 @@ impl State {
     /// `keep` is the route's content query keys: in the URLs those values
     /// are kept, since they pick which bytes came back. Free text (the
     /// detail) keeps none.
-    pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest, keep: &[&str]) {
+    ///
+    /// The portable entry names an off-route URL by origin and file name
+    /// only (see [`Self::portable_url`]; `resolved` says a route resolved
+    /// `entry.url` from the request's path); the retry and supersession
+    /// bookkeeping, and the diagnostics row, use the whole redacted URL.
+    pub(crate) fn record(
+        &self,
+        mut entry: Entry,
+        mut diag: DiagRequest,
+        keep: &[&str],
+        resolved: bool,
+    ) {
         let url =
             |text: &str| redact::text_keeping(text, keep).replace(&self.token, redact::REDACTED);
-        entry.url = url(&entry.url);
-        entry.redirected_to = entry.redirected_to.map(|hop| url(&hop));
+        let full = url(&entry.url);
+        entry.url = self.portable_url(&full, resolved);
+        entry.redirected_to = entry
+            .redirected_to
+            .map(|hop| self.portable_url(&url(&hop), false));
         diag.url = url(&diag.url);
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
         diag.hops = diag.hops.iter().map(|hop| url(hop)).collect();
-        let mut inner = self.inner();
+        let mut guard = self.inner();
+        let inner = &mut *guard;
         if inner.closed {
             return;
         }
         inner.seq += 1;
         diag.seq = inner.seq;
-        let key = (entry.method.clone(), entry.url.clone());
+        let key = (entry.method.clone(), full);
         match inner.last.get(&key) {
             Some(previous) if previous != &entry => inner.diagnostics.retries += 1,
             _ => {}
@@ -357,25 +380,109 @@ impl State {
                 .is_some_and(|ledger| ledger.insert(entry.clone()));
             if !fresh {
                 inner.diagnostics.duplicates += 1;
-            } else if failed {
+            }
+            if !failed {
+                inner.failing.remove(&entry);
+                inner.kept.insert(entry.clone());
+            } else if inner.ledger.is_some() && !inner.kept.contains(&entry) {
+                let failures = inner.failed.entry(key.clone()).or_default();
+                if !failures.contains(&entry) {
+                    failures.push(entry.clone());
+                }
                 inner
-                    .failed
-                    .entry(key.clone())
+                    .failing
+                    .entry(entry.clone())
                     .or_default()
-                    .push(entry.clone());
+                    .insert(key.clone());
             }
         }
         if entry.freshness.is_some() && inner.answered.insert(key.clone()) {
             let superseded = inner.failed.remove(&key).unwrap_or_default();
-            if let Some(ledger) = inner.ledger.as_mut() {
-                for failure in &superseded {
-                    ledger.remove(failure);
+            for failure in &superseded {
+                let Some(keys) = inner.failing.get_mut(failure) else {
+                    continue;
+                };
+                keys.remove(&key);
+                if keys.is_empty() {
+                    inner.failing.remove(failure);
+                    if let Some(ledger) = inner.ledger.as_mut() {
+                        ledger.remove(failure);
+                    }
                 }
             }
             inner.diagnostics.superseded += superseded.len() as u64;
         }
         inner.diagnostics.bytes += diag.bytes;
         push_row(&mut inner.diagnostics, diag);
+    }
+
+    /// How the portable ledger names `redacted`, a URL already redacted.
+    ///
+    /// A URL one of the session's routes serves, from a path that route's
+    /// grammar accepted (`resolved`, or, for a URL nothing resolved such as
+    /// a redirect hop, its path resolves back to exactly this URL), is on a
+    /// compiled-in public registry and names a package document, never an
+    /// account (route credentials travel in headers, which are never
+    /// recorded): it is kept whole, since it is the evidence of which
+    /// document was fetched. Any other URL (an intercepted git host or
+    /// unattested registry, a path a route refuses, even on a route's
+    /// host, a redirect hop no route maps) may carry an account token in
+    /// its path (Gemfury's `/<token>/<account>/`), and the ledger leaves
+    /// the machine (`--ledger-export`, a CI artifact): it is named by its
+    /// origin and file name, with its query as redaction left it (only
+    /// content keys keep a value, such as git's `service`). A mirror path
+    /// is kept only when its route is this session's and accepts the rest
+    /// of the path; otherwise it is reduced the same way. A CONNECT target
+    /// has no path and is kept.
+    fn portable_url(&self, redacted: &str, resolved: bool) -> String {
+        match Url::parse(redacted) {
+            Ok(url) if url.host_str().is_some() => {
+                let mut bare = url.clone();
+                bare.set_fragment(None);
+                let target = match url.query() {
+                    Some(query) => format!("{}?{query}", url.path()),
+                    None => url.path().to_string(),
+                };
+                let routed = self.config.routes.iter().any(|route| {
+                    route.endpoint_for(&url).is_some()
+                        && (resolved
+                            || match route.resolve(&target) {
+                                Ok(Upstream::Fetch(mapped)) => mapped == bare,
+                                Ok(Upstream::Local(answer)) => answer.url == bare,
+                                Err(_) => false,
+                            })
+                });
+                if routed {
+                    return redacted.to_string();
+                }
+                let mut named = redact::origin_and_file(&url);
+                if let Some(query) = url.query() {
+                    named = format!("{named}?{query}");
+                }
+                named
+            }
+            _ => match redacted.strip_prefix('/') {
+                // `/<token>/<route>/<path>`, the token already redacted.
+                Some(rest) => {
+                    let path = rest.split(['?', '#']).next().unwrap_or_default();
+                    let routed = rest
+                        .split_once('/')
+                        .and_then(|(_token, rest)| rest.split_once('/'))
+                        .is_some_and(|(id, tail)| {
+                            self.route(id)
+                                .is_some_and(|route| route.resolve(&format!("/{tail}")).is_ok())
+                        });
+                    if routed {
+                        return redacted.to_string();
+                    }
+                    match path.split('/').rfind(|segment| !segment.is_empty()) {
+                        Some(file) => format!("/.../{file}"),
+                        None => "/".to_string(),
+                    }
+                }
+                None => redacted.to_string(),
+            },
+        }
     }
 
     /// Record a request that did not carry the session token. It is not
@@ -421,36 +528,6 @@ impl State {
             detail: detail.to_string(),
         });
         Ok(())
-    }
-
-    /// Apply policy to `kind` for real-time denial only: denied, the
-    /// refusal text (which fails the door); otherwise nothing is recorded.
-    /// For facts the lock itself shows (a git dependency), which the tailor
-    /// records from the lock at sync, so the record does not count them
-    /// twice.
-    pub(crate) fn refuse_if_denied(
-        &self,
-        kind: &'static str,
-        subject: &str,
-        detail: &str,
-    ) -> Result<(), String> {
-        if self.is_closed() {
-            return Err("the proxy session has finished".into());
-        }
-        if !policy::denied(&self.config.policy, kind) {
-            return Ok(());
-        }
-        let text = policy::refusal(
-            &self.config.policy,
-            kind,
-            &self.clean(subject),
-            &self.clean(detail),
-        );
-        let mut inner = self.inner();
-        if inner.refusal_texts.insert(text.clone()) {
-            inner.facts.refusals.push(text.clone());
-        }
-        Err(text)
     }
 
     /// A refusal with no request to attach it to (bytes that never parsed

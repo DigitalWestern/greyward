@@ -72,6 +72,12 @@ pub const RESOLUTION_BUILD: &str = "resolution-build";
 /// files are verified like any other package's; its install scripts are not
 /// run.
 pub const FOREIGN_PLATFORM_PACKAGE: &str = "foreign-platform-package";
+/// A lifecycle script of the project itself or of one of its workspace
+/// members (`preinstall`, `install`, `postinstall`, `prepare`) that npm
+/// would run on install and ward did not. ward runs dependencies' scripts
+/// in the sandbox, but these write the project's own source, which no store
+/// object may hold. The subject is the directory, the detail the script.
+pub const PROJECT_SCRIPT_SKIPPED: &str = "project-script-skipped";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -93,6 +99,7 @@ pub const KINDS: &[&str] = &[
     UNRECORDED_RESOLUTION,
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
+    PROJECT_SCRIPT_SKIPPED,
 ];
 
 /// Kinds that describe the project, its lock or its resolution rather than
@@ -113,6 +120,7 @@ pub const PLAN_TIME_KINDS: &[&str] = &[
     UNRECORDED_RESOLUTION,
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
+    PROJECT_SCRIPT_SKIPPED,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on

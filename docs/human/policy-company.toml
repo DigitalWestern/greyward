@@ -154,6 +154,17 @@ deny = [
 #                                    still verified. A team that must never
 #                                    resolve against old metadata may add
 #                                    this kind to the list above.
+#   project-script-skipped           the project's own package.json, or a
+#                                    workspace member's, has a preinstall,
+#                                    install, postinstall or prepare script
+#                                    that npm would run on install and ward
+#                                    did not (a patch-package postinstall, a
+#                                    prepare that builds dist/). Nothing
+#                                    unverified entered the environment, but
+#                                    the project may expect what the script
+#                                    makes. Teams whose projects depend on
+#                                    such a script may add this kind to the
+#                                    list above.
 
 # Closure signing. With a [signing] table in the machine policy, `ward audit`
 # accepts only records signed by a key it lists; a project or --policy copy

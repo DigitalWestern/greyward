@@ -962,11 +962,18 @@ fn mark_fds_cloexec_with_fcntl(fds: &[RawFd]) -> io::Result<()> {
     Ok(())
 }
 
+/// A command for the bubblewrap (or podman) at `path` that starts with an
+/// empty environment and no inherited descriptors.
+///
+/// bubblewrap needs no environment of its own, and `--clearenv` cleans only
+/// the command it launches. Without `--as-pid-1`, bubblewrap's helper is the
+/// namespace's pid 1, readable by the build at `/proc/1/environ`, so an
+/// inherited environment (tokens, credentials, `SSH_AUTH_SOCK`) would be
+/// readable inside every sandbox (#669). Callers that need variables for
+/// the program itself, such as podman, set them after this.
 pub(crate) fn bwrap_command(path: &Path) -> io::Result<Command> {
-    // Only the Linux block below mutates `command`; without the attribute macOS
-    // builds warn about an unused `mut`.
-    #[allow(unused_mut)]
     let mut command = Command::new(path);
+    command.env_clear();
     #[cfg(target_os = "linux")]
     {
         // The fallback list is collected before fork because pre_exec must
@@ -2264,6 +2271,36 @@ mod tests {
         assert!(!read_lines(&output)
             .iter()
             .any(|line| line.starts_with("PWD=")));
+    }
+
+    /// bubblewrap's helper is the sandbox's pid 1, readable by the build,
+    /// so its environment must hold nothing from the host (#669).
+    #[test]
+    fn linux_pid_one_environment_holds_no_host_variable() {
+        if !linux_ready("linux_pid_one_environment_holds_no_host_variable") {
+            return;
+        }
+        // Planted once, under a name no other test reads.
+        std::env::set_var("GREYWARD_TEST_PID_ONE_CANARY", "leaked");
+        let root = temp_dir("pid-one-env");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let output = run_capture(
+            &sandbox,
+            &["/bin/sh", "-c", "tr '\\0' '\\n' < /proc/1/environ"],
+            &scratch,
+            &scratch,
+            &[],
+        )
+        .expect("read /proc/1/environ");
+        let environ = String::from_utf8(output).unwrap();
+        assert!(!environ.contains("GREYWARD_TEST_PID_ONE_CANARY"), "{environ}");
+        assert_eq!(environ.trim(), "", "pid 1 inherited: {environ}");
     }
 
     #[test]

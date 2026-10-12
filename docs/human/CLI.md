@@ -1166,6 +1166,14 @@ margin for a ward from before the lease. Sharp edges:
   that its own process removes; a note a killed ward left is removed by the
   next one.
 
+- A ward killed while writing a project file can leave a temporary beside
+  it, named `.greyward-tmp.lk-<32 hex>` (a link's also has a `.lock` file).
+  The next publication into that directory removes it once it is ten
+  minutes old and the lock its writer held is free. Temporaries from wards
+  before this release (`.greyward-tmp.<32 hex>`, without `lk-`) are not
+  removed automatically and are safe to delete once no older ward is
+  running.
+
 - `--forget <key>...` removes protection records by the exact keys printed
   by `ward store roots` (`<40-hex key>  <path>`, one line each), matched
   as typed including case. It removes only the record, so its objects become

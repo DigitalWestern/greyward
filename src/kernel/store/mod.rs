@@ -893,6 +893,13 @@ mod tests {
                 // contends with the commit's own descriptor.
                 let probe = fs::File::open(&lock)?;
                 let free = probe.try_lock().is_ok();
+                // Release the probe's own lock at once rather than at its
+                // close: a child another test forks meanwhile holds a copy of
+                // this descriptor until it execs, and would keep the lock
+                // held for the next probe.
+                if free {
+                    probe.unlock()?;
+                }
                 record.borrow_mut().push((at.to_string(), free));
                 Ok(())
             },

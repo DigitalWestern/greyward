@@ -2668,6 +2668,95 @@ fn bash_completion_offers_the_package_json_scripts_and_nothing_else() {
     );
 }
 
+/// A script name is data from a package.json anyone can write: completing
+/// it never runs it as shell text, and a name with a space, a `:` or a `\`
+/// is one candidate, spelled as written. Each installed shell is checked.
+#[test]
+fn completion_never_evaluates_a_script_name() {
+    let home = TempDir::boundary("cli-completion-hostile");
+    let names = [
+        "$(printf RAN >&2)",
+        "`printf RAN >&2`",
+        "a b",
+        "c:d",
+        "e\\f",
+    ];
+    let scripts: serde_json::Map<String, serde_json::Value> = names
+        .iter()
+        .map(|name| (name.to_string(), serde_json::json!("true")))
+        .collect();
+    std::fs::write(
+        home.0.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({ "scripts": scripts })).unwrap(),
+    )
+    .unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_ward")).parent().unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let shell = |program: &str, script: &str| {
+        common::child(program, &home.0)
+            .current_dir(&home.0)
+            .env("PATH", &path)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap()
+    };
+    let mut expected: Vec<String> = names.iter().map(|name| format!("[{name}]")).collect();
+    expected.sort();
+    let bracketed = |out: &std::process::Output| {
+        let mut lines: Vec<String> = text(&out.stdout).lines().map(String::from).collect();
+        lines.sort();
+        lines
+    };
+
+    let completion = text(&ward(&home.0, &home.0, &["completions", "bash"]).stdout);
+    std::fs::write(home.0.join("ward.bash"), completion).unwrap();
+    for line in ["ward ''", "ward run ''"] {
+        let out = shell(
+            "bash",
+            &format!(
+                "source ./ward.bash; COMP_WORDS=({line}); COMP_CWORD=$((${{#COMP_WORDS[@]}} - 1)); \
+                 _ward; printf '[%s]\\n' \"${{COMPREPLY[@]}}\" | grep -F -x -e '[a b]' -e '[c:d]' \
+                 -e '[e\\f]' -e '[$(printf RAN >&2)]' -e '[`printf RAN >&2`]'"
+            ),
+        );
+        assert!(
+            !text(&out.stderr).contains("RAN"),
+            "bash {line}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(
+            bracketed(&out),
+            expected,
+            "bash {line}: {}",
+            text(&out.stderr)
+        );
+    }
+
+    // zsh: `_describe` is stood in for by a printer of the candidates it
+    // is handed, which are `name` with `\` and `:` escaped for it.
+    if Path::new("/usr/bin/zsh").exists() || Path::new("/bin/zsh").exists() {
+        let completion = text(&ward(&home.0, &home.0, &["completions", "zsh"]).stdout);
+        let body = completion.trim_end().trim_end_matches("_ward \"$@\"");
+        std::fs::write(home.0.join("ward.zsh"), body).unwrap();
+        let out = shell(
+            "zsh",
+            "source ./ward.zsh; _describe() { print -rl -- \"${(@P)4}\" | sed 's/.*/[&]/' }; _ward_scripts",
+        );
+        assert!(
+            !text(&out.stderr).contains("RAN"),
+            "zsh: {}",
+            text(&out.stderr)
+        );
+        let mut escaped: Vec<String> = names
+            .iter()
+            .map(|name| format!("[{}]", name.replace('\\', "\\\\").replace(':', "\\:")))
+            .collect();
+        escaped.sort();
+        assert_eq!(bracketed(&out), escaped, "zsh: {}", text(&out.stderr));
+    }
+}
+
 #[test]
 fn x_clean_follows_a_symlinked_home_chain_the_way_the_runner_does() {
     // "Move the cache off the root disk": `~/.greyward` is a symlink to

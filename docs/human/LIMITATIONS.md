@@ -444,10 +444,21 @@ Selection covers every patch of each maintained CPython minor that python-build-
 - **Cargo resolves in the sandbox, through TLS interception** (`add`/`remove`/`update`, a
   missing `Cargo.lock`, `attest`, and an sdist's missing lock). Cargo has no network of its
   own: Greyward's proxy answers the crates.io index and download hosts and pinned git fetches,
-  and records each request. Known edges: a project `.cargo/config.toml` that sets
-  `registry.global-credential-providers` or a `credential-provider` as an array stops cargo
-  with a config merge error, because Greyward forces string forms so no project provider can run
-  (set them as strings or drop them). Authenticated alternative registries fail, as the
+  and records each request. Known edges: a project `.cargo/config.toml` (or a file it
+  includes) that sets `paths`, `registry.global-credential-providers`, any
+  `credential-provider`, or `[credential-alias]` is refused by name before cargo starts, in
+  resolution, `ward`, `ward build` and `ward run`. No setting Greyward can force undoes them:
+  `paths` builds a local directory in place of a locked crate with `Cargo.lock` unchanged
+  (use a `[patch]` table in Cargo.toml, which the lock records), and cargo runs the global
+  provider list for a replacement source after Greyward's own `cargo:token` finds no token
+  (keep providers in your own `~/.cargo/config.toml`). Source replacement itself (a mirror
+  through `[source.<name>] registry`, a vendor `directory`, a `local-registry`) stays
+  allowed: a lock entry from anywhere but crates.io or a pinned git commit is refused, and
+  each crate is fetched from crates.io and checked against the lock's checksum, so a
+  replacement cannot change what is built. `ward attest` also refuses a lock when `cargo
+  metadata` reports a crate the lock pins to a registry or a commit as a local directory.
+  `ward run` checks from the directory it starts in up to the workspace root, not the
+  directories above it. Authenticated alternative registries fail, as the
   sandbox gets no token. Path dependencies outside the workspace root are found from the
   manifests (dependency tables, `[patch]`, `[replace]`, `target.*`, `[workspace]`) and
   snapshotted read-only; one named only through a `[lib] path`, a build script or a

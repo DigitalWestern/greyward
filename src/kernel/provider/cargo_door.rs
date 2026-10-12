@@ -425,6 +425,90 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
+/// The settings a project's cargo configuration may not make, because no
+/// forced `--config` undoes them:
+///
+/// - `paths` swaps a crate the lock pins for a directory of the
+///   project's choosing, with the same name and version. Cargo prints
+///   nothing and leaves `Cargo.lock` as it was, so the verified vendor
+///   copy would never be built. Cargo has no flag or variable that clears
+///   the list.
+/// - `registry.global-credential-providers`, `registry.credential-provider`,
+///   `registries.<name>.credential-provider` and `[credential-alias]` name
+///   programs cargo runs for a token. Ward forces each registry's own slot,
+///   but a source reached through `[source.<name>] replace-with` has no
+///   `[registries]` row, so cargo asks the global list, and a `--config`
+///   array is appended to a config file's array rather than replacing it:
+///   with ward's `cargo:token` finding no token, the project's program runs
+///   next.
+///
+/// Source replacement itself (`[source.<name>]` with `replace-with`,
+/// `registry`, `directory`, `local-registry` or `git`) stays allowed: a
+/// mirror or a vendor directory is how many projects reach crates.io. It
+/// cannot change what is built: a lock entry from anywhere but crates.io
+/// or a pinned git commit is refused at plan time, every crate is
+/// downloaded from crates.io and checked against the lock's checksum, and
+/// the build replaces crates.io with ward's own vendor object. With the
+/// project unable to set a provider, the global list a replacement falls
+/// back to is ward's `cargo:token` alone.
+pub fn refuse_unneutralized_settings(files: &[ConfigFile]) -> io::Result<()> {
+    for file in files {
+        let table = &file.table;
+        let registry = table.get("registry").and_then(|value| value.as_table());
+        let mut found: Vec<String> = Vec::new();
+        if table.contains_key("paths") {
+            found.push("paths".into());
+        }
+        for key in ["global-credential-providers", "credential-provider"] {
+            if registry.is_some_and(|registry| registry.contains_key(key)) {
+                found.push(format!("registry.{key}"));
+            }
+        }
+        if let Some(registries) = table.get("registries").and_then(|value| value.as_table()) {
+            for (name, row) in registries {
+                if row
+                    .as_table()
+                    .is_some_and(|row| row.contains_key("credential-provider"))
+                {
+                    found.push(format!("registries.{name}.credential-provider"));
+                }
+            }
+        }
+        if table.contains_key("credential-alias") {
+            found.push("credential-alias".into());
+        }
+        if found.is_empty() {
+            continue;
+        }
+        return Err(crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} sets {}; ward does not run cargo with a project configuration that \
+                 replaces a locked crate with a local directory (`paths`) or names a \
+                 credential provider, since no setting of ward's can undo either. Remove {} \
+                 (a `[patch]` table in Cargo.toml overrides a crate where the lock records \
+                 it, and credential providers belong in your own ~/.cargo/config.toml)",
+                file.real.display(),
+                found.join(", "),
+                if found.len() == 1 { "it" } else { "them" },
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// [`refuse_unneutralized_settings`] for cargo's configuration in each of
+/// `dirs`, every file read through `bound` ([`config_files`]).
+pub fn refuse_project_config<'a>(
+    dirs: impl IntoIterator<Item = &'a Path>,
+    bound: &Bound,
+) -> io::Result<()> {
+    for dir in dirs {
+        refuse_unneutralized_settings(&config_files(dir, bound)?)?;
+    }
+    Ok(())
+}
+
 /// The directories outside `lock_root` that cargo reads as `path`
 /// dependencies (and `[patch]` or `[replace]` entries) or as workspace
 /// members ([`external_members`]), found from every manifest under the
@@ -1210,6 +1294,9 @@ pub fn run_cargo(
             outputs: Vec::new(),
         },
     );
+    // The lock root is where cargo starts, and inside the sandbox the only
+    // directory of its configuration chain that holds the project's files.
+    refuse_project_config([run.lock_root], &Bound::new(run.lock_root)?)?;
     let registries = configured_registries(run.lock_root)?;
     let confined = cargo_confined(&run, publish, &registries)?;
     let spec = cargo_spec(run.rust_obj, run.lock_root, run.args);
@@ -1711,6 +1798,127 @@ mod tests {
         )
         .unwrap();
         assert!(!confined(&root), "an external path dependency drops it");
+    }
+
+    /// Each setting no forced flag undoes is refused by its key and file,
+    /// in the config itself or only in a file it includes. Source
+    /// replacement (a mirror, a vendor directory) and registries without a
+    /// provider of their own pass.
+    #[test]
+    fn settings_no_forced_flag_undoes_are_refused_by_name() {
+        let temp = TempDir::named("cargo-unneutralized");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        let marker = root.join("marker.sh").display().to_string();
+        let check = |text: &str| {
+            std::fs::write(root.join(".cargo/config.toml"), text).unwrap();
+            refuse_project_config([root.as_path()], &Bound::new(&root).unwrap())
+        };
+        let replacement = "[source.crates-io]\nreplace-with = \"mirror\"\n\
+                           [source.mirror]\nregistry = \"sparse+https://mirror.test/\"\n";
+        for (text, key) in [
+            ("paths = [\"evil/dep\"]\n".to_string(), "paths"),
+            (
+                format!("{replacement}[registry]\nglobal-credential-providers = [\"{marker}\"]\n"),
+                "registry.global-credential-providers",
+            ),
+            (
+                format!("registry.credential-provider = \"{marker}\"\n"),
+                "registry.credential-provider",
+            ),
+            (
+                format!(
+                    "[registries.evil]\nindex = \"sparse+https://evil.test/\"\n\
+                     credential-provider = [\"{marker}\"]\n"
+                ),
+                "registries.evil.credential-provider",
+            ),
+            (
+                format!("[credential-alias]\nmine = [\"{marker}\"]\n"),
+                "credential-alias",
+            ),
+        ] {
+            let error = check(&text).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{key}");
+            let error = error.to_string();
+            assert!(error.contains(&format!("sets {key}")), "{key}: {error}");
+            assert!(error.contains("config.toml"), "{key}: {error}");
+        }
+
+        // Only in an included file: the walk follows the include.
+        std::fs::write(root.join(".cargo/more.toml"), "paths = [\"evil/dep\"]\n").unwrap();
+        let error = check("include = [\"more.toml\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more.toml sets paths"), "{error}");
+
+        for allowed in [
+            replacement.to_string(),
+            "[source.crates-io]\nreplace-with = \"vendored\"\n\
+             [source.vendored]\ndirectory = \"vendor\"\n"
+                .to_string(),
+            "[registries.internal]\nindex = \"sparse+https://internal.test/\"\n\
+             [registry]\ndefault = \"internal\"\n"
+                .to_string(),
+            String::new(),
+        ] {
+            check(&allowed).unwrap_or_else(|error| panic!("{allowed}: {error}"));
+        }
+    }
+
+    /// The door refuses a project credential provider before cargo starts:
+    /// the replacement source in this config is the shape whose provider
+    /// cargo would run in spite of the forced settings.
+    #[test]
+    fn run_cargo_refuses_a_project_credential_provider_before_cargo_starts() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-door-provider");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"ws\"\n").unwrap();
+        let ran = temp.0.join("marker-ran");
+        let marker = root.join("marker.sh");
+        std::fs::write(
+            &marker,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = \"mirror\"\n\
+                 [source.mirror]\nregistry = \"sparse+https://mirror.test/\"\n\
+                 [registry]\nglobal-credential-providers = [\"{}\"]\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let store = crate::kernel::store::Store::for_test(temp.0.join("absent-store"));
+        let mut scope = crate::kernel::testutil::DoorScope::new();
+        let mut door = scope.door(
+            &store,
+            &activity,
+            crate::kernel::platform::Platform::host().unwrap(),
+            crate::kernel::resolve::DoorKind::MissingLock,
+        );
+        let error = run_cargo(
+            &mut door,
+            CargoRun {
+                rust_obj: Path::new("/nonexistent/rust"),
+                lock_root: &root,
+                args: &["generate-lockfile"],
+                publish: CargoPublish::Detached {
+                    outputs: Vec::new(),
+                },
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("sets registry.global-credential-providers"),
+            "{error}"
+        );
+        assert!(!ran.exists(), "the project's provider ran");
     }
 
     #[test]

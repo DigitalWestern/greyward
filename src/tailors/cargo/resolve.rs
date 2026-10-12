@@ -191,8 +191,71 @@ pub(crate) fn attest_project(
             )
         )));
     }
+    // `paths` is refused before cargo starts; this is the check that does
+    // not depend on finding it: a crate the lock pins to a registry or a git
+    // commit must come from there, never from a directory.
+    let lock = project
+        .read_input_string(Path::new("Cargo.lock"))?
+        .unwrap_or_default();
+    let swapped = path_resolved_locked_packages(&report.stdout, &lock)?;
+    if !swapped.is_empty() {
+        let them = if swapped.len() == 1 { "it" } else { "them" };
+        return Err(crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "cargo read {} in {} from a local directory, though Cargo.lock pins {them} to \
+                 a registry or a git commit, so the lock is not attested; a `paths` override \
+                 or another configuration swapped {them} in",
+                swapped.join(", "),
+                project.path().display(),
+            ),
+        ));
+    }
     let signed = slot.borrow_mut().take();
     signed.ok_or_else(|| err("cargo's lock check published no record".into()))
+}
+
+/// The `name@version` of every package `cargo metadata` (its JSON in
+/// `metadata`) reports as a path package although `lock` gives it a
+/// `source`: a registry or a git commit. Workspace members and path
+/// dependencies have no source in either.
+fn path_resolved_locked_packages(metadata: &[u8], lock: &str) -> io::Result<Vec<String>> {
+    let metadata: serde_json::Value = serde_json::from_slice(metadata).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("cargo metadata printed no JSON: {error}"),
+        )
+    })?;
+    let lock = cargo_door::parse_toml(Path::new("Cargo.lock"), lock)?;
+    let sourced: std::collections::BTreeSet<(&str, &str)> = lock
+        .get("package")
+        .and_then(|packages| packages.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|package| package.get("source").is_some())
+        .filter_map(|package| {
+            Some((
+                package.get("name")?.as_str()?,
+                package.get("version")?.as_str()?,
+            ))
+        })
+        .collect();
+    let mut swapped: Vec<String> = metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|package| package["source"].is_null())
+        .filter_map(|package| {
+            let name = package["name"].as_str()?;
+            let version = package["version"].as_str()?;
+            sourced
+                .contains(&(name, version))
+                .then(|| format!("{name}@{version}"))
+        })
+        .collect();
+    swapped.sort();
+    swapped.dedup();
+    Ok(swapped)
 }
 
 #[cfg(test)]
@@ -209,6 +272,42 @@ mod tests {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
         )
         .unwrap();
+    }
+
+    /// `cargo metadata` reporting a locked registry or git crate as a path
+    /// package is what a `paths` override looks like from the outside:
+    /// attest names it. Members and path dependencies, sourceless in both,
+    /// are not named.
+    #[test]
+    fn a_locked_crate_read_from_a_directory_is_named() {
+        let lock = "version = 4\n\
+                    [[package]]\nname = \"ws\"\nversion = \"0.1.0\"\n\
+                    [[package]]\nname = \"local\"\nversion = \"0.2.0\"\n\
+                    [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                    [[package]]\nname = \"leaf\"\nversion = \"0.1.0\"\n\
+                    source = \"git+https://github.com/o/leaf#0123\"\n";
+        let metadata = |itoa: serde_json::Value, leaf: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({"packages": [
+                {"name": "ws", "version": "0.1.0", "source": null},
+                {"name": "local", "version": "0.2.0", "source": null},
+                {"name": "itoa", "version": "1.0.18", "source": itoa},
+                {"name": "leaf", "version": "0.1.0", "source": leaf},
+            ]}))
+            .unwrap()
+        };
+        let registry = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index");
+        let git = serde_json::json!("git+https://github.com/o/leaf#0123");
+        let clean = metadata(registry.clone(), git.clone());
+        assert!(path_resolved_locked_packages(&clean, lock)
+            .unwrap()
+            .is_empty());
+        let swapped = metadata(serde_json::Value::Null, serde_json::Value::Null);
+        assert_eq!(
+            path_resolved_locked_packages(&swapped, lock).unwrap(),
+            ["itoa@1.0.18", "leaf@0.1.0"]
+        );
+        assert!(path_resolved_locked_packages(b"not json", lock).is_err());
     }
 
     /// Path dependencies inside the workspace are implicit members: their

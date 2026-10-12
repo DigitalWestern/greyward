@@ -54,6 +54,9 @@ fn realize_and_project(
     let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
     let workspace = &inputs.workspace;
     workspace.check_still_named()?;
+    // Refused here as well as where cargo starts, so a sync stops on it
+    // rather than leave a cargo-home that `ward run` and `ward build` refuse.
+    cargo::refuse_project_cargo_config(workspace.path(), workspace.path())?;
     if fresh {
         workspace.remove_dir_all(Path::new(".greyward/cargo-home"))?;
     }
@@ -261,13 +264,18 @@ impl Tailor for Cargo {
         &self,
         ctx: &Context,
         project: &ProjectRoot,
-        _cwd: &Path,
+        cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
         if project.input_entry(Path::new(".greyward/cargo-home"))? != Entry::Absent {
+            // The wrapper's cargo starts in `cwd` and reads the
+            // configuration there and above it, unsandboxed: a `paths`
+            // override or a project credential provider is refused before
+            // the command starts, as the build refuses it.
+            cargo::refuse_project_cargo_config(&project.current_name()?, cwd)?;
             let closure = comforter::read_closure_in(project, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
             // inject arbitrary executable paths.

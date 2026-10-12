@@ -2,7 +2,7 @@
 //! record, and move a record's ledger between machines.
 //!
 //! Attesting runs in two phases. First, each ecosystem's own lock check
-//! runs through a verification door (`Tailor::attest_lock`), publishing
+//! runs through a verification door (its `Tailor::attester`), publishing
 //! nothing: a check that leaves the lock and manifest byte-unchanged yields
 //! a record signed with the process key. Only when every check passed does
 //! the second phase write them: as the project's receipts
@@ -33,7 +33,7 @@ use crate::kernel::policy;
 use crate::kernel::resolve::record::{self, Judgment, ResolutionRecord};
 use crate::kernel::resolve::{transaction, DoorKind, ResolutionDoor};
 use crate::kernel::ui;
-use crate::tailors::{self, Tailor};
+use crate::tailors::{self, Attester, Tailor};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -62,19 +62,44 @@ pub fn run(command: Command) -> io::Result<i32> {
     Ok(0)
 }
 
+/// One ecosystem to attest, with the lock check that attests it.
+struct Target {
+    tailor: &'static dyn Tailor,
+    attester: &'static dyn Attester,
+}
+
+/// Why `tailor` cannot be attested in `project`, or its lock check: it
+/// needs both an attester and a lock that a resolution door produces.
+fn attestable(
+    tailor: &'static dyn Tailor,
+    project: &ProjectRoot,
+) -> io::Result<Result<Target, String>> {
+    let Some(attester) = tailor.attester() else {
+        return Ok(Err(
+            "it has no lock check that runs through a resolution door".into(),
+        ));
+    };
+    if tailors::resolution_files(tailor, project)?.is_none() {
+        return Ok(Err(
+            "it has no lock that a resolution door produces, so there is nothing to sign".into(),
+        ));
+    }
+    Ok(Ok(Target { tailor, attester }))
+}
+
 /// The tailors to attest: the named ones, or every detected ecosystem that
-/// declares a lock the resolution join judges. A named ecosystem that is
-/// not here, or declares no such lock, is refused before any work.
+/// can be attested. A named ecosystem that is not here, or cannot be
+/// attested, is refused before any work.
 fn targets(
     project: &ProjectRoot,
     present: &[&'static dyn Tailor],
     named: &[String],
-) -> io::Result<Vec<&'static dyn Tailor>> {
+) -> io::Result<Vec<Target>> {
     let mut targets = Vec::new();
     if named.is_empty() {
         for tailor in present {
-            if tailors::resolution_files(*tailor, project)?.is_some() {
-                targets.push(*tailor);
+            if let Ok(target) = attestable(*tailor, project)? {
+                targets.push(target);
             }
         }
         if targets.is_empty() {
@@ -82,7 +107,7 @@ fn targets(
                 io::ErrorKind::Unsupported,
                 format!(
                     "nothing to attest in {}: no ecosystem found here has a lock that a \
-                     resolution door produces",
+                     resolution door produces and checks",
                     project.path().display()
                 ),
             ));
@@ -96,18 +121,37 @@ fn targets(
                 format!("no {id} project in {}", project.path().display()),
             ));
         };
-        if tailors::resolution_files(tailor, project)?.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "ward attest does not support {id}: it has no lock that a resolution door \
-                     produces, so there is nothing to sign"
-                ),
-            ));
+        match attestable(tailor, project)? {
+            Ok(target) => targets.push(target),
+            Err(why) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("ward attest does not support {id}: {why}"),
+                ))
+            }
         }
-        targets.push(tailor);
     }
     Ok(targets)
+}
+
+/// The front of `ward attest`, in order: choose the targets, then
+/// `preflight` the scope they name, then `open` the store. A refused
+/// selection returns before either runs.
+fn select_then_open<T, C>(
+    project: &ProjectRoot,
+    present: &[&'static dyn Tailor],
+    named: &[String],
+    preflight: impl FnOnce(Scope<'_>) -> io::Result<T>,
+    open: impl FnOnce() -> io::Result<C>,
+) -> io::Result<(Vec<Target>, T, C)> {
+    let targets = targets(project, present, named)?;
+    let scope = match named {
+        [one] => Scope::Only(one),
+        _ => Scope::All,
+    };
+    let toolchain = preflight(scope)?;
+    let ctx = open()?;
+    Ok((targets, toolchain, ctx))
 }
 
 fn attest(
@@ -132,15 +176,15 @@ fn attest(
     if present.is_empty() {
         return Err(no_inputs());
     }
-    let targets = targets(project, &present, named)?;
-    let scope = match named {
-        [one] => Scope::Only(one),
-        _ => Scope::All,
-    };
-    // The committed toolchain lock names the tool; attesting never writes
-    // one, so the lock is read the way `--frozen` reads it.
-    let (_, toolchain) = preflight_sync(platform, project, Mode::Frozen, scope)?;
-    let ctx = Context::open(platform)?;
+    let (targets, toolchain, ctx) = select_then_open(
+        project,
+        &present,
+        named,
+        // The committed toolchain lock names the tool; attesting never
+        // writes one, so the lock is read the way `--frozen` reads it.
+        |scope| preflight_sync(platform, project, Mode::Frozen, scope).map(|(_, lock)| lock),
+        || Context::open(platform),
+    )?;
     // An interrupted publication is finished or undone before any check
     // reads the lock it was replacing.
     transaction::recover_project(&ctx.store, &ctx.activity, project.path())?;
@@ -152,14 +196,14 @@ fn attest(
             "export GREYWARD_SIGNING_KEY=<key file your machine policy trusts>",
         );
     }
-    let ids: Vec<&str> = targets.iter().map(|tailor| tailor.id()).collect();
+    let ids: Vec<&str> = targets.iter().map(|target| target.tailor.id()).collect();
     let host = crate::commands::shared::CommandHost { platform };
     check_then_publish(
         &ids,
         |id| {
-            let tailor = targets
+            let Target { tailor, attester } = targets
                 .iter()
-                .find(|tailor| tailor.id() == id)
+                .find(|target| target.tailor.id() == id)
                 .expect("the ids are the targets'");
             let selected = toolchain.get(tailor.lock_ecosystem())?;
             // The door records its run's exceptions (a tier's
@@ -174,7 +218,7 @@ fn attest(
                 DoorKind::Attest,
                 &mut attribution,
             )
-            .and_then(|mut door| tailor.attest_lock(&ctx, project, selected, &host, &mut door));
+            .and_then(|mut door| attester.attest_lock(&ctx, project, selected, &host, &mut door));
             attribution.discard();
             checked
         },
@@ -555,5 +599,203 @@ mod tests {
         assert!(error.to_string().contains("alpha.lock changed"), "{error}");
         assert_eq!(receipt(&fx.dir, "alpha"), None);
         assert_eq!(receipt(&fx.dir, "beta"), None);
+    }
+
+    /// A tailor from a future ecosystem, as `ward attest` sees it: an id,
+    /// the lock it declares if any, and whether it has a lock check. Every
+    /// other method panics, and so does the check: choosing targets must
+    /// not reach a toolchain, a sync, a closure, or a tool.
+    struct Future {
+        id: &'static str,
+        lock: Option<&'static str>,
+        checks: bool,
+    }
+
+    /// Declares `alpha.lock` and checks it: attestable.
+    static ALPHA: Future = Future {
+        id: "alpha",
+        lock: Some("alpha.lock"),
+        checks: true,
+    };
+    /// Has a lock check but declares no lock a resolution door produces.
+    static BARE: Future = Future {
+        id: "bare",
+        lock: None,
+        checks: true,
+    };
+    /// Declares a lock but has no lock check of its own.
+    static DOORLESS: Future = Future {
+        id: "doorless",
+        lock: Some("doorless.lock"),
+        checks: false,
+    };
+
+    impl Attester for Future {
+        fn attest_lock(
+            &self,
+            _ctx: &Context,
+            _project: &ProjectRoot,
+            _toolchain: &crate::kernel::toolchain::Selected,
+            _host: &dyn tailors::EditHost,
+            _door: &mut ResolutionDoor<'_>,
+        ) -> io::Result<(ResolutionRecord, Vec<u8>)> {
+            unreachable!("attest target selection runs no lock check")
+        }
+    }
+
+    impl Tailor for Future {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn resolution_outputs(&self, _project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+            Ok(self.lock.map(PathBuf::from).into_iter().collect())
+        }
+        fn attester(&self) -> Option<&dyn Attester> {
+            self.checks.then_some(self)
+        }
+        fn toolchain_sources(&self) -> crate::kernel::toolchain::input::Sources {
+            unreachable!("attest target selection reads no toolchain source")
+        }
+        fn detect(&self, _project: &ProjectRoot) -> io::Result<bool> {
+            unreachable!("attest target selection takes the detected tailors")
+        }
+        fn input_files(&self) -> &'static str {
+            unreachable!("attest target selection names no input files")
+        }
+        fn preflight(&self, _platform: Platform, _project: &ProjectRoot) -> io::Result<()> {
+            unreachable!("attest target selection runs no preflight")
+        }
+        fn plan(
+            &self,
+            _ctx: &Context,
+            _project: &ProjectRoot,
+            _toolchain: &crate::kernel::toolchain::Selected,
+            _door: &mut ResolutionDoor<'_>,
+        ) -> io::Result<Option<String>> {
+            unreachable!("ward attest plans nothing")
+        }
+        fn sync(
+            &self,
+            _ctx: &Context,
+            _project: &ProjectRoot,
+            _request: &tailors::SyncRequest,
+            _attribution: &mut policy::Attribution,
+        ) -> io::Result<bool> {
+            unreachable!("ward attest syncs nothing")
+        }
+        fn listing(&self, _ecosystem: &str, _body: &serde_json::Value) -> tailors::ClosureListing {
+            unreachable!("ward attest lists no closure")
+        }
+        fn closure_state(
+            &self,
+            _platform: Platform,
+            _project: &ProjectRoot,
+            _ecosystem: &str,
+            _body: &serde_json::Value,
+        ) -> io::Result<crate::comforter::status::State> {
+            unreachable!("ward attest reads no closure")
+        }
+        fn sbom_components(
+            &self,
+            _ecosystem: &str,
+            _body: &serde_json::Value,
+            _out: &mut Vec<serde_json::Value>,
+        ) -> io::Result<()> {
+            unreachable!("ward attest writes no SBOM")
+        }
+        fn toolchain_catalog(&self) -> io::Result<crate::kernel::toolchain::Catalog> {
+            unreachable!("attest target selection reads no toolchain catalog")
+        }
+    }
+
+    /// Run the front of `ward attest` over `present` with observable
+    /// stand-ins for preflight and the store: the ids it chose, or its
+    /// refusal, and the steps that ran, in order.
+    fn front(
+        present: &[&'static dyn Tailor],
+        named: &[&str],
+    ) -> (Result<Vec<&'static str>, io::Error>, Vec<String>) {
+        let temp = TempDir::named("attest-front");
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let named: Vec<String> = named.iter().map(|id| id.to_string()).collect();
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = select_then_open(
+            &project,
+            present,
+            &named,
+            |scope| {
+                steps.borrow_mut().push(format!("preflight {scope:?}"));
+                Ok(())
+            },
+            || {
+                steps.borrow_mut().push("open store".to_string());
+                Ok(())
+            },
+        )
+        .map(|(targets, (), ())| targets.iter().map(|target| target.tailor.id()).collect());
+        (result, steps.into_inner())
+    }
+
+    /// No ecosystem shipped today lacks a lock check, so no CLI fixture
+    /// reaches these refusals; a future tailor would. Each one returns
+    /// before preflight or the store opens.
+    #[test]
+    fn an_unattestable_selection_refuses_before_preflight_or_the_store() {
+        let all: [&'static dyn Tailor; 3] = [&ALPHA, &BARE, &DOORLESS];
+        for (named, refusal) in [
+            (
+                &["doorless"][..],
+                "ward attest does not support doorless: it has no lock check that runs \
+                 through a resolution door",
+            ),
+            (
+                &["bare"][..],
+                "ward attest does not support bare: it has no lock that a resolution door \
+                 produces, so there is nothing to sign",
+            ),
+            // Named beside a supported one, either way round, it refuses
+            // the whole run: alpha is not attested alone in its place.
+            (
+                &["alpha", "doorless"][..],
+                "ward attest does not support doorless: ",
+            ),
+            (
+                &["doorless", "alpha"][..],
+                "ward attest does not support doorless: ",
+            ),
+            (
+                &["alpha", "bare"][..],
+                "ward attest does not support bare: ",
+            ),
+            (&["gamma"][..], "no gamma project in "),
+        ] {
+            let (result, steps) = front(&all, named);
+            let error = result.unwrap_err();
+            assert!(error.to_string().starts_with(refusal), "{named:?}: {error}");
+            assert!(steps.is_empty(), "{named:?} ran {steps:?}");
+        }
+        // Unnamed, with nothing attestable present.
+        let (result, steps) = front(&[&BARE, &DOORLESS], &[]);
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            error.to_string().starts_with("nothing to attest in "),
+            "{error}"
+        );
+        assert!(steps.is_empty(), "{steps:?}");
+    }
+
+    /// Unnamed, the unattestable tailors are skipped and the attestable one
+    /// kept; named, it is scoped alone. Preflight runs before the store
+    /// opens.
+    #[test]
+    fn an_attestable_selection_preflights_then_opens_the_store() {
+        let all: [&'static dyn Tailor; 3] = [&BARE, &ALPHA, &DOORLESS];
+        let (result, steps) = front(&all, &[]);
+        assert_eq!(result.unwrap(), ["alpha"]);
+        assert_eq!(steps, ["preflight All", "open store"]);
+        let (result, steps) = front(&all, &["alpha"]);
+        assert_eq!(result.unwrap(), ["alpha"]);
+        assert_eq!(steps, ["preflight Only(\"alpha\")", "open store"]);
     }
 }

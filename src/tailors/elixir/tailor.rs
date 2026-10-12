@@ -19,7 +19,7 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::elixir;
 use crate::tailors::{
-    ClosureListing, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
+    Attester, ClosureListing, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -68,6 +68,20 @@ fn realize_and_project(
     Ok((beam, projection))
 }
 
+impl Attester for Elixir {
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        elixir::attest_project(door, project, &beam, toolchain)
+    }
+}
+
 impl Tailor for Elixir {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -102,16 +116,8 @@ impl Tailor for Elixir {
         super::resolve::resolution_inputs(project)
     }
 
-    fn attest_lock(
-        &self,
-        ctx: &Context,
-        project: &ProjectRoot,
-        toolchain: &Selected,
-        _host: &dyn crate::tailors::EditHost,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        elixir::attest_project(door, project, &beam, toolchain)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {

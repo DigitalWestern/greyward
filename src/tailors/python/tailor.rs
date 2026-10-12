@@ -16,7 +16,8 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::python::{self as python, inputs, manifest, pyselect};
 use crate::tailors::{
-    ClosureListing, FileRunner, LoneFile, PackageRow, RegistryTool, SourceFile, SyncRequest, Tailor,
+    Attester, ClosureListing, FileRunner, LoneFile, PackageRow, RegistryTool, SourceFile,
+    SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -24,6 +25,19 @@ use std::path::Path;
 use std::process::Command;
 
 pub struct Python;
+
+impl Attester for Python {
+    fn attest_lock(
+        &self,
+        _ctx: &crate::kernel::context::Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        super::resolve::attest_project(door, project, toolchain)
+    }
+}
 
 impl Tailor for Python {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
@@ -55,15 +69,8 @@ impl Tailor for Python {
         super::resolve::resolution_inputs(project)
     }
 
-    fn attest_lock(
-        &self,
-        _ctx: &crate::kernel::context::Context,
-        project: &ProjectRoot,
-        toolchain: &Selected,
-        _host: &dyn crate::tailors::EditHost,
-        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        super::resolve::attest_project(door, project, toolchain)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn id(&self) -> &'static str {

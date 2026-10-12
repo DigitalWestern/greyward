@@ -882,7 +882,11 @@ pub(super) enum LifecycleFailure {
 pub(super) fn classify_lifecycle_result(result: io::Result<()>) -> Result<(), LifecycleFailure> {
     match result {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+        // A sandbox that could not be set up ran no script (#679).
+        Err(error)
+            if error.kind() == io::ErrorKind::Unsupported
+                || crate::kernel::error::is_sandbox_setup(&error) =>
+        {
             Err(LifecycleFailure::SandboxUnavailable(error))
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {

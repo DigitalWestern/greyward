@@ -423,10 +423,17 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
-        let held = HeldRoots::resolve(self, cwd)?;
-        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)?;
+        // Every failure before bubblewrap starts is a sandbox that could not
+        // be set up, never a failed build (#679). The preflight's own
+        // verdicts already say so (`Unsupported`, or an interrupt).
+        let setup = crate::kernel::error::sandbox_setup;
+        let held = HeldRoots::resolve(self, cwd).map_err(setup)?;
+        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)
+            .map_err(setup)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
-        let mut invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs, &held)?;
+        let mut invocation = self
+            .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
+            .map_err(setup)?;
         let mut command = bwrap_command(bwrap)?;
         command.args(&invocation.args);
         pass_fds(&mut command, held.passed());
@@ -2367,6 +2374,75 @@ mod tests {
             find_bwrap_in(&missing, Some(bin.clone().into_os_string())),
             Some(fs::canonicalize(&fake).unwrap())
         );
+    }
+
+    const UNWRITABLE_TMPDIR_CHILD: &str = "GREYWARD_TEST_UNWRITABLE_TMPDIR_SCRATCH";
+
+    /// A C-runtime-only view that cannot be built (here: TMPDIR is not
+    /// writable, so its skeleton cannot be made) ran no build. The hermetic
+    /// attempt returns that error as is: no `host-build-inputs` exception,
+    /// no retry against the whole host (#679). TMPDIR is set in a child run
+    /// of this test binary, which reports through its exit status.
+    #[test]
+    fn linux_a_view_that_cannot_be_set_up_is_no_failed_hermetic_build() {
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str =
+            "kernel::sandbox::tests::linux_a_view_that_cannot_be_set_up_is_no_failed_hermetic_build";
+        if !linux_ready("linux_a_view_that_cannot_be_set_up_is_no_failed_hermetic_build") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(UNWRITABLE_TMPDIR_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let mut views = Vec::new();
+            let mut recorded = Vec::new();
+            let result = crate::kernel::hostfallback::hermetic_first(
+                "probe",
+                "detail",
+                crate::kernel::hostfallback::Attempt {
+                    record: |kind: &str, subject: &str, _: &str| {
+                        recorded.push(format!("{kind} {subject}"));
+                        Ok(())
+                    },
+                    discard: || Ok(()),
+                    fingerprint: || Ok("fingerprint".to_string()),
+                    build: |host_view: HostView| {
+                        views.push(host_view);
+                        let sandbox = Sandbox {
+                            read: vec![],
+                            write: vec![&scratch],
+                            host_view,
+                        };
+                        run(&sandbox, &["/usr/bin/true"], &scratch, &scratch, &[])
+                    },
+                },
+            );
+            let error = result.unwrap_err();
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            assert_eq!(views, [HostView::RuntimeOnly]);
+            assert!(recorded.is_empty(), "{recorded:?}");
+            return;
+        }
+        let root = temp_dir("unwritable-tmpdir");
+        let scratch = root.0.join("scratch");
+        let unwritable = root.0.join("tmp");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&unwritable).unwrap();
+        fs::set_permissions(&unwritable, fs::Permissions::from_mode(0o555)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(UNWRITABLE_TMPDIR_CHILD, &scratch)
+            .env("TMPDIR", &unwritable)
+            .output()
+            .unwrap();
+        fs::set_permissions(&unwritable, fs::Permissions::from_mode(0o755)).unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        // The child ran the test rather than filtering it out.
+        assert!(report.contains("1 passed"), "{report}");
     }
 
     /// bubblewrap's helper is the sandbox's pid 1, readable by the build,

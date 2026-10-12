@@ -603,26 +603,7 @@ impl Sandbox<'_> {
             push_arg(&mut args, "--tmpfs");
             push_arg(&mut args, cwd.as_os_str());
         }
-        // A later bind covers an earlier one under it, so the binds go
-        // shallowest first: a read-only root under a writable root stays
-        // read-only, and a writable root under a read-only root stays
-        // writable (#680). At the same depth read-only goes first, so a
-        // root declared both ways is writable.
-        let mut binds: Vec<(&str, &PathBuf, &PathBuf)> = read_binds
-            .iter()
-            .map(|(source, dest)| ("--ro-bind", source, dest))
-            .chain(
-                write_binds
-                    .iter()
-                    .map(|(source, dest)| ("--bind", source, dest)),
-            )
-            .collect();
-        binds.sort_by_key(|(flag, _, dest)| (dest.components().count(), *flag == "--bind"));
-        for (flag, source, dest) in binds {
-            push_arg(&mut args, flag);
-            args.push(source.clone().into_os_string());
-            args.push(dest.clone().into_os_string());
-        }
+        push_root_binds(&mut args, &read_binds, &write_binds);
 
         push_setenv(&mut args, "PATH", env_path);
         push_setenv(&mut args, "HOME", &scratch);
@@ -681,6 +662,29 @@ impl Sandbox<'_> {
             _skeleton: skeleton,
             _held: HeldRoots::default(),
         })
+    }
+}
+
+/// The declared roots' binds. A later bind covers an earlier one under
+/// it, so the binds go shallowest first: a read-only root under a writable
+/// root stays read-only, and a writable root under a read-only root stays
+/// writable (#680). At the same depth read-only goes first, so a root
+/// declared both ways is writable.
+fn push_root_binds(
+    args: &mut Vec<OsString>,
+    read: &[(PathBuf, PathBuf)],
+    write: &[(PathBuf, PathBuf)],
+) {
+    let mut binds: Vec<(&str, &PathBuf, &PathBuf)> = read
+        .iter()
+        .map(|(source, dest)| ("--ro-bind", source, dest))
+        .chain(write.iter().map(|(source, dest)| ("--bind", source, dest)))
+        .collect();
+    binds.sort_by_key(|(flag, _, dest)| (dest.components().count(), *flag == "--bind"));
+    for (flag, source, dest) in binds {
+        push_arg(args, flag);
+        args.push(source.clone().into_os_string());
+        args.push(dest.clone().into_os_string());
     }
 }
 

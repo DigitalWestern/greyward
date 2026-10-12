@@ -216,8 +216,10 @@ enum Pins {
     AsWritten,
     /// `requirements.lock.txt`, compiled by uv from the manifest.
     /// `repinned` when the manifest was hash-pinned already but not in a
-    /// form the planner reads (markers, extras): every hash it names must
-    /// still be in the lock (#689).
+    /// form the planner reads (markers, extras), which `prepare` says.
+    /// Whatever the form, every hash the requirements write anywhere in
+    /// their include tree must still be in the lock, and planning reads
+    /// only those files ([`Inputs::hash_pins`], #689).
     Lock { repinned: bool },
 }
 
@@ -291,14 +293,15 @@ impl Inputs {
         })
     }
 
-    /// Where the pins come from. A hash the manifest writes that is not a
-    /// well-formed sha256 is refused here, by line, before any lock is
-    /// read or compiled: re-locking around it would drop the pin (#689).
-    fn pins(&self) -> io::Result<Pins> {
+    /// Where the pins come from. A hash the requirements write that is not
+    /// a well-formed sha256 is refused here, by file and line, before any
+    /// lock is read or compiled: re-locking around it would drop the pin
+    /// (#689).
+    fn pins(&self, project: &ProjectRoot) -> io::Result<Pins> {
         if self.manifest.is_empty() || self.manifest.locked_packages.is_some() {
             return Ok(Pins::Manifest);
         }
-        pypi::hash_pins(&self.source, &self.input)?;
+        self.hash_pins(project)?;
         if !is_fully_pinned(&self.source) {
             return Ok(Pins::Lock { repinned: false });
         }
@@ -306,6 +309,16 @@ impl Inputs {
             Ok(_) => Ok(Pins::AsWritten),
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err(e),
             Err(_) => Ok(Pins::Lock { repinned: true }),
+        }
+    }
+
+    /// Every `--hash` pin the requirements write: across the include tree
+    /// of a requirements file, each with its own file and line, or in the
+    /// text a pyproject or setup.cfg gives.
+    fn hash_pins(&self, project: &ProjectRoot) -> io::Result<Vec<pypi::HashPin>> {
+        match &self.manifest.source_path {
+            Some(path) => manifest::requirements_hash_pins(project, path),
+            None => pypi::hash_pins(&self.source, &self.input),
         }
     }
 
@@ -445,7 +458,7 @@ pub fn ensure_lock(
     door: &mut ResolutionDoor<'_>,
 ) -> io::Result<()> {
     let inputs = Inputs::discover(project, selected, door, false, true)?;
-    let Pins::Lock { repinned } = inputs.pins()? else {
+    let Pins::Lock { repinned } = inputs.pins(project)? else {
         return Ok(());
     };
     let source = inputs.lock_source(project, selected, door.platform())?;
@@ -529,7 +542,7 @@ pub fn read_plan(
         record_skippable_specs(&inputs.source)?;
     }
     inputs.selection.emit_warnings();
-    let pins = inputs.pins()?;
+    let pins = inputs.pins(project)?;
     let records = python_input_records(project, &inputs.manifest)?;
     let text = match pins {
         // A found manifest may intentionally declare no dependencies: the
@@ -548,14 +561,15 @@ pub fn read_plan(
             return Ok((plan, inputs.selection, records));
         }
         Pins::AsWritten => inputs.source,
-        Pins::Lock { repinned } => {
+        Pins::Lock { .. } => {
             let lock = require_lock(project)?;
             let source = inputs.lock_source(project, selected, platform)?;
             inputs.check_lock(project, &lock, &source, platform)?;
-            if repinned {
-                pypi::check_hash_pins(&inputs.source, &inputs.input, &lock)?;
-            }
-            lock
+            // The plan cache keys on the narrowed text, so a plan made from
+            // the lock's wider set of files is never reused.
+            let pins = inputs.hash_pins(project)?;
+            pypi::check_hash_pins(&pins, &lock)?;
+            pypi::narrow_to_pins(&lock, &pins)
         }
     };
 
@@ -1718,8 +1732,15 @@ mod tests {
     /// Plan `requirements` beside `lock` (no local state, as a fresh
     /// checkout has none) with no store: the refusal, which must come first.
     fn plan_refusal(requirements: &str, lock: Option<&str>) -> String {
+        plan_refusal_in(&[("requirements.txt", requirements)], lock)
+    }
+
+    /// [`plan_refusal`] for a project holding `files`.
+    fn plan_refusal_in(files: &[(&str, &str)], lock: Option<&str>) -> String {
         let temp = crate::kernel::testutil::TempDir::new();
-        std::fs::write(temp.0.join("requirements.txt"), requirements).unwrap();
+        for (name, text) in files {
+            std::fs::write(temp.0.join(name), text).unwrap();
+        }
         if let Some(lock) = lock {
             std::fs::write(temp.0.join(LOCK), lock).unwrap();
         }
@@ -1765,6 +1786,52 @@ mod tests {
                 "requirements.txt line 1: six is pinned to sha256:{a}, which the compiled lock"
             )),
             "{message}"
+        );
+    }
+
+    /// Every hash pin is kept whatever else the requirements hold: a hashed
+    /// line beside an unpinned one, and a pin in an included file, which
+    /// the refusal names by its own file and line (#689).
+    #[test]
+    fn a_relock_keeps_the_hashes_of_mixed_files_and_includes() {
+        let (a, b, c) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let lock = format!("six==1.17.0 --hash=sha256:{b}\nidna==3.10 --hash=sha256:{c}\n");
+        let message = plan_refusal(
+            &format!("six==1.17.0 --hash=sha256:{a}\nidna>=3\n"),
+            Some(&lock),
+        );
+        assert!(
+            message.starts_with(&format!(
+                "requirements.txt line 1: six is pinned to sha256:{a}, which the compiled lock"
+            )),
+            "{message}"
+        );
+        let message = plan_refusal_in(
+            &[
+                ("requirements.txt", "-r base.txt\nidna>=3\n"),
+                (
+                    "base.txt",
+                    &format!("# base\nsix==1.17.0 --hash=sha256:{a}\n"),
+                ),
+            ],
+            Some(&lock),
+        );
+        assert!(
+            message.starts_with(&format!(
+                "base.txt line 2: six is pinned to sha256:{a}, which the compiled lock"
+            )),
+            "{message}"
+        );
+        let message = plan_refusal_in(
+            &[
+                ("requirements.txt", "-r base.txt\n"),
+                ("base.txt", "six==1.17.0 --hash=md5:0123\n"),
+            ],
+            None,
+        );
+        assert_eq!(
+            message,
+            "base.txt line 1: only sha256 hashes are supported, got: --hash=md5:0123"
         );
     }
 

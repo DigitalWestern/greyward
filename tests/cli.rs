@@ -1058,6 +1058,33 @@ fn a_first_scoped_build_explains_why_another_ecosystem_stops_it() {
     assert!(!project.0.join("greyward-toolchain.toml").exists());
 }
 
+/// The offline Python projection `env` and `run` read: a `.venv` symlink
+/// to a directory with a `bin`, and the closure record that names it.
+fn python_env_fixture(project: &Path) {
+    let object = project.join("env-object");
+    std::fs::create_dir_all(object.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&object, project.join(".venv")).unwrap();
+    let platform = greyward::kernel::platform::Platform::host().unwrap();
+    let closures = project.join(".greyward/closures");
+    std::fs::create_dir_all(&closures).unwrap();
+    std::fs::write(
+        closures.join("python.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "closure/1",
+            "ecosystem": "python",
+            "platform": platform.triple(),
+            "projected_at": 1,
+            "body": {
+                "env_object": object,
+                "python": {"version": "3.12.14"},
+                "plan": {"packages": []},
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 /// `ward env` prints the environment `ward run` would give a child, so the
 /// shell that evals it sees exactly what a greyward-run command sees. Offline:
 /// the `.venv` symlink and a closure record are the whole projection the
@@ -1076,28 +1103,7 @@ fn env_prints_the_run_environment_as_shell_lines() {
     assert!(stderr.contains("no environment projected here"), "{stderr}");
     assert!(stderr.contains("no manifest to sync one from"), "{stderr}");
 
-    let object = project.0.join("env-object");
-    std::fs::create_dir_all(object.join("bin")).unwrap();
-    std::os::unix::fs::symlink(&object, project.0.join(".venv")).unwrap();
-    let platform = greyward::kernel::platform::Platform::host().unwrap();
-    let closures = project.0.join(".greyward/closures");
-    std::fs::create_dir_all(&closures).unwrap();
-    std::fs::write(
-        closures.join("python.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "closure/1",
-            "ecosystem": "python",
-            "platform": platform.triple(),
-            "projected_at": 1,
-            "body": {
-                "env_object": object,
-                "python": {"version": "3.12.14"},
-                "plan": {"packages": []},
-            },
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    python_env_fixture(&project.0);
     // The command reads the cwd the kernel resolves, not the fixture path.
     let venv = project.0.canonicalize().unwrap().join(".venv");
 
@@ -1110,7 +1116,7 @@ fn env_prints_the_run_environment_as_shell_lines() {
         "{stdout}"
     );
     // The inherited PATH is referenced, not frozen into the line.
-    assert!(stdout.contains(":\"$PATH\"\n"), "{stdout}");
+    assert!(stdout.contains("'\"${PATH:+:$PATH}\"\n"), "{stdout}");
     assert!(
         stdout.contains(&format!("export VIRTUAL_ENV='{}'\n", venv.display())),
         "{stdout}"
@@ -1150,6 +1156,40 @@ fn env_prints_the_run_environment_as_shell_lines() {
         assert_eq!(out.status.code(), Some(0), "{shell}");
         let stdout = text(&out.stdout);
         assert!(stdout.starts_with(first_word), "{shell}: {stdout}");
+    }
+}
+
+/// A child's PATH is the projection's prefixes and the host PATH: with no
+/// host PATH there is no trailing empty entry (which would run a program
+/// from the current directory), and a project whose path holds ':' is
+/// refused rather than split into two entries naming other directories.
+#[test]
+fn the_child_path_never_names_the_current_directory_or_a_split_entry() {
+    let home = TempDir::boundary("cli-child-path-home");
+    let project = TempDir::boundary("cli-child-path-project");
+    python_env_fixture(&project.0);
+    let venv = project.0.canonicalize().unwrap().join(".venv");
+    let mut command = common::command(&project.0, &home.0, &home.0.join("store"));
+    command
+        .args(["run", "/bin/sh", "-c", "printf %s \"$PATH\""])
+        .env_remove("PATH");
+    let out = command.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), format!("{}/bin", venv.display()));
+
+    let colon = project.0.join("co:lon");
+    std::fs::create_dir_all(colon.join(".greyward")).unwrap();
+    python_env_fixture(&colon);
+    for args in [&["env"][..], &["run", "/bin/true"]] {
+        let out = ward(&colon, &home.0, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(stderr.contains("co:lon"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("':' separates PATH entries"),
+            "{args:?}: {stderr}"
+        );
     }
 }
 

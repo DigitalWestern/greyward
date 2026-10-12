@@ -47,7 +47,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
             )
         })?;
     attribution.discard();
-    let mut command = command_for(&lone, file, &request.args)
+    let mut command = command_for(&lone, file, &request.args)?
         .ok_or_else(|| io::Error::other(format!("{ecosystem}: a lone file names no program")))?;
     ui::trace_command(&command);
     let status = crate::kernel::supervise::child_status(run_file(&mut command, ctx))?;
@@ -59,19 +59,16 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
 /// scrubbed before ward's variables are set, so the host's interpreter
 /// configuration (RUBYOPT, GEM_HOME, ERL_LIBS, ...) never reaches the
 /// program. `None`: `lone` names no program.
-fn command_for(lone: &LoneFile, file: &str, args: &[String]) -> Option<Command> {
-    let (program, leading) = lone.program.split_first()?;
-    let mut path: Vec<String> = lone
-        .path
-        .iter()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect();
-    path.push(std::env::var("PATH").unwrap_or_default());
+fn command_for(lone: &LoneFile, file: &str, args: &[String]) -> io::Result<Option<Command>> {
+    let Some((program, leading)) = lone.program.split_first() else {
+        return Ok(None);
+    };
+    let path = crate::kernel::platform::child_path(&lone.path)?;
     let mut command = Command::new(program);
     command.args(leading).arg(file).args(args);
     sandbox::force_env(&mut command, &lone.remove_prefixes, &lone.remove, &lone.env);
-    command.env("PATH", path.join(":"));
-    Some(command)
+    command.env("PATH", path);
+    Ok(Some(command))
 }
 
 /// Run the user's file. It is the user's program, as `ward x`'s tool is,
@@ -128,7 +125,7 @@ mod tests {
             remove,
             env,
         };
-        let command = command_for(&ruby, "t.rb", &args).unwrap();
+        let command = command_for(&ruby, "t.rb", &args).unwrap().unwrap();
         assert_eq!(
             command.get_program(),
             OsStr::new("/store/objects/x-runtime/bin/ruby")
@@ -162,7 +159,7 @@ mod tests {
             remove,
             env,
         };
-        let env = edits(&command_for(&elixir, "t.exs", &[]).unwrap());
+        let env = edits(&command_for(&elixir, "t.exs", &[]).unwrap().unwrap());
         assert_eq!(env.get("ERL_LIBS"), Some(&None), "{env:?}");
         assert_eq!(env["HEX_OFFLINE"].as_deref(), Some("1"));
         assert_eq!(env["HOME"].as_deref(), Some("/store/run-homes/k/eco"));

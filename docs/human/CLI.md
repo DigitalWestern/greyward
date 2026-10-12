@@ -536,7 +536,8 @@ real directory written over the projection, and the next sync moves it
 aside — saying where it went — and re-projects.
 
 **env** prints that same environment on stdout as lines a shell can eval:
-one `export PATH=...` with the projected prefixes ahead of `"$PATH"`, then
+one `export PATH=...` with the projected prefixes ahead of `"${PATH:+:$PATH}"`
+(the inherited PATH, with no empty entry when it is unset), then
 one line per ecosystem variable (`VIRTUAL_ENV`, `PYTHONDONTWRITEBYTECODE`,
 `CARGO_HOME`, the Go and Ruby variables, …). A variable the projection
 *removes* — `RUSTUP_TOOLCHAIN`, for one — is printed as `unset NAME`. Every

@@ -127,7 +127,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     }
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
-    let mut prefix = shared::projected_env(ctx, &dir, &cwd, cmd, &mut command)?;
+    let prefix = shared::projected_env(ctx, &dir, &cwd, cmd, &mut command)?;
     if prefix.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -146,9 +146,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             return Err(io::Error::new(io::ErrorKind::NotFound, refusal));
         }
     }
-    let path = std::env::var("PATH").unwrap_or_default();
-    prefix.push(path);
-    command.env("PATH", prefix.join(":"));
+    command.env("PATH", crate::kernel::platform::child_path(&prefix)?);
     if let Some(script) = script {
         let envs: Vec<_> = command
             .get_envs()

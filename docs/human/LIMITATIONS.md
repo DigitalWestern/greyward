@@ -130,12 +130,23 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
 - **A Python `requirements.lock.txt` is compiled for one platform and interpreter.**
-  uv compiles it for the machine it runs on, so its header names that platform, the
-  Python version, and a digest of the requirements it came from. `--frozen` never
+  Greyward runs `uv pip compile` without `--universal`, so uv resolves for the machine it
+  runs on, and the header names that platform, the Python version, and a digest of the
+  requirements it came from. The platform is part of the check because the lock really
+  is that platform's: a different machine can need different packages. `--frozen` never
   compiles the lock: on another platform, under another Python, or after the
-  requirements changed, it is refused as stale, exit 4, naming which of the three
-  differs. A team that syncs on macOS and Linux commits the lock from the platform CI
-  runs on. A lock compiled before ward wrote that header names no source, so `--frozen`
+  requirements changed (removing the last one included), it is refused as stale, exit 4,
+  naming which of the three differs. A team that syncs on macOS and Linux commits the
+  lock from the platform CI runs on. A `uv.lock` is universal and has no such limit. For
+  a setup.py that computes its requirements, the digest covers the files that declare
+  them: setup.py, setup.cfg, pyproject.toml, the files setup.cfg names with `file:`, and
+  the requirements file the probe falls back on. `--frozen` checks it without running
+  setup.py, and plans from a matching lock with no probe at all. A file setup.py opens by
+  a path of its own is not covered: change it, and the lock is not stale until one of
+  those files changes too. setup.py still runs, confined and in memory, when there is no
+  lock (it alone says whether there is anything to lock), when the lock has no header,
+  and when the lock holds a direct reference, which is recorded from setup.py's own
+  words. A lock compiled before ward wrote that header names no source, so `--frozen`
   holds it to the requirements instead: every package they need here must be in it at
   a version they allow. An edit the locked version still satisfies (`six>=1.16` to
   `six>=1.15`) passes that check. One `ward` without `--frozen` writes the header.

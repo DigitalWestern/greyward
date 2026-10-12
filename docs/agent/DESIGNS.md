@@ -3607,7 +3607,11 @@ uv rows onto the door:
   header command is `ward # lock-source/1 platform=... python=...
   inputs=sha256:...` (`inputs::LockSource`) for a lock that names its
   source, recomputed from the inputs, and bare `ward` for one compiled
-  before the source was written, so the rerun reproduces either. For a
+  before the source was written, so the rerun reproduces either. A
+  dynamic setup.py's `inputs` digest is of the files that declare its
+  requirements (`inputs::setup_inputs_digest`), not of what egg_info
+  gave, so planning checks the lock before setup.py runs and plans from
+  a matching one with no probe (`inputs::Reading`). For a
   pip-compile pair, `requirements.in` to `requirements.txt`. A
   hand-pinned `requirements.txt` has no check and is refused.
 - **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,

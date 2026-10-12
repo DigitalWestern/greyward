@@ -3592,14 +3592,22 @@ uv rows onto the door:
   command line into the lock, which names the store interpreter (a path
   that differs per machine) and the probe's `--no-build`. Every compile
   passes `--custom-compile-command ward`, so the bytes are the same
-  everywhere and an attest rerun can leave them unchanged. A lock with
+  everywhere and an attest rerun can leave them unchanged. For
+  `requirements.lock.txt` the command also names the lock's source (the
+  platform, the Python version, a digest of the requirements uv
+  compiled; no path), which planning checks the committed lock against
+  under `--frozen` (#673). A lock with
   another header is refused by attest. Retain `requirements.txt` and run
   `ward update` for a pip-compile pair. Delete only `requirements.lock.txt`
   and run `ward` for generated locks.
 - **Attest.** `uv lock --locked` for `uv.lock`. For
   `requirements.lock.txt`, the same compile planning runs, from the
   input planning picks (`inputs::lock_compile_input`, which writes the
-  generated `.greyward` input afresh), with `require_unchanged`. For a
+  generated `.greyward` input afresh), with `require_unchanged`. The
+  header command is `ward # lock-source/1 platform=... python=...
+  inputs=sha256:...` (`inputs::LockSource`) for a lock that names its
+  source, recomputed from the inputs, and bare `ward` for one compiled
+  before the source was written, so the rerun reproduces either. For a
   pip-compile pair, `requirements.in` to `requirements.txt`. A
   hand-pinned `requirements.txt` has no check and is refused.
 - **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,

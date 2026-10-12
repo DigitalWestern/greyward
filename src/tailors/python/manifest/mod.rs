@@ -153,6 +153,29 @@ impl Manifest {
         selected: &crate::kernel::toolchain::Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
+        self.complete_setup(project, selected, door, true)
+    }
+
+    /// [`Manifest::prepare_setup`] that reads a matching metadata cache but
+    /// never writes one: planning, which `--frozen` runs, writes nothing to
+    /// the project before it has checked the lock (#673). A miss probes,
+    /// and keeps the result in memory.
+    pub fn read_setup(
+        &mut self,
+        project: &ProjectRoot,
+        selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<()> {
+        self.complete_setup(project, selected, door, false)
+    }
+
+    fn complete_setup(
+        &mut self,
+        project: &ProjectRoot,
+        selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
+        persist: bool,
+    ) -> io::Result<()> {
         let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         let dir = project.path();
         let python_version = selected.version("cpython")?;
@@ -260,7 +283,9 @@ impl Manifest {
         };
         // Through the held project descriptor: a symlinked `.greyward` must not
         // carry this cache outside the project.
-        project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
+        if persist {
+            project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
+        }
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
         self.source = self.requirements_text();
@@ -1590,8 +1615,6 @@ files = []
         )
         .unwrap();
         fs::write(dir.0.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
-        fs::create_dir_all(dir.0.join(".greyward")).unwrap();
-        fs::write(dir.0.join(".greyward/lock-source.hash"), "stale\n").unwrap();
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,

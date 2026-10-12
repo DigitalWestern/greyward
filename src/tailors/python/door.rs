@@ -847,8 +847,12 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
         .unwrap();
         let dir = dir.canonicalize().unwrap();
         let held = ProjectRoot::open(&dir).unwrap();
-        let args =
-            super::super::resolve::compile_args("requirements.in", "requirements.lock.txt", "3.12");
+        let args = super::super::resolve::compile_args(
+            "requirements.in",
+            "requirements.lock.txt",
+            "3.12",
+            COMPILE_COMMAND,
+        );
         let shown: Vec<String> = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -932,6 +936,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
                     "requirements.in",
                     "requirements.lock.txt",
                     "3.12",
+                    COMPILE_COMMAND,
                 ),
                 index: Index::PipCompile,
                 outputs: super::super::resolve::resolution_outputs(&held).unwrap(),

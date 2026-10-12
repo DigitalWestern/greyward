@@ -296,9 +296,11 @@ default.
 
 `--frozen` validates the committed lock instead of creating one and refuses
 a missing or stale one. For Python that includes `requirements.lock.txt`:
-`--frozen` never compiles it, and a lock this machine compiled from other
-requirements than the current ones exits 4 (see
-[LIMITATIONS.md](LIMITATIONS.md) for a fresh checkout).
+`--frozen` never compiles it. The lock's header names the platform, the
+Python version and a digest of the requirements it was compiled from, so a
+lock compiled from other requirements than the current ones exits 4 on any
+checkout, naming what differs (see [LIMITATIONS.md](LIMITATIONS.md) for a
+lock compiled before Greyward wrote that header).
 
 --frozen never modifies project inputs, greyward-toolchain.toml, or the catalog
 cache; it may realize store objects and write the projection after validation
@@ -728,7 +730,7 @@ sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 `.greyward/closures/*.json`, and the policy chain includes `.greyward/policy.toml` at
 every ancestor. Both are records of a decision, so both are committed; the
 rest of `.greyward/` (`plan.json`, `go-plan.json`, the Python manifest snapshots
-and stamps, `cargo-home/`) is a machine-local cache and is ignored. A
+and the setup.py metadata cache, `cargo-home/`) is a machine-local cache and is ignored. A
 repository that ignores all of `.greyward/` has nothing for `ls`, `sbom` or
 `status` to read, and no closure diff for a reviewer to look at. The
 `.gitignore` stanza and the full table are in
@@ -1229,7 +1231,9 @@ allowlist so configuration cannot bypass these controls.
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
 lock the same `uv pip compile` Greyward ran to write it, which must leave it
 byte for byte the same: `requirements.lock.txt` from the requirements Greyward
-compiles it from, or `requirements.txt` from `requirements.in`. A
+compiles it from, or `requirements.txt` from `requirements.in`. The
+rerun writes the source the requirements give now into the lock's header,
+so a lock compiled from other requirements fails the check. A
 compiled lock whose header names another command than `ward` (one written
 by uv or pip-tools directly) is refused. For a pip-compile pair, retain
 `requirements.txt` and run `ward update`. For a generated

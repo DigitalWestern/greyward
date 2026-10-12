@@ -89,7 +89,7 @@ project contains. Greyward's own state is walked one component at a time with
 symlink is refused rather than followed: closures (read for the exception
 summary and root registration, and written),
 `.greyward/policy.toml`, the plan and setup.py caches, the Python manifest
-snapshots and lock stamp, `.greyward/cargo-home` (`greyward-config.toml` and the 0755
+snapshots, `.greyward/cargo-home` (`greyward-config.toml` and the 0755
 `cargo` shim), the `.venv` and `node_modules` links (`replace_symlink`,
 which publishes a new link with an exclusive rename so a real entry that
 appears meanwhile is refused, not replaced), and a real `.venv` or

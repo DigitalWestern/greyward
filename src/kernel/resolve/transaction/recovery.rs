@@ -308,8 +308,10 @@ pub(super) fn finish_committed(
     let mut kept = Vec::new();
     for target in &journal.targets {
         let temp = PathBuf::from(&target.temp);
-        let Ok((dir, name)) = parent_of(root, &temp) else {
-            continue;
+        let (dir, name) = match parent_of(root, &temp) {
+            Ok(found) => found,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
         match current_at(dir.as_raw_fd(), &name)? {
             Current::Absent => {}
@@ -410,9 +412,16 @@ fn undo_target(
     check_journal_target(journal, target).map_err(|detail| journal_error(journal, &detail))?;
     let relative = PathBuf::from(&target.target);
     let shown = root.path().join(&relative);
-    let Ok((dir, name)) = parent_of(root, &relative) else {
+    let (dir, name) = match parent_of(root, &relative) {
+        Ok(found) => found,
         // Its directory is gone: nothing of ours can be in it.
-        return Ok(Restored::Unchanged(shown));
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Restored::Unchanged(shown))
+        }
+        // Unopenable, a symlink, or any other failure: the directory may
+        // still hold our files, so the journal and the originals stay and
+        // the next recovery tries again.
+        Err(error) => return Err(error),
     };
     let temp_path = PathBuf::from(&target.temp);
     let temp = file_name(&temp_path);

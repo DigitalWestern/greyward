@@ -752,8 +752,10 @@ fn remove_created_dirs(root: &ProjectRoot, journal: &Journal) -> io::Result<()> 
     for dir in dirs {
         let dir = Path::new(dir.as_str());
         check_target(dir)?;
-        if let Ok((parent, name)) = parent_of(root, dir) {
-            remove_empty_dir(parent.as_raw_fd(), &name)?;
+        match parent_of(root, dir) {
+            Ok((parent, name)) => remove_empty_dir(parent.as_raw_fd(), &name)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -1759,6 +1761,49 @@ mod tests {
         recover(&fx);
         assert_eq!(read(&fx, "package.json").as_deref(), Some(USER_EDIT));
         assert_clean(&fx);
+    }
+
+    /// A crash after the receipt's swap, then a parent folder recovery
+    /// cannot open (no permission) or will not follow (a symlink): recovery
+    /// refuses and keeps the journal and the originals, rather than taking
+    /// the folder as gone and finishing with the project half published.
+    /// Once the folder is back, the next recovery undoes everything.
+    #[test]
+    fn recovery_through_an_unopenable_or_symlinked_parent_keeps_the_journal() {
+        use std::os::unix::fs::PermissionsExt;
+        for symlinked in [false, true] {
+            let fx = fixture("recover-parent", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            let resolution = fx.project.join(RESOLUTION_DIR);
+            let moved = fx.project.join("elsewhere");
+            if symlinked {
+                fs::rename(&resolution, &moved).unwrap();
+                symlink(&moved, &resolution).unwrap();
+            } else {
+                fs::set_permissions(&resolution, fs::Permissions::from_mode(0o000)).unwrap();
+                if fs::read_dir(&resolution).is_ok() {
+                    // Running as root: permissions do not bind, nothing to prove.
+                    fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+                    continue;
+                }
+            }
+            let error = recover_err(&fx);
+            assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            assert!(
+                has_pending_journal(&fx.project),
+                "symlinked {symlinked}: {error}"
+            );
+            assert_eq!(rooted_originals(&fx).len(), 1, "symlinked {symlinked}");
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+            if symlinked {
+                fs::remove_file(&resolution).unwrap();
+                fs::rename(&moved, &resolution).unwrap();
+            } else {
+                fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            recover(&fx);
+            assert_original(&fx, Some(OLD_RECEIPT));
+        }
     }
 
     /// After a crash the user edits a swapped target: recovery leaves it,

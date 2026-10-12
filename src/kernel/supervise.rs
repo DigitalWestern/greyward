@@ -1019,14 +1019,18 @@ fn status_relayed(
     secrets: &[Vec<u8>],
 ) -> io::Result<(ExitStatus, Vec<u8>)> {
     let _ = activity.mode();
-    let session = Session::new()?;
+    // A child that never started ran nothing: for the sandbox engines this
+    // form starts, a sandbox that could not be set up, never a failed build
+    // (#679). Errors once the child runs stay unmarked.
+    let not_started = crate::kernel::error::sandbox_setup;
+    let session = Session::new().map_err(not_started)?;
     session.reject_pending_before_spawn()?;
     session.prepare_child(command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(not_started)?;
     if let Err(error) = session.publish_child(&child) {
         reap_after_error(&mut child);
         return Err(error);

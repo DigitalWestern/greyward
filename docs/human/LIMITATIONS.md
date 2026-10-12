@@ -129,6 +129,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
+- **A frozen Python sync on a fresh checkout trusts the committed `requirements.lock.txt`.**
+  `--frozen` never compiles the lock. On the machine that compiled it, a lock no longer
+  compiled from `requirements.txt` (or the pyproject or setup.cfg it came from) is refused
+  as stale, exit 4, by the stamp in `.greyward/lock-source.hash`. That stamp is
+  machine-local and not committed, so a CI checkout has none. There the lock is read as
+  committed, even if `requirements.txt` changed and nobody re-ran `ward`. `ward audit`
+  over the committed closure reports that case as `stale`.
 - **`add` / `remove` / `update` run the ecosystem's tool in the resolution sandbox**, with
   no network of its own, through Greyward's resolution proxy: Go, Cargo, Node (npm and the pinned
   pnpm), Python (uv), Ruby (Bundler) and Elixir `update` (Mix). There is no unsandboxed fallback: a host where

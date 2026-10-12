@@ -31,6 +31,13 @@ fn list_roots(store: &store::Store) -> io::Result<String> {
 }
 
 pub fn path() -> io::Result<i32> {
+    // The one panic a test can drive the CLI into from outside, so the panic
+    // hook's report is proven to survive `--quiet`. Debug builds only: a
+    // release ward has no such switch.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("GREYWARD_TEST_PANIC").is_some() {
+        panic!("GREYWARD_TEST_PANIC is set");
+    }
     // Nothing is created: for a store not made yet the answer is where the
     // first sync will make it. A store this ward refuses to open still has a
     // path, and the path is what someone moving it aside needs: print it,
@@ -41,7 +48,7 @@ pub fn path() -> io::Result<i32> {
         // already changed, so printed as typed it would point elsewhere.
         println!(
             "{}",
-            std::path::absolute(store::Store::configured_path())?.display()
+            std::path::absolute(store::Store::configured_path()?)?.display()
         );
         return Ok(0);
     };

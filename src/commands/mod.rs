@@ -269,6 +269,27 @@ fn writes_closures(command: &cli::Command) -> bool {
     )
 }
 
+/// Hold `--strict` (`cli_strict`) for one dispatch. A `GREYWARD_STRICT` value
+/// ward does not know is a usage error before any verb runs (#681), printed
+/// here, and `None` is returned; `doctor` runs anyway and reports it as a
+/// failed check. Anything that reads the policy regardless counts it strict.
+fn strict_scope(
+    command: &cli::Command,
+    cli_strict: bool,
+) -> Option<crate::kernel::policy::StrictScope> {
+    if !matches!(command, cli::Command::Doctor { .. }) {
+        if let Err(message) = crate::kernel::policy::env_strict() {
+            if command.json_output() {
+                ui::error_json(&message);
+            } else {
+                ui::error(&message);
+            }
+            return None;
+        }
+    }
+    Some(crate::kernel::policy::request_strict(cli_strict))
+}
+
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
 /// never syncs. `--frozen` is handed to the verbs that skip lock writes.
@@ -276,7 +297,9 @@ fn writes_closures(command: &cli::Command) -> bool {
 /// here snapshot it, while a nested dispatch holds and restores its own flag.
 pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
-    let _strict = crate::kernel::policy::request_strict(sync.strict);
+    let Some(_strict) = strict_scope(&command, sync.strict) else {
+        return Ok(cli::EXIT_USAGE);
+    };
     install_tailor_tables(&command);
     // Maintenance commands need no host-platform validation here: GC must
     // stay usable on a copied store from a host that cannot realize its

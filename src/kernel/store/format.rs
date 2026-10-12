@@ -240,11 +240,11 @@ impl StoreFormat {
         match self {
             StoreFormat::Newer(_) => self.fix().to_string(),
             _ => {
-                let configured = Store::configured_root().0;
-                let selected = configured
-                    .is_absolute()
-                    .then(|| configured.canonicalize().ok())
-                    .flatten();
+                let selected = Store::configured_root()
+                    .ok()
+                    .map(|(configured, _)| configured)
+                    .filter(|configured| configured.is_absolute())
+                    .and_then(|configured| configured.canonicalize().ok());
                 command_on(self.fix(), root, selected.as_deref())
             }
         }

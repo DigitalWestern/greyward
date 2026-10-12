@@ -1279,12 +1279,11 @@ fn pip_activate_and_npm_install_are_refused_with_the_ward_verb() {
 #[test]
 fn a_panic_is_printed_even_under_quiet() {
     let home = TempDir::boundary("cli-panic-quiet");
-    // No HOME and no GREYWARD_STORE: the store's home lookup panics. The only
-    // deterministic panic the CLI can be driven into from outside.
+    // A debug build's `store path` panics under GREYWARD_TEST_PANIC: since
+    // an unset HOME became an error (#681), no input panics the CLI.
     let out = command(&home.0, &home.0, &home.0.join("store"))
         .args(["--quiet", "store", "path"])
-        .env_remove("HOME")
-        .env_remove("GREYWARD_STORE")
+        .env("GREYWARD_TEST_PANIC", "1")
         .output()
         .expect("spawn ward");
     assert_eq!(out.status.code(), Some(101));
@@ -1293,8 +1292,36 @@ fn a_panic_is_printed_even_under_quiet() {
         stderr.contains("internal error"),
         "quiet swallowed: {stderr:?}"
     );
-    assert!(stderr.contains("HOME"), "{stderr}");
+    assert!(stderr.contains("GREYWARD_TEST_PANIC"), "{stderr}");
     assert!(stderr.contains("bug in ward"), "{stderr}");
+}
+
+/// The store's default location is under HOME, and HOME is held to `x`'s
+/// rule: an unset or relative HOME is refused by name, never a panic and
+/// never a store under the working directory (#681).
+#[test]
+fn an_unset_or_relative_home_is_refused_for_the_store() {
+    let dir = TempDir::boundary("cli-store-home");
+    for home in [None, Some(""), Some("relative")] {
+        let mut cmd = command(&dir.0, &dir.0, &dir.0.join("store"));
+        cmd.args(["store", "path"]).env_remove("GREYWARD_STORE");
+        match home {
+            Some(value) => cmd.env("HOME", value),
+            None => cmd.env_remove("HOME"),
+        };
+        let out = cmd.output().expect("spawn ward");
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{home:?}: {stderr}");
+        let expected = if home.is_none() {
+            "HOME is not set"
+        } else {
+            "HOME must be an absolute directory"
+        };
+        assert!(stderr.contains(expected), "{home:?}: {stderr}");
+        assert!(stderr.contains("GREYWARD_STORE"), "{home:?}: {stderr}");
+        assert!(!stderr.contains("internal error"), "{home:?}: {stderr}");
+        assert!(text(&out.stdout).is_empty(), "{home:?}");
+    }
 }
 
 #[test]
@@ -3886,6 +3913,83 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
     signing_key(home).sign(&mut envelope).unwrap();
     std::fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
     path
+}
+
+/// The settings that tighten policy never load as permissive by mistake
+/// (#681): `GREYWARD_STRICT` takes the true-like words `CI` takes and refuses
+/// any other value with a usage error, a dangling machine-policy symlink is
+/// an error rather than no policy, and an empty HOME does not make the
+/// project's own `.greyward/policy.toml` the machine policy.
+#[test]
+fn policy_settings_fail_closed() {
+    let home = TempDir::boundary("cli-policy-closed-home");
+    let project = TempDir::boundary("cli-policy-closed-project");
+    let key_home = TempDir::boundary("cli-policy-closed-key");
+    synced_python_closure_with_exception(&key_home.0, &project.0, "git-dependency");
+    let audit = |env: &[(&str, &str)]| {
+        let out = ward_env(&project.0, &home.0, &["audit"], env);
+        let shown = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        (out.status.code(), shown)
+    };
+    let (code, shown) = audit(&[]);
+    assert_eq!(code, Some(0), "{shown}");
+
+    for strict in ["1", "true", "TRUE", "yes", " Yes "] {
+        let (code, shown) = audit(&[("GREYWARD_STRICT", strict)]);
+        assert_eq!(code, Some(1), "GREYWARD_STRICT={strict:?}: {shown}");
+        assert!(shown.contains("denied"), "{strict:?}: {shown}");
+    }
+    for lenient in ["", "0", "false", "No"] {
+        let (code, shown) = audit(&[("GREYWARD_STRICT", lenient)]);
+        assert_eq!(code, Some(0), "GREYWARD_STRICT={lenient:?}: {shown}");
+    }
+    for args in [&["audit"][..], &["audit", "--json"], &["store", "path"]] {
+        let out = ward_env(&project.0, &home.0, args, &[("GREYWARD_STRICT", "maybe")]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("GREYWARD_STRICT=")
+                && stderr.contains("maybe")
+                && stderr.contains("1, true or yes"),
+            "{args:?}: {stderr}"
+        );
+        assert!(text(&out.stdout).is_empty(), "{args:?}");
+        if args.contains(&"--json") {
+            let error: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+            assert!(
+                error["error"].as_str().unwrap().contains("maybe"),
+                "{stderr}"
+            );
+        }
+    }
+
+    // A machine policy symlinked to a file that is gone keeps its meaning:
+    // the audit refuses, naming the link, instead of judging with no policy.
+    let machine = home.0.join(".greyward/policy.toml");
+    std::fs::create_dir_all(machine.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(home.0.join("unmounted/policy.toml"), &machine).unwrap();
+    let (code, shown) = audit(&[]);
+    assert_eq!(code, Some(1), "{shown}");
+    assert!(
+        shown.contains(&machine.display().to_string())
+            && shown.contains("symlink to a file that does not exist"),
+        "{shown}"
+    );
+    assert!(!shown.contains("clean"), "{shown}");
+    std::fs::remove_file(&machine).unwrap();
+
+    // HOME="" would name ./.greyward/policy.toml, the project's own file,
+    // as the machine policy: refused, naming the way around.
+    std::fs::write(project.0.join(".greyward/policy.toml"), "deny = []\n").unwrap();
+    for empty_or_relative in ["", "."] {
+        let (code, shown) = audit(&[("HOME", empty_or_relative)]);
+        assert_eq!(code, Some(1), "HOME={empty_or_relative:?}: {shown}");
+        assert!(
+            shown.contains("HOME must be an absolute directory")
+                && shown.contains("GREYWARD_POLICY"),
+            "{shown}"
+        );
+    }
 }
 
 /// The solo setup: no `[signing]` table anywhere. `audit` judges the

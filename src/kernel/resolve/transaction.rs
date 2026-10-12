@@ -622,7 +622,14 @@ impl<'a> Transaction<'a> {
                             ),
                         )
                     } else {
-                        error
+                        crate::kernel::error::context(
+                            error,
+                            format_args!(
+                                "create {} as a hard link to its temporary (the project's \
+                                 filesystem must support hard links); nothing was published",
+                                shown.display()
+                            ),
+                        )
                     }
                 })
                 .and_then(|()| fault(FaultPoint::Swapped(index)))?,

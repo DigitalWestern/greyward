@@ -1,0 +1,48 @@
+{
+  "command": [
+    "uv",
+    "pip",
+    "compile",
+    "requirements.in",
+    "--generate-hashes",
+    "--quiet",
+    "--python-version",
+    "3.12.14",
+    "--custom-compile-command",
+    "ward",
+    "-o",
+    "requirements.txt",
+    "--index-url",
+    "https://pypi.org/simple",
+    "--no-build"
+  ],
+  "door": "attest",
+  "ecosystem": "python",
+  "exceptions": [],
+  "inputs": {},
+  "isolation": "confined",
+  "ledger": {
+    "endpoints": [
+      "files.pythonhosted.org",
+      "pypi.org"
+    ],
+    "entries": 2,
+    "object": "bffaee3c6090ef6e32b186e1b5c6ccc38f159d40-python-1",
+    "portable_sha256": "1dda9d16d9c9edaed68c40301ab9ffd48002ba3995354f34998285b44e074c1f",
+    "refused": 0
+  },
+  "outputs": {
+    "requirements.in": "ebf206bd17b40856161356787b67bd48f6d9f35bc882bc064dc65f140caf47fa",
+    "requirements.txt": "ea71cb0c69cd25b340c74e5dc00729142609bc9d369230a985b031d4aac87d36"
+  },
+  "schema": "resolution/1",
+  "signature": {
+    "alg": "ed25519",
+    "key": "55bddc75bcf43d8ed84d8d4b035f0000d7a5ea33b46a96713875eca98e14e141",
+    "sig": "8305c5bb6428e6059042a2e9c750ebab7062acaf0c12bbd6fe08d0f8e10fcde642c33fe3f0ff68ef97f9e520d96fea840b0ffe5ea31cdba6ac90b3e37f32af0b"
+  },
+  "tool": {
+    "name": "uv",
+    "version": "0.12.7"
+  }
+}

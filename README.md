@@ -247,7 +247,7 @@ read.
 | `.greyward/resolution/*.json` | **yes** | one signed resolution record per lock: which Greyward door produced the lock and manifest, in which isolation, and the ledger of every fetch. `ward attest` writes them; a sync's join checks them |
 | `.greyward/policy.toml` | **yes**, if you use one | the project's deny list, merged with the machine policy. See [docs/human/policy-company.toml](docs/human/policy-company.toml) |
 | `.greyward/plan.json`, `.greyward/go-plan.json` | no | plan cache, keyed by input hash |
-| `.greyward/manifest-*.txt`, `.greyward/lock-source.hash`, `.greyward/egg-info.json` | no | Python manifest snapshots and stamps |
+| `.greyward/manifest-*.txt`, `.greyward/egg-info.json` | no | Python manifest snapshots and the setup.py metadata cache |
 | `.greyward/cargo-home/` | no | the Cargo config and shim a sandboxed build runs with |
 | `.greyward/toolchain-input.lock` | no | an empty file a sync locks so that two syncs do not write `greyward-toolchain.toml` at once |
 

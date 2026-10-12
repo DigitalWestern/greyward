@@ -25,6 +25,7 @@ mod unpack;
 use unpack::extract_otp;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -321,10 +322,7 @@ const INSTALL_COPIED_BIN: &[&str] = &[
 
 fn require_regular(path: &Path, what: &str) -> io::Result<()> {
     let md = fs::symlink_metadata(path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("OTP {what} missing at {}: {e}", path.display()),
-        )
+        crate::kernel::error::reword(format!("OTP {what} missing at {}: {e}", path.display()), e)
     })?;
     if !md.file_type().is_file() {
         return Err(err(format!(
@@ -337,10 +335,7 @@ fn require_regular(path: &Path, what: &str) -> io::Result<()> {
 
 fn require_directory(path: &Path, what: &str) -> io::Result<()> {
     let md = fs::symlink_metadata(path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("OTP {what} missing at {}: {e}", path.display()),
-        )
+        crate::kernel::error::reword(format!("OTP {what} missing at {}: {e}", path.display()), e)
     })?;
     if !md.file_type().is_dir() {
         return Err(err(format!(
@@ -581,7 +576,7 @@ fn run_installer_spec(spec: &BuildSpec) -> io::Result<()> {
     }
     let output = command
         .output()
-        .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
+        .with_context(|| format!("spawn {program}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
@@ -613,7 +608,7 @@ fn run_installer_spec_for(activity: &StoreActivity, spec: &BuildSpec) -> io::Res
         command.env(key, value);
     }
     let output = crate::kernel::supervise::local_output(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("spawn {program}: {e}")))?;
+        .with_context(|| format!("spawn {program}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
@@ -638,12 +633,12 @@ where
 {
     let spec = otp_install_spec(otp_root, final_root, scratch)?;
     runner(&spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!(
                 "OTP Install -cross -minimal failed in staging {}: {e}",
                 otp_root.display()
             ),
+            e,
         )
     })
 }
@@ -659,12 +654,12 @@ where
 {
     let spec = otp_install_spec(otp_root, final_root, scratch)?;
     runner(&spec).map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!(
                 "OTP Install -cross -minimal failed in staging {}: {e}",
                 otp_root.display()
             ),
+            e,
         )
     })
 }
@@ -792,8 +787,7 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
         )?;
     }
     let epmd = otp_root.join("bin/epmd");
-    let md = fs::symlink_metadata(&epmd)
-        .map_err(|e| io::Error::new(e.kind(), format!("OTP epmd link missing: {e}")))?;
+    let md = fs::symlink_metadata(&epmd).context("OTP epmd link missing")?;
     if !md.file_type().is_symlink() {
         return Err(err(format!(
             "OTP epmd at {} is not a symlink",
@@ -819,7 +813,7 @@ fn verify_otp_install(otp_root: &Path, final_root: &Path, layout: &OtpLayout) ->
 fn probe_otp_runtime(activity: &StoreActivity, otp_root: &Path, scratch: &Path) -> io::Result<()> {
     let mut command = tool::otp_probe_command(otp_root, scratch);
     let output = crate::kernel::supervise::local_output(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("spawn staged OTP erl: {e}")))?;
+        .context("spawn staged OTP erl")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1245,7 +1239,7 @@ pub fn realize_deps(
             d.package, d.version
         );
         let tar = download_verified_held(store, activity, &url, &d.outer_sha256)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", d.app)))?;
+            .map_err(|e| crate::kernel::error::reword(format!("{}: {e}", d.app), e))?;
         let dep_dir = hextar::unpack_verified(activity, &tar, &scratch, &staged, d)?;
         // .hex marker via the pinned toolchain (ETF binary).
         let out = run_hexmark(
@@ -1420,13 +1414,13 @@ pub fn build_sandboxed(
     };
     let result = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity))
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "mix compile failed: {e}\n(network is denied during builds; deps \
              needing network at compile time or absent host libraries are \
              unsupported in v0)"
                 ),
+                e,
             )
         });
     let _ = crate::kernel::store::remove_tree(&scratch);

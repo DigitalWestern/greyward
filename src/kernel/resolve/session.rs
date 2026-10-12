@@ -10,13 +10,16 @@
 //! `Policy`, asks the pure [`policy::denied`] per request, and collects
 //! facts: the exceptions to record, the refusals that fail the door, and
 //! the hard failures (integrity) that fail it under every policy. The door
-//! turns the [`SessionReport`] into records on its own thread.
+//! turns the [`SessionReport`] into records on its own thread. Each
+//! failing fact carries its [`Cause`] as a value, so the door's error has
+//! the right failure class (#258) without reading the text.
 
 use super::cache::MetaCache;
 use super::ledger::{DiagRequest, Diagnostics, Entry, PortableLedger};
 use super::redact;
 use super::routes::{Claim, Permitted, Route};
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Class;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -80,17 +83,55 @@ pub struct Fact {
     pub detail: String,
 }
 
+/// Why a session fact fails the door. The door's error takes its class
+/// from this value, never from the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// Bytes that did not match what authenticated them: a hash mismatch,
+    /// two documents claiming different digests, a response that could not
+    /// be rewritten. No policy permits it and no rule chose it, so it has
+    /// no class (exit 1): something upstream is wrong.
+    Integrity,
+    /// A fixed rule no policy relaxes refused it: an upstream address the
+    /// SSRF rule will not reach. Refused (exit 3).
+    Rule,
+    /// The policy denied a kind (`check`, `refuse_if_denied`, a denied
+    /// `stale-resolution`). Refused (exit 3): the policy has to change.
+    Policy,
+    /// Offline mode, and the cache does not have it. Network (exit 6), as
+    /// every "offline" failure is: run once online.
+    Offline,
+}
+
+impl Cause {
+    /// The failure class the door's error carries for this cause.
+    pub fn class(self) -> Option<Class> {
+        match self {
+            Cause::Integrity => None,
+            Cause::Rule | Cause::Policy => Some(Class::Refused),
+            Cause::Offline => Some(Class::Network),
+        }
+    }
+}
+
+/// A fact that fails the door: what happened, and why it fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub cause: Cause,
+    pub text: String,
+}
+
 /// What a session established, for the door to act on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Facts {
     /// Exceptions to record (their kind was not denied).
     pub exceptions: BTreeSet<Fact>,
     /// Policy refusal texts: a denied kind refused a request. Each fails
-    /// the door even when the tool exits 0.
+    /// the door even when the tool exits 0. Every one is [`Cause::Policy`].
     pub refusals: Vec<String>,
-    /// Failures no policy permits (integrity, an address the SSRF rule
-    /// refused). Each fails the door.
-    pub hard_failures: Vec<String>,
+    /// Failures no policy permits ([`Cause::Integrity`], or an address the
+    /// SSRF rule refused, [`Cause::Rule`]). Each fails the door.
+    pub hard_failures: Vec<Failure>,
     /// The first request offline mode could not serve: the thing to fetch
     /// online.
     pub first_offline_miss: Option<String>,
@@ -101,16 +142,20 @@ pub struct Facts {
 impl Facts {
     /// Why the door fails, if it does: a hard failure first (it is never
     /// a policy question), then a policy refusal, then an offline miss.
-    pub fn failure(&self) -> Option<String> {
+    pub fn failure(&self) -> Option<Failure> {
         if let Some(failure) = self.hard_failures.first() {
             return Some(failure.clone());
         }
         if let Some(refusal) = self.refusals.first() {
-            return Some(refusal.clone());
+            return Some(Failure {
+                cause: Cause::Policy,
+                text: refusal.clone(),
+            });
         }
-        self.first_offline_miss
-            .as_ref()
-            .map(|url| format!("offline, and {url} is not cached; run once online to fetch it"))
+        self.first_offline_miss.as_ref().map(|url| Failure {
+            cause: Cause::Offline,
+            text: format!("offline, and {url} is not cached; run once online to fetch it"),
+        })
     }
 }
 
@@ -469,11 +514,14 @@ impl State {
         self.inner().diagnostics.port.get_or_insert(port);
     }
 
-    pub(crate) fn hard_failure(&self, text: String) {
+    /// A failure no policy permits. `cause` is [`Cause::Integrity`] or
+    /// [`Cause::Rule`]: a policy denial is a refusal, recorded by `check`.
+    pub(crate) fn hard_failure(&self, cause: Cause, text: String) {
+        debug_assert!(matches!(cause, Cause::Integrity | Cause::Rule));
         let text = self.clean(&text);
         let mut inner = self.inner();
         if !inner.closed && inner.failure_texts.insert(text.clone()) {
-            inner.facts.hard_failures.push(text);
+            inner.facts.hard_failures.push(Failure { cause, text });
         }
     }
 
@@ -639,6 +687,44 @@ mod tests {
             hops: Vec::new(),
             detail: Some("why".into()),
         }
+    }
+
+    #[test]
+    fn each_failing_fact_carries_its_class_as_a_value() {
+        let integrity = Failure {
+            cause: Cause::Integrity,
+            text: "hash mismatch".into(),
+        };
+        let rule = Failure {
+            cause: Cause::Rule,
+            text: "address refused".into(),
+        };
+        let refusal = "policy: denied".to_string();
+        let mut facts = Facts {
+            refusals: vec![refusal.clone()],
+            hard_failures: vec![integrity.clone()],
+            first_offline_miss: Some("https://registry.test/x".into()),
+            ..Facts::default()
+        };
+        // A hard failure is reported first, under every policy.
+        assert_eq!(facts.failure(), Some(integrity));
+        assert_eq!(Cause::Integrity.class(), None);
+        facts.hard_failures = vec![rule.clone()];
+        assert_eq!(facts.failure().unwrap().cause.class(), Some(Class::Refused));
+        // Then a policy refusal, whatever its wording.
+        facts.hard_failures.clear();
+        let failure = facts.failure().unwrap();
+        assert_eq!(failure.cause, Cause::Policy);
+        assert_eq!(failure.text, refusal);
+        assert_eq!(failure.cause.class(), Some(Class::Refused));
+        // Then the offline miss.
+        facts.refusals.clear();
+        let failure = facts.failure().unwrap();
+        assert_eq!(failure.cause, Cause::Offline);
+        assert_eq!(failure.cause.class(), Some(Class::Network));
+        assert!(failure.text.contains("https://registry.test/x"));
+        facts.first_offline_miss = None;
+        assert_eq!(facts.failure(), None);
     }
 
     #[test]

@@ -274,8 +274,7 @@ impl StoreFormat {
 pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
     let directory = open_real_directory(root, "store root")?;
     let unsupported = |error: io::Error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!(
                 "lock the store directory {}: {error}. ward takes a file lock (flock) on \
                  the store directory before it creates or empties a store, so the store has to \
@@ -283,6 +282,7 @@ pub(crate) fn lock_root(root: &Path) -> io::Result<fs::File> {
                  local disk",
                 root.display()
             ),
+            error,
         )
     };
     match directory.try_lock() {

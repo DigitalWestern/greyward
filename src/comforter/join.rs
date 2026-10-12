@@ -99,9 +99,9 @@ pub fn read_supplied(paths: &[PathBuf]) -> io::Result<Vec<SuppliedRecord>> {
     let mut records = Vec::new();
     for path in paths {
         let metadata = fs::metadata(path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("--resolution-record {}: {error}", path.display()),
+                error,
             )
         })?;
         if metadata.is_dir() {

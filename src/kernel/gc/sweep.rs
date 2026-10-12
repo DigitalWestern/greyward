@@ -81,12 +81,12 @@ pub(super) fn execute<W: Write>(
                 )
                 .map_err(|error| {
                     let stray = meta_name.strip_suffix(".json").unwrap_or(meta_name);
-                    io::Error::new(
-                        error.kind(),
+                    crate::kernel::error::reword(
                         format!(
                             "{error}; the record meta/{meta_name} is orphaned: the next `ward \
                              gc` removes it, or drop it now with `ward gc --drop-object {stray}`"
                         ),
+                        error,
                     )
                 })?;
             }
@@ -108,9 +108,9 @@ pub(super) fn execute<W: Write>(
                     size(report.freed_bytes)
                 )?;
             }
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("{}: {error}", removal.label),
+                error,
             ));
         }
     }
@@ -126,9 +126,9 @@ pub(super) fn confirm_unchanged(
     label: &str,
 ) -> io::Result<()> {
     let actual = store::stat_at(parent.file.as_raw_fd(), name).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("{label} disappeared from {} before removal", parent.label),
+            error,
         )
     })?;
     if actual.st_dev != expected.st_dev || actual.st_ino != expected.st_ino {

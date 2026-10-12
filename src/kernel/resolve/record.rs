@@ -1062,22 +1062,22 @@ pub fn publish_receipts(
             }
         }
         if left.is_empty() {
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!(
                     "{error}; no receipt was published (every one already written by this \
                      command was put back)"
                 ),
+                error,
             ));
         }
-        return Err(io::Error::new(
-            error.kind(),
+        return Err(crate::kernel::error::reword(
             format!(
                 "{error}; putting back the receipts this command had already published also \
                  failed, so these now hold a new record while another ecosystem's did not \
                  publish: {}; restore them from version control or run `ward attest` again",
                 left.join(", ")
             ),
+            error,
         ));
     }
     Ok(())

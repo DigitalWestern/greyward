@@ -7,6 +7,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
 pub use crate::kernel::digest::Digest;
 use crate::kernel::error;
+use crate::kernel::error::Context as _;
 use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::SourcePolicy;
 use sha1::Sha1;
@@ -94,9 +95,9 @@ pub(crate) fn cache_verified_held(
     let digest = Digest::sha256(sha256)?;
     cache_verified_digest_held(store, activity, &digest).map_err(|error| {
         if error.kind() == io::ErrorKind::InvalidData {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("cache entry {sha256} was corrupted or unreadable: {error}"),
+                error,
             )
         } else {
             error
@@ -133,13 +134,13 @@ pub(crate) fn cache_verified_digest_held(
                 ),
             ))
         }
-        Err(error) => Err(io::Error::new(
-            error.kind(),
+        Err(error) => Err(crate::kernel::error::reword(
             format!(
                 "cache entry {}:{} is unreadable: {error}",
                 digest.algo(),
                 digest.hex()
             ),
+            error,
         )),
     }
 }
@@ -486,9 +487,10 @@ pub(crate) fn status_failure(code: u16) -> io::Error {
 /// The HTTP status behind a fetch error, when the server answered with one.
 pub fn http_status(error: &io::Error) -> Option<u16> {
     error
-        .get_ref()?
-        .downcast_ref::<StatusFailure>()
+        .get_ref()
+        .and_then(|payload| payload.downcast_ref::<StatusFailure>())
         .map(|failure| failure.code)
+        .or_else(|| error::inner(error).and_then(http_status))
 }
 
 /// The artifact's name for progress narration: the last path segment of
@@ -524,8 +526,7 @@ fn open_url(
     timeout: Option<std::time::Duration>,
 ) -> io::Result<(Box<dyn Read>, Option<u64>)> {
     if let Some(path) = url.strip_prefix("file://") {
-        let file = fs::File::open(path)
-            .map_err(|e| io::Error::new(e.kind(), format!("open {path}: {e}")))?;
+        let file = fs::File::open(path).with_context(|| format!("open {path}"))?;
         return Ok((Box::new(file), None));
     }
     let mut builder = ureq::AgentBuilder::new()
@@ -710,7 +711,7 @@ fn stream_to_file(
 ) -> io::Result<()> {
     let mut progress = crate::kernel::ui::Progress::start(artifact_name(url), declared);
     let mut file = fs::File::create(dest)
-        .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", dest.display())))?;
+        .map_err(|e| crate::kernel::error::reword(format!("create {}: {e}", dest.display()), e))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     let mut total: u64 = 0;
@@ -806,7 +807,9 @@ pub fn cache_insert(
             .create_new(true)
             .mode(0o444)
             .open(&tmp)
-            .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?
+            .map_err(|e| {
+                crate::kernel::error::reword(format!("create {}: {e}", tmp.display()), e)
+            })?
     };
     // The create mode is masked by the umask; set it outright, as a
     // verified download's `publish_read_only` does, so both agree.
@@ -841,7 +844,10 @@ pub fn cache_insert(
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
-            return Err(io::Error::new(e.kind(), format!("cache insert {hex}: {e}")));
+            return Err(crate::kernel::error::context(
+                e,
+                format!("cache insert {hex}"),
+            ));
         }
     }
     store::touch_path(&dest)?;
@@ -1171,7 +1177,10 @@ impl std::error::Error for HashMismatch {}
 impl HashMismatch {
     /// The mismatch inside `error`, if that is what it is.
     pub fn of(error: &io::Error) -> Option<&HashMismatch> {
-        error.get_ref()?.downcast_ref::<HashMismatch>()
+        error
+            .get_ref()
+            .and_then(|payload| payload.downcast_ref::<HashMismatch>())
+            .or_else(|| error::inner(error).and_then(HashMismatch::of))
     }
 }
 
@@ -1269,8 +1278,7 @@ fn cache_or_download_narrated(
         }
     }
     let cache_dir = store.cache_path(digest.algo(), digest.hex());
-    fs::create_dir_all(cache_dir.parent().unwrap())
-        .map_err(|e| io::Error::new(e.kind(), format!("cache dir: {e}")))?;
+    fs::create_dir_all(cache_dir.parent().unwrap()).context("cache dir")?;
     // Unique per attempt: two concurrent downloads of the same artifact
     // (other processes, or threads of this one) must never share a tmp
     // file, or the stream hash would verify while the file holds
@@ -1295,7 +1303,7 @@ fn cache_or_download_narrated(
         .write(true)
         .create_new(true)
         .open(&tmp)
-        .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?;
+        .map_err(|e| crate::kernel::error::reword(format!("create {}: {e}", tmp.display()), e))?;
     let mut h256 = Sha256::new();
     let mut h512 = Sha512::new();
     let mut h1 = Sha1::new();
@@ -1368,12 +1376,9 @@ fn cache_or_download_narrated(
 fn publish_read_only(tmp: &Path, dest: &Path) -> io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(tmp)
-            .map_err(|e| io::Error::new(e.kind(), format!("stat dl tmp: {e}")))?
-            .permissions();
+        let mut perms = fs::metadata(tmp).context("stat dl tmp")?.permissions();
         perms.set_mode(0o444);
-        fs::set_permissions(tmp, perms)
-            .map_err(|e| io::Error::new(e.kind(), format!("chmod dl tmp: {e}")))?;
+        fs::set_permissions(tmp, perms).context("chmod dl tmp")?;
     }
     match fs::rename(tmp, dest) {
         Ok(()) => {}
@@ -1381,9 +1386,9 @@ fn publish_read_only(tmp: &Path, dest: &Path) -> io::Result<()> {
             let _ = fs::remove_file(tmp);
         }
         Err(e) => {
-            return Err(io::Error::new(
-                e.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("cache publish {}: {e}", dest.display()),
+                e,
             ))
         }
     }

@@ -4,6 +4,7 @@
 //! real archives (#325). `tests/architecture.rs` keeps the calls here.
 
 use super::*;
+use crate::kernel::error::Context as _;
 
 pub(super) fn extract_ruby_bottle(
     activity: &StoreActivity,
@@ -20,7 +21,7 @@ pub(super) fn extract_ruby_bottle(
         &crate::kernel::archive::ExtractOptions::platform_build(2),
         crate::kernel::archive::Compression::Gzip,
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
+    .context("extract portable-ruby bottle")?;
     validate_ruby_layout(staged)
 }
 
@@ -32,6 +33,6 @@ pub(super) fn extract_ruby_bottle_for_test(tarball: &Path, staged: &Path) -> io:
         &crate::kernel::archive::ExtractOptions::platform_build(2),
         crate::kernel::archive::Compression::Gzip,
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract portable-ruby bottle: {e}")))?;
+    .context("extract portable-ruby bottle")?;
     validate_ruby_layout(staged)
 }

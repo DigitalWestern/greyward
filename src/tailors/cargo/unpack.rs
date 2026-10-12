@@ -4,6 +4,7 @@
 //! real archives (#325). `tests/architecture.rs` keeps the calls here.
 
 use super::*;
+use crate::kernel::error::Context as _;
 use std::collections::BTreeSet;
 
 pub(super) fn stage_rustfmt(
@@ -22,7 +23,7 @@ pub(super) fn stage_rustfmt(
         archive,
         crate::kernel::archive::Compression::Xz,
     )
-    .map_err(|error| io::Error::new(error.kind(), format!("list rustfmt archive: {error}")))?;
+    .context("list rustfmt archive")?;
     let allowed: BTreeSet<String> = allowed_entries(&root).into_iter().collect();
     for entry in &listed {
         if !allowed.contains(&entry.name) {
@@ -49,18 +50,16 @@ pub(super) fn stage_rustfmt(
             crate::kernel::archive::Compression::Xz,
             &listed,
         )
-        .map_err(|error| {
-            io::Error::new(error.kind(), format!("extract rustfmt archive: {error}"))
-        })?;
+        .context("extract rustfmt archive")?;
         let bin = staged.join("bin");
         fs::create_dir_all(&bin)?;
         for name in ["rustfmt", "cargo-fmt"] {
             let source = full.join("bin").join(name);
             if fs::symlink_metadata(&source)
                 .map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
+                    crate::kernel::error::reword(
                         format!("rustfmt archive entry {name} is missing: {error}"),
+                        error,
                     )
                 })?
                 .file_type()
@@ -78,9 +77,9 @@ pub(super) fn stage_rustfmt(
         Ok(())
     })();
     let cleaned = match crate::kernel::store::remove_tree(&full) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
-            error.kind(),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(crate::kernel::error::reword(
             format!("remove rustfmt scratch {}: {error}", full.display()),
+            error,
         )),
         _ => Ok(()),
     };

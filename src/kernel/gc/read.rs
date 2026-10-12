@@ -347,11 +347,11 @@ fn read_objects(
                 } else {
                     format!("rebuild it or restore meta/{id}.json")
                 };
-                io::Error::new(
-                    error.kind(),
+                crate::kernel::error::reword(
                     format!(
                         "refusing to sweep: object {id} has no readable metadata: {error}; {fix}"
                     ),
+                    error,
                 )
             })?;
         object_entries.push(ObjectEntry {

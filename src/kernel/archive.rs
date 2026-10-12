@@ -184,7 +184,7 @@ fn list_inner(
     // The caller's lease covers both the in-process read and the
     // cross-check child.
     let entries = read_archive(archive, compression)
-        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
+        .map_err(|e| crate::kernel::error::reword(format!("list {}: {e}", archive.display()), e))?;
     // Cross-check every name against the tar that will do the extraction.
     // `-t` prints one stored name per line and nothing else, so it cannot be
     // shifted by a wide field, a locale, or a tar version that reformats.
@@ -211,7 +211,7 @@ fn list_names(
         Some(activity) => crate::kernel::supervise::local_output(&mut command, activity),
         None => command.output(),
     }
-    .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", archive.display())))?;
+    .map_err(|e| crate::kernel::error::reword(format!("list {}: {e}", archive.display()), e))?;
     if !output.status.success() {
         return Err(err(format!(
             "list {} failed: {}",
@@ -1137,8 +1137,9 @@ pub fn read_member(
     cap: u64,
 ) -> io::Result<Vec<u8>> {
     let (entries, wanted) = capture(archive, compression, member, cap)?;
-    validate::members_written_once(&entries)
-        .map_err(|e| io::Error::new(e.kind(), format!("archive {}: {e}", archive.display())))?;
+    validate::members_written_once(&entries).map_err(|e| {
+        crate::kernel::error::reword(format!("archive {}: {e}", archive.display()), e)
+    })?;
     if let Some(bytes) = wanted {
         return Ok(bytes);
     }
@@ -1270,8 +1271,9 @@ fn extract_validated_inner(
 ) -> io::Result<()> {
     validate_with_options(entries, options)?;
     let mut command = extract_command(archive, destination, options, compression);
-    let status = status_for(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;
+    let status = status_for(&mut command, activity).map_err(|e| {
+        crate::kernel::error::reword(format!("extract {}: {e}", archive.display()), e)
+    })?;
     if !status.success() {
         return Err(err(format!(
             "extract {} into {} failed ({status})",

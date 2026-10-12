@@ -2,6 +2,7 @@
 //! publish lock, cache hits, and the dependency evidence a commit records.
 
 use super::*;
+use crate::kernel::error::Context as _;
 use crate::kernel::policy::Exception;
 
 /// The most bytes an object's metadata record may hold. A record is its
@@ -82,9 +83,9 @@ impl Store {
         }
         let object = self.object_path(id);
         let object_meta = fs::symlink_metadata(&object).map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("object reference {id} is unavailable: {error}"),
+                error,
             )
         })?;
         if object_meta.file_type().is_symlink() || !object_meta.is_dir() {
@@ -104,7 +105,7 @@ impl Store {
         // a record whose identity, schema or evidence this ward cannot read
         // is not a complete object.
         crate::kernel::objmeta::read_store_record(self, id).map_err(|error| {
-            io::Error::new(error.kind(), format!("object reference {id}: {error}"))
+            crate::kernel::error::context(error, format!("object reference {id}"))
         })?;
         Ok(())
     }
@@ -217,7 +218,7 @@ impl Store {
             }
         };
         let value = read_meta_json(&file)
-            .map_err(|error| io::Error::new(error.kind(), format!("store object {id}: {error}")))?
+            .with_context(|| format!("store object {id}"))?
             .map_err(|error| invalid(format!("parse store object {id} metadata: {error}")))?;
         // The record must describe `id`: its identity hashes to it. A
         // sweep and a republish of the same id in between leave a record
@@ -462,8 +463,9 @@ impl Store {
             }
             objects.sync_all()?;
         }
-        fs::rename(staged, &dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("publish {}: {e}", dest.display())))?;
+        fs::rename(staged, &dest).map_err(|e| {
+            crate::kernel::error::reword(format!("publish {}: {e}", dest.display()), e)
+        })?;
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&dest)?.permissions();
@@ -634,7 +636,7 @@ pub(super) fn make_read_only(path: &Path) -> io::Result<()> {
     let mut perms = md.permissions();
     perms.set_mode(perms.mode() & !0o222);
     fs::set_permissions(path, perms)
-        .map_err(|e| io::Error::new(e.kind(), format!("chmod {}: {e}", path.display())))
+        .map_err(|e| crate::kernel::error::reword(format!("chmod {}: {e}", path.display()), e))
 }
 
 #[cfg(test)]
@@ -748,13 +750,13 @@ pub(super) fn validate_object_deps(
     for digest in &deps.cache {
         let path = store.cache_path(digest.algo(), digest.hex());
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "cache dependency {}:{} is unavailable: {error}",
                     digest.algo(),
                     digest.hex()
                 ),
+                error,
             )
         })?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {

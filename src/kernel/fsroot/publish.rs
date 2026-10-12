@@ -79,9 +79,9 @@ impl ProjectRoot {
                         last = candidate;
                     }
                     Err(error) => {
-                        return Err(io::Error::new(
-                            error.kind(),
+                        return Err(crate::kernel::error::reword(
                             format!("create temporary for {}: {error}", display.display()),
+                            error,
                         ))
                     }
                 }
@@ -119,9 +119,9 @@ impl ProjectRoot {
                 )));
             }
             rename_at(parent_fd, &temp, name.as_bytes()).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
+                crate::kernel::error::reword(
                     format!("publish {}: {error}", display.display()),
+                    error,
                 )
             })?;
             renamed = true;

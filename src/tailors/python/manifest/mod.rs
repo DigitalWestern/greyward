@@ -232,9 +232,11 @@ impl Manifest {
             let _ = fs::remove_dir_all(&scratch);
             return Err(unreadable(
                 &dir.join("setup.py"),
-                io::Error::other(format!(
-                    "sandboxed egg_info failed: {error}; last 20 lines:\n{tail}"
-                )),
+                crate::kernel::error::reword_as(
+                    io::ErrorKind::Other,
+                    format!("sandboxed egg_info failed: {error}; last 20 lines:\n{tail}"),
+                    error,
+                ),
             ));
         }
 

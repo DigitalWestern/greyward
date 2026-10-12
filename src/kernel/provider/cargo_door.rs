@@ -142,9 +142,9 @@ impl Bound {
                 return Ok(None)
             }
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("{}: {error}", path.display()),
+                    error,
                 ))
             }
         }
@@ -208,7 +208,7 @@ impl Bound {
             return Ok(None);
         };
         let context = |error: io::Error| {
-            io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+            crate::kernel::error::reword(format!("read {}: {error}", path.display()), error)
         };
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -352,7 +352,7 @@ fn held_config_files_with(
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|error| {
-            io::Error::new(error.kind(), format!("read {}: {error}", shown.display()))
+            crate::kernel::error::reword(format!("read {}: {error}", shown.display()), error)
         })?;
         let text = String::from_utf8(bytes).map_err(|_| {
             io::Error::new(
@@ -1001,9 +1001,9 @@ fn expand_or_literal(root: &Path, pattern: &str) -> io::Result<Expanded> {
                 return Ok(expanded)
             }
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("read {}: {error}", path.display()),
+                    error,
                 ))
             }
         };
@@ -1084,9 +1084,9 @@ pub(crate) fn expand(root: &Path, pattern: &str) -> io::Result<Expanded> {
                 continue
             }
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("read {}: {error}", root.join(&relative).display()),
+                    error,
                 ))
             }
         };
@@ -1215,9 +1215,9 @@ pub fn run_cargo(
     let spec = cargo_spec(run.rust_obj, run.lock_root, run.args);
     spec.trace();
     door.run_confined(spec, confined).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("store cargo {}: {error}", run.args.join(" ")),
+            error,
         )
     })
 }

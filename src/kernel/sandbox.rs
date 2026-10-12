@@ -991,9 +991,9 @@ pub(crate) fn bind_target(bind: &Path) -> io::Result<Option<PathBuf>> {
     match fs::canonicalize(bind) {
         Ok(target) => Ok(Some(target)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io::Error::new(
-            error.kind(),
+        Err(error) => Err(crate::kernel::error::reword(
             format!("cannot resolve sandbox path {}: {error}", bind.display()),
+            error,
         )),
     }
 }
@@ -1045,9 +1045,9 @@ fn scan_for_socket(path: &Path, is_root: bool) -> io::Result<Option<PathBuf>> {
         Ok(entries) => entries,
         Err(error) if vanished(&error) => return Ok(None),
         Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("cannot scan {} for host sockets: {error}", path.display()),
+                error,
             ))
         }
     };
@@ -1314,12 +1314,12 @@ pub(crate) fn system_root_args(host_root: &Path) -> io::Result<Vec<OsString>> {
 }
 
 pub(crate) fn host_layout_error(path: &Path, error: io::Error) -> io::Error {
-    io::Error::new(
-        error.kind(),
+    crate::kernel::error::reword(
         format!(
             "cannot read host {} for the sandbox: {error}",
             path.display()
         ),
+        error,
     )
 }
 

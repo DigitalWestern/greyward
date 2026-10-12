@@ -15,6 +15,7 @@
 //! identity goldens and object-kind rows beside it.
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::download_toolchain_artifact_held;
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -352,7 +353,7 @@ pub fn realize_runtime(
             deps
         })
         .map(|(path, _)| path)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit rust object: {e}")))
+        .context("commit rust object")
 }
 
 /// The shipped catalog's release for one exact Rust version, as a selection.
@@ -398,7 +399,9 @@ fn extract_rust_components_for(
             &crate::kernel::archive::ExtractOptions::platform_build(2),
             crate::kernel::archive::Compression::Xz,
         )
-        .map_err(|e| io::Error::new(e.kind(), format!("extract tarball for {component}: {e}")))?;
+        .map_err(|e| {
+            crate::kernel::error::context(e, format!("extract tarball for {component}"))
+        })?;
     }
     validate_rust_layout(staged, platform)
 }
@@ -421,7 +424,9 @@ pub fn extract_rust_components(
             &crate::kernel::archive::ExtractOptions::platform_build(2),
             crate::kernel::archive::Compression::Xz,
         )
-        .map_err(|e| io::Error::new(e.kind(), format!("extract tarball for {component}: {e}")))?;
+        .map_err(|e| {
+            crate::kernel::error::context(e, format!("extract tarball for {component}"))
+        })?;
     }
     validate_rust_layout(staged, platform)
 }
@@ -511,8 +516,9 @@ fn resolve_toolchain_with(
         return fallback_pin(platform, default);
     };
     let bytes = read_toolchain_file(&path)?;
-    let located =
-        |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    let located = |error: io::Error| {
+        crate::kernel::error::reword(format!("{}: {error}", path.display()), error)
+    };
     // A local toolchain has no pin to resolve to: only a project lock
     // records one (its content hash), and this resolver has no lock.
     if let Some(table) = input::rust_toolchain_table(&bytes, legacy).map_err(located)? {
@@ -549,8 +555,9 @@ pub(super) fn file_extras_within(root: &Path) -> io::Result<Extras> {
         return Ok(Extras::default());
     };
     let bytes = read_toolchain_file(&path)?;
-    let located =
-        |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    let located = |error: io::Error| {
+        crate::kernel::error::reword(format!("{}: {error}", path.display()), error)
+    };
     let Some(table) = input::rust_toolchain_table(&bytes, legacy).map_err(located)? else {
         return Ok(Extras::default());
     };
@@ -568,7 +575,8 @@ pub(super) fn file_extras_within(root: &Path) -> io::Result<Extras> {
 }
 
 fn read_toolchain_file(path: &Path) -> io::Result<Vec<u8>> {
-    fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))
+    fs::read(path)
+        .map_err(|e| crate::kernel::error::reword(format!("read {}: {e}", path.display()), e))
 }
 
 /// The nearest rustup-style toolchain file at or above `project_dir`, and

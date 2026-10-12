@@ -1103,9 +1103,9 @@ pub fn realize_packages(
     if let Err(e) = result {
         let _ = crate::kernel::store::remove_tree(&scratch);
         let _ = crate::kernel::store::remove_tree(&staged);
-        return Err(io::Error::new(
-            e.kind(),
+        return Err(crate::kernel::error::reword(
             format!("locked-mode package verification failed: {e}"),
+            e,
         ));
     }
     // Every locked package must have materialized with its completion
@@ -1476,16 +1476,16 @@ fn publish_output(
             };
             if let Err(clone_error) = cloned {
                 let _ = crate::kernel::store::remove_tree(&new);
-                return Err(io::Error::new(
-                    clone_error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("publish {}: {clone_error}", output.display()),
+                    clone_error,
                 ));
             }
         }
         Err(e) => {
-            return Err(io::Error::new(
-                e.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("publish {}: {e}", output.display()),
+                e,
             ))
         }
     }
@@ -1494,9 +1494,9 @@ fn publish_output(
     if had_old {
         if let Err(e) = fs::rename(&output, &old) {
             let _ = crate::kernel::store::remove_tree(&new);
-            return Err(io::Error::new(
-                e.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("publish {}: {e}", output.display()),
+                e,
             ));
         }
     }
@@ -1508,13 +1508,13 @@ fn publish_output(
             Ok(())
         };
         return Err(match restore {
-            Ok(()) => io::Error::new(e.kind(), format!("publish {}: {e}", output.display())),
-            Err(restore_error) => io::Error::new(
-                e.kind(),
+            Ok(()) => crate::kernel::error::reword(format!("publish {}: {e}", output.display()), e),
+            Err(restore_error) => crate::kernel::error::reword(
                 format!(
                     "publish {}: {e}; restoring previous output failed: {restore_error}",
                     output.display()
                 ),
+                e,
             ),
         });
     }
@@ -1595,13 +1595,13 @@ pub fn build_sandboxed(
     };
     let spec = phase.spec(false, restore, env.clone(), ensure_dotnet_tmp(platform)?);
     crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)).map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!(
                 "offline locked restore failed: {e}; network is denied — \
                      packages outside the lock, framework packs, or workloads \
                      are unsupported in v0"
             ),
+            e,
         )
     })?;
     if !objdir.join("project.assets.json").is_file() {
@@ -1625,9 +1625,9 @@ pub fn build_sandboxed(
     let spec = phase.spec(true, build, env, ensure_dotnet_tmp(platform)?);
     if let Err(e) = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)) {
         let _ = crate::kernel::store::remove_tree(&scratch);
-        return Err(io::Error::new(
-            e.kind(),
+        return Err(crate::kernel::error::reword(
             format!("dotnet build failed: {e}\n(network is denied during builds)"),
+            e,
         ));
     }
     let after = fs::read(objdir.join("project.assets.json"))?;

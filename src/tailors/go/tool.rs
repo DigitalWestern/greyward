@@ -4,6 +4,7 @@
 
 use super::go_env;
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
 use crate::kernel::resolve::ledger;
@@ -116,9 +117,9 @@ pub(crate) fn run_go(
     };
     let confined = go_confined(&run, publish)?;
     let spec = go_spec(run.go_obj, run.lock_root, run.modcache, false, run.args);
-    let report = door
-        .run_confined(spec, confined)
-        .map_err(|e| io::Error::new(e.kind(), format!("store go {}: {e}", run.args.join(" "))))?;
+    let report = door.run_confined(spec, confined).map_err(|e| {
+        crate::kernel::error::reword(format!("store go {}: {e}", run.args.join(" ")), e)
+    })?;
     if let (Some(project), Some(objects)) = (project, &report.ledger) {
         ledger::root(door.store(), door.lease(), project, objects)?;
     }
@@ -175,7 +176,7 @@ pub(super) fn run_go_offline(
     telemetry_off(cwd)?;
     let mut cmd = offline_command(go_obj, cwd, modcache, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store go {args:?}: {e}")))
+        .with_context(|| format!("run store go {args:?}"))
 }
 
 /// Turn Go telemetry off for a run whose `HOME` is `home` (with no

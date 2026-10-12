@@ -648,7 +648,7 @@ fn read_project_input(project: &ProjectRoot, name: &str) -> io::Result<Option<St
     let path = project.path().join(name);
     let bytes = project
         .read_input(Path::new(name))
-        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        .map_err(|e| crate::kernel::error::reword(format!("{}: {e}", path.display()), e))?;
     let Some(bytes) = bytes else {
         return Ok(None);
     };

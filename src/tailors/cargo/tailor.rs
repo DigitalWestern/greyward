@@ -429,8 +429,9 @@ impl Formatter for Rustfmt {
         // holds (#612): a project renamed or replaced after this point is
         // not what gets formatted. Every path below is the canonical one
         // each was opened at, never canonicalized again.
-        let invocation = ProjectRoot::open(cwd)
-            .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", cwd.display())))?;
+        let invocation = ProjectRoot::open(cwd).map_err(|error| {
+            crate::kernel::error::reword(format!("{}: {error}", cwd.display()), error)
+        })?;
         let (_, workspace) = inputs::locate_held_cargo_root(&invocation)?;
         let workspace_root = workspace.path().to_path_buf();
         fmt_preflight(

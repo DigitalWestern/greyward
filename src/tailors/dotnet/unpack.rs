@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::kernel::archive::{Compression, ExtractOptions};
+use crate::kernel::error::Context as _;
 
 #[cfg(test)]
 pub(super) fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
@@ -17,7 +18,7 @@ pub(super) fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<(
         Compression::Gzip,
     )
     .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
+    .context("extract dotnet SDK archive")?;
     if !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }
@@ -37,7 +38,7 @@ pub(super) fn extract_sdk_archive_for(
         Compression::Gzip,
     )
     .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract dotnet SDK archive: {e}")))?;
+    .context("extract dotnet SDK archive")?;
     if !staged.join("dotnet").is_file() {
         return Err(err("dotnet SDK extraction failed or has unexpected layout"));
     }

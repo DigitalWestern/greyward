@@ -176,10 +176,7 @@ impl SigningKey {
         #[cfg(unix)]
         options.custom_flags(libc::O_NONBLOCK);
         let file = options.open(path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("signing key {}: {error}", path.display()),
-            )
+            crate::kernel::error::reword(format!("signing key {}: {error}", path.display()), error)
         })?;
         let metadata = file
             .metadata()
@@ -281,10 +278,7 @@ pub fn generate(path: &Path) -> io::Result<PublicKey> {
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("keygen: create {}: {error}", path.display()),
-        )
+        crate::kernel::error::reword(format!("keygen: create {}: {error}", path.display()), error)
     })?;
     let result = (|| {
         file.write_all(format!("{KEY_PREFIX}{}\n", hex::encode(seed)).as_bytes())?;

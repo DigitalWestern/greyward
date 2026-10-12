@@ -578,12 +578,12 @@ impl Store {
         // identity, so a replacement is never opened or emptied.
         let removed = if is_directory(&current) {
             remove_tree_entry_if_same(roots.as_raw_fd(), name, &current).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
+                crate::kernel::error::reword(
                     format!(
                         "root registry entry {} could not be removed as a directory: {error}",
                         entry.key
                     ),
+                    error,
                 )
             })?
         } else {
@@ -1102,9 +1102,9 @@ pub(super) fn read_registry_file_at(
         0,
     )
     .map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("read root record {}: {error}", path.display()),
+            error,
         )
     })?;
     if !file.metadata()?.is_file() {

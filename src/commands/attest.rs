@@ -247,12 +247,12 @@ fn write_record(
         out.to_path_buf()
     } else {
         fs::create_dir_all(out).map_err(|error| {
-            io::Error::new(error.kind(), format!("create {}: {error}", out.display()))
+            crate::kernel::error::reword(format!("create {}: {error}", out.display()), error)
         })?;
         out.join(format!("{}.json", record.ecosystem))
     };
     fs::write(&path, bytes).map_err(|error| {
-        io::Error::new(error.kind(), format!("write {}: {error}", path.display()))
+        crate::kernel::error::reword(format!("write {}: {error}", path.display()), error)
     })?;
     Ok(path)
 }
@@ -282,7 +282,7 @@ fn export_ledger(
     let ctx = Context::open(platform)?;
     let portable = record::read_ledger(&ctx.store, &ctx.activity, &record)?;
     fs::write(file, &portable).map_err(|error| {
-        io::Error::new(error.kind(), format!("write {}: {error}", file.display()))
+        crate::kernel::error::reword(format!("write {}: {error}", file.display()), error)
     })?;
     ui::note(&format!(
         "attest: wrote the {ecosystem} ledger {} ({} bytes) to {}",
@@ -325,7 +325,7 @@ fn attesting_record_for(
 
 fn import_ledger(platform: Platform, project: &ProjectRoot, file: &Path) -> io::Result<()> {
     let portable = fs::read(file).map_err(|error| {
-        io::Error::new(error.kind(), format!("read {}: {error}", file.display()))
+        crate::kernel::error::reword(format!("read {}: {error}", file.display()), error)
     })?;
     let Some(record) = attesting_record_for(project, &portable)? else {
         return Err(io::Error::new(

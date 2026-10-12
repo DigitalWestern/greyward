@@ -104,9 +104,9 @@ fn open_error(path: &Path, from_env: bool, error: io::Error) -> io::Error {
             _ => error.to_string(),
         },
     };
-    io::Error::new(
-        error.kind(),
+    crate::kernel::error::reword(
         format!("create the store at {}: {cause}; {lever}", path.display()),
+        error,
     )
 }
 

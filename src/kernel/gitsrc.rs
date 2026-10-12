@@ -252,7 +252,7 @@ fn run_git_with_activity(
     let mut command = Command::new(GIT);
     configure_git(&mut command, args, cwd);
     supervise_git(&mut command, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
+        .map_err(|e| crate::kernel::error::reword(format!("run {GIT} {}: {e}", args.join(" ")), e))
 }
 
 // Reviewed site (tests/architecture.rs): ward's own verified Git fetches and its fixed, scrubbed index-only query, built here rather than supplied by a dependency tool.
@@ -363,10 +363,7 @@ fn tracked_in_git_index(
         });
     }
     let output = supervise_git(&mut command, activity).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot check Git-tracked source: {error}"),
-        )
+        crate::kernel::error::reword(format!("cannot check Git-tracked source: {error}"), error)
     })?;
     if !output.status.success() {
         return Err(err(format!(
@@ -974,9 +971,9 @@ mod realization_tests {
     fn run_git(args: &[&str], cwd: Option<&Path>) -> io::Result<std::process::Output> {
         let mut command = Command::new(GIT);
         configure_git(&mut command, args, cwd);
-        command
-            .output()
-            .map_err(|e| io::Error::new(e.kind(), format!("run {GIT} {}: {e}", args.join(" "))))
+        command.output().map_err(|e| {
+            crate::kernel::error::reword(format!("run {GIT} {}: {e}", args.join(" ")), e)
+        })
     }
 
     fn git_ok(args: &[&str], cwd: Option<&Path>, what: &str) -> io::Result<String> {
@@ -1472,10 +1469,7 @@ pub fn pack_checkout(
         platform.is_macos(),
     )
     .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("packing {} failed: {e}", source_root.display()),
-        )
+        crate::kernel::error::reword(format!("packing {} failed: {e}", source_root.display()), e)
     })?;
     let mut gzip = Command::new("/usr/bin/gzip");
     gzip.args(["-n", "-9", "-c"])

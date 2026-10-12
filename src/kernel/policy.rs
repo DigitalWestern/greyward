@@ -335,9 +335,9 @@ fn open_policy(path: &Path, required: bool) -> io::Result<Option<(fs::File, Path
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(None),
         Err(e) => {
-            return Err(io::Error::new(
-                e.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("read {}: {e}", path.display()),
+                e,
             ))
         }
     };
@@ -349,7 +349,7 @@ fn open_policy(path: &Path, required: bool) -> io::Result<Option<(fs::File, Path
 fn read_policy(mut file: &fs::File, path: &Path) -> io::Result<String> {
     let mut text = String::new();
     io::Read::read_to_string(&mut file, &mut text)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", path.display())))?;
+        .map_err(|e| crate::kernel::error::reword(format!("read {}: {e}", path.display()), e))?;
     Ok(text)
 }
 
@@ -628,7 +628,7 @@ pub(crate) fn load_with_sources_from(
         }
         let mut bytes = Vec::new();
         io::Read::read_to_end(&mut file, &mut bytes).map_err(|error| {
-            io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+            crate::kernel::error::reword(format!("read {}: {error}", path.display()), error)
         })?;
         let text = String::from_utf8(bytes).map_err(|_| {
             io::Error::new(

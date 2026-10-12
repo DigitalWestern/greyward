@@ -93,7 +93,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   detection, freshness, and resolution evidence. `gc --register` still opens it by path.
 - **CLI exit statuses distinguish classified failures.** See the
   [CLI status table](CLI.md#conventions) for ordinary errors, usage errors,
-  refusals (3), stale locks (4), unsupported requests (5) and signals.
+  refusals (3), stale locks (4), unsupported requests (5), network
+  failures (6) and signals. Integrity failures, malformed input, real
+  filesystem permission errors and a resolving tool's own failure stay
+  status 1 with no class.
   Completed `audit`, `status` and `doctor` reports retain their verdict codes.
   `run`, `x` and `fmt` pass the program's status through. A tool argument that is spelled like one of Greyward's
   own options needs `--` first: `-h`/`--help` for all four, and for `fmt` and `x` also the

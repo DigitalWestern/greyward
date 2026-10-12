@@ -252,6 +252,46 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
     assert_eq!(others, ["python.json"], "the closures besides cargo.json");
 }
 
+/// A policy refusal inside the resolution proxy fails the door with the
+/// Refused class (#258): `ward sync` exits 3, through the Cargo tailor's
+/// own "could not generate Cargo.lock" wording, and nothing is published.
+/// The git fetch is refused inside the intercepted tunnel before any
+/// upstream connection, so the repository URL never has to resolve.
+#[test]
+#[ignore]
+fn a_proxy_policy_refusal_exits_with_the_refused_class() {
+    let temp = TempDir::new("cargo-e2e");
+    let project = temp.0.join("cargo-hello");
+    copy_tree(&fixture("cargo-hello"), &project);
+    std::fs::remove_file(project.join("Cargo.lock")).unwrap();
+    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        manifest.replace(
+            "[dependencies]\n",
+            "[dependencies]\ngitdep = { git = \"https://example.invalid/gitdep.git\" }\n",
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join(".greyward")).unwrap();
+    std::fs::write(
+        project.join(".greyward/policy.toml"),
+        "deny = [\"git-dependency\"]\n",
+    )
+    .unwrap();
+    let tmp = temp.0.join("tmp");
+    std::fs::create_dir_all(tmp.join("home")).unwrap();
+    let store = temp.0.join("store");
+
+    let out = ward_with_tmp(&project, &store, &tmp, &["sync"]);
+    let stderr = common::text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("could not generate Cargo.lock"), "{stderr}");
+    assert!(stderr.contains("policy denies git-dependency"), "{stderr}");
+    assert!(stderr.contains("nothing was published"), "{stderr}");
+    assert!(!project.join("Cargo.lock").exists());
+}
+
 /// Components and targets a `rust-toolchain.toml` asks for are provisioned
 /// from the pinned channel manifest (#134): after one sync, `clippy` and
 /// `rustfmt` run through Cargo, the `wasm32-unknown-unknown` standard

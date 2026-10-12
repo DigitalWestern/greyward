@@ -58,7 +58,6 @@ None open.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What
   is left, one issue and one PR each, in order:
-  - #258: failure classes. `kernel::error` carries Refused, Stale, Unsupported and Network to exit statuses 3 to 6 (a signal is already `128 + n`). Left: moving the `io::Error::new(e.kind(), format!(..))` re-wraps to `error::context` as each is touched.
   - #243 sandbox: the macOS Seatbelt profile reads all of /opt, its timezone rule is dead, and CI never runs it.
 - **Found in the #399 release work (2026-10-03).** One issue and one PR each:
   - #330 sandbox: HostView::RuntimeOnly is a no-op on macOS.
@@ -109,8 +108,6 @@ None open.
 - #257: Finish explicit Context ownership and independent attribution. Thread-bound policy, key and strictness scopes support synchronous operations.
 
 - #651: carry explicit operation Context settings and independently owned attribution through the CLI, completing #257.
-
-- **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
 
 - #653: detect ecosystem comparisons across Rust line boundaries with a bounded token scan and adversarial fixtures.
 

@@ -5,6 +5,7 @@
 use super::script_view::{self, PackageScripts, ScriptsFallback};
 use super::*;
 use crate::kernel::digest::{describe_candidates, sri_candidates};
+use crate::kernel::error::Context as _;
 use sha2::Digest as _;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -408,9 +409,9 @@ fn fetch_plan_sources(
         if let Some(source) = &p.git {
             let object = crate::kernel::gitsrc::ensure_git_source(store, activity, source)
                 .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
+                    crate::kernel::error::reword(
                         format!("{}: git source {}: {e}", p.path, source.url),
+                        e,
                     )
                 })?;
             crate::kernel::policy::record(
@@ -461,9 +462,9 @@ fn stage_env_skeleton(
 fn read_verified_patch(package_path: &str, patch: &NpmPatch) -> io::Result<Vec<u8>> {
     let patch_path = Path::new(&patch.path);
     let patch_bytes = fs::read(patch_path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!("{}: read verified patch {}: {e}", package_path, patch.path),
+            e,
         )
     })?;
     // Same acceptance set as the lock-time check, from the same function, so a
@@ -558,13 +559,13 @@ fn apply_verified_patch(
     dest: &Path,
 ) -> io::Result<()> {
     let snapshot_file = snapshot.open().map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!(
                 "{}: open patch snapshot for {}: {e}",
                 package_path,
                 snapshot.source.display()
             ),
+            e,
         )
     })?;
     let mut command = Command::new("/usr/bin/patch");
@@ -573,13 +574,13 @@ fn apply_verified_patch(
         .current_dir(dest)
         .stdin(snapshot_file);
     let status = crate::kernel::supervise::local_status(&mut command, activity).map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!(
                 "{}: spawn /usr/bin/patch for {}: {e}",
                 package_path,
                 snapshot.source.display()
             ),
+            e,
         )
     })?;
     if !status.success() {
@@ -590,10 +591,7 @@ fn apply_verified_patch(
         )));
     }
     normalize_modes(dest).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("{}: normalize patched modes: {e}", package_path),
-        )
+        crate::kernel::error::reword(format!("{}: normalize patched modes: {e}", package_path), e)
     })
 }
 
@@ -612,11 +610,12 @@ fn extract_tarball_packages(
     for (p, tarball) in tarballs {
         let dest = env_package_path(staged, &p.path);
         fs::create_dir_all(&dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: create dir: {e}", p.path)))?;
+            .map_err(|e| crate::kernel::error::reword(format!("{}: create dir: {e}", p.path), e))?;
         super::unpack::extract_npm_package(activity, platform, tarball, &dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
-        normalize_modes(&dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
+            .map_err(|e| crate::kernel::error::reword(format!("{}: {e}", p.path), e))?;
+        normalize_modes(&dest).map_err(|e| {
+            crate::kernel::error::reword(format!("{}: normalize modes: {e}", p.path), e)
+        })?;
         if let Some(patch) = &p.patch {
             let snapshot = snapshot_verified_patch(store, activity, &p.path, patch)?;
             apply_verified_patch(activity, &p.path, &snapshot, &dest)?;
@@ -630,7 +629,7 @@ fn extract_tarball_packages(
         // bombs after the fact, not before. Lockfiles are trusted inputs, so
         // this is a backstop rather than the primary defence.
         if dir_size(&dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: size walk: {e}", p.path)))?
+            .map_err(|e| crate::kernel::error::reword(format!("{}: size walk: {e}", p.path), e))?
             > 1 << 30
         {
             return Err(err(format!(
@@ -657,7 +656,10 @@ fn place_git_packages(
         let source_root = match &p.git.as_ref().and_then(|g| g.subdirectory.clone()) {
             Some(subdir) => {
                 crate::tailors::node::validate_lock_path(subdir).map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}: subdirectory {subdir}: {e}", p.path))
+                    crate::kernel::error::reword(
+                        format!("{}: subdirectory {subdir}: {e}", p.path),
+                        e,
+                    )
                 })?;
                 object.join(subdir)
             }
@@ -683,18 +685,21 @@ fn place_git_packages(
         ));
         let _ = crate::kernel::store::remove_tree(&staging);
         crate::comforter::clone_tree_with_activity(activity, &source_root, &staging, platform)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: copy git source: {e}", p.path)))?;
+            .map_err(|e| {
+                crate::kernel::error::reword(format!("{}: copy git source: {e}", p.path), e)
+            })?;
         for entry in fs::read_dir(&staging)? {
             let entry = entry?;
             fs::rename(entry.path(), dest.join(entry.file_name()))?;
         }
         let _ = crate::kernel::store::remove_tree(&staging);
-        normalize_modes(&dest)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
+        normalize_modes(&dest).map_err(|e| {
+            crate::kernel::error::reword(format!("{}: normalize modes: {e}", p.path), e)
+        })?;
         let manifest = fs::read_to_string(dest.join("package.json")).map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!("{}: git source has no package.json: {e}", p.path),
+                e,
             )
         })?;
         if serde_json::from_str::<serde_json::Value>(&manifest)
@@ -764,7 +769,7 @@ fn commit_env_object(
     let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
         .commit_with_activity_and_deps(activity, identity, staged, &candidate, deps)
-        .map_err(|e| crate::kernel::error::context(e, "commit env"))?;
+        .context("commit env")?;
     for exception in applied {
         if !candidate.contains(&exception) {
             crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
@@ -783,9 +788,8 @@ pub(super) fn realize_node_env_with_node_object(
     gyp_python: &crate::kernel::toolchain::Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
-    let gyp_python_id =
-        crate::kernel::provider::cpython::cpython_object_id(gyp_python, platform)
-            .map_err(|e| io::Error::new(e.kind(), format!("python for node-gyp: {e}")))?;
+    let gyp_python_id = crate::kernel::provider::cpython::cpython_object_id(gyp_python, platform)
+        .context("python for node-gyp")?;
     let mut classification_tarballs: Vec<FetchedTarball<'_>> = Vec::new();
     // One lease for the whole realization: the archive children and the
     // staged environment borrow it.
@@ -1022,15 +1026,13 @@ fn plant_declared_artifacts(
 ) -> io::Result<()> {
     for a in artifacts {
         consumed.cache_digest(Digest::sha256(&a.sha256)?);
-        let src = download_verified_held(store, activity, &a.url, &a.sha256)
-            .map_err(|e| io::Error::new(e.kind(), format!("declared artifact {}: {e}", a.url)))?;
+        let src = download_verified_held(store, activity, &a.url, &a.sha256).map_err(|e| {
+            crate::kernel::error::reword(format!("declared artifact {}: {e}", a.url), e)
+        })?;
         let dest = tmp.join(&a.path);
         fs::create_dir_all(dest.parent().unwrap())?;
         fs::copy(&src, &dest).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("placing declared artifact {}: {e}", a.path),
-            )
+            crate::kernel::error::reword(format!("placing declared artifact {}: {e}", a.path), e)
         })?;
     }
     Ok(())
@@ -1051,7 +1053,7 @@ fn ensure_gyp_python(
     }
     let p =
         crate::kernel::provider::cpython::realize_runtime(store, activity, platform, gyp_python)
-            .map_err(|e| crate::kernel::error::context(e, "ensure python for node-gyp"))?;
+            .context("ensure python for node-gyp")?;
     Ok(python_obj.insert(p).clone())
 }
 
@@ -1206,13 +1208,13 @@ fn require_provisioning(
     provisioned: io::Result<Option<crate::kernel::provider::artifacts::Provisioning>>,
 ) -> io::Result<Option<crate::kernel::provider::artifacts::Provisioning>> {
     provisioned.map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!(
                 "{}@{}: provisioning the artifact its install script downloads failed: {error}; \
                  re-run 'ward' once the download is reachable",
                 p.name, p.version
             ),
+            error,
         )
     })
 }

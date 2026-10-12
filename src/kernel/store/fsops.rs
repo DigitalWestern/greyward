@@ -780,9 +780,9 @@ pub(super) fn open_private_lock(path: &Path, label: &str) -> io::Result<fs::File
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("open {label} lock {}: {error}", path.display()),
+                error,
             )
         })?;
     if !file.metadata()?.is_file() {
@@ -803,10 +803,7 @@ pub(super) fn open_private_lock(path: &Path, label: &str) -> io::Result<fs::File
 /// store, gc and the comforter's projection moves all open this way.
 pub(crate) fn open_real_directory(path: &Path, label: &str) -> io::Result<fs::File> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("open {label} {}: {error}", path.display()),
-        )
+        crate::kernel::error::reword(format!("open {label} {}: {error}", path.display()), error)
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(io::Error::new(

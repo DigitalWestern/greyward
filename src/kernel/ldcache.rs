@@ -97,10 +97,9 @@ fn read_host(host_cache: &Path) -> io::Result<(Cache, Option<String>)> {
             Err(reason) => Ok((empty(), Some(reason))),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((empty(), None)),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(io::Error::new(
-            error.kind(),
-            format!("read {}: {error}", host_cache.display()),
-        )),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(
+            crate::kernel::error::reword(format!("read {}: {error}", host_cache.display()), error),
+        ),
         Err(error) => Ok((empty(), Some(error.to_string()))),
     }
 }

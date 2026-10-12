@@ -192,12 +192,12 @@ impl<'a> AttemptHomes<'a> {
     fn next(&mut self) -> io::Result<PathBuf> {
         if let Some(previous) = self.current.take() {
             crate::kernel::store::remove_tree(&previous).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
+                crate::kernel::error::reword(
                     format!(
                         "remove the failed attempt's home {}: {e}",
                         previous.display()
                     ),
+                    e,
                 )
             })?;
         }

@@ -7,6 +7,7 @@
 use crate::cli;
 use crate::commands::shared::{child_status_code, selected_toolchain};
 use crate::kernel::context::Context;
+use crate::kernel::error::Context as _;
 use crate::kernel::{policy, sandbox, ui};
 use crate::tailors::{self, LoneFile};
 use std::io;
@@ -35,7 +36,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
     let attribution = policy::Attribution::open(ecosystem)?;
     let lone = tailor
         .lone_file(ctx, &toolchain, &extension)
-        .map_err(|error| crate::kernel::error::context(error, format_args!("'{file}'")))?
+        .with_context(|| format!("'{file}'"))?
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,

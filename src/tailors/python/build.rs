@@ -3,6 +3,7 @@
 
 use super::sdist_view::{self, SdistWheel};
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::hostfallback::RUNTIME_ONLY_VIEW;
 use crate::kernel::platform::Platform;
@@ -197,14 +198,14 @@ fn wrap_sandbox_build_error_with_tail(
             "\nbuild stderr was relayed by the sandbox API and was not available for inclusion"
                 .into()
         });
-    io::Error::new(
-        error.kind(),
+    crate::kernel::error::reword(
         format!(
             "sandboxed build of {}=={} failed: {error}\n\
              (network is denied during builds; setup_requires in legacy setup.py \
              is not handled){diagnostics}",
             pkg.name, pkg.version
         ),
+        error,
     )
 }
 
@@ -640,7 +641,7 @@ fn generate_cargo_lock(
             publish: CargoPublish::Detached { outputs },
         },
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("generate the sdist's Cargo.lock: {e}")))?;
+    .context("generate the sdist's Cargo.lock")?;
     if let Some(objects) = report.ledger.clone() {
         missing_lock.keep_ledger(objects);
     }

@@ -192,9 +192,9 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
                     }
                     Some(interrupted) => return Ok(child_status_code(&interrupted.status)),
                     None => {
-                        return Err(io::Error::new(
-                            error.kind(),
+                        return Err(crate::kernel::error::reword(
                             format!("run {} {label}: {error}", script.noun),
+                            error,
                         ));
                     }
                 },

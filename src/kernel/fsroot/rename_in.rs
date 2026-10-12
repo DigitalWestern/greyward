@@ -48,9 +48,9 @@ impl ProjectRoot {
             0,
         )
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("open {}: {error}", source_parent.display()),
+                error,
             )
         })?;
         // Opened without following a symlink, so the check below and the
@@ -66,7 +66,7 @@ impl ProjectRoot {
                 "{} is a symlink; refusing to move it into the project",
                 from.display()
             )),
-            _ => io::Error::new(error.kind(), format!("open {}: {error}", from.display())),
+            _ => crate::kernel::error::reword(format!("open {}: {error}", from.display()), error),
         })?;
         let opened = fd_stat(source.as_raw_fd())?;
         if opened.st_mode & libc::S_IFMT != libc::S_IFREG {
@@ -119,13 +119,13 @@ impl ProjectRoot {
             Ok(()) => fsync_directory(parent_fd),
             Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
                 self.copy_in(&source, &opened, relative).map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
+                    crate::kernel::error::reword(
                         format!(
                             "copy {} to {} across filesystems: {error}",
                             from.display(),
                             display.display()
                         ),
+                        error,
                     )
                 })?;
                 // The copy is in place, so the source goes, as the rename
@@ -133,9 +133,9 @@ impl ProjectRoot {
                 unlink_if_same(source_dir.as_raw_fd(), source_name.as_bytes(), &opened, 0)?;
                 Ok(())
             }
-            Err(error) => Err(io::Error::new(
-                error.kind(),
+            Err(error) => Err(crate::kernel::error::reword(
                 format!("move {} to {}: {error}", from.display(), display.display()),
+                error,
             )),
         }
     }

@@ -49,8 +49,9 @@ pub struct CargoInputs {
 /// would print the key. ward's own reads name a parse error's position only,
 /// and a manifest that is the signing key is refused by name.
 pub fn locate_cargo_root(cwd: &Path) -> io::Result<PathBuf> {
-    let held = ProjectRoot::open(cwd)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", cwd.display())))?;
+    let held = ProjectRoot::open(cwd).map_err(|error| {
+        crate::kernel::error::reword(format!("{}: {error}", cwd.display()), error)
+    })?;
     Ok(locate_held_cargo_root(&held)?.0)
 }
 
@@ -179,7 +180,7 @@ fn read_manifest(
     use std::os::unix::fs::MetadataExt;
     let path = &dir.path().join("Cargo.toml");
     let context = |error: io::Error| {
-        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+        crate::kernel::error::reword(format!("read {}: {error}", path.display()), error)
     };
     let mut file = dir
         .open_input_file(Path::new("Cargo.toml"))
@@ -349,12 +350,12 @@ pub fn ensure_cargo_lock(
          (confined, through the resolution proxy)...",
     );
     super::resolve::generate_lock(door, workspace, rust_obj, toolchain).map_err(|e| {
-        io::Error::new(
-            e.kind(),
+        crate::kernel::error::reword(
             format!(
                 "could not generate Cargo.lock: {e}; \
                  run `ward` after fixing the project or network"
             ),
+            e,
         )
     })
 }

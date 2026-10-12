@@ -394,9 +394,9 @@ pub fn build_sandboxed(
     let result = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity));
     let _ = fs::remove_dir_all(&scratch);
     result.map_err(|e| {
-        io::Error::new(e.kind(), format!(
+        crate::kernel::error::reword(format!(
             "Cargo build failed: {e}; network is denied; external path dependencies outside the project and build scripts needing network are unsupported (declared-artifact support may come later)"
-        ))
+        ), e)
     })
 }
 

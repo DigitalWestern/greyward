@@ -46,6 +46,7 @@ use super::rust_channel::{Archive, ChannelManifest, ANY_TARGET, STD_PACKAGE};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{self, Compression};
 use crate::kernel::digest::Digest;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::download_toolchain_artifact_held;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::platform::Platform;
@@ -263,16 +264,16 @@ fn load_manifest(
 ) -> io::Result<ChannelManifest> {
     let lease = download_toolchain_artifact_held(store, activity, publisher, url, pin).map_err(
         |error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("fetch the channel manifest for Rust {version}: {error}"),
+                error,
             )
         },
     )?;
     let text = fs::read_to_string(&*lease).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("read the channel manifest for Rust {version}: {error}"),
+            error,
         )
     })?;
     ChannelManifest::parse(version, &text)
@@ -560,7 +561,7 @@ pub fn realize_toolchain(
     store
         .commit_with_activity_and_deps(activity, &plan.identity, &staged, &[], &deps)
         .map(|(path, _)| path)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit assembled Rust toolchain: {e}")))
+        .context("commit assembled Rust toolchain")
 }
 
 fn base_id(base: &Path) -> io::Result<String> {
@@ -613,9 +614,9 @@ fn realize_component(
         .commit_with_activity_and_deps(activity, &extension.identity, &staged, &[], &deps)
         .map(|(path, _)| path)
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!("commit Rust component {}: {e}", archive.package),
+                e,
             )
         })
 }
@@ -763,12 +764,12 @@ fn link_or_copy(from: &Path, to: &Path) -> io::Result<()> {
         {
             fs::copy(from, to).map(|_| ())
         }
-        Err(error) => Err(io::Error::new(
-            error.kind(),
+        Err(error) => Err(crate::kernel::error::reword(
             format!(
                 "link {} into the assembled toolchain: {error}",
                 from.display()
             ),
+            error,
         )),
     }
 }

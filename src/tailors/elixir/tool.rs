@@ -4,6 +4,7 @@
 
 use super::{beam_path, forced_env, ENV_REMOVE, ENV_REMOVE_PREFIXES};
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::resolve::DelegateSpec;
 use std::io;
 use std::path::Path;
@@ -42,7 +43,7 @@ pub(super) fn run_hexmark(
 ) -> io::Result<std::process::Output> {
     let mut cmd = hexmark_command(beam_obj, scratch, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store mix {args:?}: {e}")))
+        .with_context(|| format!("run store mix {args:?}"))
 }
 
 /// The command `run_hexmark` starts: the offline mix environment, with no

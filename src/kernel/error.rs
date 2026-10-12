@@ -17,7 +17,12 @@
 //! reports it, and `main` exits `128 + signal` for it.
 //!
 //! A caller that adds words to an error must keep its class: [`context`]
-//! does, where `io::Error::new(e.kind(), format!(..))` keeps only the text.
+//! (or [`Context::context`] on a result) and [`reword`] do, where
+//! `io::Error::new(e.kind(), format!(..))` keeps only the text. A caller
+//! that also changes the kind uses [`reword_as`]. Each keeps the original
+//! error inside the new one, so a class, an exact store recovery command,
+//! a server status and a supervised signal all survive any number of
+//! wrappers. Nothing here reads a class back out of message text.
 
 use std::fmt;
 use std::io;
@@ -98,26 +103,31 @@ pub fn stale(kind: io::ErrorKind, message: impl Into<String>) -> io::Error {
 }
 
 /// The class of `error`, if it has one. Besides a carried [`Classified`],
-/// a refused store is `Refused`, an `Unsupported` kind is `Unsupported`,
-/// and a server status a retry can change (`fetch::retry_may_help`) is
-/// `Network`: each already says exactly that.
+/// a refused store is `Refused`, and a server status a retry can change
+/// (`fetch::retry_may_help`) is `Network`, anywhere in the retained chain:
+/// each already says exactly that. An `Unsupported` kind is `Unsupported`
+/// only on the outermost error: a wrapper that gave the failure another
+/// kind ([`reword_as`]) has said what it is instead.
 pub fn class_of(error: &io::Error) -> Option<Class> {
+    carried(error)
+        .or_else(|| (error.kind() == io::ErrorKind::Unsupported).then_some(Class::Unsupported))
+}
+
+/// A class an owned payload in `error`'s retained chain carries.
+fn carried(error: &io::Error) -> Option<Class> {
     if let Some(classified) = error
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<Classified>())
     {
         return Some(classified.class);
     }
-    if let Some(class) = inner(error).and_then(class_of) {
+    if let Some(class) = inner(error).and_then(carried) {
         return Some(class);
     }
     if crate::kernel::store::refusal_fix(error).is_some() {
         return Some(Class::Refused);
     }
-    if crate::kernel::fetch::retry_may_help(error) {
-        return Some(Class::Network);
-    }
-    (error.kind() == io::ErrorKind::Unsupported).then_some(Class::Unsupported)
+    crate::kernel::fetch::retry_may_help(error).then_some(Class::Network)
 }
 
 /// An error with added words and its original, owned failure payload.
@@ -160,13 +170,47 @@ pub fn context(error: io::Error, what: impl fmt::Display) -> io::Error {
 /// For callers with a recovery suffix or multiple reasons whose existing
 /// message order must remain intact.
 pub(crate) fn describe(error: io::Error, message: String) -> io::Error {
+    let kind = error.kind();
+    reword_as(kind, message, error)
+}
+
+/// `error` said as `message`, a whole sentence that usually quotes it,
+/// keeping its kind, class and original payload. The message comes first
+/// so it may borrow `error` (`reword(format!("..({e})"), e)`).
+pub fn reword(message: impl Into<String>, error: io::Error) -> io::Error {
+    describe(error, message.into())
+}
+
+/// [`reword`], with the kind a caller decided the failure is (an
+/// unreadable file that means a corrupt input, say). The original error
+/// is still retained, so its carried class, recovery command, server
+/// status and signal survive; its kind no longer decides `Unsupported`.
+pub fn reword_as(kind: io::ErrorKind, message: impl Into<String>, error: io::Error) -> io::Error {
     io::Error::new(
-        error.kind(),
+        kind,
         Contextual {
-            message,
+            message: message.into(),
             original: error,
         },
     )
+}
+
+/// [`context`] on a result: `fs::read(path).context(path.display())?`.
+pub trait Context<T> {
+    /// The error with `what: ` in front of its message, its class kept.
+    fn context(self, what: impl fmt::Display) -> io::Result<T>;
+    /// [`Context::context`], with `what` built only on failure.
+    fn with_context<D: fmt::Display>(self, what: impl FnOnce() -> D) -> io::Result<T>;
+}
+
+impl<T> Context<T> for io::Result<T> {
+    fn context(self, what: impl fmt::Display) -> io::Result<T> {
+        self.map_err(|error| context(error, what))
+    }
+
+    fn with_context<D: fmt::Display>(self, what: impl FnOnce() -> D) -> io::Result<T> {
+        self.map_err(|error| context(error, what()))
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +284,52 @@ mod tests {
         );
         let status = crate::kernel::supervise::child_status(Err(wrapped)).unwrap();
         assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn reword_keeps_the_message_kind_and_class() {
+        let original = refused(io::ErrorKind::PermissionDenied, "denied");
+        let message = format!("the build failed ({original})");
+        let wrapped = reword(message, original);
+        assert_eq!(wrapped.to_string(), "the build failed (denied)");
+        assert_eq!(wrapped.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(class_of(&wrapped), Some(Class::Refused));
+    }
+
+    #[test]
+    fn the_result_extension_keeps_the_class() {
+        let failed: io::Result<()> = Err(stale(io::ErrorKind::NotFound, "lock missing"));
+        let wrapped = failed.context("go.mod").unwrap_err();
+        assert_eq!(wrapped.to_string(), "go.mod: lock missing");
+        assert_eq!(class_of(&wrapped), Some(Class::Stale));
+        let failed: io::Result<()> = Err(refused(io::ErrorKind::InvalidData, "swapped"));
+        let wrapped = failed.with_context(|| "dir").unwrap_err();
+        assert_eq!(wrapped.to_string(), "dir: swapped");
+        assert_eq!(class_of(&wrapped), Some(Class::Refused));
+    }
+
+    #[test]
+    fn a_new_kind_keeps_carried_classes_but_not_the_inner_unsupported_kind() {
+        let carried = reword_as(
+            io::ErrorKind::InvalidData,
+            "corrupt",
+            refused(io::ErrorKind::PermissionDenied, "denied"),
+        );
+        assert_eq!(carried.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(class_of(&carried), Some(Class::Refused));
+        let recast = reword_as(
+            io::ErrorKind::InvalidData,
+            "the file is not a valid archive",
+            io::Error::new(io::ErrorKind::Unsupported, "unknown compression"),
+        );
+        assert_eq!(class_of(&recast), None);
+        let network = reword_as(
+            io::ErrorKind::InvalidData,
+            "manifest",
+            crate::kernel::fetch::status_failure(503),
+        );
+        assert_eq!(class_of(&network), Some(Class::Network));
+        assert_eq!(crate::kernel::fetch::http_status(&network), Some(503));
     }
 
     #[test]

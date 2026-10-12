@@ -6,6 +6,7 @@
 //! `tests/architecture.rs` keeps the calls here.
 
 use super::*;
+use crate::kernel::error::Context as _;
 use std::io::{Read, Write};
 
 pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> io::Result<bool> {
@@ -15,10 +16,7 @@ pub(super) fn tarball_has_binding_gyp(activity: &StoreActivity, path: &Path) -> 
         crate::kernel::archive::Compression::Gzip,
     )
     .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("list npm tarball {}: {e}", path.display()),
-        )
+        crate::kernel::error::reword(format!("list npm tarball {}: {e}", path.display()), e)
     })?;
     Ok(entries.iter().any(|entry| {
         let trimmed = entry.name.trim_end_matches('/');
@@ -41,7 +39,7 @@ pub(super) fn extract_node_dist(
         crate::kernel::archive::Compression::Gzip,
     )
     .map(|_| ())
-    .map_err(|e| io::Error::new(e.kind(), format!("extract node tarball: {e}")))
+    .context("extract node tarball")
 }
 
 /// Unpack one registry tarball into `dest`, past its `package/` root.

@@ -20,6 +20,7 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Digest;
+use crate::kernel::error::Context as _;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Exception, EXTERNAL_TOOLCHAIN};
 use crate::kernel::sandbox::Sandbox;
@@ -90,9 +91,9 @@ fn probe_scratch_under(root: &Path) -> io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     const ATTEMPTS: usize = 8;
     fs::create_dir_all(root).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("create the temp directory {}: {error}", root.display()),
+            error,
         )
     })?;
     let mut taken = None;
@@ -103,9 +104,9 @@ fn probe_scratch_under(root: &Path) -> io::Result<PathBuf> {
             Ok(()) => return Ok(scratch),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => taken = Some(error),
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("create the probe directory {}: {error}", scratch.display()),
+                    error,
                 ))
             }
         }
@@ -149,12 +150,12 @@ fn version_output(platform: Platform, tree: &Path, binary: &str, flag: &str) -> 
     let read = ran.and_then(|()| fs::read(&answer));
     let _ = fs::remove_dir_all(&scratch);
     let bytes = read.map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!(
                 "the Rust toolchain at {}: bin/{binary} {flag}: {error}",
                 tree.display()
             ),
+            error,
         )
     })?;
     String::from_utf8(bytes).map_err(|_| {
@@ -373,13 +374,13 @@ enum Entry<'a> {
 }
 
 fn at_entry(root: &Path, path: &Path, error: io::Error) -> io::Error {
-    io::Error::new(
-        error.kind(),
+    crate::kernel::error::reword(
         format!(
             "the Rust toolchain at {}: {}: {error}",
             root.display(),
             path.display()
         ),
+        error,
     )
 }
 
@@ -390,9 +391,9 @@ fn open_root(root: &Path) -> io::Result<fs::File> {
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("the Rust toolchain at {}: {error}", root.display()),
+                error,
             )
         })
 }
@@ -775,12 +776,12 @@ fn tree_of(project: &Path, value: &str) -> io::Result<PathBuf> {
         project.join(written)
     };
     let tree = joined.canonicalize().map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!(
                 "rust-toolchain.toml: toolchain.path {value} ({}): {error}",
                 joined.display()
             ),
+            error,
         )
     })?;
     if !tree.is_dir() {
@@ -1010,7 +1011,7 @@ pub fn realize(
     let candidate = [exception];
     let (path, applied) = store
         .commit_with_activity_and_deps(activity, &identity, &staged, &candidate, &ObjectDeps::new())
-        .map_err(|e| io::Error::new(e.kind(), format!("commit the local Rust toolchain: {e}")))?;
+        .context("commit the local Rust toolchain")?;
     for other in applied {
         if !candidate.contains(&other) {
             policy::record(&other.kind, &other.subject, &other.detail)?;

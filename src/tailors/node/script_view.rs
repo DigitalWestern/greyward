@@ -298,13 +298,13 @@ impl PackageScripts<'_> {
                 Ok(()) => {}
                 Err(LifecycleFailure::SandboxUnavailable(e)) => return Err(e),
                 Err(LifecycleFailure::Interrupted(e)) => {
-                    return Err(io::Error::new(
-                        e.kind(),
+                    return Err(crate::kernel::error::reword(
                         format!("{}: {phase}: {e}; the sync stopped here", p.path),
+                        e,
                     ))
                 }
                 Err(LifecycleFailure::Script(e)) => {
-                    return Err(io::Error::new(e.kind(), format!("{phase}: {e}")))
+                    return Err(crate::kernel::error::context(e, phase))
                 }
             }
         }

@@ -344,6 +344,60 @@ fn layers_point_one_way() {
 /// A comparison listed in `ECOSYSTEM_COMPARISONS` is the one exception,
 /// and every entry must occur exactly once, so a fixed site leaves no stale
 /// permission behind and a copied site needs its own review.
+/// Where `io::Error::new(<error>.kind(), ..)` rebuilds an error from its
+/// kind and text: the class, store recovery command, server status and
+/// signal it carried would be lost (#258). Each of these instead copies a
+/// borrowed error whose owned original still travels on.
+const KIND_REWRAP_ALLOWED: &[&str] = &[
+    // The mechanism itself.
+    "src/kernel/error.rs",
+    // The relay keeps the original as the stderr result and reports a copy.
+    "src/kernel/supervise.rs",
+    // `doctor`'s project row copies the borrowed detection error.
+    "src/commands/inspect.rs",
+];
+
+/// The (path, line) of every `io::Error::new(<expr>.kind(), ..)` in `text`.
+fn kind_rewraps(relative: &str, text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let needle = "io::Error::new(";
+    let mut from = 0;
+    while let Some(at) = text[from..].find(needle) {
+        let start = from + at;
+        from = start + needle.len();
+        let rest = text[from..].trim_start();
+        let first = rest.split(',').next().unwrap_or("");
+        if first.trim_end().ends_with(".kind()") && !first.contains('\n') {
+            let line = text[..start].matches('\n').count() + 1;
+            found.push(format!("{relative}:{line}"));
+        }
+    }
+    found
+}
+
+/// A wrapper that adds words to an `io::Error` keeps the error it wraps:
+/// `error::context`, `Context::context`, `error::reword` or
+/// `error::reword_as`, never `io::Error::new(e.kind(), format!(..))` (#258).
+#[test]
+fn wrappers_keep_the_error_they_wrap() {
+    let mut found = Vec::new();
+    for (relative, text) in all_sources() {
+        if !relative.starts_with("src/") || KIND_REWRAP_ALLOWED.contains(&relative.as_str()) {
+            continue;
+        }
+        found.extend(kind_rewraps(&relative, non_test(&text)));
+    }
+    assert!(
+        found.is_empty(),
+        "use crate::kernel::error::{{context, reword}} so the wrapped error's class \
+         survives:\n{}",
+        found.join("\n")
+    );
+    let sample = "a(io::Error::new(\n    error.kind(),\n    format!(\"x: {error}\"),\n));\n\
+                  b(io::Error::new(io::ErrorKind::Other, \"y\"));\n";
+    assert_eq!(kind_rewraps("s.rs", sample), ["s.rs:1"]);
+}
+
 #[test]
 fn the_kernel_branches_on_no_ecosystem_name() {
     let mut names: Vec<&str> = greyward::tailors::registry()

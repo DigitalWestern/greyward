@@ -117,9 +117,9 @@ impl ProjectRoot {
             ));
         }
         let path = project_dir.canonicalize().map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("open project {}: {error}", project_dir.display()),
+                error,
             )
         })?;
         let dir = walk_from_root(&path)?;
@@ -199,9 +199,9 @@ impl ProjectRoot {
                         )));
                     }
                 }
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("read {}: {error}", display.display()),
+                    error,
                 ));
             }
         };
@@ -299,9 +299,9 @@ impl ProjectRoot {
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::AlreadyExists {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("create temporary link for {label}: {error}"),
+                    error,
                 ));
             }
         }
@@ -332,12 +332,12 @@ impl ProjectRoot {
                 if error.kind() == io::ErrorKind::InvalidData {
                     error
                 } else {
-                    io::Error::new(error.kind(), format!("publish {label}: {error}"))
+                    crate::kernel::error::context(error, format!("publish {label}"))
                 }
             })
             .and_then(|()| {
                 fsync_directory(parent_fd).map_err(|error| {
-                    io::Error::new(error.kind(), format!("sync {label} parent: {error}"))
+                    crate::kernel::error::context(error, format!("sync {label} parent"))
                 })
             });
         if result.is_err() {
@@ -375,9 +375,9 @@ impl ProjectRoot {
             let error = io::Error::last_os_error();
             return match error.raw_os_error() {
                 Some(libc::ENOENT) | Some(libc::EINVAL) => Ok(None),
-                _ => Err(io::Error::new(
-                    error.kind(),
+                _ => Err(crate::kernel::error::reword(
                     format!("read link {}: {error}", display.display()),
+                    error,
                 )),
             };
         }
@@ -409,10 +409,7 @@ impl ProjectRoot {
             )));
         }
         unlink_if_same(parent_fd, name.as_bytes(), &stat, 0).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("remove {}: {error}", display.display()),
-            )
+            crate::kernel::error::reword(format!("remove {}: {error}", display.display()), error)
         })?;
         Ok(())
     }
@@ -430,10 +427,7 @@ impl ProjectRoot {
             .as_ref()
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
         remove_tree_entry_at(parent_fd, name.as_bytes()).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("remove {}: {error}", display.display()),
-            )
+            crate::kernel::error::reword(format!("remove {}: {error}", display.display()), error)
         })
     }
 
@@ -514,9 +508,9 @@ impl ProjectRoot {
                 "{} is a symlink; refusing to lock through it",
                 display.display()
             ))),
-            Err(error) => Err(io::Error::new(
-                error.kind(),
+            Err(error) => Err(crate::kernel::error::reword(
                 format!("open {}: {error}", display.display()),
+                error,
             )),
         }
     }
@@ -593,10 +587,7 @@ impl ProjectRoot {
         // whatever took its place is exactly what this walk refuses to do,
         // so there is nothing to report.
         unlink_if_same(parent_fd, name.as_bytes(), &stat, 0).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("remove {}: {error}", display.display()),
-            )
+            crate::kernel::error::reword(format!("remove {}: {error}", display.display()), error)
         })?;
         Ok(())
     }
@@ -729,9 +720,9 @@ impl ProjectRoot {
         };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("read {}: {error}", self.path.join(relative).display()),
+                error,
             )
         })?;
         self.observe_input(relative, Some(&bytes))?;
@@ -880,9 +871,9 @@ impl ProjectRoot {
             {
                 Ok(None)
             }
-            Err(error) => Err(io::Error::new(
-                error.kind(),
+            Err(error) => Err(crate::kernel::error::reword(
                 format!("open {}: {error}", self.path.join(relative).display()),
+                error,
             )),
         }
     }
@@ -931,7 +922,7 @@ impl ProjectRoot {
                 }
             })
             .map_err(|error| {
-                io::Error::new(error.kind(), format!("open {}: {error}", path.display()))
+                crate::kernel::error::reword(format!("open {}: {error}", path.display()), error)
             })?;
         if same_inode(&fd_stat(dir.as_raw_fd())?, &fd_stat(self.dir.as_raw_fd())?) {
             return Ok(None);
@@ -1038,9 +1029,9 @@ impl ProjectRoot {
                 return Ok(None)
             }
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("read {}: {error}", display.display()),
+                    error,
                 ))
             }
         };
@@ -1099,9 +1090,9 @@ impl ProjectRoot {
                 .as_ref()
                 .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
             let created = mkdir_at(fd, component.as_bytes(), 0o755).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
+                crate::kernel::error::reword(
                     format!("create {}: {error}", display.display()),
+                    error,
                 )
             })?;
             let flags = if index + 1 == components.len() {
@@ -1425,10 +1416,7 @@ fn open_directory_with(
             "{} is not a real directory; refusing to {verb} through it",
             display.display()
         )),
-        _ => io::Error::new(
-            error.kind(),
-            format!("{verb} {}: {error}", display.display()),
-        ),
+        _ => crate::kernel::error::reword(format!("{verb} {}: {error}", display.display()), error),
     })
 }
 

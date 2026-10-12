@@ -17,7 +17,7 @@ use super::outputs::{Forbidden, OutputFile, Outputs};
 use super::proxy::Proxy;
 use super::relay::{self, ToolStatus};
 use super::routes::{Permitted, ProxyAddress, Route};
-use super::session::{Fact, Intercept, Mode as Network, SessionConfig, SessionReport};
+use super::session::{Fact, Failure, Intercept, Mode as Network, SessionConfig, SessionReport};
 use super::snapshot::{EntryState, PathGlob, Snapshot, SnapshotSpec};
 use super::transaction::{HoldSpec, Published, Transaction};
 use super::{DelegateReport, DelegateSpec, DelegateStdio, DoorKind, ResolutionDoor};
@@ -331,13 +331,7 @@ pub(super) fn run(
     let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
     if let Some(failure) = ran.session.facts.failure() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "{} ({status}): {failure}; nothing was published",
-                confined.name
-            ),
-        ));
+        return Err(failed_session(confined.name, &status, failure));
     }
     let facts = record_facts(&confined, &policy, &ran)?;
     if !status.success() {
@@ -439,6 +433,19 @@ struct Ran {
     session: SessionReport,
     token: String,
     advertised: String,
+}
+
+/// The door's error for a session fact that fails it. The kind is always
+/// `PermissionDenied`, as it was; the class comes from the fact's typed
+/// [`super::session::Cause`]: a policy denial or a fixed-rule refusal is `Refused`, an
+/// offline cache miss is `Network`, and an integrity failure has none.
+fn failed_session(name: &str, status: &impl std::fmt::Display, failure: Failure) -> io::Error {
+    let message = format!("{name} ({status}): {}; nothing was published", failure.text);
+    let kind = io::ErrorKind::PermissionDenied;
+    match failure.cause.class() {
+        Some(class) => crate::kernel::error::new(class, kind, message),
+        None => io::Error::new(kind, message),
+    }
 }
 
 /// Steps 4 and 5: open the session, wire the tool to it, run it until its
@@ -836,9 +843,9 @@ fn unroot_after(
 ) -> io::Error {
     match store.unroot_objects_locked(activity, tx.root(), added, tx.project_lock()) {
         Ok(()) => error,
-        Err(unroot) => io::Error::new(
-            error.kind(),
+        Err(unroot) => crate::kernel::error::reword(
             format!("{error}; taking the ledger back from the root record also failed: {unroot}"),
+            error,
         ),
     }
 }
@@ -995,6 +1002,37 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The door's error takes its class from the session fact's typed
+    /// cause, never from its words, and keeps its kind (#258).
+    #[test]
+    fn a_failed_session_carries_the_class_of_its_cause() {
+        use super::super::session::Cause;
+        use crate::kernel::error::{class_of, Class};
+        let status = exit_status(ToolStatus::Code(0));
+        for (cause, class) in [
+            (Cause::Policy, Some(Class::Refused)),
+            (Cause::Rule, Some(Class::Refused)),
+            (Cause::Offline, Some(Class::Network)),
+            (Cause::Integrity, None),
+        ] {
+            let failure = Failure {
+                cause,
+                // The same words for every cause: the class is not read
+                // from them.
+                text: "policy denies git-dependency: x".into(),
+            };
+            let error = failed_session("cargo", &status, failure);
+            assert_eq!(class_of(&error), class, "{cause:?}");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                error
+                    .to_string()
+                    .ends_with("policy denies git-dependency: x; nothing was published"),
+                "{error}"
+            );
+        }
+    }
     use crate::kernel::platform::Platform;
     use crate::kernel::policy::Attribution;
     use crate::kernel::resolve::confine::{Engine, Missing, TierOffer, TIERS_FOR_TEST};

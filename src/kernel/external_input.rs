@@ -113,7 +113,7 @@ fn read_regular(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(|error| {
-        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+        crate::kernel::error::reword(format!("read {}: {error}", path.display()), error)
     })?;
     Ok(Some(bytes))
 }

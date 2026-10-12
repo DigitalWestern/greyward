@@ -260,7 +260,7 @@ impl Report {
 /// error rather than a failed audit.
 pub fn read_policy_file(path: &Path) -> io::Result<Policy> {
     let text = std::fs::read_to_string(path).map_err(|error| {
-        io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+        crate::kernel::error::reword(format!("read {}: {error}", path.display()), error)
     })?;
     policy::parse_file(path, &text)
 }

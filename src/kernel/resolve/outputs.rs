@@ -111,13 +111,13 @@ impl Outputs {
             snapshot::check_relative(relative)?;
             let shown = snapshot.lock_root().real.join(relative);
             let source = open_beneath(stage_root.as_raw_fd(), relative).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
+                crate::kernel::error::reword(
                     format!(
                         "the declared output {} could not be opened without following a \
                          symlink: {error}",
                         shown.display()
                     ),
+                    error,
                 )
             })?;
             let stat = store::fd_stat(source.as_raw_fd())?;
@@ -257,7 +257,9 @@ fn open_dir(path: &Path) -> io::Result<fs::File> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|error| io::Error::new(error.kind(), format!("open {}: {error}", path.display())))
+        .map_err(|error| {
+            crate::kernel::error::reword(format!("open {}: {error}", path.display()), error)
+        })
 }
 
 /// Open `relative` below `dirfd` read-only, refusing any symlink on the

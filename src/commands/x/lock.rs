@@ -97,7 +97,7 @@ pub(super) fn lock_x_root_at(
             0o600,
         )
         .map_err(|error| {
-            io::Error::new(error.kind(), format!("x: open lock {lock_name}: {error}"))
+            crate::kernel::error::context(error, format!("x: open lock {lock_name}"))
         })?;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         let mut operation = if exclusive {
@@ -119,9 +119,9 @@ pub(super) fn lock_x_root_at(
             {
                 return Ok(None);
             }
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("x: lock {lock_name}: {error}"),
+                error,
             ));
         }
         match store::stat_at(locks.as_raw_fd(), lock_name.as_bytes()) {

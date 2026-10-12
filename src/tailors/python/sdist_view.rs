@@ -139,9 +139,9 @@ pub(super) fn discard_failed_attempt(
     generated_lock: Option<&str>,
 ) -> io::Result<()> {
     let removed = |path: &Path| match crate::kernel::store::remove_tree(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
-            error.kind(),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(crate::kernel::error::reword(
             format!("remove the failed attempt's {}: {error}", path.display()),
+            error,
         )),
         _ => Ok(()),
     };

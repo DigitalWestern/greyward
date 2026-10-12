@@ -13,6 +13,7 @@
 //! tailor keeps its identity goldens and object-kind rows beside it.
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{download_toolchain_artifact_held, Digest};
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
@@ -321,7 +322,7 @@ pub fn realize_uv(
         &crate::kernel::archive::ExtractOptions::platform_build(1),
         crate::kernel::archive::Compression::Gzip,
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract uv tarball: {e}")))?;
+    .context("extract uv tarball")?;
     if !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
@@ -372,7 +373,7 @@ pub fn realize_runtime(
         &crate::kernel::archive::ExtractOptions::platform_build(1),
         crate::kernel::archive::Compression::Gzip,
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("extract CPython tarball: {e}")))?;
+    .context("extract CPython tarball")?;
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();

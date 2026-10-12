@@ -205,9 +205,9 @@ impl RegistryTool for NodeTool {
             },
         )
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("could not resolve '{package}' from npm: {error}"),
+                error,
             )
         })?;
         node::resolve::root_x_ledger(door, root, &report)?;

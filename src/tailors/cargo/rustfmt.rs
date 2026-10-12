@@ -21,6 +21,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::kernel::error::Context as _;
 use crate::kernel::provider::rust::RUSTFMT_RECIPE;
 #[cfg(test)]
 use crate::kernel::provider::rust::{shipped_selection, RUST_VERSION};
@@ -251,9 +252,9 @@ pub fn ensure_rustfmt(
     let _ = crate::kernel::store::remove_tree(&scratch);
     if let Err(error) = probe_result {
         let _ = crate::kernel::store::remove_tree(&staged);
-        return Err(io::Error::new(
-            error.kind(),
+        return Err(crate::kernel::error::reword(
             format!("rustfmt probe failed before publication: {error}"),
+            error,
         ));
     }
 
@@ -287,7 +288,7 @@ pub fn ensure_rustfmt(
             deps
         })
         .map(|(path, _)| path)
-        .map_err(|error| io::Error::new(error.kind(), format!("commit rustfmt object: {error}")))
+        .context("commit rustfmt object")
 }
 
 /// The `store/tmp` scratch names for the pre-publication `rustfmt --version`

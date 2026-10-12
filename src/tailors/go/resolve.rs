@@ -4,6 +4,7 @@
 
 use super::tool::{run_go, run_go_checked, GoPublish, GoRun, OUTPUTS};
 use super::{err, read_gomod, read_gosum, reject_local_replaces, reject_workspaces, tailor};
+use crate::kernel::error::Context as _;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::record;
@@ -70,8 +71,7 @@ pub fn tidy_project(
     tool: record::Tool,
 ) -> io::Result<()> {
     reject_workspaces(project)?;
-    let gomod =
-        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let gomod = read_gomod(project).context("go.mod")?;
     reject_local_replaces(&gomod)?;
     let gate_cache = gate_cache(door.store())?;
     let tidy = is_tidy(
@@ -117,8 +117,7 @@ pub fn attest_project(
     tool: record::Tool,
 ) -> io::Result<(record::ResolutionRecord, Vec<u8>)> {
     reject_workspaces(project)?;
-    let gomod =
-        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let gomod = read_gomod(project).context("go.mod")?;
     reject_local_replaces(&gomod)?;
     let gosum = read_gosum(project)?.unwrap_or_default();
     let (store, activity) = (door.store(), door.lease());

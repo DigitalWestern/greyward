@@ -51,6 +51,7 @@ pub(crate) fn is_host_changed(error: &io::Error) -> bool {
     error
         .get_ref()
         .is_some_and(|inner| inner.is::<HostChanged>())
+        || crate::kernel::error::inner(error).is_some_and(is_host_changed)
 }
 
 /// The one host state every fallback of an object was built against: the
@@ -280,12 +281,12 @@ where
     // The retry's error first: it is the one left to fix, and a caller
     // that cuts the message short (an exception detail) keeps it.
     (attempt.build)(HostView::Full).map_err(|full| {
-        io::Error::new(
-            full.kind(),
+        crate::kernel::error::reword(
             format!(
                 "the build against this machine's whole /usr failed ({full}), after \
                  the build against the C runtime alone failed ({hermetic})"
             ),
+            full,
         )
     })?;
     let after = (attempt.fingerprint)()?;
@@ -347,5 +348,56 @@ pub(crate) fn identity_contract(
         }
         (_, Some(_)) => Err("host_fallback without build_view host-fallback/1".to_string()),
         (_, None) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::error::{self, Class};
+
+    fn attempt_with(record: io::Result<()>, full: io::Result<()>) -> io::Result<Option<String>> {
+        let mut builds = vec![full, Err(io::Error::other("lzma.h not found"))];
+        hermetic_first(
+            "nokogiri-1.18.10",
+            "lzma.h not found",
+            Attempt {
+                record: |_: &str, _: &str, _: &str| record,
+                discard: || Ok(()),
+                fingerprint: || Ok("host".to_string()),
+                build: |_: HostView| builds.pop().unwrap(),
+            },
+        )
+    }
+
+    /// A classified failure from either side of the fallback keeps its
+    /// class through the fallback's own wording (#258): the policy
+    /// refusing `host-build-inputs` is Refused, and a retry that failed on
+    /// the network is Network.
+    #[test]
+    fn the_fallback_keeps_the_class_of_what_stopped_it() {
+        let refusal = error::refused(io::ErrorKind::PermissionDenied, "policy denies it");
+        let stopped = attempt_with(Err(refusal), Ok(())).unwrap_err();
+        assert_eq!(error::class_of(&stopped), Some(Class::Refused));
+        assert!(
+            stopped
+                .to_string()
+                .contains("was not retried against the whole host"),
+            "{stopped}"
+        );
+
+        let offline = error::new(Class::Network, io::ErrorKind::Other, "connection reset");
+        let failed = attempt_with(Ok(()), Err(offline)).unwrap_err();
+        assert_eq!(error::class_of(&failed), Some(Class::Network));
+        assert!(
+            failed.to_string().starts_with(
+                "the build against this machine's whole /usr failed (connection reset)"
+            ),
+            "{failed}"
+        );
+
+        // An ordinary build failure stays unclassified.
+        let plain = attempt_with(Ok(()), Err(io::Error::other("cc failed"))).unwrap_err();
+        assert_eq!(error::class_of(&plain), None);
     }
 }

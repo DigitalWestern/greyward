@@ -33,6 +33,7 @@
 use super::confine::{ConfinedRun, Mounts};
 use super::relay;
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::sandbox;
 use std::ffi::OsString;
 use std::fs;
@@ -620,8 +621,7 @@ fn remove(
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     };
-    perform().map_err(|error| io::Error::new(error.kind(), format!(
-        "removal of resolution container {name} is unconfirmed; its outputs are refused; inspect it with podman: {error}")))
+    perform().with_context(|| format!("removal of resolution container {name} is unconfirmed; its outputs are refused; inspect it with podman"))
 }
 
 #[cfg(test)]

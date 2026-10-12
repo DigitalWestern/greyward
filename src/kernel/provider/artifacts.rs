@@ -155,9 +155,9 @@ fn resolve_electron(
             // tables: this IS the checksum source. The zip is then verified
             // against it, so a corrupted or swapped zip fails.
             let text = crate::kernel::fetch::fetch_text(&sums_url).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
+                crate::kernel::error::reword(
                     format!("electron {version}: fetch {sums_url}: {e}"),
+                    e,
                 )
             })?;
             fs::create_dir_all(&cached)?;

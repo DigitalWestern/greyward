@@ -566,9 +566,9 @@ pub(crate) fn check_relative(path: &Path) -> io::Result<()> {
 fn normalize_roots(lock_root: &Path, extra: &[PathBuf]) -> io::Result<(Vec<PathBuf>, usize)> {
     let canonical = |path: &Path| {
         fs::canonicalize(path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("snapshot root {}: {error}", path.display()),
+                error,
             )
         })
     };
@@ -633,9 +633,9 @@ pub(crate) fn create_private_dir(parent: &Path, prefix: &str) -> io::Result<Path
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("create {}: {error}", path.display()),
+                    error,
                 ))
             }
         }
@@ -682,7 +682,9 @@ fn open_dir(path: &Path) -> io::Result<fs::File> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|error| io::Error::new(error.kind(), format!("open {}: {error}", path.display())))
+        .map_err(|error| {
+            crate::kernel::error::reword(format!("open {}: {error}", path.display()), error)
+        })
 }
 
 /// Open the directory the canonical `path` names one component at a time
@@ -692,12 +694,12 @@ fn open_dir(path: &Path) -> io::Result<fs::File> {
 /// where the symlink points.
 fn open_dir_no_symlinks(path: &Path) -> io::Result<fs::File> {
     let context = |error: io::Error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!(
                 "open {} without following a symlink: {error}",
                 path.display()
             ),
+            error,
         )
     };
     if !path.is_absolute() {
@@ -795,9 +797,9 @@ impl Walk<'_> {
             match stat.st_mode & libc::S_IFMT {
                 libc::S_IFDIR => {
                     let from = open_dir_at(source.as_raw_fd(), name).map_err(|error| {
-                        io::Error::new(
-                            error.kind(),
+                        crate::kernel::error::reword(
                             format!("snapshot {}: {error}", child_real.display()),
+                            error,
                         )
                     })?;
                     store::mkdir_at(target.as_raw_fd(), name, 0o700)?;
@@ -954,10 +956,7 @@ fn copy_file(
         0,
     )
     .map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("snapshot {}: {error}", shown.display()),
-        )
+        crate::kernel::error::reword(format!("snapshot {}: {error}", shown.display()), error)
     })?;
     let stat = store::fd_stat(from.as_raw_fd())?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG {

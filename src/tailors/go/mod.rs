@@ -27,6 +27,7 @@ use unpack::extract_go_toolchain_inner;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::dirhash;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{
     cache_insert, cache_verified_held, download_toolchain_artifact_held, Digest,
 };
@@ -826,8 +827,7 @@ pub fn plan_go_read(
     ledgers: &mut Vec<LedgerObjects>,
 ) -> io::Result<Planned> {
     reject_workspaces(project)?;
-    let gomod =
-        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let gomod = read_gomod(project).context("go.mod")?;
     let gosum_read = read_gosum(project)?;
     let gosum = gosum_read.clone().unwrap_or_default();
     reject_local_replaces(&gomod)?;
@@ -883,8 +883,7 @@ pub fn plan_go_read(
     validate_plan(&plan)?;
     // Snapshot guard: the manifest must not have changed under us between
     // the gate and now, or the cache key would lie about the plan's inputs.
-    let now_mod =
-        read_gomod(project).map_err(|e| io::Error::new(e.kind(), format!("go.mod: {e}")))?;
+    let now_mod = read_gomod(project).context("go.mod")?;
     let now_sum = read_gosum(project)?;
     if now_mod != gomod || now_sum != gosum_read {
         return Err(err("go.mod/go.sum changed while planning; re-run 'ward'"));
@@ -1010,8 +1009,9 @@ pub fn stage_modcache_skeleton(
             // trusted, because go skips extraction checks when zip+ziphash
             // already exist, so a poisoned cache byte would go straight
             // into the object.
-            let src = cache_verified_held(store, activity, hash)
-                .map_err(|e| io::Error::new(e.kind(), format!("{}@{}: {e}", m.path, m.version)))?;
+            let src = cache_verified_held(store, activity, hash).map_err(|e| {
+                crate::kernel::error::reword(format!("{}@{}: {e}", m.path, m.version), e)
+            })?;
             // COPY, never hardlink: builds must not reach the cache.
             fs::copy(&src, dir.join(format!("{ver}.{ext}")))?;
         }
@@ -1311,12 +1311,12 @@ pub fn build_sandboxed(
     };
     let result = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity))
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "go build failed: {e}; network is denied during builds (local \
              replace directives and network-dependent tooling are unsupported)"
                 ),
+                e,
             )
         });
     // Each output goes into the directory `project` holds, never by the

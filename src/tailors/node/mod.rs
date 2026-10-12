@@ -46,6 +46,7 @@ pub use project::*;
 pub use realize::*;
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{download_toolchain_artifact_held, download_verified_held, Digest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -367,9 +368,7 @@ pub fn realize_runtime(
         &spec.url,
         &Digest::sha256(sha256)?,
     )?;
-    let staged = store
-        .stage_with_activity(activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
+    let staged = store.stage_with_activity(activity).context("stage")?;
     unpack::extract_node_dist(activity, &tarball, &staged)?;
     validate_node_layout(&staged)?;
     store
@@ -379,7 +378,7 @@ pub fn realize_runtime(
             deps
         })
         .map(|(path, _)| path)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit node object: {e}")))
+        .context("commit node object")
 }
 
 #[derive(Debug, Clone)]

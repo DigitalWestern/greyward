@@ -139,10 +139,21 @@ the program's status through. Which files ward reads per ecosystem:
   verdict codes: 1 for a gate that denies, 2 for a misconfigured one.
   `status` and `doctor` also return their report verdicts, including 1 for
   a stale projection or a failed diagnostic. These are completed reports,
-  rather than classified command errors. Classification is being migrated
-  gradually. Remaining ordinary errors, including some proxy resolution
-  failures, exit 1 and omit `class`. Treat 1 as an unknown failure, without
-  assuming that retrying is safe or that it bypasses a policy denial.
+  rather than classified command errors. A class survives every wrapper
+  that adds words to the error, and a resolution door takes it from what
+  its proxy session recorded: a policy denial inside the proxy (a denied
+  `git-dependency`, `unattested-index`, `weak-integrity` or
+  `stale-resolution`) and an address the proxy will never reach exit 3,
+  an offline cache miss exits 6. Status 1, with no `class`, remains for
+  every failure no class describes, including these on purpose: bytes
+  that did not match their published digest (a hash mismatch, two
+  registries claiming different digests, a response the proxy could not
+  rewrite), a resolving tool that failed on its own after an upstream
+  504 with no cached copy (the tool's exit is reported, not a proxy
+  fact), malformed input (an unparsable manifest, lock or archive), and
+  a real filesystem permission error, which is never a policy refusal.
+  Treat 1 as an unknown failure, without assuming that retrying is safe
+  or that it bypasses a policy denial.
 - **`--quiet`** suppresses narration; **`--verbose`** prints every decision
   and every subprocess command line — the bug-report mode. An error is never
   narration: `--quiet` redirects stderr but keeps a private copy of it, and

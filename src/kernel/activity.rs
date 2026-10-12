@@ -184,7 +184,7 @@ fn open_lock(root: &Path) -> io::Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&path)
         .map_err(|error| {
-            io::Error::new(error.kind(), format!("open {}: {error}", path.display()))
+            crate::kernel::error::reword(format!("open {}: {error}", path.display()), error)
         })?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {

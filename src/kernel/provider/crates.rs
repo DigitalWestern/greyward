@@ -11,6 +11,7 @@
 //! tailor keeps its identity goldens and object-kind rows beside it.
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::Platform;
 use crate::kernel::store::Store;
@@ -387,12 +388,12 @@ fn realize_vendor_inner(
         if let Some(git) = &krate.git {
             let object = crate::kernel::gitsrc::ensure_git_source(store, activity, &git.inner)
                 .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
+                    crate::kernel::error::reword(
                         format!(
                             "{}@{}: git source {}: {e}",
                             krate.name, krate.version, git.inner.url
                         ),
+                        e,
                     )
                 })?;
             crate::kernel::policy::record(
@@ -426,18 +427,18 @@ fn realize_vendor_inner(
             Platform::host()?,
         )
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!("{}@{}: copy git crate: {e}", krate.name, krate.version),
+                e,
             )
         })?;
         crate::kernel::gitsrc::validate_symlinks(&crate_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "{}@{}: copied git crate contains escaping symlink: {e}",
                     krate.name, krate.version
                 ),
+                e,
             )
         })?;
         // A directory source's files are not checksummed by cargo (the commit
@@ -448,21 +449,21 @@ fn realize_vendor_inner(
             br#"{"files":{},"package":null}"#,
         )
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "{}@{}: write .cargo-checksum.json: {e}",
                     krate.name, krate.version
                 ),
+                e,
             )
         })?;
     }
     for (krate, archive) in crates.iter().filter(|k| k.git.is_none()).zip(archives) {
         let crate_dir = staged.join(format!("{}-{}", krate.name, krate.version));
         fs::create_dir_all(&crate_dir).map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!("{}@{}: create staging dir: {e}", krate.name, krate.version),
+                e,
             )
         })?;
         crate::kernel::archive::extract_with_activity_and_options(
@@ -473,9 +474,9 @@ fn realize_vendor_inner(
             crate::kernel::archive::Compression::Gzip,
         )
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!("{}@{}: extract archive: {e}", krate.name, krate.version),
+                e,
             )
         })?;
 
@@ -491,12 +492,12 @@ fn realize_vendor_inner(
             ))
         })?;
         fs::write(crate_dir.join(".cargo-checksum.json"), json).map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "{}@{}: write .cargo-checksum.json: {e}",
                     krate.name, krate.version
                 ),
+                e,
             )
         })?;
     }
@@ -523,7 +524,7 @@ fn realize_vendor_inner(
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
         .map(|(path, _)| path)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
+        .context("commit cargo vendor object")
 }
 
 pub fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> {

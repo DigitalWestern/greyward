@@ -641,9 +641,9 @@ fn refuse_key_links_walk(
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => {
-                return Err(io::Error::new(
-                    error.kind(),
+                return Err(crate::kernel::error::reword(
                     format!("read {}: {error}", display.join(&relative).display()),
+                    error,
                 ))
             }
         };
@@ -795,9 +795,9 @@ pub(crate) fn find_socket(root: &Path) -> io::Result<Option<PathBuf>> {
             return Ok(None)
         }
         Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("cannot scan {} for sockets: {error}", root.display()),
+                error,
             ))
         }
     };

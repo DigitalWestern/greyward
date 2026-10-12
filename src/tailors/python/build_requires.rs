@@ -108,7 +108,7 @@ fn clean_entry(raw: &str) -> io::Result<Option<String>> {
 
 fn tar_entries(path: &Path, activity: Option<&StoreActivity>) -> io::Result<Vec<ArchiveEntry>> {
     let listed = super::unpack::list_sdist(path, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("list {}: {e}", path.display())))?;
+        .map_err(|e| crate::kernel::error::reword(format!("list {}: {e}", path.display()), e))?;
     listed
         .into_iter()
         .map(|entry| {
@@ -507,7 +507,7 @@ fn extract_sdist_inner(
             // writes anything. The same check runs in inspect_sdist, but
             // extract_sdist is also used directly in the Rust planning path.
             let listed = super::unpack::list_sdist(path, activity).map_err(|e| {
-                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+                crate::kernel::error::reword(format!("extract {}: {e}", path.display()), e)
             })?;
             // Keep the name-shape check the inspect path applies, so a
             // direct extract refuses exactly what inspection would refuse.
@@ -515,7 +515,7 @@ fn extract_sdist_inner(
                 clean_entry(&entry.name)?;
             }
             super::unpack::extract_sdist(path, destination, activity, &listed).map_err(|e| {
-                io::Error::new(e.kind(), format!("extract {}: {e}", path.display()))
+                crate::kernel::error::reword(format!("extract {}: {e}", path.display()), e)
             })?;
         }
         ArchiveKind::Zip => super::unpack::extract_zip_sdist(path, destination, |name| {

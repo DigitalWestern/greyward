@@ -127,8 +127,8 @@ pub(crate) fn stage(
             crate::kernel::fetch::cache_insert(store, activity, &tmp)
         })();
         let _ = std::fs::remove_file(&tmp);
-        let (hex, _) =
-            staged.map_err(|e| io::Error::new(e.kind(), format!("pack {}: {e}", package.path)))?;
+        let (hex, _) = staged
+            .map_err(|e| crate::kernel::error::reword(format!("pack {}: {e}", package.path), e))?;
         let packed = crate::kernel::digest::Digest::sha256(&hex)?;
         if !crate::kernel::digest::sri_candidates(&package.integrity)?.contains(&packed) {
             return Err(err(format!(
@@ -221,9 +221,9 @@ fn resolve_inside(
     shown: &Path,
 ) -> io::Result<Option<PathBuf>> {
     let follow = |error: io::Error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("{}: cannot follow the symlink: {error}", shown.display()),
+            error,
         )
     };
     let target = match std::fs::canonicalize(held_name(from).join(name)) {

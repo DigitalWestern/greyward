@@ -488,13 +488,13 @@ fn original_bytes(store: &Store, journal: &Journal, target: &JournalTarget) -> i
     }
     let path = store.object_path(&journal.originals).join(copy);
     let bytes = fs::read(&path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!(
                 "the pre-run copy of {} at {} cannot be read ({error}); the journal was kept",
                 target.target,
                 path.display()
             ),
+            error,
         )
     })?;
     if hex::encode(Sha256::digest(&bytes)) != target.original {

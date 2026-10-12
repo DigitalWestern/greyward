@@ -220,7 +220,9 @@ fn read_opened_value(
     // A failed read, or a record over the cap, is a storage problem, not
     // malformed metadata.
     let value = store::read_meta_json(&file)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?
+        .map_err(|error| {
+            crate::kernel::error::reword(format!("{}: {error}", path.display()), error)
+        })?
         .map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

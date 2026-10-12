@@ -26,7 +26,7 @@ use super::http::{self, Headers};
 use super::ledger::{DiagRequest, Entry, Freshness};
 use super::redact;
 use super::routes::{Claim, LocalAnswer, Permitted, ProxyAddress, RequestClass, Route};
-use super::session::{Claimed, Mode, State};
+use super::session::{Cause, Claimed, Mode, State};
 use crate::kernel::digest::Algo;
 use crate::kernel::fetch::pinned::{PinnedClient, PinnedError, PinnedRequest, PinnedResponse};
 use crate::kernel::fetch::{self, HashMismatch};
@@ -519,7 +519,8 @@ impl Exchange<'_> {
     ) -> io::Result<()> {
         match failure {
             Failure::Address(why) => {
-                self.state.hard_failure(format!("{}: {why}", record.url));
+                self.state
+                    .hard_failure(Cause::Rule, format!("{}: {why}", record.url));
                 self.refuse(out, record, 403, &why)
             }
             Failure::Redirect(why) => self.refuse(out, record, 403, &why),
@@ -717,7 +718,7 @@ impl Exchange<'_> {
                         "{}: the response could not be rewritten: {error}",
                         record.url
                     );
-                    self.state.hard_failure(reason.clone());
+                    self.state.hard_failure(Cause::Integrity, reason.clone());
                     return self.fail(out, record, 502, reason);
                 }
             }
@@ -748,7 +749,7 @@ impl Exchange<'_> {
             Record::new(class.as_str(), self.method, self.redacted(url)).keeping(self.keys());
         match self.state.claimed(url) {
             Claimed::Conflict(why) => {
-                self.state.hard_failure(why.clone());
+                self.state.hard_failure(Cause::Integrity, why.clone());
                 self.fail(out, record, 502, why)
             }
             Claimed::One(claim) => self.claimed_artifact(url, claim, record, out),
@@ -885,7 +886,7 @@ impl Exchange<'_> {
                 mismatch.expected.algo(),
                 mismatch.got
             );
-            self.state.hard_failure(reason.clone());
+            self.state.hard_failure(Cause::Integrity, reason.clone());
             record.sha256 = Some(received);
             return self.fail(out, record, 502, reason);
         }
@@ -1239,6 +1240,10 @@ mod tests {
 
         let report = session.finish();
         let failure = report.facts.failure().unwrap();
+        // Bytes that did not match their claim: no class, exit 1.
+        assert_eq!(failure.cause, super::super::session::Cause::Integrity);
+        assert_eq!(failure.cause.class(), None);
+        let failure = failure.text;
         assert!(failure.contains(&format!("sha256:{claimed}")), "{failure}");
         assert!(failure.contains(&sha256(&bad)), "{failure}");
         let bad_entries = entries_for(&report, &harness.upstream_url("/art/claimed-bad-1.0.tgz"));
@@ -1594,7 +1599,14 @@ mod tests {
             report.facts.first_stale_refused.as_deref(),
             Some(url.as_str())
         );
-        assert!(report.facts.failure().unwrap().contains(&url));
+        let failure = report.facts.failure().unwrap();
+        assert!(failure.text.contains(&url));
+        // A denied stale-resolution is a policy refusal: exit 3.
+        assert_eq!(failure.cause, super::super::session::Cause::Policy);
+        assert_eq!(
+            failure.cause.class(),
+            Some(crate::kernel::error::Class::Refused)
+        );
         let entry = &entries_for(&report, &url)[0];
         assert_eq!(
             (entry.class.as_str(), entry.status, entry.freshness),
@@ -1619,7 +1631,7 @@ mod tests {
         };
         let (session, address) = harness.open(harness.config(strict, Mode::Online));
         assert_eq!(fetch(&address, "/meta/pkg.json").status, 504);
-        let failure = session.finish().facts.failure().unwrap();
+        let failure = session.finish().facts.failure().unwrap().text;
         let url = harness.upstream_url("/meta/pkg.json");
         let port = harness.upstream.port();
         assert!(
@@ -1707,7 +1719,12 @@ mod tests {
             report.facts.first_offline_miss.as_deref(),
             Some(index.as_str())
         );
-        assert!(report.facts.failure().unwrap().contains(&index));
+        let failure = report.facts.failure().unwrap();
+        assert!(failure.text.contains(&index));
+        assert_eq!(
+            failure.cause.class(),
+            Some(crate::kernel::error::Class::Network)
+        );
         let classes: Vec<_> = report
             .ledger
             .entries()

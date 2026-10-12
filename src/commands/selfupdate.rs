@@ -270,16 +270,10 @@ fn newer_release(running: &str, release: &Release, host: io::Result<Platform>) -
 /// already reports the resolved path; macOS may report the link.)
 fn running_binary() -> io::Result<PathBuf> {
     let exe = std::env::current_exe().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot locate the running ward: {error}"),
-        )
+        crate::kernel::error::reword(format!("cannot locate the running ward: {error}"), error)
     })?;
     fs::canonicalize(&exe).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("cannot resolve {}: {error}", exe.display()),
-        )
+        crate::kernel::error::reword(format!("cannot resolve {}: {error}", exe.display()), error)
     })
 }
 
@@ -305,7 +299,7 @@ impl Scratch {
             .mode(0o700)
             .create(&path)
             .map_err(|error| {
-                io::Error::new(error.kind(), format!("create {}: {error}", path.display()))
+                crate::kernel::error::reword(format!("create {}: {error}", path.display()), error)
             })?;
         Ok(Scratch(path))
     }
@@ -343,15 +337,12 @@ impl Stage {
             .open(&path)
         {
             Ok(file) => Ok((Stage { path, armed: true }, file)),
-            Err(error) => Err(io::Error::new(
-                error.kind(),
-                format!(
+            Err(error) => Err(crate::kernel::error::reword(format!(
                     "cannot write to {} ({error}); ward is installed there. Make that directory \
                      writable, or install a copy you own:\n  curl -fsSL \
                      https://raw.githubusercontent.com/DigitalWestern/greyward/main/install.sh | sh",
                     dir.display()
-                ),
-            )),
+                ), error)),
         }
     }
 
@@ -404,9 +395,9 @@ fn smoke_test(binary: &Path, expected: Version) -> io::Result<String> {
         .env("NO_COLOR", "1")
         .output()
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("the downloaded ward does not run on this machine ({error})"),
+                error,
             )
         })?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -436,9 +427,9 @@ pub fn run(platform: Platform) -> io::Result<i32> {
     let running = cli::version_line();
     let target = running_binary()?;
     let release = latest().map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("cannot read the latest release ({error}); releases: {RELEASES_PAGE}"),
+            error,
         )
     })?;
     let current = Version::running()?;
@@ -498,10 +489,7 @@ pub fn run(platform: Platform) -> io::Result<i32> {
         // a complete file even across a power cut.
         let mut source = fs::File::open(&binary)?;
         io::copy(&mut source, &mut stage_file).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("write {}: {error}", stage.path.display()),
-            )
+            crate::kernel::error::reword(format!("write {}: {error}", stage.path.display()), error)
         })?;
         stage_file.sync_all()?;
         // The handle must be closed before the file is executed: Linux
@@ -516,9 +504,9 @@ pub fn run(platform: Platform) -> io::Result<i32> {
     // Rename over the running binary: the process keeps its open inode,
     // and no moment exists where the path holds a half-written file.
     fs::rename(&stage.path, &target).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("cannot replace {}: {error}", target.display()),
+            error,
         )
     })?;
     stage.consumed();

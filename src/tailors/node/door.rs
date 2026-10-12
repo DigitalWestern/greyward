@@ -430,9 +430,9 @@ pub(crate) fn run_node(
     spec.trace();
     let name = run.tool.name();
     door.run_confined(spec, confined).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("store {name} {}: {error}", run.args.join(" ")),
+            error,
         )
     })
 }

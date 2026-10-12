@@ -27,8 +27,9 @@ pub(super) fn unpack_verified(
     let outer_dir = scratch.join(format!("outer-{}", d.app));
     let app: &str = &d.app;
     let extract = |archive: &Path, dest: &Path, gzip: bool, what: &str| {
-        super::unpack::extract_hex_tar(activity, archive, dest, gzip)
-            .map_err(|e| io::Error::new(e.kind(), format!("{app}: {what} extraction failed: {e}")))
+        super::unpack::extract_hex_tar(activity, archive, dest, gzip).map_err(|e| {
+            crate::kernel::error::context(e, format!("{app}: {what} extraction failed"))
+        })
     };
     fs::create_dir_all(&outer_dir)?;
     extract(tar, &outer_dir, false, "outer tar")?;
@@ -37,10 +38,7 @@ pub(super) fn unpack_verified(
     for part in ["VERSION", "metadata.config", "contents.tar.gz", "CHECKSUM"] {
         let p = outer_dir.join(part);
         let md = fs::symlink_metadata(&p).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("{}: missing {part} in tarball: {e}", d.app),
-            )
+            crate::kernel::error::reword(format!("{}: missing {part} in tarball: {e}", d.app), e)
         })?;
         if !md.file_type().is_file() {
             return Err(err(format!("{}: {part} is not a regular file", d.app)));

@@ -86,9 +86,9 @@ pub fn init_signing() -> io::Result<SigningScope> {
         None => None,
         Some(path) => Some(std::sync::Arc::new(
             SigningKey::load(Path::new(&path)).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
+                crate::kernel::error::reword(
                     format!("GREYWARD_SIGNING_KEY: {error}; unset it to write unsigned closures"),
+                    error,
                 )
             })?,
         )),
@@ -811,13 +811,13 @@ pub fn move_reserved_backup(
     project
         .move_dir_out(relative, &backups_dir, destination_name.as_bytes())
         .map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "could not move existing {} aside to {}: {e}",
                     path.display(),
                     destination.display()
                 ),
+                e,
             )
         })?;
     if let Some(parent) = relative.parent().filter(|p| !p.as_os_str().is_empty()) {

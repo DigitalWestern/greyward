@@ -1368,7 +1368,12 @@ mod tests {
         assert!(body.contains("policy denies unattested-index"), "{body}");
         let report = session.finish();
         assert!(report.facts.exceptions.is_empty());
-        assert!(report.facts.failure().unwrap().contains("unattested-index"));
+        let failure = report.facts.failure().unwrap();
+        assert!(failure.text.contains("unattested-index"));
+        assert_eq!(
+            failure.cause,
+            crate::kernel::resolve::session::Cause::Policy
+        );
     }
 
     #[test]
@@ -1398,7 +1403,7 @@ mod tests {
         let (session, address) =
             harness.open(harness.config(deny(&[policy::GIT_DEPENDENCY]), Mode::Online));
         connect(&address, "github.com:9418", Some(address.token()));
-        let failure = session.finish().facts.failure().unwrap();
+        let failure = session.finish().facts.failure().unwrap().text;
         assert!(failure.contains("git-dependency"), "{failure}");
     }
 
@@ -1585,6 +1590,13 @@ mod tests {
             4,
             "{:?}",
             report.facts.hard_failures
+        );
+        // A refused address is a rule refusal, so the door exits 3.
+        let failure = report.facts.failure().unwrap();
+        assert_eq!(failure.cause, crate::kernel::resolve::session::Cause::Rule);
+        assert_eq!(
+            failure.cause.class(),
+            Some(crate::kernel::error::Class::Refused)
         );
     }
 
@@ -1942,7 +1954,10 @@ mod tests {
         assert!(state
             .check(policy::UNATTESTED_INDEX, "late", "late")
             .is_err());
-        state.hard_failure("late".into());
+        state.hard_failure(
+            crate::kernel::resolve::session::Cause::Integrity,
+            "late".into(),
+        );
         let report = state.take_report();
         assert!(report.ledger.is_empty());
         assert!(report.diagnostics.requests.is_empty());

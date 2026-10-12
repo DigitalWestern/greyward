@@ -29,12 +29,12 @@ pub(super) fn read_archive_classification(
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!(
                     "read npm archive classification {}: {error}",
                     path.display()
                 ),
+                error,
             ))
         }
     };
@@ -132,12 +132,12 @@ pub(super) fn write_archive_classification(
                 )),
             }
         }
-        Err(error) => Err(io::Error::new(
-            error.kind(),
+        Err(error) => Err(crate::kernel::error::reword(
             format!(
                 "publish npm archive classification {}: {error}",
                 destination.display()
             ),
+            error,
         )),
     }
 }
@@ -292,10 +292,7 @@ pub(super) fn fetch_tarball(
 ) -> io::Result<(crate::kernel::fetch::CacheLease, Digest)> {
     let candidates = sri_candidates(&package.integrity)?;
     download_verified_any_held(store, activity, &package.url, &candidates).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("{}: fetch {}: {e}", package.path, package.url),
-        )
+        crate::kernel::error::reword(format!("{}: fetch {}: {e}", package.path, package.url), e)
     })
 }
 

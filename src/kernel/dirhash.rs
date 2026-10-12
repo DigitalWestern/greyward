@@ -19,8 +19,9 @@ fn err(msg: impl Into<String>) -> io::Error {
 /// and hashed uncompressed. Rejects entries outside the module prefix,
 /// backslashes, and newlines (Hash1's own rules).
 pub fn hash_zip(zip_path: &Path, module: &str, version: &str) -> io::Result<String> {
-    let file = fs::File::open(zip_path)
-        .map_err(|e| io::Error::new(e.kind(), format!("open {}: {e}", zip_path.display())))?;
+    let file = fs::File::open(zip_path).map_err(|e| {
+        crate::kernel::error::reword(format!("open {}: {e}", zip_path.display()), e)
+    })?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| err(format!("{}: not a zip: {e}", zip_path.display())))?;
     let prefix = format!("{module}@{version}/");
@@ -55,8 +56,9 @@ pub fn hash_zip(zip_path: &Path, module: &str, version: &str) -> io::Result<Stri
 
 /// Hash1 for a `/go.mod` go.sum entry: a single file named exactly "go.mod".
 pub fn hash_gomod(file_path: &Path) -> io::Result<String> {
-    let content = fs::read(file_path)
-        .map_err(|e| io::Error::new(e.kind(), format!("read {}: {e}", file_path.display())))?;
+    let content = fs::read(file_path).map_err(|e| {
+        crate::kernel::error::reword(format!("read {}: {e}", file_path.display()), e)
+    })?;
     Ok(hash1(vec![(
         "go.mod".to_string(),
         hex::encode(Sha256::digest(&content)),

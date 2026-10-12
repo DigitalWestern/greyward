@@ -352,6 +352,38 @@ fn an_unwritable_directory_is_refused_before_anything_is_downloaded() {
     no_leftovers(&bin);
 }
 
+/// A network failure behind `update --self`'s own wording keeps its class
+/// (#258): a refused connection exits 6, so CI can retry it, where the
+/// wrapper used to keep only the text and exit 1. A manifest that is not
+/// there at all (a local file, no network involved) stays exit 1.
+#[test]
+fn a_network_failure_reading_the_release_exits_with_the_network_class() {
+    let home = TempDir::boundary("selfupdate-network");
+    let binary = install_copy(&home.0);
+    // A loopback port that was just closed refuses the connection.
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("https://{}/manifest.json", listener.local_addr().unwrap())
+    };
+    let out = run(&binary, &home.0, &closed, &["update", "--self"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(6), "{stderr}");
+    assert!(
+        stderr.contains("cannot read the latest release ("),
+        "{stderr}"
+    );
+
+    let absent = format!("file://{}", home.0.join("no-manifest.json").display());
+    let out = run(&binary, &home.0, &absent, &["update", "--self"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("cannot read the latest release ("),
+        "{stderr}"
+    );
+    assert_eq!(version_of(&binary, &home.0), running_line());
+}
+
 #[test]
 fn a_symlinked_binary_updates_its_target_and_names_it() {
     let home = TempDir::boundary("selfupdate-symlink");

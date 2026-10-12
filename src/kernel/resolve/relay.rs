@@ -329,9 +329,9 @@ mod linux {
             return Err(io::Error::last_os_error());
         }
         let listener = TcpListener::bind(args.listen).map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("{VERB}: listen on {}: {error}", args.listen),
+                error,
             )
         })?;
         let env = match args.env_fd {
@@ -352,9 +352,10 @@ mod linux {
     fn read_env(fd: i32) -> io::Result<Vec<(OsString, OsString)>> {
         use std::io::Read as _;
         let adopt_error = |error: io::Error| {
-            io::Error::new(
+            crate::kernel::error::reword_as(
                 io::ErrorKind::InvalidInput,
                 format!("{VERB}: environment descriptor {fd}: {error}"),
+                error,
             )
         };
         // SAFETY: fcntl on an integer descriptor; a bad one fails with
@@ -395,7 +396,10 @@ mod linux {
                 .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .open(path)
                 .map_err(|error| {
-                    io::Error::new(error.kind(), format!("{VERB}: {}: {error}", path.display()))
+                    crate::kernel::error::reword(
+                        format!("{VERB}: {}: {error}", path.display()),
+                        error,
+                    )
                 })?;
             if !file.metadata()?.file_type().is_socket() {
                 return Err(io::Error::new(
@@ -509,9 +513,9 @@ mod linux {
             });
         }
         command.spawn().map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!("{VERB}: start {}: {error}", Path::new(&argv[0]).display()),
+                error,
             )
         })
     }

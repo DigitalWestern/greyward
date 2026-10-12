@@ -683,9 +683,9 @@ impl ViewSkeleton {
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
-                    return Err(io::Error::new(
-                        error.kind(),
+                    return Err(crate::kernel::error::reword(
                         format!("create the sandbox host view {}: {error}", path.display()),
+                        error,
                     ))
                 }
             }
@@ -714,12 +714,12 @@ fn lock_skeleton(root: &Path) -> io::Result<Option<fs::File>> {
         .mode(0o600)
         .open(&path)
         .map_err(|error| {
-            io::Error::new(
-                error.kind(),
+            crate::kernel::error::reword(
                 format!(
                     "create the sandbox host view lock {}: {error}",
                     path.display()
                 ),
+                error,
             )
         })?;
     Ok(file.try_lock().is_ok().then_some(file))
@@ -1268,12 +1268,12 @@ impl Fingerprint<'_> {
 }
 
 fn fingerprint_error(path: &Path, error: io::Error) -> io::Error {
-    io::Error::new(
-        error.kind(),
+    crate::kernel::error::reword(
         format!(
             "cannot read host {} to fingerprint its build inputs: {error}",
             path.display()
         ),
+        error,
     )
 }
 

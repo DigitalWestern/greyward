@@ -433,8 +433,7 @@ impl<'a> Transaction<'a> {
                         match finish(self.store, self.activity, &self.root, &self.lock, &journal) {
                             Ok(()) => Err(error),
                             Err(cleanup) if is_crash(&cleanup) => Err(cleanup),
-                            Err(cleanup) => Err(io::Error::new(
-                                error.kind(),
+                            Err(cleanup) => Err(crate::kernel::error::reword(
                                 format!(
                                     "{error}; the partial publication was undone, but \
                                      cleaning up after it failed ({cleanup}), so the journal \
@@ -446,6 +445,7 @@ impl<'a> Transaction<'a> {
                                         .join(journal_name(&self.ecosystem))
                                         .display()
                                 ),
+                                error,
                             )),
                         }
                     }
@@ -453,8 +453,7 @@ impl<'a> Transaction<'a> {
                         // The journal stays, and so does the originals'
                         // root: the next writing command recovers.
                         self.finished = true;
-                        Err(io::Error::new(
-                            error.kind(),
+                        Err(crate::kernel::error::reword(
                             format!(
                                 "{error}; undoing the partial publication also failed \
                                  ({undo_error}), so the journal {} was kept and the next \
@@ -465,6 +464,7 @@ impl<'a> Transaction<'a> {
                                     .join(journal_name(&self.ecosystem))
                                     .display()
                             ),
+                            error,
                         ))
                     }
                 }
@@ -956,9 +956,9 @@ fn read_regular(root: &ProjectRoot, relative: &Path) -> io::Result<Option<(Vec<u
         Ok(Some(file)) => file,
         Ok(None) => return Ok(None),
         Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
+            return Err(crate::kernel::error::reword(
                 format!("{}: {error}", shown.display()),
+                error,
             ))
         }
     };
@@ -1109,12 +1109,13 @@ fn exchange(dirfd: RawFd, a: &OsStr, b: &OsStr) -> io::Result<()> {
             error.raw_os_error(),
             Some(libc::EINVAL) | Some(libc::ENOSYS)
         ) {
-            io::Error::new(
+            crate::kernel::error::reword_as(
                 io::ErrorKind::Unsupported,
                 format!(
                     "this filesystem cannot exchange two files atomically ({error}), which \
                      a resolution needs to publish safely"
                 ),
+                error,
             )
         } else {
             error

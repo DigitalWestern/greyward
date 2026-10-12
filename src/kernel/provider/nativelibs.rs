@@ -625,9 +625,9 @@ fn realize_staged(
     for (index, package) in packages.iter().enumerate() {
         let archive = download_verified_held(store, activity, &package.url(), package.sha256)
             .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
+                crate::kernel::error::reword(
                     format!("fetch native package {}: {e}", package.filename),
+                    e,
                 )
             })?;
         let package_root = package_work.join(format!("{index}-payload"));
@@ -646,10 +646,7 @@ fn realize_staged(
             crate::kernel::store::remove_tree(&info)?;
         }
         merge_tree(&package_root, work).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("merge native package {}: {e}", package.name),
-            )
+            crate::kernel::error::reword(format!("merge native package {}: {e}", package.name), e)
         })?;
         crate::kernel::store::remove_tree(&package_root)?;
         crate::kernel::store::remove_tree(&info_root)?;
@@ -695,7 +692,9 @@ fn extract_package(
             &crate::kernel::archive::ExtractOptions::platform_build(0),
             crate::kernel::archive::Compression::Bzip2,
         )
-        .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", package.filename)))?;
+        .map_err(|e| {
+            crate::kernel::error::reword(format!("extract {}: {e}", package.filename), e)
+        })?;
         if package_root.join("info").is_dir() {
             // Keep metadata separate from payload so it cannot leave the
             // build prefix in the committed object.

@@ -29,6 +29,7 @@ use unpack::extract_ruby_bottle_for_test;
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::digest::Algo;
+use crate::kernel::error::Context as _;
 use crate::kernel::fetch::{
     download_toolchain_artifact_held, download_verified_held, hash_file, CacheLease, Digest,
 };
@@ -195,10 +196,7 @@ fn err(msg: impl Into<String>) -> io::Error {
 fn required_entry(root: &Path, relative: &str) -> io::Result<()> {
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("portable-ruby is missing {relative}: {e}"),
-        )
+        crate::kernel::error::reword(format!("portable-ruby is missing {relative}: {e}"), e)
     })?;
     if !metadata.is_file() && !metadata.file_type().is_symlink() {
         return Err(err(format!(
@@ -209,9 +207,9 @@ fn required_entry(root: &Path, relative: &str) -> io::Result<()> {
     if metadata.file_type().is_symlink() {
         let root = root.canonicalize()?;
         let resolved = path.canonicalize().map_err(|e| {
-            io::Error::new(
-                e.kind(),
+            crate::kernel::error::reword(
                 format!("portable-ruby has dangling symlink {}: {e}", path.display()),
+                e,
             )
         })?;
         if !resolved.starts_with(&root) {
@@ -405,7 +403,7 @@ fn read_gem_spec(
 ) -> io::Result<std::process::Output> {
     let mut cmd = gem_spec_command(ruby_obj, cwd, gem_home, args);
     crate::kernel::supervise::local_output(&mut cmd, activity)
-        .map_err(|e| io::Error::new(e.kind(), format!("run store ruby {args:?}: {e}")))
+        .with_context(|| format!("run store ruby {args:?}"))
 }
 
 /// The command `read_gem_spec` starts: the forced environment, with `HOME`
@@ -957,7 +955,7 @@ fn verify_gem(
 ) -> io::Result<(CacheLease, Vec<String>, bool)> {
     let url = gem_url(g);
     let lease = download_verified_held(store, activity, &url, &g.sha256)
-        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
+        .map_err(|e| crate::kernel::error::reword(format!("{}: {e}", g.full_name), e))?;
     let out = read_gem_spec(
         activity,
         ruby_obj,
@@ -1265,7 +1263,7 @@ fn install_gems(
     let candidate = crate::kernel::policy::object_exceptions();
     let (object, applied) = store
         .commit_with_activity_and_deps(activity, &commit_identity, &staged, &candidate, &deps)
-        .map_err(|e| io::Error::new(e.kind(), format!("commit gems: {e}")))?;
+        .context("commit gems")?;
     if let Some(host_inputs) = &host_inputs {
         record_host_fallback(store, activity, identity, host_inputs, &fell_back);
     }

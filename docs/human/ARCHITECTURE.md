@@ -1063,9 +1063,14 @@ These keep the layout organized. The first is enforced by
    request are built with `kernel::error` (`refused`, `stale`, or the
    `Unsupported` kind), and a network failure by `fetch`, which `main`
    turns into exit statuses 3, 4, 5 and 6 (`docs/human/CLI.md`). Adding
-   words to an error goes through `error::context`, which retains the
-   typed cause, class, store recovery command and interruption record;
-   `io::Error::new(e.kind(), format!(..))` keeps only the text.
+   words to an error goes through `error::context` (or `Context::context`
+   on a result), `error::reword` for a whole new sentence, or
+   `error::reword_as` when the kind changes too. Each retains the owned
+   original, so its class, store recovery command, server status and
+   interruption record survive; `io::Error::new(e.kind(), format!(..))`
+   keeps only the text, and `tests/architecture.rs` refuses it. A
+   resolution door's failure takes its class from the session fact's
+   typed `Cause`, never from the fact's words.
 
 ## Layout
 

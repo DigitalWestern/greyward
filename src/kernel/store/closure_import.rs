@@ -299,9 +299,9 @@ pub(super) fn validate_object_reference(store: &Store, id: &str, path: &Path) ->
         ));
     }
     let object = fs::symlink_metadata(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("closure object reference {id} is unavailable: {error}"),
+            error,
         )
     })?;
     if object.file_type().is_symlink() || !object.is_dir() {
@@ -312,9 +312,9 @@ pub(super) fn validate_object_reference(store: &Store, id: &str, path: &Path) ->
     }
     let metadata = store.root.join("meta").join(format!("{id}.json"));
     let metadata_stat = fs::symlink_metadata(&metadata).map_err(|error| {
-        io::Error::new(
-            error.kind(),
+        crate::kernel::error::reword(
             format!("closure object reference {id} has no metadata: {error}"),
+            error,
         )
     })?;
     if metadata_stat.file_type().is_symlink() || !metadata_stat.is_file() {

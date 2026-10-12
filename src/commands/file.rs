@@ -77,7 +77,9 @@ fn command_for(lone: &LoneFile, file: &str, args: &[String]) -> io::Result<Optio
 // Reviewed site (tests/architecture.rs): the user's own program, run on a greyward-realized runtime.
 #[allow(clippy::disallowed_methods)]
 fn run_file(command: &mut Command, ctx: &Context) -> io::Result<std::process::ExitStatus> {
-    crate::kernel::supervise::status(command, &ctx.activity)
+    crate::kernel::ui::with_users_stderr(|| {
+        crate::kernel::supervise::status(command, &ctx.activity)
+    })
 }
 
 #[cfg(test)]

@@ -250,7 +250,7 @@ fn run_users_command(
     command: &mut std::process::Command,
     activity: &crate::kernel::activity::StoreActivity,
 ) -> io::Result<std::process::ExitStatus> {
-    supervise::status(command, activity)
+    crate::kernel::ui::with_users_stderr(|| supervise::status(command, activity))
 }
 
 #[cfg(test)]

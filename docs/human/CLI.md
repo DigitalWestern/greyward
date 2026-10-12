@@ -113,7 +113,8 @@ reference: docs/human/CLI.md.
   still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
-  `--json`; `plan` prints JSON either way.
+  `--json`; `plan` prints JSON either way, and under `--json` it prints
+  one array of the plans, one document however many ecosystems there are.
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
@@ -904,7 +905,9 @@ GREYWARD_STRICT`), or the file that set `strict = true`.
 toolchain per package, `-v` adds artifact and store object (and works in
 either position); the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`.
-**plan** prints what a sync would realize, one JSON document per ecosystem.
+**plan** prints what a sync would realize, one JSON document per ecosystem,
+or with `--json` one array of them. A tool planning runs (npm generating a
+missing lock) prints to stderr, never into the plan.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'ward
 update --self'` when one is newer, `ok` with `no build for this machine`

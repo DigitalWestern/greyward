@@ -623,13 +623,15 @@ ships as docs/human/policy-company.toml.",
         description: "\
 Prints one JSON document per ecosystem found here, exactly what 'ward
 sync' would realize. Planning may resolve missing lockfiles with the store's
-own uv/npm/cargo and cache the result under .greyward/.
-The output is JSON either way; --json adds nothing but the promise every
---json command makes: stdout is JSON and a failure is a JSON object on
-stderr.",
+own uv/npm/cargo and cache the result under .greyward/; what those tools
+print goes to stderr. The output is JSON either way; --json prints one
+array of the plans, a single document whatever the number of ecosystems,
+and makes the promise every --json command makes: stdout is JSON and a
+failure is a JSON object on stderr.",
         examples: &[
             ("ward plan", "the locked plan for every ecosystem, as JSON"),
             ("ward plan | jq .", "read it with jq"),
+            ("ward plan --json", "every plan as one JSON array"),
         ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],

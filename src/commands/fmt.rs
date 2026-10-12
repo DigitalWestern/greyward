@@ -132,7 +132,8 @@ pub fn run(
     } else {
         resolve_at(&decides)?
     };
-    let status = formatter.run(&ctx, &cwd, check, args, &selected)?;
+    // The formatter's diagnostics are the user's, even under `--quiet`.
+    let status = ui::with_users_stderr(|| formatter.run(&ctx, &cwd, check, args, &selected))?;
     attribution.discard();
     Ok(status)
 }

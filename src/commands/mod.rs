@@ -350,9 +350,8 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         .transpose()?;
     let ctx = Context::open(platform)?;
     match command {
-        // `json` is not read here: plan's output is JSON either way, and
-        // the flag only tells `main` which error renderer to use.
-        Plan { .. } => plan::run(&ctx, sync.frozen).map(|_| 0),
+        // Plan's output is JSON either way: `json` makes it one array.
+        Plan { json } => plan::run(&ctx, sync.frozen, json).map(|_| 0),
         Build { ecosystem, args } => build::run(&ctx, ecosystem, &args, sync.frozen).map(|_| 0),
         Run { command } => run::run(&ctx, &command, sync.frozen),
         File(request) => file::run(&ctx, &request),

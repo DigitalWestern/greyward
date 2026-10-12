@@ -117,6 +117,18 @@ pub fn with_stdout_on_stderr<T>(job: impl FnOnce() -> io::Result<T>) -> io::Resu
     with_fd_pointed_at(io::stdout().as_raw_fd(), io::stderr().as_raw_fd(), job)
 }
 
+/// Run `job` with fd 2 on the real stderr, then put it back. `--quiet`
+/// means "errors and results only": it silences ward's own sync tools, but
+/// the program the user asked for (`run`, a script, `x`, a file, `fmt`,
+/// `build`) is theirs, and its tracebacks and compiler errors are the
+/// errors. Without `--quiet` fd 2 already is the real stderr.
+pub fn with_users_stderr<T>(job: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    match ERROR_FD.get() {
+        Some(&real) => with_fd_pointed_at(io::stderr().as_raw_fd(), real, job),
+        None => job(),
+    }
+}
+
 /// The mechanism, over any two descriptors so it can be tested against a
 /// pipe. Rust's own stdout buffer is flushed first, so nothing written
 /// before the swap comes out after it on the wrong side.

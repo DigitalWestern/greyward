@@ -1876,10 +1876,14 @@ lock) write no record, so the join never looks for one. Planner doors run
 inside a sync whose lock already exists: that lock's own record is what
 the join judges.
 
-**Double counting.** Facts the lock itself shows (`git-dependency`,
-`weak-integrity`) are recorded by the tailor from the lock during sync.
-The proxy uses them only for real-time denial and leaves them out of the
-record. Facts only the proxy can know (`unattested-index` for an endpoint
+**Double counting.** Facts the lock itself shows (a git dependency by
+name, `weak-integrity`) are recorded by the tailor from the lock during
+sync. A git fetch is the exception: the proxy records `git-dependency`
+for every git-shaped request, with the repository's origin as subject
+(`https://github.com`, never the path), because code that runs during
+resolution (a build backend, a script) can make one without the lock
+naming any git dependency. The subject differs from the tailor's (the
+package), so the two never collide. Facts only the proxy can know (`unattested-index` for an endpoint
 the resolution consulted, `resolution-build`, `unconfined-resolution`,
 `stale-resolution`) go into the record. As a second safety, `Attribution::claim` now removes
 exact `(kind, subject, detail)` duplicates, which closes the separate
@@ -1895,7 +1899,7 @@ on the thread that opened the attribution, records after the tool exits.
 
 | What the door or proxy establishes | Kind | Real-time action when denied | Otherwise |
 |---|---|---|---|
-| Any git fetch (smart HTTP through interception, or a refused `git://`) | `git-dependency` (existing) | refuse the request with the policy refusal text | ledger only (sync re-derives from the lock) |
+| Any git fetch (smart HTTP through interception, or a refused `git://`) | `git-dependency` (existing; subject = the repository's origin) | refuse the request with the policy refusal text | record, whether or not the lock names a git dependency |
 | An artifact whose registry claim is SHA-1 or MD5 only (npm `shasum` without `integrity`, a PyPI `md5` fragment), or has no claim where the protocol provides one | `weak-integrity` (existing) | refuse | ledger only |
 | A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and record in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and record |
 | The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |

@@ -963,7 +963,16 @@ mod tests {
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
         let report = report.unwrap();
         assert!(report.status.success(), "{}", stderr(&report));
-        assert!(recorded.is_empty(), "{recorded:?}");
+        // Every git fetch is recorded for the repository's host, whether
+        // or not the lock names it.
+        assert!(
+            !recorded.is_empty()
+                && recorded
+                    .iter()
+                    .all(|fact| fact.kind == policy::GIT_DEPENDENCY
+                        && fact.subject == "https://github.com"),
+            "{recorded:?}"
+        );
         let lock = fs::read_to_string(project.join("Cargo.lock")).unwrap();
         assert!(
             lock.contains(&format!(

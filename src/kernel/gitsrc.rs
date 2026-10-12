@@ -126,8 +126,8 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
 /// stops the sync before git contacts the host. `git@host:repo` is already
 /// `ssh://` once normalized. https and `git://` offer no credential of
 /// this machine's and reach no local path, so they record nothing here.
-/// Called by each realizer beside its `git-dependency` record, inside the
-/// sync's attribution.
+/// Called inside the sync's attribution, by [`record_git_dependency`] or a
+/// realizer that records no `git-dependency` of its own.
 pub fn record_transport(source: &GitSource) -> io::Result<()> {
     let detail = if source.url.starts_with("ssh://") {
         "fetched over ssh from this machine, offering its ssh agent's keys under its ssh \
@@ -142,6 +142,18 @@ pub fn record_transport(source: &GitSource) -> io::Result<()> {
         &source.url,
         detail,
     )
+}
+
+/// Record `git-dependency` for the package `subject` realized from
+/// `source`, and its transport ([`record_transport`]), before the fetch: a
+/// policy denying either kind stops the sync before git contacts the host.
+pub fn record_git_dependency(subject: &str, source: &GitSource) -> io::Result<()> {
+    crate::kernel::policy::record(
+        crate::kernel::policy::GIT_DEPENDENCY,
+        subject,
+        &format!("{} at {}", source.url, source.commit),
+    )?;
+    record_transport(source)
 }
 
 pub fn is_full_commit(value: &str) -> bool {

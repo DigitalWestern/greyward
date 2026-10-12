@@ -406,14 +406,8 @@ fn fetch_plan_sources(
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
         if let Some(source) = &p.git {
-            // Recorded before the fetch, so a policy denying either kind
-            // stops the sync before the host is contacted.
-            crate::kernel::policy::record(
-                crate::kernel::policy::GIT_DEPENDENCY,
-                &format!("{}@{}", p.name, p.version),
-                &format!("{} at {}", source.url, source.commit),
-            )?;
-            crate::kernel::gitsrc::record_transport(source)?;
+            let subject = format!("{}@{}", p.name, p.version);
+            crate::kernel::gitsrc::record_git_dependency(&subject, source)?;
             let object = crate::kernel::gitsrc::ensure_git_source(store, activity, source)
                 .map_err(|e| {
                     io::Error::new(

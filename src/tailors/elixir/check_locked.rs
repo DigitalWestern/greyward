@@ -123,9 +123,14 @@ pub(super) fn check_locked_inputs(
 /// is not a plain string literal (an interpolation, a sigil, a variable),
 /// since ward never evaluates mix.exs to find out where that points. A
 /// `path:` inside a comment counts too, which only costs a registry check.
-/// `deps_path:`, `config_path:` and the like are other keys.
+/// `deps_path:`, `config_path:` and the like are other keys. The option
+/// named as an atom instead (`{:path, "../x"}`, `"path": "../x"`) counts
+/// as escaping wherever it points: only the `path:` spelling is placed.
 fn path_dependency_escapes(dir: &Path, manifest: &[u8]) -> bool {
     let text = String::from_utf8_lossy(manifest);
+    if names_path_as_atom(&text) {
+        return true;
+    }
     let mut rest = text.as_ref();
     while let Some(at) = rest.find("path:") {
         let preceded_by_word = rest[..at]
@@ -163,6 +168,30 @@ fn path_dependency_escapes(dir: &Path, manifest: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// Whether `text` spells the `path` option as an atom: `:path` (the
+/// tuple form `{:path, "../x"}`), `:"path"`, or the quoted keyword
+/// `"path":`. A longer atom (`:path_to`, `:paths`, `:path?`) or one
+/// inside a module path (`Mix::path`) is another name.
+fn names_path_as_atom(text: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let spellings: [(&str, bool); 5] = [
+        (":path", true),
+        (":\"path\"", false),
+        (":'path'", false),
+        ("\"path\":", false),
+        ("'path':", false),
+    ];
+    spellings.iter().any(|(spelling, bare)| {
+        text.match_indices(spelling).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + spelling.len()..].chars().next();
+            let bounded_before = !before.is_some_and(|c| word(c) || (*bare && c == ':'));
+            let bounded_after = !*bare || !after.is_some_and(|c| word(c) || c == '?' || c == '!');
+            bounded_before && bounded_after
+        })
+    })
 }
 
 /// Whether the last passing check in this project, as ward recorded it in the
@@ -290,6 +319,9 @@ mod tests {
             r#"{:core, path: "../core"}"#,
             r#"{:core, in_umbrella: true}, deps_path: "../../deps", config_path: "x""#,
             r#"{:local, path: "./vendor/local"}"#,
+            // Other atoms that start with the same letters.
+            r#"{:core, [{:paths, "x"}, {:path_to, "y"}, {:path?, 1}]}"#,
+            r#"Mix::path(); {:"deps_path", "../../deps"}"#,
         ] {
             assert!(
                 !path_dependency_escapes(inside, manifest.as_bytes()),
@@ -308,6 +340,11 @@ mod tests {
             r#"{:core, path: "../../deps/core"}"#,
             r#"{:core, path: "./.vendor/core"}"#,
             r#"{:core, path: "../web/node_modules/core"}"#,
+            // The option as an atom: never placed, so never vouched for.
+            r#"{:core, [{:path, "../../../core"}]}"#,
+            r#"{:core, [{:path, "./inside"}]}"#,
+            r#"{:core, [{:"path", "../core"}]}"#,
+            r#"{:core, ["path": "../core"]}"#,
         ] {
             assert!(
                 path_dependency_escapes(inside, manifest.as_bytes()),

@@ -32,8 +32,16 @@ fn bash_completions(source_extensions: &[&str]) -> String {
          _ward_scripts() {\n    ",
     );
     out.push_str(SCRIPTS_COMMAND);
+    // A script name is data from the project's package.json: it is added
+    // to COMPREPLY as one literal word, never through `compgen -W`, whose
+    // word list is expanded (a name `$(cmd)` would run) and split on
+    // spaces.
     out.push_str(
-        "\n}\n\n_ward() {\n    local cur cmd=\"\" i\n    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n    \
+        "\n}\n\n\
+         # Append the script names that start with $cur, each as one literal word.\n\
+         _ward_add_scripts() {\n    local name\n    while IFS= read -r name; do\n        \
+         [[ -n \"$name\" && \"$name\" == \"$cur\"* ]] && COMPREPLY+=(\"$name\")\n    \
+         done < <(_ward_scripts)\n}\n\n_ward() {\n    local cur cmd=\"\" i\n    cur=\"${COMP_WORDS[COMP_CWORD]}\"\n    \
          for ((i = 1; i < COMP_CWORD; i++)); do\n        case \"${COMP_WORDS[i]}\" in\n            \
          -C|--directory|--resolution-record) ((i++)) ;;\n            -*) ;;\n            *) cmd=\"${COMP_WORDS[i]}\"; break ;;\n        \
          esac\n    done\n    if [[ -z \"$cmd\" ]]; then\n        if [[ \"$cur\" == -* ]]; then\n            ",
@@ -50,7 +58,8 @@ fn bash_completions(source_extensions: &[&str]) -> String {
         setup_only.join(" ")
     ));
     out.push_str(&format!(
-        "        else\n            COMPREPLY=( $(compgen -W \"{} $(_ward_scripts)\" -- \"$cur\") )\n            \
+        "        else\n            COMPREPLY=( $(compgen -W \"{}\" -- \"$cur\") )\n            \
+         _ward_add_scripts\n            \
          compopt -o filenames 2>/dev/null\n            \
          mapfile -t -O \"${{#COMPREPLY[@]}}\" COMPREPLY < <(compgen -d -- \"$cur\"; for ext in {}; do \
          compgen -f -X \"!*.$ext\" -- \"$cur\"; done)\n        fi\n        return\n    fi\n    case \"$cmd\" in\n",
@@ -64,7 +73,7 @@ fn bash_completions(source_extensions: &[&str]) -> String {
         match spec.name {
             "run" => out.push_str(
                 "        run)\n            if [[ $i -eq $((COMP_CWORD - 1)) ]]; then\n                \
-                 COMPREPLY=( $(compgen -W \"$(_ward_scripts)\" -c -- \"$cur\") )\n            else\n                \
+                 COMPREPLY=( $(compgen -c -- \"$cur\") )\n                _ward_add_scripts\n            else\n                \
                  COMPREPLY=( $(compgen -f -- \"$cur\") )\n            fi ;;\n",
             ),
             "build" => out.push_str(&format!(
@@ -127,8 +136,10 @@ fn zsh_completions(source_extensions: &[&str]) -> String {
          _ward_scripts() {\n    local -a scripts\n    scripts=(${(f)\"$(",
     );
     out.push_str(SCRIPTS_COMMAND);
-    // `_describe` reads `name:description`, so a `:` in a name is escaped.
-    out.push_str(")\"})\n    scripts=(${scripts//:/\\\\:})\n    (( ${#scripts} )) || return 1\n    _describe -t scripts 'package.json script' scripts\n}\n\n_ward() {\n    local -a commands\n    commands=(\n");
+    // `_describe` reads `name:description` and takes `\` as an escape, so
+    // a `\` and a `:` in a name are escaped. Nothing in a name is ever
+    // evaluated: `${(f)...}` only splits the output into lines.
+    out.push_str(")\"})\n    scripts=(${scripts//\\\\/\\\\\\\\})\n    scripts=(${scripts//:/\\\\:})\n    (( ${#scripts} )) || return 1\n    _describe -t scripts 'package.json script' scripts\n}\n\n_ward() {\n    local -a commands\n    commands=(\n");
     for spec in listed() {
         out.push_str(&format!(
             "        '{}:{}'\n",
@@ -346,9 +357,7 @@ mod tests {
                 let offered = script.lines().any(|line| match shell {
                     // The one word list that mixes verbs and script names.
                     Shell::Bash => {
-                        line.contains("compgen -W")
-                            && line.contains("$(_ward_scripts)")
-                            && line.replace('"', " ").contains(&top)
+                        line.contains("compgen -W") && line.replace('"', " ").contains(&top)
                     }
                     _ => line.contains(&top),
                 });

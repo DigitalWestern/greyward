@@ -762,6 +762,10 @@ pub enum Restored {
     Unchanged(PathBuf),
     /// At neither the pre-run nor the new bytes: edited since, left alone.
     LeftEdited(PathBuf),
+    /// A file at a temporary's name holding bytes ward did not write
+    /// (perhaps a save made while undo moved files): kept, not deleted.
+    /// The path is the temporary's.
+    Kept(PathBuf),
 }
 
 /// Remove the directories `journal` says its transaction created, deepest
@@ -1214,6 +1218,11 @@ pub enum FaultPoint {
     Released,
     /// In undo, after a target was looked at and before it is acted on.
     Undoing,
+    /// In undo, after a target was moved aside and before what moved is
+    /// compared.
+    UndoMoved,
+    /// In undo, after the compare found a save and before it is moved back.
+    UndoMismatched,
 }
 
 #[cfg(test)]
@@ -1721,6 +1730,139 @@ mod tests {
         }
     }
 
+    /// Every temporary-named file left in the project, sorted.
+    fn temporaries(fx: &Fixture) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for dir in [fx.project.clone(), fx.project.join(RESOLUTION_DIR)] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.to_string_lossy().ends_with(".tmp") {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Recovery finished (no journal, no originals rooted), and the only
+    /// temporaries left are `kept`.
+    fn assert_undone_keeping(fx: &Fixture, kept: &[PathBuf]) {
+        assert!(!has_pending_journal(&fx.project));
+        assert!(rooted_originals(fx).is_empty(), "originals still rooted");
+        let mut kept = kept.to_vec();
+        kept.sort();
+        assert_eq!(temporaries(fx), kept);
+    }
+
+    /// Recovery crashes after undo moved a target aside and before it
+    /// compared what moved, with a save landed just before the move: the
+    /// save is at the temporary, and the next recovery keeps it there and
+    /// reports it rather than deleting it. For a replaced target (put back
+    /// by exchange) and a created one (moved aside).
+    #[test]
+    fn a_save_moved_aside_by_an_interrupted_undo_is_kept() {
+        // Undo runs last target first: the receipt, the lock, then the
+        // manifest. Each moves its target aside once.
+        for (edited, at) in [("package.json", 3), ("package-lock.json", 2)] {
+            let fx = fixture("undo-crash-save", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            let temp = journal_temp(&fx, edited);
+            let path = fx.project.join(edited);
+            let (mut looked, mut moved) = (0, 0);
+            let error = recover_with(&fx, move |point| match point {
+                FaultPoint::Undoing => {
+                    looked += 1;
+                    if looked == at {
+                        fs::write(&path, USER_EDIT).unwrap();
+                    }
+                    Fault::Continue
+                }
+                FaultPoint::UndoMoved => {
+                    moved += 1;
+                    if moved == at {
+                        Fault::Crash
+                    } else {
+                        Fault::Continue
+                    }
+                }
+                _ => Fault::Continue,
+            })
+            .unwrap_err();
+            assert!(is_crash(&error), "{edited}: {error}");
+            assert_eq!(fs::read(&temp).unwrap(), USER_EDIT, "{edited}");
+            let notes = recover(&fx);
+            assert!(
+                notes.contains(&Restored::Kept(temp.clone())),
+                "{edited}: {notes:?}"
+            );
+            assert_eq!(fs::read(&temp).unwrap(), USER_EDIT, "{edited}");
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            assert_eq!(read(&fx, "package-lock.json"), None);
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT)
+            );
+            assert_undone_keeping(&fx, &[temp]);
+        }
+    }
+
+    /// Two saves during one undo: the first lands before undo moves the
+    /// target aside, so the compare finds it; the second lands before the
+    /// first is moved back. Neither is lost: one ends at the target, which
+    /// is reported edited, the other at the temporary, which is kept.
+    #[test]
+    fn a_second_save_during_undo_is_kept() {
+        const FIRST: &[u8] = b"first save\n";
+        const SECOND: &[u8] = b"second save\n";
+        for (edited, at, at_target) in [
+            // An exchange back swaps the two saves.
+            ("package.json", 3, FIRST),
+            // A created target: the second save holds the name, so the
+            // first stays aside.
+            ("package-lock.json", 2, SECOND),
+        ] {
+            let fx = fixture("undo-two-saves", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            let temp = journal_temp(&fx, edited);
+            let path = fx.project.join(edited);
+            let mut looked = 0;
+            let notes = recover_with(&fx, move |point| {
+                match point {
+                    FaultPoint::Undoing => {
+                        looked += 1;
+                        if looked == at {
+                            fs::write(&path, FIRST).unwrap();
+                        }
+                    }
+                    FaultPoint::UndoMismatched => fs::write(&path, SECOND).unwrap(),
+                    _ => {}
+                }
+                Fault::Continue
+            })
+            .unwrap();
+            let at_temp = if at_target == FIRST { SECOND } else { FIRST };
+            assert_eq!(read(&fx, edited).as_deref(), Some(at_target), "{edited}");
+            assert_eq!(fs::read(&temp).unwrap(), at_temp, "{edited}");
+            assert!(
+                notes.contains(&Restored::LeftEdited(fx.project.join(edited))),
+                "{edited}: {notes:?}"
+            );
+            assert!(
+                notes.contains(&Restored::Kept(temp.clone())),
+                "{edited}: {notes:?}"
+            );
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT)
+            );
+            assert_undone_keeping(&fx, &[temp]);
+        }
+    }
+
     /// A crash after a target's temporary was written and before its swap,
     /// then a save of the same bytes at the target: the swap never
     /// happened, so the file is the user's, kept and reported, never
@@ -1862,10 +2004,13 @@ mod tests {
             .unwrap();
         fs::remove_file(&temp).unwrap();
         symlink("/etc/passwd", &temp).unwrap();
-        recover(&fx);
+        let notes = recover(&fx);
         let meta = fs::symlink_metadata(fx.project.join("package.json")).unwrap();
         assert!(meta.file_type().is_file());
-        assert_original(&fx, Some(OLD_RECEIPT));
+        // Not ward's: kept as it is, and reported.
+        assert!(notes.contains(&Restored::Kept(temp.clone())), "{notes:?}");
+        assert_eq!(fs::read_link(&temp).unwrap(), Path::new("/etc/passwd"));
+        assert_undone_keeping(&fx, &[temp]);
     }
 
     /// A crash at every point of publication: afterwards the journal is
@@ -2285,8 +2430,11 @@ mod tests {
             .find(|path| path.to_string_lossy().ends_with(".tmp"))
             .unwrap();
         fs::write(&temp, b"planted\n").unwrap();
-        recover(&fx);
-        assert_original(&fx, Some(OLD_RECEIPT));
+        let notes = recover(&fx);
+        // Ward did not write those bytes, so it keeps them where they are.
+        assert!(notes.contains(&Restored::Kept(temp.clone())), "{notes:?}");
+        assert_eq!(fs::read(&temp).unwrap(), b"planted\n");
+        assert_undone_keeping(&fx, &[temp]);
     }
 
     /// Cleanup failing after the commit point is not a failed publication:

@@ -28,7 +28,6 @@ mod roots_lookup;
 
 pub use closure_import::install_closure_ecosystems;
 use closure_import::*;
-use env::home;
 #[cfg(test)]
 pub(crate) use env::STORE_ENV_LOCK;
 pub(crate) use format::lock_root;
@@ -129,19 +128,23 @@ pub(crate) fn bare_record(identity: &crate::kernel::types::Identity) -> serde_js
 
 impl Store {
     /// Where `open` puts the store, and whether `GREYWARD_STORE` chose it.
-    fn configured_root() -> (PathBuf, bool) {
-        let explicit = std::env::var_os("GREYWARD_STORE").map(PathBuf::from);
-        let from_env = explicit.is_some();
-        (
-            explicit.unwrap_or_else(|| home().join(".greyward/store")),
-            from_env,
-        )
+    /// `HOME` is read only when `GREYWARD_STORE` is unset, and refused
+    /// unless it is absolute (`kernel::home`), so a store is never made
+    /// under the working directory.
+    fn configured_root() -> io::Result<(PathBuf, bool)> {
+        if let Some(explicit) = std::env::var_os("GREYWARD_STORE") {
+            return Ok((PathBuf::from(explicit), true));
+        }
+        let home = crate::kernel::home::home().map_err(|error| {
+            io::Error::other(format!("{error}, or set GREYWARD_STORE to name the store"))
+        })?;
+        Ok((home.join(".greyward/store"), false))
     }
 
     /// Where the store is configured to be (`GREYWARD_STORE`, or
     /// `~/.greyward/store`), as configured: nothing is created or resolved.
-    pub fn configured_path() -> PathBuf {
-        Self::configured_root().0
+    pub fn configured_path() -> io::Result<PathBuf> {
+        Ok(Self::configured_root()?.0)
     }
 
     /// The store `open` would use, without creating or changing anything:
@@ -152,7 +155,7 @@ impl Store {
     /// locate the store and never create it (the local Rust tree cache);
     /// anything that commits, leases or sweeps uses `open`.
     pub fn existing() -> io::Result<Option<Store>> {
-        let (root, _) = Self::configured_root();
+        let (root, _) = Self::configured_root()?;
         let root = match root.canonicalize() {
             Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -208,7 +211,7 @@ impl Store {
     /// named (`ward store path`), reported (`ward doctor`) and emptied
     /// (`ward gc --reset`).
     pub fn probe() -> io::Result<Option<(PathBuf, StoreFormat)>> {
-        let (root, _) = Self::configured_root();
+        let (root, _) = Self::configured_root()?;
         Self::probe_at(&root)
     }
 
@@ -217,7 +220,7 @@ impl Store {
     /// starts here, because it must work on a store whose marker cannot
     /// even be read.
     pub fn locate() -> io::Result<Option<PathBuf>> {
-        let (root, _) = Self::configured_root();
+        let (root, _) = Self::configured_root()?;
         match root.canonicalize() {
             Ok(root) => Ok(Some(root)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -307,7 +310,7 @@ impl Store {
     /// error names the two ways out, `ward gc --reset` and moving the
     /// directory aside.
     pub fn open() -> io::Result<Store> {
-        let (root, from_env) = Self::configured_root();
+        let (root, from_env) = Self::configured_root()?;
         Self::open_root(&root, from_env)
     }
 

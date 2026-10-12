@@ -67,6 +67,8 @@ the tool's own arguments):
 ENVIRONMENT:
   GREYWARD_STORE           store root (default ~/.greyward/store)
   GREYWARD_STRICT=1        refuse every policy exception, like 'ward --strict'
+                           (1, true, yes; 0, false, no or empty for none;
+                           any other value exits 2)
   GREYWARD_POLICY          policy file used instead of ~/.greyward/policy.toml
   GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
@@ -710,7 +712,14 @@ judges the exceptions it records against the policy chain (`GREYWARD_POLICY` or
 project or `--policy` file can add denials and drop trusted keys, never the
 reverse; a `--policy` file that is missing or malformed is a usage error
 (exit 2), never ignored, so CI can tell an operator mistake from a denied
-build.
+build. The other settings fail closed the same way: a `GREYWARD_STRICT`
+value other than `1`, `true`, `yes`, `0`, `false`, `no` or empty (any case)
+is a usage error (exit 2) for every command but `doctor`, which reports it;
+a `~/.greyward/policy.toml` that is a symlink to a missing file is an error
+rather than no policy; and with `GREYWARD_POLICY` unset, a `HOME` that is
+unset or not absolute is refused, since an empty one would make the
+project's own `.greyward/policy.toml` the machine policy. `HOME` is held to
+the same rule wherever ward reads it: the store's default location and `x`.
 
 What a pass proves: every closure file carries a valid signature from a key
 the machine policy trusts (when the policy has a `[signing]` table; see

@@ -46,7 +46,9 @@ pub enum Freshness {
     LastGood,
 }
 
-/// One request, as portable evidence. `url` is already redacted.
+/// One request, as portable evidence. `url` is already redacted, and off
+/// every route it names only the origin, the file name and the query (see
+/// `State::portable_url` in the session).
 ///
 /// Entries describe outcomes: a failed attempt at a request the session
 /// also answered is not one (the session drops it).

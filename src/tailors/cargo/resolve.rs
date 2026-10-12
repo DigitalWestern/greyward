@@ -998,7 +998,8 @@ mod tests {
         assert!(
             entries.iter().any(|entry| entry.class == "git"
                 && entry.method == "POST"
-                && entry.url == format!("{LEAF}/git-upload-pack")
+                // Off every route: origin and file name only.
+                && entry.url == "https://github.com/.../git-upload-pack"
                 && entry.status == 200),
             "{entries:?}"
         );

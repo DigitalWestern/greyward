@@ -321,11 +321,16 @@ impl State {
     /// `keep` is the route's content query keys: in the URLs those values
     /// are kept, since they pick which bytes came back. Free text (the
     /// detail) keeps none.
+    ///
+    /// The portable entry names an off-route URL by origin and file name
+    /// only (see [`Self::portable_url`]); the retry and supersession
+    /// bookkeeping, and the diagnostics row, use the whole redacted URL.
     pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest, keep: &[&str]) {
         let url =
             |text: &str| redact::text_keeping(text, keep).replace(&self.token, redact::REDACTED);
-        entry.url = url(&entry.url);
-        entry.redirected_to = entry.redirected_to.map(|hop| url(&hop));
+        let full = url(&entry.url);
+        entry.url = self.portable_url(&full);
+        entry.redirected_to = entry.redirected_to.map(|hop| self.portable_url(&url(&hop)));
         diag.url = url(&diag.url);
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
         diag.hops = diag.hops.iter().map(|hop| url(hop)).collect();
@@ -335,7 +340,7 @@ impl State {
         }
         inner.seq += 1;
         diag.seq = inner.seq;
-        let key = (entry.method.clone(), entry.url.clone());
+        let key = (entry.method.clone(), full);
         match inner.last.get(&key) {
             Some(previous) if previous != &entry => inner.diagnostics.retries += 1,
             _ => {}
@@ -376,6 +381,57 @@ impl State {
         }
         inner.diagnostics.bytes += diag.bytes;
         push_row(&mut inner.diagnostics, diag);
+    }
+
+    /// How the portable ledger names `redacted`, a URL already redacted.
+    ///
+    /// A URL one of the session's routes serves is on a compiled-in public
+    /// registry, whose paths name packages and never an account (route
+    /// credentials travel in headers, which are never recorded): it is
+    /// kept whole, since it is the evidence of which document was fetched.
+    /// Any other URL (an intercepted git host or unattested registry, a
+    /// refused request) is a host ward knows nothing about, whose path may
+    /// carry an account token (Gemfury's `/<token>/<account>/`), and the
+    /// ledger leaves the machine (`--ledger-export`, a CI artifact): it is
+    /// named by its origin and file name, with its query as redaction left
+    /// it (only content keys keep a value, such as git's `service`). So is
+    /// a mirror path to a route this session does not have. A CONNECT
+    /// target has no path and is kept.
+    fn portable_url(&self, redacted: &str) -> String {
+        match Url::parse(redacted) {
+            Ok(url) if url.host_str().is_some() => {
+                let routed = self
+                    .config
+                    .routes
+                    .iter()
+                    .any(|route| route.endpoint_for(&url).is_some());
+                if routed {
+                    return redacted.to_string();
+                }
+                let mut named = redact::origin_and_file(&url);
+                if let Some(query) = url.query() {
+                    named = format!("{named}?{query}");
+                }
+                named
+            }
+            _ => match redacted.strip_prefix('/') {
+                // `/<token>/<route>/<path>`, the token already redacted.
+                Some(rest) => {
+                    let path = rest.split(['?', '#']).next().unwrap_or_default();
+                    let mut segments = path.split('/');
+                    let _token = segments.next();
+                    let routed = segments.next().is_some_and(|id| self.route(id).is_some());
+                    if routed {
+                        return redacted.to_string();
+                    }
+                    match path.split('/').rfind(|segment| !segment.is_empty()) {
+                        Some(file) => format!("/.../{file}"),
+                        None => "/".to_string(),
+                    }
+                }
+                None => redacted.to_string(),
+            },
+        }
     }
 
     /// Record a request that did not carry the session token. It is not

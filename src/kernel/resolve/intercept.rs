@@ -742,6 +742,44 @@ mod tests {
         assert!(harness.upstream.seen().is_empty());
     }
 
+    /// An account token in the path of a host no route serves (Gemfury's
+    /// `/<token>/<account>/`) never reaches the portable ledger, which
+    /// leaves the machine: the entry names the origin and the file. The
+    /// diagnostics row, which stays on the machine, keeps the whole path.
+    #[test]
+    fn a_path_token_on_an_unrouted_host_stays_out_of_the_portable_ledger() {
+        const TOKEN: &str = "s3cr3tAcc0untT0ken";
+        let harness = Harness::new("intercept-path-token");
+        let path = format!("/{TOKEN}/acme/meta/pkg.json");
+        harness
+            .upstream
+            .set(&path, Behavior::Reply(Reply::new(200, b"{}")));
+        let (session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let answer = tunnel_request(&mut tunnel, &get(&authority, &path), b"");
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        drop(tunnel);
+        let report = session.finish();
+        let portable = serde_json::to_string(&entries(&report)).unwrap();
+        assert!(!portable.contains(TOKEN), "{portable}");
+        assert!(
+            entries(&report)
+                .iter()
+                .any(|entry| entry.url == format!("https://{authority}/.../pkg.json")),
+            "{portable}"
+        );
+        assert!(
+            report
+                .diagnostics
+                .requests
+                .iter()
+                .any(|row| row.url.contains(TOKEN)),
+            "the local row keeps the path"
+        );
+    }
+
     /// A host no route serves is `unattested-index`: forwarded and recorded
     /// under permissive policy, refused when the kind is denied.
     #[test]
@@ -764,10 +802,11 @@ mod tests {
                 assert_eq!(facts.len(), 1, "{facts:?}");
                 assert_eq!(facts[0].kind, policy::UNATTESTED_INDEX);
                 assert_eq!(facts[0].subject, origin);
+                // Off every route, the ledger names origin and file only.
                 assert!(entries(&report)
                     .iter()
                     .any(|entry| entry.class == "artifact"
-                        && entry.url == format!("{origin}/meta/pkg.json")
+                        && entry.url == format!("{origin}/.../pkg.json")
                         && entry.status == 200));
             } else {
                 assert_eq!(answer.status, 403, "{}", answer.text());
@@ -868,13 +907,14 @@ mod tests {
             assert!(
                 git.contains(&(
                     "GET".into(),
-                    // `service` names content for the git row, so the
-                    // ledger keeps its value.
-                    "https://github.com/dtolnay/itoa/info/refs?service=git-upload-pack".into(),
+                    // A git host is off every route, so the path is
+                    // reduced to its file name; `service` names content for
+                    // the git row, so the ledger keeps its value.
+                    "https://github.com/.../refs?service=git-upload-pack".into(),
                     200
                 )) && git.contains(&(
                     "POST".into(),
-                    "https://github.com/dtolnay/itoa/git-upload-pack".into(),
+                    "https://github.com/.../git-upload-pack".into(),
                     200
                 )),
                 "{git:?}"
@@ -984,11 +1024,13 @@ mod tests {
             assert_eq!(at(target).body, body, "{target}");
             assert_eq!(at(target).headers.get("content-encoding"), Some("gzip"));
         }
-        let origin = format!("https://{authority}");
+        // Both name the file only: the ledger names an off-route URL by
+        // origin and file name.
+        let reduced = format!("https://{authority}/.../git-upload-pack");
         assert!(
             entries(&report).iter().any(|entry| entry.class == "git"
-                && entry.url == format!("{origin}{from}")
-                && entry.redirected_to.as_deref() == Some(&format!("{origin}{to}"))
+                && entry.url == reduced
+                && entry.redirected_to.as_deref() == Some(&reduced)
                 && entry.status == 200),
             "{:?}",
             entries(&report)
@@ -1084,7 +1126,7 @@ mod tests {
                 assert_eq!(facts.len(), 2, "{facts:?}");
                 assert!(fact(policy::UNATTESTED_INDEX), "{facts:?}");
                 assert!(entries(&report).iter().any(|entry| entry.class == "git"
-                    && entry.redirected_to.as_deref() == Some(&format!("{origin}/meta/pkg.json"))));
+                    && entry.redirected_to.as_deref() == Some(&format!("{origin}/.../pkg.json"))));
             } else {
                 assert_eq!(answer.status, 403, "{}", answer.text());
                 assert_eq!(harness.upstream.hits("/meta/pkg.json"), 0);

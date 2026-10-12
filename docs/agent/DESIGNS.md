@@ -1534,6 +1534,14 @@ field pass through one redactor:
   to list them. Intercepted hosts without a protocol get all values
   redacted.
 - Redirect chains are redacted hop by hop the same way.
+- Paths: a portable entry keeps the whole path of a URL a route serves
+  (a compiled-in public registry, whose paths name packages, never an
+  account). Any other URL (an intercepted git host or unattested
+  registry, a refused request) is named by its origin, its file name and
+  its redacted query (`https://npm.fury.io/.../pkg-1.0.tgz`), since some
+  registries carry an account token in the path (Gemfury's
+  `/<token>/<account>/`) and the ledger leaves the machine. The
+  diagnostics row keeps the whole redacted URL; it never does.
 - Command operands: the Greyward verb's operands and the tool argv are
   scanned. URL-shaped operands are redacted as above. Values of
   credential-bearing flags (`--password`, `--token`, `--auth`, `-u`/

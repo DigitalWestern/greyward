@@ -71,6 +71,9 @@ pub fn preflight_sync(
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable_in(project)?;
+    // The projection's bin directories go on every child's PATH, where a
+    // ':' in the project's path would split one entry into two.
+    crate::kernel::platform::refuse_path_separator("the project", project.path())?;
     let present = tailors::detected_in(project)?;
     // No project is the answer before any lock is: `ward --frozen` in the
     // wrong directory must say there is no manifest here, not that

@@ -764,14 +764,9 @@ pub fn launch(
         )));
     }
     let launch_env = tool.launch_env(&store, activity, platform, &root, &toolchain)?;
-    let mut path: Vec<String> = launch_env
-        .path
-        .iter()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect();
-    path.push(std::env::var("PATH").unwrap_or_default());
+    let path = crate::kernel::platform::child_path(&launch_env.path)?;
     let mut command = Command::new(&executable);
-    command.args(&request.args).env("PATH", path.join(":"));
+    command.args(&request.args).env("PATH", path);
     for (key, value) in launch_env.vars {
         command.env(key, value);
     }

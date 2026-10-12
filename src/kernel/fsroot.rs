@@ -1523,6 +1523,14 @@ mod tests {
         let stale_file = dir.join(ours(1));
         fs::write(&stale_file, b"x").unwrap();
         age(&stale_file);
+        // Another publication's probe holds a shared lock on it. That is no
+        // writer, so the temporary is still dead: the probe is shared, since
+        // NFS refuses an exclusive lock on a read-only descriptor.
+        let probed = dir.join(ours(0xa));
+        fs::write(&probed, b"x").unwrap();
+        age(&probed);
+        let other_probe = fs::File::open(&probed).unwrap();
+        other_probe.try_lock_shared().unwrap();
         let stale_link = dir.join(ours(2));
         symlink("/nowhere", &stale_link).unwrap();
         age(&stale_link);
@@ -1572,7 +1580,7 @@ mod tests {
             fs::symlink_metadata(&stale_link).is_err(),
             "stale link kept"
         );
-        for gone in [&stale_owner, &orphan_owner] {
+        for gone in [&probed, &stale_owner, &orphan_owner] {
             assert!(fs::symlink_metadata(gone).is_err(), "{}", gone.display());
         }
         for kept in [
@@ -1607,7 +1615,7 @@ mod tests {
             .filter(|name| name.ends_with(".lock") && !name.contains(&"8".repeat(32)))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-        drop((paused_writer, paused_link_writer));
+        drop((paused_writer, paused_link_writer, other_probe));
     }
 
     struct SystemTimeNow;

@@ -208,7 +208,10 @@ fn dead_writer(dirfd: RawFd, name: &[u8], stat: &libc::stat) -> Option<fs::File>
     {
         return None;
     }
-    file.try_lock().ok()?;
+    // Shared: it still conflicts with the writer's exclusive lock, and NFS
+    // grants it on this read-only descriptor where it refuses an exclusive
+    // one. Another publication's probe holding it too is no writer.
+    file.try_lock_shared().ok()?;
     Some(file)
 }
 

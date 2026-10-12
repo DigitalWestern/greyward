@@ -127,8 +127,8 @@ pub(crate) fn project_root(cwd: &Path) -> io::Result<PathBuf> {
 pub(crate) fn package_script(
     root: &Path,
     name: &str,
-    args: &[String],
-) -> io::Result<Option<Vec<(String, String)>>> {
+    args: &[std::ffi::OsString],
+) -> io::Result<Option<Vec<(String, std::ffi::OsString)>>> {
     for tailor in crate::tailors::registry() {
         if let Some(steps) = tailor.project_script(root, name, args)? {
             return Ok(Some(steps));

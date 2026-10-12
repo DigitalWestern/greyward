@@ -9,6 +9,7 @@ use crate::commands::sync;
 use crate::kernel::context::Context;
 use crate::kernel::supervise;
 use crate::tailors::{self, ScriptRun};
+use std::ffi::OsString;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -86,7 +87,7 @@ fn unprovided_runtime(dir: &Path, program: &str, prefix: &[String]) -> io::Resul
 fn projected_script(
     dir: &std::path::Path,
     cwd: &std::path::Path,
-    cmd: &[String],
+    cmd: &[OsString],
 ) -> io::Result<Option<ScriptRun>> {
     for tailor in tailors::registry() {
         if let Some(script) = tailor.projected_script(dir, cwd, cmd)? {
@@ -96,7 +97,7 @@ fn projected_script(
     Ok(None)
 }
 
-pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
+pub fn run(ctx: &Context, cmd: &[OsString], frozen: bool) -> io::Result<i32> {
     let activity = &ctx.activity;
     if cmd.is_empty() {
         return Err(io::Error::new(
@@ -104,9 +105,15 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             "run: no command given",
         ));
     }
+    // The command line as text, for the checks and messages that read it.
+    // The program gets `cmd` itself: an argument need not be UTF-8.
+    let words: Vec<String> = cmd
+        .iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
     // Before the environment is even looked up: these fail the same way in
     // every project, and the explanation is the point.
-    if let Some(refusal) = refused_command(cmd) {
+    if let Some(refusal) = refused_command(&words) {
         return Err(crate::kernel::error::refused(
             io::ErrorKind::InvalidInput,
             refusal,
@@ -127,14 +134,14 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     }
     let mut command = std::process::Command::new(&cmd[0]);
     command.args(&cmd[1..]);
-    let prefix = shared::projected_env(ctx, &dir, &cwd, cmd, &mut command)?;
+    let prefix = shared::projected_env(ctx, &dir, &cwd, &words, &mut command)?;
     if prefix.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
                 "no environment projected here for command '{}', and no manifest to sync one \
                  from in {} (see 'ward help inputs')",
-                cmd[0],
+                words[0],
                 dir.display()
             ),
         ));
@@ -142,7 +149,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     // A package.json script named like a runtime (`go`, `python`) is a
     // script: its steps run, not a program of that name.
     if script.is_none() {
-        if let Some(refusal) = unprovided_runtime(&dir, &cmd[0], &prefix)? {
+        if let Some(refusal) = unprovided_runtime(&dir, &words[0], &prefix)? {
             return Err(io::Error::new(io::ErrorKind::NotFound, refusal));
         }
     }
@@ -158,7 +165,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
             .filter(|key| key.to_string_lossy().starts_with(script.scrubbed_prefix))
             .collect();
         for (label, text) in &script.steps {
-            crate::kernel::ui::note(&format!("> {label}: {text}"));
+            crate::kernel::ui::note(&format!("> {label}: {}", text.to_string_lossy()));
             let mut step = std::process::Command::new("/bin/sh");
             step.arg("-c").arg(text).current_dir(&dir);
             for (key, value) in &envs {

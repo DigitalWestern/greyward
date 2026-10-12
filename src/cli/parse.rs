@@ -163,7 +163,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
             return Ok(Parsed::Script {
                 options,
                 name: other.to_string(),
-                args: rest.to_vec(),
+                args: rest.iter().map(Into::into).collect(),
                 message: with_suggestion(
                     format!("unknown command '{other}'"),
                     other,
@@ -742,7 +742,9 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
     }
     let args = args.to_vec();
     Ok(Some(match name {
-        "run" => Command::Run { command: args },
+        "run" => Command::Run {
+            command: args.into_iter().map(Into::into).collect(),
+        },
         _ => Command::Build { ecosystem, args },
     }))
 }
@@ -1489,6 +1491,11 @@ mod tests {
         words.iter().map(|word| word.to_string()).collect()
     }
 
+    /// A program's arguments, which the grammar keeps as bytes.
+    fn osargv(words: &[&str]) -> Vec<std::ffi::OsString> {
+        words.iter().map(Into::into).collect()
+    }
+
     fn run(words: &[&str]) -> Invocation {
         match parse(&argv(words)).unwrap() {
             Parsed::Run(invocation) => invocation,
@@ -1548,7 +1555,7 @@ mod tests {
                     ..Options::default()
                 },
                 name: "dev".into(),
-                args: argv(&["--port", "3000"]),
+                args: osargv(&["--port", "3000"]),
                 message: "unknown command 'dev'".into(),
             })
         );
@@ -1760,7 +1767,7 @@ mod tests {
         assert_eq!(
             invocation.command,
             Command::Run {
-                command: argv(&["pytest"]),
+                command: osargv(&["pytest"]),
             }
         );
         assert_eq!(
@@ -1784,7 +1791,7 @@ mod tests {
             flagged(&["run", "pytest", "--frozen"]),
             (
                 Command::Run {
-                    command: argv(&["pytest", "--frozen"]),
+                    command: osargv(&["pytest", "--frozen"]),
                 },
                 SyncFlags::default()
             )
@@ -1965,7 +1972,7 @@ mod tests {
         assert_eq!(sync, sync_flags(false, true));
         let (command, sync) = flagged(&["x", "--strict", "ruff", "--frozen"]);
         assert!(
-            matches!(command, Command::X { ref args, .. } if args == &argv(&["--frozen"])),
+            matches!(command, Command::X { ref args, .. } if args == &osargv(&["--frozen"])),
             "past the tool its arguments are the tool's"
         );
         assert_eq!(sync, sync_flags(false, true));
@@ -2328,7 +2335,7 @@ mod tests {
                 ecosystem: None,
                 from: None,
                 tool: "ruff".into(),
-                args: argv(&["check", "--fix", "."]),
+                args: osargv(&["check", "--fix", "."]),
             }
         );
         assert_eq!(
@@ -2337,7 +2344,7 @@ mod tests {
                 ecosystem: Some("node".into()),
                 from: Some("@angular/cli".into()),
                 tool: "ng@18".into(),
-                args: argv(&["--version"]),
+                args: osargv(&["--version"]),
             }
         );
         assert_eq!(
@@ -2346,7 +2353,7 @@ mod tests {
                 ecosystem: Some("python".into()),
                 from: None,
                 tool: "cowsay@6.1".into(),
-                args: argv(&["hi"]),
+                args: osargv(&["hi"]),
             }
         );
         assert!(message(&["x", "--", "--weird-tool"]).contains("x: invalid tool"));
@@ -2437,7 +2444,7 @@ mod tests {
                     ecosystem: selected.clone(),
                     from: None,
                     tool: "tool@1".into(),
-                    args: argv(&["a"]),
+                    args: osargv(&["a"]),
                 }
             );
         }
@@ -2493,13 +2500,13 @@ mod tests {
         assert_eq!(
             command(&["run", "python", "-c", "print(1)", "--help"]),
             Command::Run {
-                command: argv(&["python", "-c", "print(1)", "--help"]),
+                command: osargv(&["python", "-c", "print(1)", "--help"]),
             }
         );
         assert_eq!(
             command(&["run", "--", "-h"]),
             Command::Run {
-                command: argv(&["-h"]),
+                command: osargv(&["-h"]),
             }
         );
         assert_eq!(message(&["run"]), "run: no command given");
@@ -2932,7 +2939,7 @@ mod tests {
         assert_eq!(
             command(&["run", "make", "-C", "sub"]),
             Command::Run {
-                command: argv(&["make", "-C", "sub"]),
+                command: osargv(&["make", "-C", "sub"]),
             }
         );
     }
@@ -2962,7 +2969,7 @@ mod tests {
         assert_eq!(
             command(&["run", "pytest", "-q"]),
             Command::Run {
-                command: argv(&["pytest", "-q"]),
+                command: osargv(&["pytest", "-q"]),
             }
         );
     }
@@ -3042,7 +3049,7 @@ mod tests {
                 ecosystem: None,
                 from: None,
                 tool: "ruff".into(),
-                args: argv(&["-q"])
+                args: osargv(&["-q"])
             }
         );
         assert!(!run(&["fmt", "--", "-v"]).options.verbose);

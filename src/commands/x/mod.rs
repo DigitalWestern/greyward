@@ -44,7 +44,7 @@ pub struct Request {
     pub from: Option<String>,
     /// `tool` or `tool@version`.
     pub tool: String,
-    pub args: Vec<String>,
+    pub args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

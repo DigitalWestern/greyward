@@ -35,17 +35,20 @@
 
 mod attest;
 mod completions;
+mod osargs;
 mod parse;
 mod spec;
 mod x;
 
 pub use self::completions::completions;
+pub use self::osargs::parse_os;
 pub use self::parse::{option_spellings, parse, suggest};
 pub use self::spec::{
     after_command, canonical_name, help, inputs, spec, sync_footer, usage, BUILD_WORDS, COMMANDS,
     LS_WORDS, SHELL_WORDS, SYNC_ALIASES,
 };
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -104,7 +107,7 @@ pub enum Command {
     /// The program (or package.json script) and its arguments. `SyncFlags`
     /// typed before the verb govern the implicit sync, never the program.
     Run {
-        command: Vec<String>,
+        command: Vec<OsString>,
     },
     /// `ward <file>` for a file of an ecosystem the project does not have,
     /// or outside any project: never parsed from argv, `commands::resolve`
@@ -151,7 +154,7 @@ pub enum Command {
         ecosystem: Option<String>,
         from: Option<String>,
         tool: String,
-        args: Vec<String>,
+        args: Vec<OsString>,
     },
     /// Remove cached x environments. With no tool, removes every x
     /// environment; otherwise the tool's environments only.
@@ -227,7 +230,7 @@ impl Command {
 pub struct FileRun {
     pub ecosystem: String,
     pub file: String,
-    pub args: Vec<String>,
+    pub args: Vec<OsString>,
 }
 
 /// `ward attest --ledger-export` and `--ledger-import`.
@@ -334,7 +337,7 @@ pub enum Parsed {
     Script {
         options: Options,
         name: String,
-        args: Vec<String>,
+        args: Vec<OsString>,
         message: String,
     },
 }

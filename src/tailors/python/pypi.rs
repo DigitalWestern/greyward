@@ -441,6 +441,8 @@ pub struct HashPin {
     pub line: usize,
     /// PEP 503 normalized.
     pub name: String,
+    /// The version an `==` pins, if the line has one.
+    pub version: Option<String>,
     /// Lowercase hex, no "sha256:" prefix.
     pub sha256s: Vec<String>,
 }
@@ -488,9 +490,29 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
         if name.is_empty() {
             continue;
         }
+        // The exact version an `==` pins, after any extras.
+        let rest = spec[name.len()..].trim_start();
+        let rest = match rest.strip_prefix('[') {
+            Some(extras) => extras.split_once(']').map_or("", |(_, rest)| rest),
+            None => rest,
+        };
+        let version = rest
+            .trim_start()
+            .strip_prefix("==")
+            .filter(|version| !version.starts_with('='))
+            .map(|version| {
+                version
+                    .trim_start()
+                    .split(|c: char| c == ';' || c == ',' || c.is_whitespace())
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .filter(|version| !version.is_empty());
         pins.push(HashPin {
             line,
             name: normalize_name(&name),
+            version,
             sha256s,
         });
     }
@@ -502,11 +524,19 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
 /// uv, which takes the index's hashes: every hash the user wrote for a
 /// package the lock keeps must still be one the lock allows, or the pin
 /// that guarded against an upstream change would be gone. A package the
-/// lock leaves out (a marker false on this platform) has nothing to check.
+/// lock leaves out, or keeps at another version than the line's `==` (a
+/// marker false on this platform, the package reached another way), is not
+/// what the line pinned, and has nothing to check.
 pub fn check_hash_pins(source: &str, file: &str, lock: &str) -> io::Result<()> {
     let locked = parse_requirements(lock)?;
     for pin in hash_pins(source, file)? {
-        let Some(requirement) = locked.iter().find(|locked| locked.name == pin.name) else {
+        let Some(requirement) = locked.iter().find(|locked| {
+            locked.name == pin.name
+                && pin
+                    .version
+                    .as_ref()
+                    .is_none_or(|version| *version == locked.version)
+        }) else {
             continue;
         };
         if let Some(dropped) = pin
@@ -1759,6 +1789,7 @@ mod requirement_hash_pin_tests {
             vec![HashPin {
                 line: 2,
                 name: "six-pkg".into(),
+                version: Some("1.17.0".into()),
                 sha256s: vec![A.into(), B.into()],
             }]
         );
@@ -1773,6 +1804,12 @@ mod requirement_hash_pin_tests {
         check_hash_pins(&source, "requirements.txt", &kept).unwrap();
         let other = format!("idna==3.10 --hash=sha256:{B}\n");
         check_hash_pins(&source, "requirements.txt", &other).unwrap();
+        // A pin whose marker is false here, for a package the lock keeps at
+        // another version: not the line's pin, so nothing to check.
+        let elsewhere = format!("six==1.16.0 --hash=sha256:{B}\n");
+        check_hash_pins(&source, "requirements.txt", &elsewhere).unwrap();
+        let ranged = format!("six>=1 ; python_version >= \"3\" --hash=sha256:{A}\n");
+        check_hash_pins(&ranged, "requirements.txt", &elsewhere).unwrap_err();
         let dropped = format!("six==1.17.0 --hash=sha256:{B}\n");
         let error = check_hash_pins(&source, "requirements.txt", &dropped).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

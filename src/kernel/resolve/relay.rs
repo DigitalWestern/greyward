@@ -672,17 +672,13 @@ mod linux {
         /// takes its place.
         #[test]
         fn the_proxy_socket_is_the_one_held_at_start() {
-            let dir = crate::kernel::testutil::TempDir::named("relay-held");
             // A short path: sun_path is 108 bytes.
-            let short =
-                std::path::PathBuf::from(format!("/tmp/greyward-held-{}", std::process::id()));
-            let _ = std::fs::remove_file(&short);
-            std::os::unix::fs::symlink(&dir.0, &short).unwrap();
-            let real = std::os::unix::net::UnixListener::bind(short.join("p.sock")).unwrap();
-            let other = std::os::unix::net::UnixListener::bind(short.join("o.sock")).unwrap();
-            let held = ProxySocket::hold(&short.join("p.sock")).unwrap();
-            std::fs::rename(short.join("p.sock"), short.join("moved.sock")).unwrap();
-            std::os::unix::fs::symlink(short.join("o.sock"), short.join("p.sock")).unwrap();
+            let sockets = crate::kernel::testutil::SocketDir::new();
+            let real = std::os::unix::net::UnixListener::bind(sockets.socket("p.sock")).unwrap();
+            let other = std::os::unix::net::UnixListener::bind(sockets.socket("o.sock")).unwrap();
+            let held = ProxySocket::hold(&sockets.socket("p.sock")).unwrap();
+            std::fs::rename(sockets.socket("p.sock"), sockets.socket("moved.sock")).unwrap();
+            std::os::unix::fs::symlink(sockets.socket("o.sock"), sockets.socket("p.sock")).unwrap();
             let mut stream = held.connect().unwrap();
             stream.write_all(b"x").unwrap();
             real.set_nonblocking(true).unwrap();
@@ -690,10 +686,9 @@ mod linux {
             assert!(real.accept().is_ok(), "the held socket got the connection");
             assert!(other.accept().is_err(), "the planted one did not");
             assert!(
-                ProxySocket::hold(&short.join("p.sock")).is_err(),
+                ProxySocket::hold(&sockets.socket("p.sock")).is_err(),
                 "a symlink is refused"
             );
-            std::fs::remove_file(&short).unwrap();
         }
 
         /// The tool runs under the real filter with the real notification

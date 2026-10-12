@@ -17,6 +17,7 @@ fn main() {
             commands::Pending::Command(invocation.command),
         ),
         Ok(cli::Parsed::Relay(relay)) => exit(commands::relay(relay)),
+        Ok(cli::Parsed::ScriptNames) => exit(commands::script_names()),
         Ok(cli::Parsed::Print(text)) => {
             print!("{text}");
             exit(0);

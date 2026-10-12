@@ -71,9 +71,11 @@ ENVIRONMENT:
   GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
 
-Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
-the program's status through. Which files ward reads per ecosystem:
-'ward help inputs'. Full reference: docs/human/CLI.md.
+Exit status: 0 success, 1 failure, 2 usage error, 3 refused by rule, 4 stale
+lock, 5 unsupported here, 6 network, 128+n stopped by signal n; 'run', 'x' and
+'fmt' pass the program's status through ('run' exits 127 when it cannot find
+the program). Which files ward reads per ecosystem: 'ward help inputs'. Full
+reference: docs/human/CLI.md.
 ```
 
 ## Conventions
@@ -131,6 +133,7 @@ the program's status through. Which files ward reads per ecosystem:
   | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
   | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
   | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; HTTP 403/404, invalid request or proxy settings, and TLS certificate/protocol failures exit 1 |
+  | 127 | `ward run` could not find the program it was asked to run (a shell's status for it) | check the name, or `ward run` a path |
   | 128 + n | stopped by signal n (130 for Ctrl-C) | |
 
   Under `--json` the failure object carries the same class as a key:
@@ -209,8 +212,12 @@ the program's status through. Which files ward reads per ecosystem:
 
 `ward completions bash|zsh|fish` prints a script generated from the same
 command table as the help: commands, per-command options, `store path|roots`,
-`build <ecosystem>`. package.json script names complete under `run` and as
-the first word when a package.json is present.
+`build <ecosystem>`, and the values of options that take one (`--shell`,
+`--policy <file>`). package.json script names complete under `run` and as
+the first word when a package.json is present: the script asks `ward
+__scripts`, a hidden command that reads the project's package.json as JSON
+and prints its script names one per line, so a minified file or a name like
+`test:unit` completes as written.
 
 ## Everyday verbs
 

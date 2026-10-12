@@ -29,7 +29,9 @@
 //!   `install` and `i` still parse as that command but are never listed,
 //!   completed, or suggested (`Group::Bare`).
 //!
-//! Exit status contract: 0 success, 1 the command failed, 2 usage error.
+//! Exit status contract: 0 success, 1 the command failed, 2 usage error,
+//! 3 to 6 a classified failure (`kernel::error::Class::exit_code`), 127 a
+//! program `run` cannot find, 128 + n a signal.
 
 mod attest;
 mod completions;
@@ -90,11 +92,13 @@ pub enum Command {
     Plan {
         json: bool,
     },
-    /// Everything after `build` (ecosystem name and tool arguments); the
-    /// ecosystem is inferred by the dispatcher from the project layout.
-    /// `SyncFlags` typed before the verb govern the implicit sync, never
-    /// the build itself.
+    /// `build [<ecosystem>] [--] [<args>...]`: the ecosystem when the first
+    /// word names one that builds (never after `--`), else `None` and the
+    /// dispatcher infers it from the project layout; then the tool's
+    /// arguments. `SyncFlags` typed before the verb govern the implicit
+    /// sync, never the build itself.
     Build {
+        ecosystem: Option<String>,
         args: Vec<String>,
     },
     /// The program (or package.json script) and its arguments. `SyncFlags`
@@ -318,6 +322,9 @@ pub enum Parsed {
     /// resolution door's sandbox. ward starts it; nobody types it, so it is
     /// never listed, completed, or suggested, and it takes no global option.
     Relay(RelayInvocation),
+    /// The hidden `__scripts`: the package.json script names, one per line,
+    /// for the completion scripts. Never listed, completed, or suggested.
+    ScriptNames,
     /// Print to stdout and exit 0 (help, version).
     Print(String),
     /// `ward` with no command: `sync` inside a project, usage outside.

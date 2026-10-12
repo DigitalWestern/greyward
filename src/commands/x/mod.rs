@@ -539,11 +539,21 @@ fn cached_projection(
             "x: cached environment object is missing or outside the active store; run the command again",
         ));
     }
-    let env_path = path.canonicalize().map_err(|_| {
-        other(
+    // A missing object is rebuilt by running again; any other failure to
+    // resolve it (EACCES, EIO) is reported with its cause, since running
+    // again would meet it again.
+    let env_path = path.canonicalize().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => other(
             "x: cached environment object is unavailable; \
              run the command again to rebuild it",
-        )
+        ),
+        _ => io::Error::new(
+            error.kind(),
+            format!(
+                "x: cannot resolve the cached environment object {}: {error}",
+                path.display()
+            ),
+        ),
     })?;
     check_projection_target(store, root, ecosystem, &closure, &env_path)?;
     Ok((closure, id))

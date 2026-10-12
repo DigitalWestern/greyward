@@ -28,6 +28,7 @@ pub(crate) mod sync;
 pub(crate) mod toolchain;
 pub(crate) mod x;
 
+pub use crate::commands::completions::script_names;
 pub use crate::commands::x::environment_name as x_environment_name;
 pub use crate::kernel::context::Context;
 
@@ -352,7 +353,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         // `json` is not read here: plan's output is JSON either way, and
         // the flag only tells `main` which error renderer to use.
         Plan { .. } => plan::run(&ctx, sync.frozen).map(|_| 0),
-        Build { args } => build::run(&ctx, &args, sync.frozen).map(|_| 0),
+        Build { ecosystem, args } => build::run(&ctx, ecosystem, &args, sync.frozen).map(|_| 0),
         Run { command } => run::run(&ctx, &command, sync.frozen),
         File(request) => file::run(&ctx, &request),
         // Like `run`, `env` needs the store open: a recorded runtime is a

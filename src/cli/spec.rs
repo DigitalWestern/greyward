@@ -1007,9 +1007,11 @@ pub fn usage() -> String {
     text.push('\n');
     text.push_str(ENVIRONMENT);
     text.push_str(
-        "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass\n\
-         the program's status through. Which files ward reads per ecosystem:\n\
-         'ward help inputs'. Full reference: docs/human/CLI.md.\n",
+        "\nExit status: 0 success, 1 failure, 2 usage error, 3 refused by rule, 4 stale\n\
+         lock, 5 unsupported here, 6 network, 128+n stopped by signal n; 'run', 'x' and\n\
+         'fmt' pass the program's status through ('run' exits 127 when it cannot find\n\
+         the program). Which files ward reads per ecosystem: 'ward help inputs'. Full\n\
+         reference: docs/human/CLI.md.\n",
     );
     text
 }
@@ -1201,6 +1203,16 @@ mod tests {
         assert!(text.contains("ward <script> [<args>...]"));
         assert!(text.contains("ward <file> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
+        // Every status the classes and signals produce, not only 0 to 2.
+        for status in [
+            "3 refused",
+            "4 stale",
+            "5 unsupported",
+            "6 network",
+            "128+n",
+        ] {
+            assert!(words(&text).contains(status), "usage lacks {status}");
+        }
     }
 
     fn words(text: &str) -> String {

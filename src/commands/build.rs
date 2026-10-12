@@ -10,16 +10,42 @@ use crate::kernel::policy;
 use crate::tailors::{self, Tailor};
 use std::io;
 
+/// `ward build` with nothing to build here: every ecosystem it builds, by
+/// the file that marks its project, read from the tailors so a new one is
+/// never left out.
+fn no_build_project() -> io::Error {
+    let kinds: Vec<String> = tailors::registry()
+        .iter()
+        .filter(|tailor| tailor.builds())
+        .map(|tailor| {
+            let marker = tailor.input_files().split(", ").next().unwrap_or_default();
+            format!("{marker} ({})", tailor.id())
+        })
+        .collect();
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "ward build requires a project with one of: {}",
+            kinds.join(", ")
+        ),
+    )
+}
+
 /// Explicit ecosystem, or inferred when exactly one build-capable ecosystem
 /// is present.
-pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
+pub fn run(
+    ctx: &Context,
+    ecosystem: Option<String>,
+    args: &[String],
+    frozen: bool,
+) -> io::Result<()> {
     let cwd = ctx.project_dir();
-    let explicit = args
-        .first()
-        .and_then(|word| tailors::by_id(word))
+    let explicit = ecosystem
+        .as_deref()
+        .and_then(tailors::by_id)
         .filter(|tailor| tailor.builds());
     let (tailor, rest): (&dyn Tailor, &[String]) = match explicit {
-        Some(tailor) => (tailor, &args[1..]),
+        Some(tailor) => (tailor, args),
         None => {
             let mut present = Vec::new();
             for tailor in tailors::registry() {
@@ -29,12 +55,7 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
             }
             match present.as_slice() {
                 [one] => (*one, args),
-                [] => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "ward build requires a Cargo.toml, go.mod, or mix.exs project",
-                    ))
-                }
+                [] => return Err(no_build_project()),
                 many => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -81,4 +102,19 @@ pub fn run(ctx: &Context, args: &[String], frozen: bool) -> io::Result<()> {
     let mut attribution = policy::Attribution::open(tailor.id())?;
     tailor.build(ctx, &root, &cwd, rest, selected, &mut attribution)?;
     attribution.finish(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every ecosystem `ward build` builds is named by its project file,
+    /// .NET's `*.csproj` among them.
+    #[test]
+    fn nothing_to_build_names_every_building_ecosystem() {
+        let message = no_build_project().to_string();
+        for marker in ["Cargo.toml", "go.mod", "mix.exs", "*.csproj"] {
+            assert!(message.contains(marker), "{message}");
+        }
+    }
 }

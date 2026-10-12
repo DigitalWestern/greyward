@@ -215,7 +215,7 @@ fn status_with_stderr(
 #[allow(clippy::disallowed_methods)]
 fn spawn_unmanaged(command: &mut Command) -> io::Result<std::process::Child> {
     // A child that never started ran no build (#679).
-    command.spawn().map_err(crate::kernel::error::sandbox_setup)
+    command.spawn().map_err(crate::kernel::error::sandbox_spawn)
 }
 
 /// The child's status, unless its stderr shows the sandbox itself failed
@@ -2384,7 +2384,8 @@ mod tests {
     }
 
     /// A sandbox engine that could not be started ran no build, supervised
-    /// or not; one that ran and failed returns its status (#679).
+    /// or not. One that ran and failed returns its status, and a spawn the
+    /// command's own arguments made fail stays the build's failure (#679).
     #[test]
     fn a_sandbox_engine_that_never_started_is_a_setup_failure() {
         let root = temp_dir("never-started");
@@ -2410,6 +2411,25 @@ mod tests {
                 .stderr(std::process::Stdio::piped());
             let (status, _) = status_with_stderr(&mut command, supervised).unwrap();
             assert_eq!(status.code(), Some(3));
+
+            // A spawn the command's own arguments make fail is the build's
+            // failure: an argument past the kernel's 128 KiB limit, and
+            // one holding a NUL byte.
+            let script = format!("# {}", "x".repeat(200 * 1024));
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", &script])
+                .stderr(std::process::Stdio::piped());
+            let error = status_with_stderr(&mut command, supervised).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+            assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "true\0"])
+                .stderr(std::process::Stdio::piped());
+            let error = status_with_stderr(&mut command, supervised).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
         }
     }
 

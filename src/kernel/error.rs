@@ -179,6 +179,20 @@ pub(crate) fn sandbox_setup(error: io::Error) -> io::Error {
     io::Error::new(error.kind(), SandboxSetup(error))
 }
 
+/// A sandbox engine's failed spawn, marked as [`sandbox_setup`] when the
+/// backend could not start it (the engine missing or not executable, out
+/// of descriptors, processes or memory). A failure the build's own
+/// command caused stays unmarked, because the same command fails the same
+/// way in any view: an argument list or environment too large (`E2BIG`,
+/// an npm script past the kernel's 128 KiB argument limit) or one holding
+/// a NUL byte (`InvalidInput`).
+pub(crate) fn sandbox_spawn(error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(libc::E2BIG) || error.kind() == io::ErrorKind::InvalidInput {
+        return error;
+    }
+    sandbox_setup(error)
+}
+
 /// Whether `error` is, or wraps through [`context`], a [`sandbox_setup`]
 /// error.
 pub(crate) fn is_sandbox_setup(error: &io::Error) -> bool {

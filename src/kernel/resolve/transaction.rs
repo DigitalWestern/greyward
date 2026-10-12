@@ -394,11 +394,15 @@ impl<'a> Transaction<'a> {
         );
         journal.created_dirs = created;
         let journals = self.journal_dir()?;
+        // The target being swapped when a failure came, if any.
+        let mut swapping = None;
         let outcome = (|| {
             write_journal(&journals, &journal)?;
             fault(FaultPoint::Journaled)?;
             for (index, entry) in plan.iter().enumerate() {
+                swapping = Some(index);
                 self.swap(entry, index)?;
+                swapping = None;
                 journal.targets[index].state = TargetState::Swapped;
                 write_journal(&journals, &journal)?;
                 fault(FaultPoint::Marked(index))?;
@@ -425,7 +429,12 @@ impl<'a> Transaction<'a> {
                 Err(error)
             }
             Err(error) => {
-                let undone = undo(self.store, &self.root, &journal);
+                // A no-replace create that found its name taken: what is
+                // there is another writer's, even with the new bytes.
+                let foreign = swapping
+                    .filter(|_| error.kind() == io::ErrorKind::AlreadyExists)
+                    .map(|index| journal.targets[index].target.as_str());
+                let undone = undo(self.store, &self.root, &journal, foreign);
                 match undone {
                     Ok(notes) => {
                         self.finished = true;
@@ -1192,6 +1201,8 @@ pub enum FaultPoint {
     Releasing,
     /// In `finish`, after the release and before the journal is deleted.
     Released,
+    /// In undo, after a target was looked at and before it is acted on.
+    Undoing,
 }
 
 #[cfg(test)]
@@ -1552,6 +1563,119 @@ mod tests {
         assert!(error.to_string().contains("appeared"), "{error}");
         assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(USER_EDIT));
         assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_clean(&fx);
+    }
+
+    /// A created target that another process writes during the run with
+    /// the very bytes the tool produced: the no-replace create refuses, and
+    /// undo leaves the other process's file, though its bytes are ours.
+    #[test]
+    fn a_created_target_that_appears_with_the_same_bytes_is_kept() {
+        let fx = fixture("created-appears-same", true);
+        let project = fx.project.clone();
+        let error = run_door(
+            &fx,
+            |_| {},
+            move |point| {
+                if point == FaultPoint::TempWritten(1) {
+                    fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                }
+                Fault::Continue
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("appeared"), "{error}");
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(OLD_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
+    /// The temporary of `relative` named by the journal.
+    fn journal_temp(fx: &Fixture, relative: &str) -> PathBuf {
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path(fx)).unwrap()).unwrap();
+        let temp = journal["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["target"] == relative)
+            .unwrap()["temp"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        fx.project.join(temp)
+    }
+
+    /// A save that lands after undo looked at a target and before it acts:
+    /// for a replaced target put back by exchange, one restored from the
+    /// stored copy, and a created one, the save is kept and reported, and
+    /// the rest is still undone.
+    #[test]
+    fn a_save_during_undo_is_kept_and_reported() {
+        for (edited, from_copy) in [
+            ("package.json", false),
+            ("package.json", true),
+            ("package-lock.json", false),
+        ] {
+            let fx = fixture("undo-race", true);
+            let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+            if from_copy {
+                fs::remove_file(journal_temp(&fx, "package.json")).unwrap();
+            }
+            // Undo runs last target first: the receipt, the lock, then the
+            // manifest.
+            let at = if edited == "package.json" { 3 } else { 2 };
+            let path = fx.project.join(edited);
+            let mut seen = 0;
+            let notes = recover_with(&fx, move |point| {
+                if point == FaultPoint::Undoing {
+                    seen += 1;
+                    if seen == at {
+                        fs::write(&path, USER_EDIT).unwrap();
+                    }
+                }
+                Fault::Continue
+            })
+            .unwrap();
+            let case = format!("{edited} from_copy={from_copy}");
+            assert!(
+                notes.contains(&Restored::LeftEdited(fx.project.join(edited))),
+                "{case}: {notes:?}"
+            );
+            assert_eq!(read(&fx, edited).as_deref(), Some(USER_EDIT), "{case}");
+            if edited == "package.json" {
+                assert_eq!(read(&fx, "package-lock.json"), None, "{case}");
+            } else {
+                assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            }
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT),
+                "{case}"
+            );
+            assert_clean(&fx);
+        }
+    }
+
+    /// A crash after a target's temporary was written and before its swap,
+    /// then a save of the same bytes at the target: the swap never
+    /// happened, so the file is the user's, kept and reported, never
+    /// exchanged with the temporary.
+    #[test]
+    fn an_unswapped_pending_target_is_left_to_the_user() {
+        let fx = fixture("pending-unswapped", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::TempWritten(0)));
+        fs::write(fx.project.join("package.json"), NEW_MANIFEST).unwrap();
+        let notes = recover(&fx);
+        assert!(
+            notes.contains(&Restored::LeftEdited(fx.project.join("package.json"))),
+            "{notes:?}"
+        );
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
         assert_clean(&fx);
     }
 

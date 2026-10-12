@@ -406,7 +406,7 @@ argument. A release is compared by version only, because a release does not
 name the commit it was built from: a local build of the same crate version
 is "at the latest release's version" and stays. The asset names and the
 checksum rule are `install.sh`'s, so the two read a release the same way. Releases are built for Linux x86_64
-only for now (macOS waits on #66); a 404 from the anonymous request is
+only for now (macOS waits on the macOS gate in FOLLOW-UPS.md); a 404 from the anonymous request is
 reported as no published release. `GREYWARD_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 
@@ -944,7 +944,7 @@ operator must inspect any remaining `greyward-resolve-*` container with Podman
 before removing it. Automated crash recovery is deferred.
 
 **--version** prints `ward <crate version> (<short commit> <commit date>)`,
-stamped at build time from the checkout (`ward 0.1.0 (7688cfd 2026-09-21)`);
+stamped at build time from the checkout (`ward 0.2.0 (58f3482 2026-10-11)`);
 outside a checkout the parenthesis says `unknown build`. Two binaries of the
 same crate version built from different commits print different lines, which
 is what makes "is this binary stale?" answerable and what a bug report
@@ -1302,7 +1302,7 @@ moves one ledger.
 prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
 root (`store roots`). `store path` also answers for a store Greyward refuses to
-open, with a `warning:` and the `fix:` on stderr. **version** prints `ward 0.1.0`.
+open, with a `warning:` and the `fix:` on stderr. **version** prints `ward 0.2.0`.
 
 ## Open questions
 

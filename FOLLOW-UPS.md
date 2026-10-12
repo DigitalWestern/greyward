@@ -36,17 +36,14 @@ None open.
 ## Open work, each its own pull request
 
 - **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
-- **#656: harness HOME containment.** Add alternate-spelling coverage and define physical containment with the existing offline exceptions in the next shared-harness change.
-- **#657: native_libs probe target directory.** Give the Rust probe build an explicit `--target-dir` so an inherited `CARGO_TARGET_DIR` cannot hide its output, and list `GREYWARD_STORE` in the local e2e recipe.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
-- **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
-  - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc.
+  - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc. The issue is closed; its closing comment keeps these three open under their original conditions.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
   - #620 test gaps: the dev-files hook for tailors other than Ruby, to add with the next tailor whose host-header fallback changes.
-- **#464: macOS supervision: deferred notification-pipe initialization and validation.** macOS supervision initialization and validation. Deferred by the owner on 2026-10-04.
+- **#464: macOS supervision: deferred notification-pipe initialization and validation.** Deferred by the owner on 2026-10-04.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml` (at that tag, change `@main` in `action.yml`'s header and in
@@ -55,6 +52,51 @@ None open.
   The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
   round, then its four implementation PRs in order.
 
+- **Adversarial audit of 2026-10-12.** A whole-codebase review by parallel
+  auditors; every item below was demonstrated or traced in the code. One
+  issue and one PR each, most severe first:
+  - #669 sandbox: build scripts read ward's whole environment through bwrap's PID 1 (`/proc/1/environ`).
+  - #670 policy: a reused Node object drops the three artifact exception kinds, so `--strict` and deny lists pass.
+  - #671 cargo: a `.cargo/config.toml` `paths` override replaces a verified crate, and attest signs it.
+  - #682 resolve: transaction recovery treats any error as a missing folder and releases the originals.
+  - #687 python: uv.lock sources classified by substring drop GitLab and Gitea index packages.
+  - #672 ci: heavy-unlabel.yml puts a fork's branch name into a jq program with a write token.
+  - #673 python: `--frozen` can re-lock `requirements.lock.txt` (the #223 fix missed Python).
+  - #674 archive: extraction as root keeps setuid bits and archive owners.
+  - #675 zip extraction misses the tar path's size, duplicate-name and mode rules.
+  - #676 store: `gc --reset` deletes user files in a directory that is not a store.
+  - #684 resolve: git-shaped requests to any host record no policy exception.
+  - #685 cargo: a replacement source runs a project-chosen credential provider.
+  - #688 closure and SBOM: package names are never checked against the installed bytes.
+  - #689 python: a malformed or md5 hash triggers a re-lock that drops the user's pins.
+  - #690 python: `setup.cfg` reading disagrees with setuptools.
+  - #692 node: importers differ on link containment, workspace keys and skipped optional deps.
+  - #693 node: the project's own lifecycle scripts never run, unrecorded.
+  - #694 node: npm lock stays fresh when a workspace member is added; shrinkwrap is never read.
+  - #679 sandbox: a host-view setup error triggers a lasting host fallback.
+  - #681 policy: `GREYWARD_STRICT=true`, a dangling policy symlink and an empty HOME load as permissive.
+  - #683 resolve: transaction undo can lose a concurrent edit.
+  - #696 dotnet: every build downloads every nupkg again; no offline build.
+  - #677 store: whole-filesystem `syncfs` under the publish lock.
+  - #700 cli: a non-UTF-8 argument or a deleted working directory panics.
+  - #701 cli: `-q` discards the user program's stderr; `plan --json` stdout.
+  - #702 cli: the child PATH adds the cwd when PATH is unset and splits paths containing `:`.
+  - #698 release: ward's binary is checked only against a same-release checksum; install.sh replaces first.
+  - #704 tailors: drift between the seven copies (run env, attest without a lock, atomic edits).
+  - #706 architecture test skips production code below a test module.
+  - #695 node: nested bins, `gypfile`, empty `install`, bin dotfiles.
+  - #699 catalog: CI re-checks sampled rows only; CDN first hops; nativelibs source policy.
+  - #678 store: run holds the lease, crash temps, a gc doc sentence.
+  - #680 sandbox: read-only bind under a writable bind; relative PATH bwrap lookup.
+  - #686 resolve: tokens in URL paths reach records; unbounded cache and buffers.
+  - #691 python: launcher shebangs with a space or over 255 bytes.
+  - #697 cargo, ruby, elixir, gitsrc smaller gaps.
+  - #703 cli: completion script names and error text.
+  - #705 ui and fsops: fd restore and close-on-exec.
+  - #707 tests: podman cancellation under load, nss3 on Ubuntu, orphan fixture.
+  - #708 archive: bzip2/xz streams, dirhash zip, conda zstd cap.
+  - #709 audit and action: duplicate JSON keys, base64, the Action policy input warning.
+  - #710 maintainability: split read/write functions, one test env helper.
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What
   is left, one issue and one PR each, in order:
@@ -96,7 +138,6 @@ None open.
 - #640: Define independent .NET lock semantic verification for executable MSBuild projects.
 - #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
 - #642: Design declared MSBuild resolution inputs with conservative fallback.
-- #643: Cover unsupported future-tailor attest guards with focused unit tests.
 
 - #645: Design Docker relay descriptor transport and the privileged helper installation boundary.
 - #646: Design policy-owned Podman runtime and storage configuration with tenant boundaries.
@@ -113,6 +154,3 @@ None open.
 - **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
 
 - #653: detect ecosystem comparisons across Rust line boundaries with a bounded token scan and adversarial fixtures.
-
-- #661: the Action demo fails under v0.2.0, because the demo's `requirements.txt` has no resolution record and the company policy denies `unrecorded-resolution`.
-- #662: recapture `docs/human/GETTING-STARTED.md` with v0.2.0. Its blocks still say they are 0.1.0 output, but the rename changed the names in them.

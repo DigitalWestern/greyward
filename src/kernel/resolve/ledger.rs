@@ -39,7 +39,7 @@ pub const PORTABLE_FILE: &str = "portable.json";
 pub const DIAGNOSTICS_FILE: &str = "diagnostics.json";
 
 /// Whether a served body was fetched just now or is the last copy that was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Freshness {
     Live,
@@ -64,7 +64,7 @@ pub enum Freshness {
 /// matched one of them; which one is not recorded separately (for a
 /// sha256 claim `sha256` is it). `freshness` is absent when nothing was
 /// served (a refusal, an offline miss, a failure).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Entry {
     pub class: String,
     pub method: String,

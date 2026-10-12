@@ -2013,6 +2013,41 @@ mod tests {
         assert_eq!(urls, expected);
     }
 
+    /// Two off-route URLs whose failures reduce to one portable entry:
+    /// answering one leaves the shared failure in the ledger while the
+    /// other is still unanswered, and answering both takes it out.
+    #[test]
+    fn a_shared_failure_stays_until_every_url_behind_it_is_answered() {
+        let harness = Harness::new("proxy-shared-failure");
+        let failure = "https://third.test/.../pkg.json".to_string();
+        let (a, b) = (
+            "https://third.test/a/pkg.json",
+            "https://third.test/b/pkg.json",
+        );
+        let state = State::new(harness.config(Policy::default(), Mode::Online)).unwrap();
+        record_one(&state, a, 504, true, false);
+        record_one(&state, b, 504, true, false);
+        record_one(&state, a, 200, false, false);
+        let report = state.take_report();
+        let failures: Vec<_> = report
+            .ledger
+            .entries()
+            .filter(|entry| entry.url == failure && entry.status == 504)
+            .collect();
+        assert_eq!(failures.len(), 1, "b's failure is unanswered");
+        let state = State::new(harness.config(Policy::default(), Mode::Online)).unwrap();
+        record_one(&state, a, 504, true, false);
+        record_one(&state, b, 504, true, false);
+        record_one(&state, a, 200, false, false);
+        record_one(&state, b, 200, false, false);
+        let report = state.take_report();
+        assert!(
+            report.ledger.entries().all(|entry| entry.status == 200),
+            "{:?}",
+            report.ledger.entries().collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn nothing_is_recorded_after_a_session_finishes() {
         let harness = Harness::new("proxy-closed");

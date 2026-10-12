@@ -146,9 +146,17 @@ struct Inner {
     stale_refused: BTreeSet<String>,
     /// Every (method, url) that was answered (something was served).
     answered: HashSet<(String, String)>,
-    /// Failed portable entries per (method, url), taken out of the ledger
-    /// when the same request is answered.
+    /// Failed portable entries per (method, whole url), taken out of the
+    /// ledger when the same request is answered.
     failed: HashMap<(String, String), Vec<Entry>>,
+    /// Per failed portable entry in the ledger, every (method, whole url)
+    /// still failing with it. Off-route URLs share an entry once reduced
+    /// (two `.../pkg.json` on one host): it leaves the ledger only when the
+    /// last of them is answered.
+    failing: HashMap<Entry, HashSet<(String, String)>>,
+    /// Portable entries a request that did not fail put in the ledger:
+    /// never taken out, even when a failure shares their bytes.
+    kept: HashSet<Entry>,
     /// The texts already in `facts.refusals` and `facts.hard_failures`.
     refusal_texts: HashSet<String>,
     failure_texts: HashSet<String>,
@@ -343,7 +351,8 @@ impl State {
         diag.url = url(&diag.url);
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
         diag.hops = diag.hops.iter().map(|hop| url(hop)).collect();
-        let mut inner = self.inner();
+        let mut guard = self.inner();
+        let inner = &mut *guard;
         if inner.closed {
             return;
         }
@@ -371,19 +380,34 @@ impl State {
                 .is_some_and(|ledger| ledger.insert(entry.clone()));
             if !fresh {
                 inner.diagnostics.duplicates += 1;
-            } else if failed {
+            }
+            if !failed {
+                inner.failing.remove(&entry);
+                inner.kept.insert(entry.clone());
+            } else if inner.ledger.is_some() && !inner.kept.contains(&entry) {
+                let failures = inner.failed.entry(key.clone()).or_default();
+                if !failures.contains(&entry) {
+                    failures.push(entry.clone());
+                }
                 inner
-                    .failed
-                    .entry(key.clone())
+                    .failing
+                    .entry(entry.clone())
                     .or_default()
-                    .push(entry.clone());
+                    .insert(key.clone());
             }
         }
         if entry.freshness.is_some() && inner.answered.insert(key.clone()) {
             let superseded = inner.failed.remove(&key).unwrap_or_default();
-            if let Some(ledger) = inner.ledger.as_mut() {
-                for failure in &superseded {
-                    ledger.remove(failure);
+            for failure in &superseded {
+                let Some(keys) = inner.failing.get_mut(failure) else {
+                    continue;
+                };
+                keys.remove(&key);
+                if keys.is_empty() {
+                    inner.failing.remove(failure);
+                    if let Some(ledger) = inner.ledger.as_mut() {
+                        ledger.remove(failure);
+                    }
                 }
             }
             inner.diagnostics.superseded += superseded.len() as u64;

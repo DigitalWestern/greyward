@@ -131,7 +131,7 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   exactly what frozen promises not to do.
 - **`add` / `remove` / `update` run the ecosystem's tool in the resolution sandbox**, with
   no network of its own, through Greyward's resolution proxy: Go, Cargo, Node (npm and the pinned
-  pnpm), Python (uv) and Ruby (Bundler). There is no unsandboxed fallback: a host where
+  pnpm), Python (uv), Ruby (Bundler) and Elixir `update` (Mix). There is no unsandboxed fallback: a host where
   neither bubblewrap nor rootless podman can isolate the tool refuses the edit and names
   what is missing (`ward doctor --isolation`).
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.

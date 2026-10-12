@@ -1456,7 +1456,7 @@ exit 37
             .unwrap();
         assert_eq!(
             weak.subject,
-            fx.harness.upstream_url("/art/weak-pkg-1.0.tgz")
+            fx.harness.upstream_url("/.../weak-pkg-1.0.tgz")
         );
         assert_eq!(
             fs::read(fx.project.join("deps.lock")).unwrap(),

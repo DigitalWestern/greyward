@@ -61,14 +61,24 @@ jobs:
             --jq '.jobs[] | select(.name == "acceptance") | .conclusion')
           # GitHub leaves pull_requests empty in some cases; find the PR by
           # its branch then.
+          # The branch name is the fork's to choose and may hold jq syntax,
+          # so it reaches jq as data ($ENV), never as program text.
           if [ -z "$PR" ]; then
+            export HEAD_BRANCH
+            # shellcheck disable=SC2016 # $ENV is jq's, not the shell's
             PR=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
               -f state=open -f "head=$HEAD_OWNER:$HEAD_BRANCH" \
-              --jq ".[] | select(.head.ref == \"$HEAD_BRANCH\") | .number" | head -n 1)
+              --jq '.[] | select(.head.ref == $ENV.HEAD_BRANCH) | .number' | head -n 1)
           fi
           if [ -z "$PR" ]; then
             echo "no open pull request for $HEAD_OWNER:$HEAD_BRANCH"
             exit 0
+          fi
+          # Everything below puts $PR and $RUN into URLs and jq programs:
+          # refuse anything but a number.
+          if ! [[ $PR =~ ^[0-9]+$ && $RUN =~ ^[0-9]+$ ]]; then
+            echo "::error::unexpected pull request or run number"
+            exit 1
           fi
           # The green run vouches for one commit and one label request. A
           # push since, or the label added again after the run started

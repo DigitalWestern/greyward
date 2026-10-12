@@ -44,11 +44,14 @@ pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>>
     Ok(outputs)
 }
 
-/// `Tailor::resolution_inputs` for Python: [`INPUTS`] and every file a
-/// requirements file includes inside the project.
+/// `Tailor::resolution_inputs` for Python: [`INPUTS`], every file a
+/// requirements file includes inside the project, and every file setup.cfg
+/// names with `file:`.
 pub(crate) fn resolution_inputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut inputs: Vec<PathBuf> = INPUTS.iter().map(PathBuf::from).collect();
-    for file in includes(root)?.inside {
+    let mut found = includes(root)?.inside;
+    found.extend(super::manifest::setup_cfg_file_inputs(root)?);
+    for file in found {
         if !inputs.contains(&file) {
             inputs.push(file);
         }

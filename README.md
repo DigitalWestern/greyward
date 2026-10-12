@@ -72,7 +72,7 @@ is on, `ward doctor` names it.
 
 Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
-tag, for Linux x86_64 only (macOS arm64 waits on #66). On Linux x86_64
+tag, for Linux x86_64 only (macOS arm64 waits on the macOS gate in FOLLOW-UPS.md). On Linux x86_64
 this is one line. It downloads the release binary for your machine, checks
 its sha256, puts it in `~/.local/bin`, adds that directory to PATH if it is
 not already there, and installs bash, zsh, and fish completions:
@@ -151,7 +151,7 @@ ward update --toolchain      # re-select the runtimes and rewrite greyward-toolc
 ward gc --dry-run            # preview unreferenced store/cache cleanup
 ward doctor                  # host prerequisites, sandbox, store, free space, newer release?
 ward update --self           # replace this binary with the newest release
-ward --version               # ward 0.1.0 (7688cfd 2026-09-21): crate version, commit, date
+ward --version               # ward 0.2.0 (58f3482 2026-10-11): crate version, commit, date
 ```
 
 `ward <script>` is the short form of `ward run <script>` for any package.json

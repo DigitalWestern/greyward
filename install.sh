@@ -301,7 +301,7 @@ fi
 
 # --- platform ---------------------------------------------------------------
 # Same two rows as src/kernel/platform.rs; anything else must build from source.
-# release.yml builds Linux x86_64 only until the macOS gate (#66); the Darwin
+# release.yml builds Linux x86_64 only until the macOS gate (FOLLOW-UPS.md); the Darwin
 # row stays so a release that carries the asset again needs no script change.
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -349,7 +349,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 say "downloading $base/$asset"
 fetch "$base/$asset" "$tmp/$asset" \
     || fail "download failed. Is there a release at https://github.com/$REPO/releases with $asset?
-  Releases are built for Linux x86_64 only for now (macOS waits on #66).
+  Releases are built for Linux x86_64 only for now.
   Build from source instead:  cargo install --git https://github.com/$REPO --locked"
 fetch "$base/$asset.sha256" "$tmp/$asset.sha256" \
     || fail "checksum file missing next to the release asset; refusing to install an unverified binary"

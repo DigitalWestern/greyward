@@ -268,8 +268,18 @@ impl PackageScripts<'_> {
     /// interrupt keeps its kind, so it never becomes a script failure.
     fn run_phases(&self, view: HostView) -> io::Result<()> {
         let p = self.package;
+        // The test stand-in for host development packages is part of the
+        // whole host, so only the whole-host attempt sees it.
+        let dev = match view {
+            HostView::Full => crate::kernel::hostview::test_host_dev_files(),
+            HostView::RuntimeOnly => None,
+        };
+        let mut envs = self.envs.to_vec();
+        if let Some(dev) = &dev {
+            crate::kernel::hostview::add_host_dev_files(&mut envs, dev);
+        }
         let sandbox = Sandbox {
-            read: self.read.clone(),
+            read: self.read.iter().copied().chain(dev.as_deref()).collect(),
             write: vec![self.pkg_dir, self.tmp],
             host_view: view,
         };
@@ -279,8 +289,7 @@ impl PackageScripts<'_> {
         };
         for (phase, script) in self.phases {
             crate::kernel::ui::note(&format!("{} {}: {phase} ({mode})", p.name, p.version));
-            let envs_phase: Vec<(String, String)> = self
-                .envs
+            let envs_phase: Vec<(String, String)> = envs
                 .iter()
                 .cloned()
                 .chain([("npm_lifecycle_event".to_string(), phase.to_string())])

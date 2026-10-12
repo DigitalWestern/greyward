@@ -1296,10 +1296,43 @@ fn digest_field(digest: &mut sha2::Sha256, bytes: &[u8]) {
 pub(crate) fn test_host_dev_files() -> Option<PathBuf> {
     #[cfg(debug_assertions)]
     {
-        std::env::var_os("GREYWARD_TEST_HOST_DEV_FILES").map(PathBuf::from)
+        dev_files_dir(std::env::var_os("GREYWARD_TEST_HOST_DEV_FILES"))
     }
     #[cfg(not(debug_assertions))]
     None
+}
+
+/// The stand-in directory a `GREYWARD_TEST_HOST_DEV_FILES` value names,
+/// made absolute against ward's working directory. The fingerprint and the
+/// sandbox mount resolve it there; the compiler, given it in `CPATH` and
+/// `LIBRARY_PATH`, would resolve a relative one from the build directory
+/// instead. Symlinks are left as spelled, so `with_dev_files` still sees and
+/// refuses them.
+#[cfg(debug_assertions)]
+fn dev_files_dir(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    Some(std::path::absolute(&path).unwrap_or(path))
+}
+
+/// Add the test-only stand-in for host development packages at `dev`
+/// (`test_host_dev_files`) to a whole-host attempt's `env`: its
+/// `usr/include` and `usr/lib` go after whatever `CPATH` and `LIBRARY_PATH`
+/// already name, so a native library set still wins where it has a
+/// library, and the host's own directories, which gcc searches last, come
+/// after both. Every tailor that falls back to the whole host (gems, sdists,
+/// npm install scripts) calls this for its `HostView::Full` attempt and
+/// mounts `dev` read-only beside it.
+pub(crate) fn add_host_dev_files(env: &mut Vec<(String, String)>, dev: &Path) {
+    for (key, subdir) in [("CPATH", "usr/include"), ("LIBRARY_PATH", "usr/lib")] {
+        let dir = dev.join(subdir).display().to_string();
+        match env.iter_mut().find(|(k, _)| k == key) {
+            Some((_, value)) => {
+                value.push(':');
+                value.push_str(&dir);
+            }
+            None => env.push((key.to_string(), dir)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1331,6 +1364,27 @@ mod tests {
     /// A symlinked directory in the stand-in, or the stand-in itself as a
     /// symlink, is refused: the walk would not see a change behind it. A
     /// symlink to a file is recorded as usual (#620).
+    /// A relative stand-in is made absolute against ward's working
+    /// directory, so `CPATH` and `LIBRARY_PATH` name what was fingerprinted
+    /// rather than a path the compiler resolves from the build directory.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_relative_dev_files_value_is_made_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = dev_files_dir(Some("fixtures/dev".into())).unwrap();
+        assert_eq!(dir, cwd.join("fixtures/dev"));
+        let mut env = Vec::new();
+        add_host_dev_files(&mut env, &dir);
+        for (_, value) in &env {
+            assert!(Path::new(value).is_absolute(), "{value}");
+        }
+        assert_eq!(
+            dev_files_dir(Some("/abs/dev".into())).unwrap(),
+            PathBuf::from("/abs/dev")
+        );
+        assert_eq!(dev_files_dir(None), None);
+    }
+
     #[test]
     fn dev_files_refuse_a_symlinked_directory() {
         use std::os::unix::fs::symlink;

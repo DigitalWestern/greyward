@@ -577,6 +577,129 @@ fn install_script_needing_host_headers_falls_back_once() {
     assert_eq!(realize(), env);
 }
 
+/// An install script that compiles against a host development package
+/// only the whole host has falls back to it, and the env's identity
+/// follows that package: the next sync on the unchanged host reuses the
+/// env, and one after the package changed builds a new env against the new
+/// files. The package is the stand-in a debug build reads from
+/// `GREYWARD_TEST_HOST_DEV_FILES` (tests/common/host_dev_files.rs), so the
+/// case runs on any host with a C compiler; Node and node-gyp's CPython
+/// are stubs published under the shipped ids, so the binary syncs offline.
+#[test]
+#[ignore]
+#[cfg(target_os = "linux")]
+fn install_script_fallback_follows_the_host_dev_files() {
+    use common::host_dev_files;
+    let platform = Platform::host().expect("host platform");
+    if !sandbox_or_skip(
+        "install_script_fallback_follows_the_host_dev_files",
+        platform,
+    ) {
+        return;
+    }
+    let _policy_guard = policy_guard();
+    let temp = TempDir::new("npm-host-dev-files");
+    let store = store_at(&temp.0);
+    let project = temp.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"npm-host-dev-files","version":"1.0.0","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package-lock.json"),
+        r#"{"name":"npm-host-dev-files","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"npm-host-dev-files","version":"1.0.0"}}}"#,
+    )
+    .unwrap();
+    let package = serde_json::json!({
+        "name": "fixture-probe",
+        "version": "1.0.0",
+        "main": "index.js",
+        "scripts": {"postinstall": format!(
+            "cc probe.c -l{} -o probe && ./probe > built.txt",
+            host_dev_files::LIBRARY
+        )}
+    })
+    .to_string();
+    let (tarball, sri) = make_fixture_tarball(
+        &temp.0,
+        "fixture-probe",
+        &package,
+        &[
+            ("index.js", b"module.exports = 1;\n"),
+            ("probe.c", host_dev_files::PROBE_C.as_bytes()),
+        ],
+    );
+    seed_verified_fixture(&store, &tarball, &sri);
+    seed_shipped_node(&store, platform);
+    seed_gyp_python(&store, platform);
+    add_fixture_dependency(&project, "fixture-probe", &sri);
+    let dev = temp.0.join("host-dev-files");
+    host_dev_files::write(&dev, "first");
+
+    // One sync with the stand-in named: the env object it projected, its
+    // identity inputs, and what the install script printed.
+    let sync = || {
+        let output = common::command(&project, &temp.0, &store.root)
+            .env("GREYWARD_TEST_HOST_DEV_FILES", &dev)
+            .arg("sync")
+            .output()
+            .expect("spawn ward");
+        assert_success(&output, "ward sync");
+        let closure = comforter::read_closure(&project, "node").unwrap();
+        let env = PathBuf::from(closure["env_object"].as_str().unwrap());
+        let inputs = object_inputs(&temp.0, &env);
+        let built =
+            std::fs::read_to_string(env.join("node_modules/fixture-probe/built.txt")).unwrap();
+        (env, inputs, built)
+    };
+
+    let (first, inputs, built) = sync();
+    assert_eq!(built, "first\n");
+    assert_eq!(
+        inputs["build_view"].as_str(),
+        Some("host-fallback/1"),
+        "the script did not fall back: {inputs:?}"
+    );
+    assert_eq!(
+        inputs["host_fallback"].as_str(),
+        Some("node_modules/fixture-probe"),
+        "{inputs:?}"
+    );
+    let first_host = inputs["host_inputs"].as_str().unwrap().to_string();
+    let exceptions = store
+        .exceptions(first.file_name().unwrap().to_str().unwrap())
+        .unwrap();
+    assert!(
+        exceptions
+            .iter()
+            .any(|exception| exception.kind == policy::HOST_BUILD_INPUTS
+                && exception.subject == "node_modules/fixture-probe"),
+        "no host-build-inputs exception: {exceptions:?}"
+    );
+
+    // The host as it was: the same env, through the fallback record.
+    let (again, _, _) = sync();
+    assert_eq!(again, first, "an unchanged host built a new env");
+
+    // The development package upgraded: a new env, built against it.
+    host_dev_files::rewrite(&dev, "second, upgraded");
+    let (second, inputs, built) = sync();
+    assert_ne!(second, first, "a changed host reused the old env");
+    assert_eq!(built, "second, upgraded\n");
+    assert_eq!(
+        inputs["build_view"].as_str(),
+        Some("host-fallback/1"),
+        "{inputs:?}"
+    );
+    assert_ne!(
+        inputs["host_inputs"].as_str(),
+        Some(first_host.as_str()),
+        "the host fingerprint missed the changed header: {inputs:?}"
+    );
+}
+
 #[test]
 fn benign_install_script_runs_and_output_is_captured() {
     let platform = Platform::host().expect("host platform");

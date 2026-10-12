@@ -958,6 +958,15 @@ fn run_sdist_build(
     if let Some(native_libs) = native_libs {
         envs = crate::kernel::provider::nativelibs::compose_env(native_libs, &envs);
     }
+    // The test stand-in for host development packages is part of the whole
+    // host, so only the whole-host attempt sees it, after the set.
+    let dev = match host_view {
+        HostView::Full => crate::kernel::hostview::test_host_dev_files(),
+        HostView::RuntimeOnly => None,
+    };
+    if let Some(dev) = &dev {
+        crate::kernel::hostview::add_host_dev_files(&mut envs, dev);
+    }
     let path = envs
         .iter()
         .find(|(key, _)| key == "PATH")
@@ -969,6 +978,7 @@ fn run_sdist_build(
             .chain(rust)
             .chain(vendor)
             .chain(native_libs)
+            .chain(dev.as_deref())
             .collect(),
         write: vec![work],
         host_view,

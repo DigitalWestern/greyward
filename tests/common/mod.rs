@@ -6,6 +6,7 @@
 //! `mod common;`, so a helper one suite does not use is dead code there.
 #![allow(dead_code)]
 
+pub mod host_dev_files;
 pub mod node_stub;
 
 use std::collections::BTreeMap;

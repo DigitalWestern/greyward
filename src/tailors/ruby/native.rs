@@ -112,7 +112,7 @@ impl GemInstall<'_> {
             // the whole host, so only the whole-host attempt sees it.
             if host_view == HostView::Full {
                 if let Some(dev) = crate::kernel::hostview::test_host_dev_files() {
-                    super::native_libs::add_host_dev_files(&mut env, &dev);
+                    crate::kernel::hostview::add_host_dev_files(&mut env, &dev);
                     read.push(dev);
                 }
             }

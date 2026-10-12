@@ -316,10 +316,12 @@ impl Tailor for Node {
         node::freshness::check_lock_freshness(project, &plan)?;
         // package.json is read through the held descriptor; a lock-only
         // project has no "greyward" config to read.
-        let config = match project.read_input_string(Path::new("package.json"))? {
-            Some(pkg) => node::parse_greyward_config(&pkg)?,
+        let package_json = project.read_input_string(Path::new("package.json"))?;
+        let config = match &package_json {
+            Some(pkg) => node::parse_greyward_config(pkg)?,
             None => node::GreywardConfig::default(),
         };
+        record_skipped_project_scripts(project, &plan, package_json.as_deref(), attribution)?;
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
         // node-gyp runs on the helper Python selection when the project has
         // one; a Node-only project gets the shipped default.
@@ -578,6 +580,73 @@ impl Tailor for Node {
     fn toolchain_kinds(&self) -> &'static [&'static str] {
         &["nodejs"]
     }
+}
+
+/// The lifecycle phases npm runs for the project itself and for each
+/// workspace member on install, in npm's order.
+const PROJECT_LIFECYCLE_PHASES: &[&str] = &["preinstall", "install", "postinstall", "prepare"];
+
+/// The project's and its workspace members' own lifecycle scripts, each
+/// recorded as the exception it is: npm runs them on install and ward does
+/// not, since they write the project's source rather than an environment
+/// (#693). The root is `.`, then every workspace importer and `link: true`
+/// target the plan names, once each. A directory without a package.json has
+/// nothing to run.
+fn record_skipped_project_scripts(
+    project: &ProjectRoot,
+    plan: &node::NpmPlan,
+    root_package_json: Option<&str>,
+    attribution: &crate::kernel::policy::Attribution,
+) -> io::Result<()> {
+    let mut skipped = match root_package_json {
+        Some(text) => skipped_project_scripts(".", text)?,
+        None => Vec::new(),
+    };
+    let members: std::collections::BTreeSet<&str> = plan
+        .workspaces
+        .iter()
+        .map(String::as_str)
+        .chain(plan.links.iter().map(|link| link.target.as_str()))
+        .filter(|dir| !dir.is_empty() && *dir != ".")
+        .collect();
+    for member in members {
+        let manifest = Path::new(member).join("package.json");
+        if let Some(text) = project.read_input_string(&manifest)? {
+            skipped.extend(skipped_project_scripts(member, &text)?);
+        }
+    }
+    for (subject, detail) in skipped {
+        attribution.record(
+            crate::kernel::policy::PROJECT_SCRIPT_SKIPPED,
+            &subject,
+            &detail,
+        )?;
+    }
+    Ok(())
+}
+
+/// The lifecycle scripts in one package.json that npm would run on install,
+/// as (subject, detail) pairs: the subject is `dir`, the detail names the
+/// phase and its command.
+fn skipped_project_scripts(dir: &str, package_json: &str) -> io::Result<Vec<(String, String)>> {
+    let manifest: Value = serde_json::from_str(package_json).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {e}", Path::new(dir).join("package.json").display()),
+        )
+    })?;
+    Ok(PROJECT_LIFECYCLE_PHASES
+        .iter()
+        .filter_map(|phase| {
+            let command = manifest["scripts"][*phase].as_str()?;
+            Some((
+                dir.to_string(),
+                format!(
+                    "`{phase}` script ({command}) was not run: ward runs the lifecycle scripts of dependencies, not the project's own"
+                ),
+            ))
+        })
+        .collect())
 }
 
 /// The Node object this project's closure recorded. A closure written
@@ -1304,5 +1373,82 @@ mod tests {
             property(local, "greyward:integrity").as_deref(),
             Some("sha256-l")
         );
+    }
+
+    /// npm runs the root's and each workspace member's install lifecycle
+    /// scripts; ward does not, so each one is recorded where policy and
+    /// `ward audit` see it (#693). Other scripts, and a member directory
+    /// without a package.json, record nothing; a directory named both as a
+    /// workspace and as a link target is read once.
+    #[test]
+    fn the_projects_own_lifecycle_scripts_are_recorded_as_skipped() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let scratch = TempDir::named("node-project-scripts");
+        let project = scratch.0.clone();
+        let root = r#"{"name":"app","scripts":{"postinstall":"patch-package","test":"jest","prepare":"husky"}}"#;
+        fs::write(project.join("package.json"), root).unwrap();
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        fs::write(
+            project.join("packages/lib/package.json"),
+            r#"{"name":"lib","scripts":{"prepare":"tsc","build":"tsc"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(project.join("packages/empty")).unwrap();
+        let plan = node::NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: Vec::new(),
+            links: vec![node::NpmLink {
+                path: "node_modules/lib".into(),
+                target: "packages/lib".into(),
+            }],
+            workspaces: vec!["packages/lib".into(), "packages/empty".into()],
+            lock_source: "package-lock.json".into(),
+        };
+        let held = ProjectRoot::open(&project).unwrap();
+        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        record_skipped_project_scripts(&held, &plan, Some(root), &attribution).unwrap();
+        let recorded: Vec<(String, String)> = attribution
+            .recorded()
+            .into_iter()
+            .map(|exception| {
+                assert_eq!(
+                    exception.kind,
+                    crate::kernel::policy::PROJECT_SCRIPT_SKIPPED
+                );
+                (exception.subject, exception.detail)
+            })
+            .collect();
+        attribution.discard();
+        let not_run =
+            "was not run: ward runs the lifecycle scripts of dependencies, not the project's own";
+        assert_eq!(
+            recorded,
+            [
+                (
+                    ".".to_string(),
+                    format!("`postinstall` script (patch-package) {not_run}")
+                ),
+                (
+                    ".".to_string(),
+                    format!("`prepare` script (husky) {not_run}")
+                ),
+                (
+                    "packages/lib".to_string(),
+                    format!("`prepare` script (tsc) {not_run}")
+                ),
+            ]
+        );
+
+        let denying = crate::kernel::policy::PolicyScope::install(crate::kernel::policy::Policy {
+            deny: [crate::kernel::policy::PROJECT_SCRIPT_SKIPPED.to_string()].into(),
+            ..Default::default()
+        });
+        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let error = record_skipped_project_scripts(&held, &plan, Some(root), &attribution)
+            .unwrap_err()
+            .to_string();
+        attribution.discard();
+        drop(denying);
+        assert!(error.contains("project-script-skipped"), "{error}");
     }
 }

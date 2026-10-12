@@ -198,9 +198,18 @@ fn create_locked(
         }
     }
     let _ = spare;
-    // No unnamed file here: create the name, then lock it. The moment
-    // between the two is accepted; `STALE_TEMP_AGE` covers it, since no
-    // cleanup judges a temporary that young.
+    // No unnamed file here: create the name, then lock it. A shared lock
+    // on the directory covers the moment between the two: a cleanup sweeps
+    // only under the directory's exclusive lock, so it never sees this
+    // temporary before its own lock is held, however long the writer is
+    // paused in between.
+    let directory = open_file_at(dirfd, b".", DIRECTORY_FLAGS, 0)?;
+    directory.lock_shared().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("lock the temporary's directory: {error}"),
+        )
+    })?;
     let file = open_file_at(
         dirfd,
         name,
@@ -361,6 +370,12 @@ pub(super) fn remove_stale_temps(dirfd: RawFd) {
     let Ok(listed) = open_file_at(dirfd, b".", DIRECTORY_FLAGS, 0) else {
         return;
     };
+    // Exclusive and never waited for: a writer creating a temporary without
+    // an unnamed file holds the directory shared until its temporary is
+    // locked (`create_locked`), so the sweep waits for the next publication.
+    if listed.try_lock().is_err() {
+        return;
+    }
     let Ok(names) = read_dir_names_at(listed.as_raw_fd()) else {
         return;
     };

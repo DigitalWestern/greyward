@@ -13,6 +13,7 @@
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -87,6 +88,51 @@ pub struct EditOutcome {
     /// Where the following sync runs: the project, or the pnpm workspace
     /// root whose lock the edit wrote.
     pub sync_root: PathBuf,
+}
+
+/// What `ward update --adopt` hands a tailor (`Tailor::adopt_lock`).
+pub struct LockAdoption<'a> {
+    /// The project adopted in (the nearest project from the working
+    /// directory upward).
+    pub project: &'a Path,
+    pub host: &'a dyn EditHost,
+}
+
+/// One package a lock pins: its version and the integrity hashes the lock
+/// accepts for it (`sha256:<hex>`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Pin {
+    pub version: String,
+    pub hashes: BTreeSet<String>,
+}
+
+/// A lock's pins by package (a key may carry an environment marker when
+/// one package is pinned once per marker).
+pub type Pins = BTreeMap<String, Pin>;
+
+/// What `Tailor::adopt_lock` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Adoption {
+    /// Nothing here needs adopting: the lock already comes from a
+    /// resolver, or there is none. The text says why and what to run.
+    Nothing(String),
+    Adopted(Adopted),
+}
+
+/// A lock no resolver wrote, now compiled by the ecosystem's resolver
+/// through the resolution door, with its signed record published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adopted {
+    /// The files written, project-relative, for the report line.
+    pub files: Vec<String>,
+    /// Where the sync after adoption runs.
+    pub sync_root: PathBuf,
+    /// The lock the resolver wrote, project-relative.
+    pub lock: String,
+    /// The pins the original lock stated, and the ones the resolver
+    /// compiled: the command prints the difference for review.
+    pub before: Pins,
+    pub after: Pins,
 }
 
 /// What a tailor's edit needs from the command that runs it. The command

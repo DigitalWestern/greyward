@@ -23,7 +23,7 @@ START HERE:
 EVERYDAY:
   add          add a dependency, re-lock, sync
   remove       remove a dependency, re-lock, sync
-  update       update dependencies, --toolchain, or --self (ward itself)
+  update       update dependencies, --toolchain, --adopt, or --self (ward)
   run          run a command or package.json script in the environment(s)
   env          print the environment as shell exports (for eval or direnv)
   x            run a tool without adding it as a dependency (like npx / uvx)
@@ -420,6 +420,31 @@ rewrites `greyward-toolchain.toml` atomically, and then syncs. It takes no
 package name, never touches a dependency lock, and is the only thing that
 moves a locked runtime. `--no-sync` stops after the lock is written, so the
 diff can be reviewed before anything is realized.
+
+**update --adopt** `[<ecosystem>]` gives a lock no resolver wrote the
+provenance `ward attest` and `--strict` require. Hashes alone prove package
+bytes, not how the dependency set was resolved, so `attest` never signs a
+hand-hashed `requirements.txt`; adoption is the explicit step that has the
+resolver write it instead. `ward update --adopt python` keeps the original
+as `requirements.in`, byte for byte, and refuses when a different
+`requirements.in` is already there. It then runs the same `uv pip compile`
+an edit and `attest` run (`--generate-hashes`, Greyward's header, no
+upgrade flag, so the original's `==` pins decide every version) through the
+confined resolution door, which writes `requirements.txt` and its signed
+record `.greyward/resolution/python.json` together. On stdout it prints the
+original pins against the compiled ones: `=` kept (with how many of the
+original hashes the compiled lock still accepts), `~` a version changed,
+`+` a package the resolver added, `-` one it dropped, and a `!` line for
+every original hash missing from the compiled lock. A failed compile
+removes the `requirements.in` it wrote. A pip-compile pair whose
+`requirements.txt` another tool generated is recompiled from its own
+`requirements.in` the same way. With no ecosystem named, every ecosystem
+found here is offered adoption; one whose lock already comes from its
+resolver (a `uv.lock`, a compiled pair, `package-lock.json`, `Cargo.lock`,
+...) reports that there is nothing to adopt and names `ward attest`.
+`--no-sync` stops after the compile so the diff can be reviewed; commit
+the pair and the record, then `ward attest python` checks it without
+changing it.
 
 **fmt** runs the pinned rustfmt for a Rust workspace, discovered with the
 store Cargo and `--no-deps`, so a project that has never been synced needs
@@ -1229,7 +1254,8 @@ byte for byte the same: `requirements.lock.txt` from the requirements Greyward
 compiles it from, or `requirements.txt` from `requirements.in`. A
 compiled lock whose header names another command than `ward` (one written
 by uv or pip-tools directly) is refused. For a pip-compile pair, retain
-`requirements.txt` and run `ward update`. For a generated
+`requirements.txt` and run `ward update --adopt python`, which recompiles it
+from `requirements.in` without upgrading. For a generated
 `requirements.lock.txt`, delete only that lock and run `ward` again.
 Commit the regenerated lock before attesting. A project with no lock a
 tool resolved (a hand-pinned
@@ -1276,10 +1302,11 @@ api.nuget.org only. It records transport and package content hashes, without
 claiming publisher-signature verification.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
-To adopt a hand-hashed `requirements.txt`, preserve it as `requirements.in`
-beside the existing file, then run a Python `ward update` to compile the pair.
-For example, `ward update --no-sync py:six` in a project that pins six writes
-the compiled lock and its resolution receipt before sync or attest.
+To adopt a hand-hashed `requirements.txt`, run `ward update --adopt python`
+(see `update --adopt`). Under the hood it copies the file to
+`requirements.in` and compiles the pair through the resolution door without
+upgrading, which writes the compiled lock and its signed resolution receipt,
+and prints the original pins against the compiled ones for review.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.

@@ -142,6 +142,16 @@ pub enum Command {
     /// project, no store, and no signing key, and the dispatcher must be
     /// able to tell that apart without reading three fields.
     SelfUpdate,
+    /// `update --adopt [<ecosystem>]`: turn a lock no resolver wrote (a
+    /// hand-hashed `requirements.txt`) into one the ecosystem's resolver
+    /// compiles through the resolution door, with its signed record, keeping
+    /// the original as the source. Its own variant like `SelfUpdate`: it
+    /// names an ecosystem, never a package. `ecosystem` is a tailor id;
+    /// `None` adopts in every ecosystem found here.
+    Adopt {
+        ecosystem: Option<String>,
+        no_sync: bool,
+    },
     /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
     X {
         ecosystem: Option<String>,

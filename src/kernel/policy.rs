@@ -95,6 +95,26 @@ pub const KINDS: &[&str] = &[
     FOREIGN_PLATFORM_PACKAGE,
 ];
 
+/// Kinds that describe the project, its lock or its resolution rather than
+/// the bytes of an object built from them. The planner, the resolution join
+/// or the projection records each one again on every sync, warm or cold, so
+/// a store object never carries one: an environment shared by two projects
+/// must not replay one project's lock findings onto the other. Every other
+/// kind recorded while an object is realized is stored with it, so a cache
+/// hit replays it and a stricter policy refuses the object (`object_exceptions`).
+pub const PLAN_TIME_KINDS: &[&str] = &[
+    REQUIREMENT_SKIPPED,
+    WEAK_INTEGRITY,
+    UNATTESTED_MUTABLE_STATE,
+    UNATTESTED_INDEX,
+    LOCK_DISAGREEMENT,
+    STALE_RESOLUTION,
+    UNCONFINED_RESOLUTION,
+    UNRECORDED_RESOLUTION,
+    RESOLUTION_BUILD,
+    FOREIGN_PLATFORM_PACKAGE,
+];
+
 /// Kinds were spelled with two separators until the names were unified on
 /// the hyphen. Policy files and closure records written under the old
 /// spellings keep working: every kind is read through `canonical_kind`, so
@@ -1303,23 +1323,19 @@ pub(crate) fn clear() {
     });
 }
 
-/// Exceptions that change the bytes of the object being built.
+/// The exceptions the object being built carries in its metadata: every
+/// kind recorded in the current frame except the plan-time kinds the sync
+/// records again each time (`PLAN_TIME_KINDS`). A warm sync skips the
+/// realization that recorded the rest, so the stored list is all a cache
+/// hit can judge; a kind left out here would pass a policy that refuses the
+/// same object built cold.
 pub fn object_exceptions() -> Vec<Exception> {
     with_frames(|frames| {
         frames.last().map_or_else(Vec::new, |frame| {
             frame
                 .exceptions
                 .iter()
-                .filter(|e| {
-                    matches!(
-                        e.kind.as_str(),
-                        FILE_COLLISION
-                            | INSTALL_SCRIPT_FAILED
-                            | GIT_DEPENDENCY
-                            | UNATTESTED_CARGO_LOCK
-                            | HOST_BUILD_INPUTS
-                    )
-                })
+                .filter(|e| !PLAN_TIME_KINDS.contains(&canonical_kind(&e.kind)))
                 .cloned()
                 .collect()
         })
@@ -1531,6 +1547,48 @@ deny = ["git-dependency"]"#,
         )
         .unwrap();
         assert!(denied(&denying, HOST_BUILD_INPUTS));
+    }
+
+    /// Every kind is either stored with the object it was recorded beside
+    /// or listed as plan-time, and the choice is made here, by name: a kind
+    /// added to `KINDS` fails this test until it is placed in one list.
+    /// Object kinds are recorded only while bytes are realized, so a warm
+    /// sync that skips the realization learns them from the object alone
+    /// (#670: the three artifact kinds were once dropped at commit, and a
+    /// cache hit passed a policy that refused the cold build).
+    #[test]
+    fn every_kind_is_an_object_kind_or_a_plan_time_kind() {
+        const OBJECT_KINDS: &[&str] = &[
+            FILE_COLLISION,
+            INSTALL_SCRIPT_FAILED,
+            GIT_DEPENDENCY,
+            UNATTESTED_CARGO_LOCK,
+            ARTIFACT_NOT_PROVISIONED,
+            ARTIFACT_PROVISIONED,
+            BUILT_FROM_SOURCE,
+            EXTERNAL_TOOLCHAIN,
+            HOST_BUILD_INPUTS,
+        ];
+        for kind in KINDS {
+            let object = OBJECT_KINDS.contains(kind);
+            let plan_time = PLAN_TIME_KINDS.contains(kind);
+            assert!(
+                object != plan_time,
+                "{kind} must be in exactly one of OBJECT_KINDS and PLAN_TIME_KINDS"
+            );
+        }
+        for kind in OBJECT_KINDS.iter().chain(PLAN_TIME_KINDS) {
+            assert!(KINDS.contains(kind), "{kind} is not a known kind");
+        }
+
+        let _guard = exception_guard();
+        let attribution = Attribution::open("node").unwrap();
+        for kind in KINDS {
+            record_with(&Policy::default(), kind, "subject", "d").unwrap();
+        }
+        let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
+        attribution.discard();
+        assert_eq!(stored, OBJECT_KINDS, "{stored:?}");
     }
 
     #[test]

@@ -865,6 +865,76 @@ fn skip_download_switch_is_injected_and_recorded() {
     attribution.discard();
 }
 
+/// A skipped download is part of the environment object, not only of the
+/// sync that built it. A warm sync of the same environment under a policy
+/// that denies `artifact-not-provisioned` refuses the cached object, as the
+/// cold build under that policy would (#670): the env identity does not
+/// include the policy, so a permissive build must not serve a strict one.
+#[test]
+fn a_cached_skipped_download_is_refused_under_a_denying_policy() {
+    if !sandbox_or_skip(
+        "a_cached_skipped_download_is_refused_under_a_denying_policy",
+        Platform::host().expect("host platform"),
+    ) {
+        return;
+    }
+    let _policy_guard = policy_guard();
+    let platform = Platform::host().expect("host platform");
+    let temp = TempDir::new("cached-skip-npm");
+    let dir = temp.path();
+    let (tarball, sri) = make_named_pkg_tarball(
+        dir,
+        "puppeteer",
+        "[ \"$PUPPETEER_SKIP_DOWNLOAD\" = true ] || exit 3",
+    );
+    let store = store_at(dir);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    // One selection for both syncs: the stub Node is packed afresh on each
+    // call, and a different Node is a different environment.
+    let selected = stub_node_selection(dir, &store, activity, platform);
+    seed_gyp_python(&store, platform);
+    let mut plan = plan_named(&tarball, &sri, "puppeteer");
+    plan.node_version = selected.version("node").unwrap().to_string();
+    let realize = || {
+        node::realize_node_env_for(
+            &store,
+            activity,
+            platform,
+            &plan,
+            &[],
+            &selected,
+            &node::shipped_gyp_python().unwrap(),
+        )
+    };
+
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let env = realize().expect("permissive cold realize");
+    attribution.discard();
+    let stored = store
+        .exceptions(env.file_name().unwrap().to_str().unwrap())
+        .unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|exception| exception.kind == policy::ARTIFACT_NOT_PROVISIONED),
+        "the object does not carry the skipped download: {stored:?}"
+    );
+
+    let _scope = policy::PolicyScope::install(policy::Policy {
+        deny: [policy::ARTIFACT_NOT_PROVISIONED.to_string()].into(),
+        ..Default::default()
+    });
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let error =
+        realize().expect_err("a warm sync under a denying policy must refuse the cached object");
+    attribution.discard();
+    let message = error.to_string();
+    assert!(message.contains("cached object"), "{message}");
+    assert!(message.contains("artifact-not-provisioned"), "{message}");
+}
+
 #[test]
 fn prebuilt_downloader_is_told_to_build_from_source() {
     if !sandbox_or_skip(

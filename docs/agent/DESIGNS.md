@@ -4237,11 +4237,12 @@ Two writers, built in this order.
    with Greyward's existing realization code on the server side.
 
 Exceptions: an object whose realization records an object exception
-(`object_exceptions()`: install-script-failed, git-dependency, ...) still
-records it in `meta/<id>.json` as today. A user's Greyward checks a system
-object's recorded exceptions against *that user's* policy chain through
-`check_cached_with_activity`, the same check a cached object gets now, so a
-shared object never smuggles a waived exception past a stricter user.
+(`object_exceptions()`: every kind but `PLAN_TIME_KINDS`, which a sync records
+again each time) still records it in `meta/<id>.json` as today. A user's
+Greyward checks a system object's recorded exceptions against *that user's*
+policy chain through `check_cached_with_activity`, the same check a cached
+object gets now, so a shared object never smuggles a waived exception past
+a stricter user.
 
 ### Reading it: the trust check
 

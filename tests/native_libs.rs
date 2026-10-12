@@ -127,24 +127,39 @@ pub unsafe extern "C" fn ward_pango_version_is_pinned() -> bool {
     };
     let cargo_bin = find_tool("cargo");
     let rustc_bin = find_tool("rustc");
+    // An explicit target directory: an inherited `CARGO_TARGET_DIR` (or
+    // `CARGO_BUILD_TARGET_DIR`) would otherwise move the probe's output
+    // away from the path checked below. Both are set to a decoy here, so
+    // the flag is proven on every run, not only where the caller sets one.
+    let probe_target = rust_probe.join("target");
+    let decoy_target = rust_probe.join("decoy-target");
     let mut cargo_probe = Command::new(&cargo_bin);
     cargo_probe
         .current_dir(&rust_probe)
-        .args(["build", "--release"])
+        .args(["build", "--release", "--target-dir"])
+        .arg(&probe_target)
         .env("RUSTC", &rustc_bin)
         .env_remove("RUSTUP_HOME")
         .env_remove("RUSTUP_TOOLCHAIN");
     for (key, value) in &env {
         cargo_probe.env(key, value);
     }
-    cargo_probe.env("PATH", host_path);
+    cargo_probe
+        .env("PATH", host_path)
+        .env("CARGO_TARGET_DIR", &decoy_target)
+        .env("CARGO_BUILD_TARGET_DIR", &decoy_target);
     let cargo_output = cargo_probe.output().unwrap();
     assert_ok(cargo_output, "Rust Pango probe build");
-    let probe = rust_probe.join("target/release/librust_pango_probe.so");
+    let probe = probe_target.join("release/librust_pango_probe.so");
     assert!(
         probe.is_file(),
         "Rust probe did not produce {}",
         probe.display()
+    );
+    assert!(
+        !decoy_target.exists(),
+        "Rust probe built into the inherited target directory {}",
+        decoy_target.display()
     );
     let readelf = assert_ok(
         Command::new("readelf")

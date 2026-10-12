@@ -122,6 +122,8 @@ pub(crate) struct Reach {
     /// The slowest a tool may read a response (bytes/s).
     pub min_response_rate: u64,
     pub request_timeout: Duration,
+    /// The proxy's in-flight byte budget.
+    pub buffer_budget: u64,
 }
 
 #[cfg(test)]
@@ -136,6 +138,7 @@ impl Reach {
             workers: 8,
             min_response_rate: 16 * 1024,
             request_timeout: Duration::from_secs(1),
+            buffer_budget: super::http::BUFFER_BUDGET,
         }
     }
 
@@ -152,6 +155,7 @@ impl Reach {
             workers: 8,
             min_response_rate: 16 * 1024,
             request_timeout: Duration::from_secs(1),
+            buffer_budget: super::http::BUFFER_BUDGET,
         }
     }
 }
@@ -209,6 +213,7 @@ impl Harness {
             idle_timeout: Duration::from_secs(2),
             request_timeout: reach.request_timeout,
             min_response_rate: reach.min_response_rate,
+            buffer_budget: reach.buffer_budget,
             allow_loopback: reach.allow_loopback,
             connect_to,
         })

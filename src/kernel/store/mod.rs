@@ -860,6 +860,48 @@ mod tests {
         }
     }
 
+    /// The flush of an object's contents is outside the publish lock
+    /// (#677): every lookup and root registration on the store needs that
+    /// lock, and the flush can take seconds. While the contents are flushed
+    /// another opener of the lock gets it at once; once the object is
+    /// renamed into place, under the lock, it does not.
+    #[test]
+    fn the_contents_are_flushed_outside_the_publish_lock() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let lock = store.root.join("tmp/.publish.lock");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = seen.clone();
+        let (object, _) = with_publication_hook(
+            move |at| {
+                // flock belongs to the open file description: a fresh open
+                // contends with the commit's own descriptor.
+                let probe = fs::File::open(&lock)?;
+                let free = probe.try_lock().is_ok();
+                record.borrow_mut().push((at.to_string(), free));
+                Ok(())
+            },
+            || store.commit_with_deps(&identity(), &staged(&store), &[], &ObjectDeps::new()),
+        )
+        .unwrap();
+        let seen = seen.borrow();
+        let at = |point: &str| {
+            seen.iter()
+                .find(|(at, _)| at == point)
+                .unwrap_or_else(|| panic!("no {point} in {seen:?}"))
+                .1
+        };
+        assert!(
+            at("before-sync-tree"),
+            "the tree flush waits under the lock"
+        );
+        assert!(!at("before-sync-object"), "the rename ran outside the lock");
+        assert!(object.join("content").is_file());
+        assert_eq!(store.is_complete(&identity().object_id()), Some(true));
+    }
+
     #[test]
     fn orphan_completion_is_invalidated_before_a_republication_flush_failure() {
         let temp = temp_store();
@@ -877,7 +919,7 @@ mod tests {
         let stage = staged(&store);
         let result = with_publication_hook(
             |at| {
-                if at == "before-sync-tree" {
+                if at == "before-sync-object" {
                     return Err(io::Error::other("injected flush failure"));
                 }
                 Ok(())

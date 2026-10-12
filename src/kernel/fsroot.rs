@@ -1491,6 +1491,50 @@ mod tests {
         dir
     }
 
+    /// A writer without an unnamed file creates its temporary's name and
+    /// only then locks it, holding the directory shared in between. A
+    /// cleanup in that moment sweeps nothing, however long the writer is
+    /// paused there, and sweeps once the writer is through.
+    #[test]
+    fn no_sweep_while_a_writer_holds_its_directory_between_name_and_lock() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let unlocked = dir.join(format!("{}{}", publish::TEMP_PREFIX, "b".repeat(32)));
+        fs::write(&unlocked, b"x").unwrap();
+        let old = libc::timespec {
+            tv_sec: (SystemTimeNow::secs() - 3600) as libc::time_t,
+            tv_nsec: 0,
+        };
+        let name = CString::new(unlocked.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is NUL-terminated and the two timespecs live
+        // through the call.
+        let done = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                name.as_ptr(),
+                [old, old].as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(done, 0, "{}", io::Error::last_os_error());
+        let writer = fs::File::open(&dir).unwrap();
+        writer.lock_shared().unwrap();
+
+        let root = ProjectRoot::open(&dir).unwrap();
+        root.write_file(Path::new("published"), b"new").unwrap();
+        assert!(
+            fs::symlink_metadata(&unlocked).is_ok(),
+            "a sweep ran while a writer held the directory"
+        );
+
+        drop(writer);
+        root.write_file(Path::new("published"), b"newer").unwrap();
+        assert!(
+            fs::symlink_metadata(&unlocked).is_err(),
+            "the sweep after the writer kept a dead temporary"
+        );
+    }
+
     /// A publication removes the temporaries of ours a killed ward left
     /// in the same directory, and only those (#678): a file or link named
     /// exactly as ours, older than the window, whose writer is provably

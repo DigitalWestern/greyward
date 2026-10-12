@@ -1254,7 +1254,7 @@ pub fn realize_deps(
             &scratch,
             &[
                 "elixir",
-                helper.to_str().unwrap(),
+                helper.to_str().ok_or_else(|| err("helper not UTF-8"))?,
                 "hexmark",
                 dep_dir.to_str().ok_or_else(|| err("dep path not UTF-8"))?,
                 &d.package,

@@ -19,7 +19,7 @@ type Variable = (String, Option<String>);
 /// explanation `run` gives when there is no project here at all.
 pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32> {
     let shell = shell.unwrap_or_else(shell_from_environment);
-    let cwd = ctx.project_dir();
+    let cwd = ctx.project_dir()?;
     // What is printed is the environment the inputs describe, as `run`
     // gives it: a missing or stale projection is synced first. Everything
     // that sync and its children print is sent to stderr for the duration,
@@ -42,6 +42,14 @@ pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32>
                 dir.display()
             ),
         ));
+    }
+    // A prefix entry with ':' in it would be split into two PATH entries
+    // that name other directories: refused, as `run` refuses it.
+    for entry in &prefix {
+        crate::kernel::platform::refuse_path_separator(
+            "the directory",
+            std::path::Path::new(entry),
+        )?;
     }
     print!("{}", render(shell, &prefix, &variables(&carrier)));
     Ok(0)
@@ -87,7 +95,10 @@ fn shell_from_environment() -> Shell {
 ///
 /// The inherited PATH is referenced rather than expanded (`"$PATH"`,
 /// `$PATH`), so the output does not freeze the PATH of the shell that ran
-/// `ward env` into the shell that evals it.
+/// `ward env` into the shell that evals it. In POSIX syntax the separator
+/// comes with it only when that PATH is set and not empty
+/// (`${PATH:+:$PATH}`): a bare trailing `:` is an empty entry, which a
+/// shell reads as the current directory.
 fn render(shell: Shell, prefix: &[String], variables: &[Variable]) -> String {
     let mut out = String::new();
     let quote = |value: &str| quoted(shell, value);
@@ -104,7 +115,7 @@ fn render(shell: Shell, prefix: &[String], variables: &[Variable]) -> String {
         }
         Shell::Bash | Shell::Zsh => {
             out.push_str(&format!(
-                "export PATH={}:\"$PATH\"\n",
+                "export PATH={}\"${{PATH:+:$PATH}}\"\n",
                 quote(&prefix.join(":"))
             ));
             for (name, value) in variables {
@@ -167,7 +178,7 @@ mod tests {
         let (prefix, variables) = fixture();
         assert_eq!(
             render(Shell::Bash, &prefix, &variables),
-            "export PATH='/proj/.venv/bin:/store/objects/abc-node/bin':\"$PATH\"\n\
+            "export PATH='/proj/.venv/bin:/store/objects/abc-node/bin'\"${PATH:+:$PATH}\"\n\
              export VIRTUAL_ENV='/proj/.venv'\n\
              export PYTHONDONTWRITEBYTECODE='1'\n\
              export CARGO_HOME='/it'\\''s/here/.greyward/cargo-home'\n\
@@ -195,6 +206,23 @@ mod tests {
         // inside a POSIX shell's.
         assert_eq!(quoted(Shell::Fish, "a\\b"), "'a\\\\b'");
         assert_eq!(quoted(Shell::Bash, "a\\b"), "'a\\b'");
+    }
+
+    /// The printed PATH line, evaluated by a real shell: the prefix alone
+    /// when the evaluating shell's PATH is empty, never a trailing empty
+    /// entry. (An unset PATH cannot be shown this way: sh sets a default.)
+    #[test]
+    fn the_printed_path_adds_no_empty_entry() {
+        let line = render(Shell::Bash, &["/a b/bin".to_string()], &[]);
+        for (host, expected) in [("", "/a b/bin"), ("/usr/bin", "/a b/bin:/usr/bin")] {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("{line}printf %s \"$PATH\""))
+                .env("PATH", host)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{host:?}");
+        }
     }
 
     /// PATH is printed from the prefix list, so a tailor that also set it

@@ -47,12 +47,55 @@ impl Context {
     }
 
     /// The directory `open_in` pinned, or the current directory.
-    pub fn project_dir(&self) -> PathBuf {
-        self.project_dir.clone().unwrap_or_else(project_dir)
+    pub fn project_dir(&self) -> io::Result<PathBuf> {
+        match &self.project_dir {
+            Some(dir) => Ok(dir.clone()),
+            None => project_dir(),
+        }
     }
 }
 
 /// The project directory: the current directory, as every command reads it.
-pub fn project_dir() -> PathBuf {
-    std::env::current_dir().expect("cwd")
+/// A shell can sit in a directory something else removed; that is an error
+/// the user can act on, not a panic.
+pub fn project_dir() -> io::Result<PathBuf> {
+    std::env::current_dir().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => io::Error::new(
+            io::ErrorKind::NotFound,
+            "the current directory no longer exists: cd to one that does, or name it with -C",
+        ),
+        kind => io::Error::new(kind, format!("cannot read the current directory: {error}")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    /// A removed working directory is an error that says so. The process
+    /// cwd is shared by every test thread, so the removal runs in a child.
+    #[test]
+    fn a_removed_current_directory_is_an_error() {
+        let Ok(test) = std::env::current_exe() else {
+            return;
+        };
+        if std::env::var_os("WARD_REMOVED_CWD_CHILD").is_some() {
+            let dir = std::env::temp_dir().join(format!("ward-gone-{}", std::process::id()));
+            std::fs::create_dir(&dir).unwrap();
+            std::env::set_current_dir(&dir).unwrap();
+            std::fs::remove_dir(&dir).unwrap();
+            let error = super::project_dir().unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(error.to_string().contains("no longer exists"), "{error}");
+            return;
+        }
+        let status = std::process::Command::new(test)
+            .args([
+                "--exact",
+                "kernel::context::tests::a_removed_current_directory_is_an_error",
+            ])
+            .env("WARD_REMOVED_CWD_CHILD", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 }

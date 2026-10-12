@@ -7,7 +7,7 @@ use crate::kernel::platform::Platform;
 use std::io;
 
 pub fn run(platform: Platform, json: bool) -> io::Result<i32> {
-    let dir = project_dir();
+    let dir = project_dir()?;
     let rows = inspect::status(platform, &dir)?;
     if rows.is_empty() {
         return Err(io::Error::new(

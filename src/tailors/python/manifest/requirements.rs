@@ -285,6 +285,42 @@ pub fn requirements_hash_pins(
     Ok(pins)
 }
 
+/// The `pins` that apply on `platform` under `python_version`: a pin
+/// whose marker is false there pins nothing there, and its hashes must
+/// neither be required of the lock nor widen the files planning may pick
+/// (another platform's line beside this one's). A marker ward cannot
+/// evaluate is refused, by file and line: whether its hashes guard this
+/// environment cannot be told.
+pub(crate) fn active_hash_pins(
+    pins: Vec<pypi::HashPin>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<Vec<pypi::HashPin>> {
+    let mut active = Vec::new();
+    for pin in pins {
+        let applies = match &pin.marker {
+            None => true,
+            Some(marker) => {
+                markers::marker_matches(marker, python_version, platform).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} line {}: ward cannot tell whether the marker `{marker}` \
+                             applies here ({error}), so it cannot tell which files its \
+                             hashes pin",
+                            pin.file, pin.line
+                        ),
+                    )
+                })?
+            }
+        };
+        if applies {
+            active.push(pin);
+        }
+    }
+    Ok(active)
+}
+
 /// Why a lock holding `locked` (name, version) does not satisfy
 /// `manifest`, or `None` when it does: every requirement that applies on
 /// `platform` under `python_version` must name a locked package at a

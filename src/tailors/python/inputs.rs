@@ -301,7 +301,7 @@ impl Inputs {
         if self.manifest.is_empty() || self.manifest.locked_packages.is_some() {
             return Ok(Pins::Manifest);
         }
-        self.hash_pins(project)?;
+        self.written_hash_pins(project)?;
         if !is_fully_pinned(&self.source) {
             return Ok(Pins::Lock { repinned: false });
         }
@@ -315,11 +315,23 @@ impl Inputs {
     /// Every `--hash` pin the requirements write: across the include tree
     /// of a requirements file, each with its own file and line, or in the
     /// text a pyproject or setup.cfg gives.
-    fn hash_pins(&self, project: &ProjectRoot) -> io::Result<Vec<pypi::HashPin>> {
+    fn written_hash_pins(&self, project: &ProjectRoot) -> io::Result<Vec<pypi::HashPin>> {
         match &self.manifest.source_path {
             Some(path) => manifest::requirements_hash_pins(project, path),
             None => pypi::hash_pins(&self.source, &self.input),
         }
+    }
+
+    /// The [`Inputs::written_hash_pins`] that apply on `platform` under
+    /// `python_version`: the ones a lock compiled here must keep, and the
+    /// only ones that say which files planning may pick.
+    fn hash_pins(
+        &self,
+        project: &ProjectRoot,
+        python_version: &str,
+        platform: Platform,
+    ) -> io::Result<Vec<pypi::HashPin>> {
+        manifest::active_hash_pins(self.written_hash_pins(project)?, python_version, platform)
     }
 
     /// The file uv compiles the lock from, as planning names it: the
@@ -499,7 +511,11 @@ pub fn ensure_lock(
         selected,
         compile_path.as_deref(),
         &source.command(),
-        Some(lock_check(inputs.hash_pins(project)?)),
+        Some(lock_check(inputs.hash_pins(
+            project,
+            selected.version("cpython")?,
+            door.platform(),
+        )?)),
     )?;
     if repinned {
         // Said once the lock exists, with its full path: an automatic sync
@@ -568,7 +584,7 @@ pub fn read_plan(
             inputs.check_lock(project, &lock, &source, platform)?;
             // The plan cache keys on the narrowed text, so a plan made from
             // the lock's wider set of files is never reused.
-            let pins = inputs.hash_pins(project)?;
+            let pins = inputs.hash_pins(project, version, platform)?;
             pypi::check_hash_pins(&pins, &lock)?;
             pypi::narrow_to_pins(&lock, &pins)
         }
@@ -765,7 +781,8 @@ pub(crate) fn lock_command(
     let command = inputs
         .lock_source(project, selected, door.platform())?
         .command();
-    Ok((command, lock_check(inputs.hash_pins(project)?)))
+    let pins = inputs.hash_pins(project, selected.version("cpython")?, door.platform())?;
+    Ok((command, lock_check(pins)))
 }
 
 /// The check a compiled `requirements.lock.txt` passes before it is
@@ -1904,6 +1921,54 @@ mod tests {
         assert_eq!(
             message,
             "base.txt line 1: only sha256 hashes are supported, got: --hash=md5:0123"
+        );
+    }
+
+    /// A pin whose marker is false for the target environment pins nothing
+    /// there: the Darwin line's hash neither has to be in a Linux lock nor
+    /// lets Linux planning pick its file (#689). A marker ward cannot
+    /// evaluate is refused by file and line.
+    #[test]
+    fn a_pin_for_another_environment_pins_nothing_here() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let temp = crate::kernel::testutil::TempDir::new();
+        std::fs::write(
+            temp.0.join("requirements.txt"),
+            format!(
+                "six==1.17.0 ; sys_platform == \"linux\" --hash=sha256:{a}\n\
+                 six==1.17.0 ; sys_platform == \"darwin\" --hash=sha256:{b}\n"
+            ),
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let inputs = inputs_of(&temp.0);
+        let lock = format!("six==1.17.0 --hash=sha256:{a} --hash=sha256:{b}\n");
+        for (platform, kept) in [
+            (Platform::X86_64UnknownLinuxGnu, &a),
+            (Platform::Aarch64AppleDarwin, &b),
+        ] {
+            let pins = inputs.hash_pins(&project, "3.12.0", platform).unwrap();
+            assert_eq!(pins.len(), 1, "{platform:?}: {pins:?}");
+            pypi::check_hash_pins(&pins, &format!("six==1.17.0 --hash=sha256:{kept}\n")).unwrap();
+            assert_eq!(
+                pypi::narrow_to_pins(&lock, &pins),
+                format!("six==1.17.0 --hash=sha256:{kept}\n"),
+                "{platform:?}"
+            );
+        }
+
+        std::fs::write(
+            temp.0.join("requirements.txt"),
+            format!("six==1.17.0 ; implementation_flavor == \"x\" --hash=sha256:{a}\n"),
+        )
+        .unwrap();
+        let error = inputs_of(&temp.0)
+            .hash_pins(&project, "3.12.0", Platform::X86_64UnknownLinuxGnu)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("requirements.txt line 1: ward cannot tell whether the marker"),
+            "{error}"
         );
     }
 

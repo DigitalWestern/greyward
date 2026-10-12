@@ -443,8 +443,12 @@ pub struct HashPin {
     pub line: usize,
     /// PEP 503 normalized.
     pub name: String,
-    /// The version an `==` pins, if the line has one.
-    pub version: Option<String>,
+    /// The line's PEP 440 version specifier (`==1.17.0`, `==1.*`,
+    /// `>=1,<2`), if it has one.
+    pub specifier: Option<String>,
+    /// The line's environment marker, if it has one: a pin whose marker is
+    /// false for the target environment pins nothing there.
+    pub marker: Option<String>,
     /// Lowercase hex, no "sha256:" prefix.
     pub sha256s: Vec<String>,
 }
@@ -492,30 +496,29 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
         if name.is_empty() {
             continue;
         }
-        // The exact version an `==` pins, after any extras.
-        let rest = spec[name.len()..].trim_start();
+        // The version specifier after any extras, and the marker after it.
+        let (body, marker) = match spec.split_once(';') {
+            Some((body, marker)) => (body, Some(marker.trim().to_string())),
+            None => (spec.as_str(), None),
+        };
+        let rest = body[name.len()..].trim_start();
         let rest = match rest.strip_prefix('[') {
             Some(extras) => extras.split_once(']').map_or("", |(_, rest)| rest),
             None => rest,
         };
-        let version = rest
-            .trim_start()
-            .strip_prefix("==")
-            .filter(|version| !version.starts_with('='))
-            .map(|version| {
-                version
-                    .trim_start()
-                    .split(|c: char| c == ';' || c == ',' || c.is_whitespace())
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
-            .filter(|version| !version.is_empty());
+        let specifier = rest
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        let specifier = (!specifier.is_empty()).then(|| specifier.to_string());
+        let marker = marker.filter(|marker| !marker.is_empty());
         pins.push(HashPin {
             file: file.to_string(),
             line,
             name: normalize_name(&name),
-            version,
+            specifier,
+            marker,
             sha256s,
         });
     }
@@ -523,13 +526,16 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
 }
 
 /// Whether `pin` is the pin of a locked `name` at `version`: the same
-/// package, at the version the line's `==` names when it names one.
+/// package, at a version the line's specifier allows, matched as PEP 440
+/// does (`==1.*` and `==1.17` both allow `1.17.0`). A specifier ward cannot
+/// read applies, so its hashes are held to rather than dropped. The caller
+/// has already left out the pins whose marker is false for the target
+/// environment.
 fn pin_applies(pin: &HashPin, name: &str, version: &str) -> bool {
     pin.name == name
-        && pin
-            .version
-            .as_deref()
-            .is_none_or(|pinned| pinned == version)
+        && pin.specifier.as_deref().is_none_or(|specifier| {
+            crate::kernel::pep440::matches_specifier(specifier, version).unwrap_or(true)
+        })
 }
 
 /// Refuse a compiled `lock` that drops a hash one of `pins` names. uv
@@ -1855,7 +1861,8 @@ mod requirement_hash_pin_tests {
                 file: "requirements.txt".into(),
                 line: 2,
                 name: "six-pkg".into(),
-                version: Some("1.17.0".into()),
+                specifier: Some("==1.17.0".into()),
+                marker: Some("python_version >= \"3\"".into()),
                 sha256s: vec![A.into(), B.into()],
             }]
         );
@@ -1895,6 +1902,36 @@ mod requirement_hash_pin_tests {
             )),
             "{message}"
         );
+    }
+
+    /// A pin applies to every version its specifier allows, as PEP 440
+    /// reads it: `==1.*` and `==1.17` (trailing zeros are padding) both pin
+    /// the `1.17.0` uv compiles, so their hashes are held to, and the lock
+    /// is narrowed to them.
+    #[test]
+    fn a_pin_applies_to_every_version_its_specifier_allows() {
+        let lock = format!("six==1.17.0 --hash=sha256:{A} --hash=sha256:{B}\n");
+        let dropped = format!("six==1.17.0 --hash=sha256:{B}\n");
+        for line in ["six==1.*", "six==1.17", "six == 1.17.0.0", "six>=1,<2"] {
+            let user = pins(&format!("{line} --hash=sha256:{A}\n"));
+            check_hash_pins(&user, &lock).unwrap();
+            let error = check_hash_pins(&user, &dropped)
+                .expect_err(line)
+                .to_string();
+            assert!(
+                error.contains(&format!("six is pinned to sha256:{A}")),
+                "{line}: {error}"
+            );
+            assert_eq!(
+                narrow_to_pins(&lock, &user),
+                format!("six==1.17.0 --hash=sha256:{A}\n"),
+                "{line}"
+            );
+        }
+        // A specifier the locked version is outside is another line's pin.
+        let other = pins(&format!("six==1.16.* --hash=sha256:{A}\n"));
+        check_hash_pins(&other, &dropped).unwrap();
+        assert_eq!(narrow_to_pins(&lock, &other), lock);
     }
 
     /// The compiled lock lists every file of a version. The user pinned the

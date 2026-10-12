@@ -17,7 +17,9 @@ use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::dotnet;
-use crate::tailors::{ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor};
+use crate::tailors::{
+    Attester, ClosureListing, FileRunner, PackageRow, SourceFile, SyncRequest, Tailor,
+};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -62,6 +64,20 @@ fn realize_and_project(
     Ok((sdk, packages))
 }
 
+impl Attester for Dotnet {
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let sdk = dotnet::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        dotnet::attest_project(door, project, &sdk, toolchain)
+    }
+}
+
 impl Tailor for Dotnet {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -99,16 +115,8 @@ impl Tailor for Dotnet {
         super::resolve::resolution_inputs(project)
     }
 
-    fn attest_lock(
-        &self,
-        ctx: &Context,
-        project: &ProjectRoot,
-        toolchain: &Selected,
-        _host: &dyn crate::tailors::EditHost,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        let sdk = dotnet::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        dotnet::attest_project(door, project, &sdk, toolchain)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {

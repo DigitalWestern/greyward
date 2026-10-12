@@ -1753,9 +1753,11 @@ project, and each fails (or, for npm and Bundler, which exit 0 either way,
 rewrites the lock, so the byte diff is the check) when the manifest has
 drifted. Go needs both commands: after an edit that removes a module,
 `go mod tidy -diff` is what catches the stale `go.sum` lines.
-Tailors without a lock check refuse `attest` with the reason. With no
-ecosystem named, `ward attest` covers every detected ecosystem whose tailor
-declares resolution outputs, and refuses when there is none. It is
+A tailor offers a lock check through `Tailor::attester()`; one without an
+attester, or without declared resolution outputs, cannot be attested. Named,
+it is refused with the reason before preflight and before the store opens.
+With no ecosystem named, `ward attest` covers every detected ecosystem that
+has both, skips the rest, and refuses when there is none. It is
 all-or-nothing: every check runs before any record is written, so one
 failing ecosystem leaves no partial set. The receipts are then published
 together under the project lock, each only while its lock still has the
@@ -2182,15 +2184,18 @@ fn edit_manifest(
     Err(unsupported(self.id(), "add, remove, and update"))
 }
 
-/// `ward attest`: run this ecosystem's lock-consistency check through
-/// `door` and return the record the door built. The default refuses.
-/// The command, not the tailor, signs and writes the record, so every
-/// ecosystem is checked before anything is written and `--record-out`
+/// `ward attest`: this ecosystem's lock-consistency check, or `None` when
+/// it has none. Target selection requires one, so an unsupported tailor is
+/// refused (named) or skipped (unnamed) before any toolchain or store work.
+fn attester(&self) -> Option<&dyn Attester> { None }
+
+// trait Attester:
+/// Run the lock-consistency check through `door` and return the record the
+/// door built. The command, not the tailor, signs and writes the record, so
+/// every ecosystem is checked before anything is written and `--record-out`
 /// needs no tailor support.
 fn attest_lock(&self, ctx: &Context, project: &ProjectRoot, toolchain: &Selected,
-               door: &mut ResolutionDoor<'_>) -> io::Result<ResolutionRecord> {
-    Err(unsupported(self.id(), "attest"))
-}
+               door: &mut ResolutionDoor<'_>) -> io::Result<ResolutionRecord>;
 
 /// The project files a door of this ecosystem produces, relative to the
 /// closure's project directory. The join requires the record's `outputs`

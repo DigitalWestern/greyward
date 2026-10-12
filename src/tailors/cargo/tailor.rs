@@ -18,7 +18,7 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::cargo::{self as cargo, inputs, rustfmt};
 use crate::tailors::{
-    ClosureListing, FileRunner, Formatter, PackageRow, SourceFile, SyncRequest, Tailor,
+    Attester, ClosureListing, FileRunner, Formatter, PackageRow, SourceFile, SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -71,6 +71,25 @@ fn realize_and_project(
     Ok((inputs, vendor_obj))
 }
 
+impl Attester for Cargo {
+    /// `cargo metadata --locked` at the workspace root, on the Rust the
+    /// selection names with its components and targets.
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let root = inputs::locate_cargo_root(project.path())?;
+        let extras = cargo::project_extras_in(project)?;
+        let rust_obj =
+            cargo::realize_toolchain(&ctx.store, &ctx.activity, ctx.platform, toolchain, &extras)?;
+        super::resolve::attest_project(door, project, &rust_obj, &root, toolchain)
+    }
+}
+
 impl Tailor for Cargo {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -97,21 +116,8 @@ impl Tailor for Cargo {
         super::resolve::resolution_inputs(project)
     }
 
-    /// `cargo metadata --locked` at the workspace root, on the Rust the
-    /// selection names with its components and targets.
-    fn attest_lock(
-        &self,
-        ctx: &Context,
-        project: &ProjectRoot,
-        toolchain: &Selected,
-        _host: &dyn crate::tailors::EditHost,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        let root = inputs::locate_cargo_root(project.path())?;
-        let extras = cargo::project_extras_in(project)?;
-        let rust_obj =
-            cargo::realize_toolchain(&ctx.store, &ctx.activity, ctx.platform, toolchain, &extras)?;
-        super::resolve::attest_project(door, project, &rust_obj, &root, toolchain)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn id(&self) -> &'static str {

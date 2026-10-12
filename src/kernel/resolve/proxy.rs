@@ -114,6 +114,14 @@ pub struct Proxy {
     shared: Arc<Shared>,
 }
 
+#[cfg(test)]
+impl Proxy {
+    /// The in-flight byte budget, for a test to hold part of it.
+    pub(super) fn budget(&self) -> &http::Budget {
+        &self.shared.budget
+    }
+}
+
 pub(super) struct Shared {
     pub(super) client: PinnedClient,
     /// The process's certificate authority, which signs the leaf of every

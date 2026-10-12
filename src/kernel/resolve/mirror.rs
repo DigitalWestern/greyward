@@ -568,16 +568,25 @@ impl Exchange<'_> {
         // new value would be a new file: such URLs are served, not cached.
         let keys = self.route.protocol.content_query_keys();
         let cacheable = url.query_pairs().all(|(name, _)| keys.contains(&&*name));
+        // Every body this request holds (the cached copy, a fetched one,
+        // the rewritten one served) is reserved here first.
+        let mut held = self.budget.reservation();
         let cached = if cacheable {
-            self.state.meta.load(&key).unwrap_or_else(|error| {
-                record.detail = Some(format!("metadata cache unreadable: {error}"));
-                None
-            })
+            match self.state.meta.load(&key, &mut held) {
+                Ok(cached) => cached,
+                Err(error) if http::OverBudget::is(&error) => {
+                    return self.busy(out, record, error.to_string());
+                }
+                Err(error) => {
+                    record.detail = Some(format!("metadata cache unreadable: {error}"));
+                    None
+                }
+            }
         } else {
             None
         };
         if self.state.config.mode == Mode::Offline {
-            return self.last_good(url, cached, record, "offline".into(), out);
+            return self.last_good(url, cached, record, "offline".into(), &mut held, out);
         }
         let mut extra = Vec::new();
         if let Some(cached) = &cached {
@@ -592,7 +601,7 @@ impl Exchange<'_> {
             Ok(fetched) => fetched,
             Err((Failure::Transport(why), hops)) => {
                 record.hops = hops;
-                return self.last_good(url, cached, record, why, out);
+                return self.last_good(url, cached, record, why, &mut held, out);
             }
             Err((failure, hops)) => {
                 record.hops = hops;
@@ -612,15 +621,16 @@ impl Exchange<'_> {
                         out,
                         url,
                         200,
-                        &cached,
+                        cached,
                         Freshness::Live,
                         "revalidated",
                         record,
+                        &mut held,
                     )
                 }
                 None => {
                     let why = "upstream answered 304 to an unconditional request".to_string();
-                    self.last_good(url, None, record, why, out)
+                    self.last_good(url, None, record, why, &mut held, out)
                 }
             };
         }
@@ -630,10 +640,10 @@ impl Exchange<'_> {
                 cached,
                 record,
                 format!("upstream answered {status}"),
+                &mut held,
                 out,
             );
         }
-        let mut held = self.budget.reservation();
         let body = match cache::read_capped(&mut response.body, http::MAX_BODY, &mut held) {
             Ok(body) => body,
             Err(error) if http::OverBudget::is(&error) => {
@@ -642,7 +652,9 @@ impl Exchange<'_> {
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 return self.fail(out, record, 502, error.to_string());
             }
-            Err(error) => return self.last_good(url, cached, record, error.to_string(), out),
+            Err(error) => {
+                return self.last_good(url, cached, record, error.to_string(), &mut held, out)
+            }
         };
         let fresh = Cached::new(url.as_str(), &response.headers, body);
         let vary = response
@@ -657,7 +669,16 @@ impl Exchange<'_> {
                 record.detail = Some(format!("metadata cache not written: {error}"));
             }
         }
-        self.serve_metadata(out, url, status, &fresh, Freshness::Live, "miss", record)
+        self.serve_metadata(
+            out,
+            url,
+            status,
+            fresh,
+            Freshness::Live,
+            "miss",
+            record,
+            &mut held,
+        )
     }
 
     /// The upstream is unreachable: serve last-good if policy allows and a
@@ -668,6 +689,7 @@ impl Exchange<'_> {
         cached: Option<Cached>,
         mut record: Record,
         why: String,
+        held: &mut http::Reservation<'_>,
         out: &mut dyn Write,
     ) -> io::Result<()> {
         let offline = self.state.config.mode == Mode::Offline;
@@ -684,10 +706,11 @@ impl Exchange<'_> {
                     out,
                     url,
                     200,
-                    &cached,
+                    cached,
                     Freshness::LastGood,
                     "last-good",
                     record,
+                    held,
                 )
             }
             None if offline => self.offline_miss(out, record),
@@ -716,23 +739,41 @@ impl Exchange<'_> {
 
     /// Serve a metadata body: learn its claims, apply the protocol's
     /// rewrite, record the upstream bytes.
+    ///
+    /// The body is moved into the rewrite, never copied, and `held` (which
+    /// already counts it) grows by whatever the rewrite added. The
+    /// rewrite's own working memory, while it runs, is not counted.
     #[allow(clippy::too_many_arguments)]
     fn serve_metadata(
         &self,
         out: &mut dyn Write,
         url: &Url,
         status: u16,
-        cached: &Cached,
+        cached: Cached,
         freshness: Freshness,
         disposition: &'static str,
         mut record: Record,
+        held: &mut http::Reservation<'_>,
     ) -> io::Result<()> {
         let protocol = self.route.protocol;
         let success = (200..300).contains(&status);
+        let Cached {
+            headers: cached_headers,
+            sha256,
+            body: upstream,
+            ..
+        } = cached;
         let body = if success && !self.head_only() {
-            self.state.add_claims(protocol.claims(url, &cached.body));
-            match protocol.rewrite(url, cached.body.clone(), self.address) {
-                Ok(body) => body,
+            self.state.add_claims(protocol.claims(url, &upstream));
+            let before = upstream.len();
+            match protocol.rewrite(url, upstream, self.address) {
+                Ok(body) => {
+                    let added = body.len().saturating_sub(before) as u64;
+                    if let Err(over) = held.grow(added) {
+                        return self.busy(out, record, over.to_string());
+                    }
+                    body
+                }
                 Err(error) => {
                     let reason = format!(
                         "{}: the response could not be rewritten: {error}",
@@ -743,10 +784,10 @@ impl Exchange<'_> {
                 }
             }
         } else {
-            cached.body.clone()
+            upstream
         };
         record.status = status;
-        record.sha256 = (!self.head_only()).then(|| cached.sha256.clone());
+        record.sha256 = (!self.head_only()).then_some(sha256);
         record.freshness = Some(freshness);
         record.disposition = disposition;
         record.bytes = if self.head_only() {
@@ -756,7 +797,7 @@ impl Exchange<'_> {
         };
         record.commit(self.state);
         let mut headers = Headers::new();
-        for (name, value) in &cached.headers {
+        for (name, value) in &cached_headers {
             if SERVED_RESPONSE_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
                 headers.push(name, value);
             }
@@ -1133,6 +1174,48 @@ mod tests {
             assert_eq!(answer.body.len(), fits.len());
         }
         session.finish();
+    }
+
+    /// A cached body counts against the budget like a fetched one: with
+    /// most of the budget held elsewhere, a cached document is a 503
+    /// offline (served from the cache) and online (where a 304 or an
+    /// unreachable upstream would serve it), and served once the budget is
+    /// free again. Nothing stays reserved afterwards.
+    #[test]
+    fn a_cached_body_past_the_in_flight_budget_is_a_503() {
+        use crate::kernel::resolve::testing::Reach;
+        let harness = Harness::with(
+            "mirror-budget-cached",
+            Reach {
+                buffer_budget: 1 << 20,
+                ..Reach::loopback()
+            },
+        );
+        let body = vec![b' '; 700 << 10];
+        harness
+            .upstream
+            .set("/meta/cached.json", Behavior::Reply(Reply::new(200, &body)));
+        warm(&harness, &["/meta/cached.json"]);
+        harness
+            .upstream
+            .set("/meta/cached.json", Behavior::Reply(Reply::new(500, b"")));
+        let budget = harness.proxy.budget();
+        let mut elsewhere = budget.reservation();
+        elsewhere.grow(600 << 10).unwrap();
+        for mode in [Mode::Offline, Mode::Online] {
+            let (session, address) = harness.open(harness.config(Policy::default(), mode));
+            let answer = fetch(&address, "/meta/cached.json");
+            assert_eq!(answer.status, 503, "{mode:?}: {}", answer.text());
+            assert_eq!(answer.headers.get("retry-after"), Some("1"));
+            session.finish();
+        }
+        drop(elsewhere);
+        let (session, address) = harness.open(harness.config(Policy::default(), Mode::Offline));
+        let answer = fetch(&address, "/meta/cached.json");
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        assert_eq!(answer.body, body);
+        session.finish();
+        assert_eq!(budget.used(), 0);
     }
 
     fn entries_for(report: &SessionReport, url: &str) -> Vec<Entry> {

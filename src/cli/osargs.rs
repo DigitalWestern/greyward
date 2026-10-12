@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 /// [`parse`] over the arguments as the kernel passed them.
 pub fn parse_os(args: &[OsString]) -> Result<Parsed, UsageError> {
-    let mut slots: Vec<Option<OsString>> = Vec::new();
+    let mut slots: Vec<Option<Slot>> = Vec::new();
     let words: Vec<String> = args.iter().map(|arg| word(arg, &mut slots)).collect();
     let mut parsed = match parse(&words) {
         Ok(parsed) => parsed,
@@ -43,12 +43,12 @@ pub fn parse_os(args: &[OsString]) -> Result<Parsed, UsageError> {
 
 /// The usage error for the first argument still stood in for: one ward
 /// would have to read as text.
-fn not_text(slots: &[Option<OsString>]) -> UsageError {
+fn not_text(slots: &[Option<Slot>]) -> UsageError {
     let left = slots
         .iter()
         .flatten()
         .next()
-        .map(|arg| arg.to_string_lossy());
+        .map(|slot| slot.arg.to_string_lossy());
     UsageError {
         message: format!(
             "the argument '{}' is not valid UTF-8; ward reads every argument but a \
@@ -60,19 +60,30 @@ fn not_text(slots: &[Option<OsString>]) -> UsageError {
     }
 }
 
+/// One argument that is not UTF-8: its bytes, and how many of them are a
+/// directory option's spelling (`-C`, `--directory=`) the stand-in keeps.
+struct Slot {
+    arg: OsString,
+    prefix: usize,
+}
+
 /// `arg` as text: itself when it is UTF-8, else a stand-in for it, kept in
-/// `slots`. `--directory=<dir>` and `-C<dir>` keep their spelling, so only
-/// the directory is stood in for and the grammar still sees the option.
-fn word(arg: &OsStr, slots: &mut Vec<Option<OsString>>) -> String {
+/// `slots`. `--directory=<dir>` and `-C<dir>` keep their spelling, so where
+/// ward reads its own options the grammar still sees the option; wherever
+/// the word is a program's argument, the whole of it comes back.
+fn word(arg: &OsStr, slots: &mut Vec<Option<Slot>>) -> String {
     if let Some(text) = arg.to_str() {
         return text.to_string();
     }
     let bytes = arg.as_bytes();
-    let (option, value) = ["--directory=", "-C"]
-        .iter()
+    let option = ["--directory=", "-C"]
+        .into_iter()
         .find(|option| bytes.starts_with(option.as_bytes()))
-        .map_or(("", bytes), |option| (*option, &bytes[option.len()..]));
-    slots.push(Some(OsStr::from_bytes(value).to_owned()));
+        .unwrap_or_default();
+    slots.push(Some(Slot {
+        arg: arg.to_owned(),
+        prefix: option.len(),
+    }));
     format!("{option}{}", stand_in(slots.len() - 1))
 }
 
@@ -80,21 +91,39 @@ fn stand_in(index: usize) -> String {
     format!("\0{index}\0")
 }
 
-/// The slot a stand-in names, if `text` is exactly one.
-fn slot_of(text: &str) -> Option<usize> {
-    text.strip_prefix('\0')?.strip_suffix('\0')?.parse().ok()
+/// The slot a stand-in names and the length of the text before it, if
+/// `text` ends in one.
+fn slot_of(text: &str) -> Option<(usize, usize)> {
+    let body = text.strip_suffix('\0')?;
+    let start = body.rfind('\0')?;
+    Some((body[start + 1..].parse().ok()?, start))
 }
 
 /// Put the original bytes back in every place the grammar passes an
-/// argument through untouched, taking each slot it fills.
-fn restore(parsed: &mut Parsed, slots: &mut [Option<OsString>]) {
-    let mut take = |arg: &mut OsString| {
-        if let Some(slot) = arg.to_str().and_then(slot_of) {
-            if let Some(original) = slots.get_mut(slot).and_then(Option::take) {
-                *arg = original;
+/// argument through untouched, taking each slot it fills: a program's
+/// argument is the whole word as typed, `-C`'s directory the bytes after
+/// the option's spelling.
+fn restore(parsed: &mut Parsed, slots: &mut [Option<Slot>]) {
+    let mut fill = |arg: &mut OsString, directory: bool| {
+        let Some((index, before)) = arg.to_str().and_then(slot_of) else {
+            return;
+        };
+        let Some(entry) = slots.get_mut(index) else {
+            return;
+        };
+        let fits = entry.as_ref().is_some_and(|slot| {
+            if directory {
+                before == 0
+            } else {
+                before == slot.prefix
             }
+        });
+        if let Some(slot) = entry.take_if(|_| fits) {
+            let start = if directory { slot.prefix } else { 0 };
+            *arg = OsStr::from_bytes(&slot.arg.as_bytes()[start..]).to_owned();
         }
     };
+    let mut take = |arg: &mut OsString| fill(arg, false);
     let options = match parsed {
         Parsed::Run(invocation) => {
             match &mut invocation.command {
@@ -117,7 +146,7 @@ fn restore(parsed: &mut Parsed, slots: &mut [Option<OsString>]) {
     }) = options
     {
         let mut path = std::mem::take(directory).into_os_string();
-        take(&mut path);
+        fill(&mut path, true);
         *directory = PathBuf::from(path);
     }
 }
@@ -167,6 +196,33 @@ mod tests {
             };
             let directory = invocation.options.directory.unwrap();
             assert_eq!(directory.as_os_str().as_bytes(), name, "{words:?}");
+        }
+    }
+
+    /// A program's argument spelled like ward's directory option is still
+    /// the program's, and comes back whole, `-C` and all.
+    #[test]
+    fn a_programs_argument_spelled_like_a_directory_option_stays_whole() {
+        for arg in [&b"-C\xff"[..], b"--directory=\xff", b"-Cx\xff"] {
+            let Parsed::Run(invocation) = parse_os(&os(&[b"run", b"printf", b"%s", arg])).unwrap()
+            else {
+                panic!("not a run");
+            };
+            let Command::Run { command } = invocation.command else {
+                panic!("not a run");
+            };
+            assert_eq!(command, os(&[b"printf", b"%s", arg]));
+            assert_eq!(invocation.options.directory, None);
+            let Parsed::Run(invocation) = parse_os(&os(&[b"x", b"tool", arg])).unwrap() else {
+                panic!("not an x");
+            };
+            assert!(
+                matches!(invocation.command, Command::X { ref args, .. } if *args == os(&[arg]))
+            );
+            let Parsed::Script { args, .. } = parse_os(&os(&[b"lint", arg])).unwrap() else {
+                panic!("not a script");
+            };
+            assert_eq!(args, os(&[arg]));
         }
     }
 

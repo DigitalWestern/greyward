@@ -18,7 +18,8 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::go::{self as go, inputs};
 use crate::tailors::{
-    ClosureListing, DoctorCheck, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
+    Attester, ClosureListing, DoctorCheck, FileRunner, LoneFile, PackageRow, SourceFile,
+    SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -63,6 +64,20 @@ fn realize_and_project(
         attribution,
     )?;
     Ok((inputs.go_obj, modcache))
+}
+
+impl Attester for Go {
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        go::attest_project(door, project, &go_obj, go::go_tool(toolchain)?)
+    }
 }
 
 impl Tailor for Go {
@@ -159,16 +174,8 @@ impl Tailor for Go {
         Ok(vec![PathBuf::from("go.mod"), PathBuf::from("go.sum")])
     }
 
-    fn attest_lock(
-        &self,
-        ctx: &Context,
-        project: &ProjectRoot,
-        toolchain: &Selected,
-        _host: &dyn crate::tailors::EditHost,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        let go_obj = go::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        go::attest_project(door, project, &go_obj, go::go_tool(toolchain)?)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn builds(&self) -> bool {

@@ -167,20 +167,39 @@ impl MetaCache {
 
     /// The entry under `key`, verified. A corrupt entry is removed and is a
     /// miss. A hit refreshes the entry's age.
-    pub fn load(&self, key: &str) -> io::Result<Option<Cached>> {
+    ///
+    /// The entry's size is reserved under `held` before it is read, so a
+    /// cached body counts against the in-flight budget like a fetched one;
+    /// past the budget the error is [`super::http::OverBudget`].
+    pub fn load(
+        &self,
+        key: &str,
+        held: &mut super::http::Reservation<'_>,
+    ) -> io::Result<Option<Cached>> {
         let path = self.path(key);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
+        let mut file = match fs::File::open(&path) {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
+        let size = file.metadata()?.len();
+        held.grow(size).map_err(super::http::OverBudget::into_io)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+        // Never more than was reserved, should the entry grow meanwhile.
+        (&mut file).take(size).read_to_end(&mut bytes)?;
+        drop(file);
         let parsed = bytes
             .iter()
             .position(|&b| b == b'\n')
             .and_then(|newline| {
-                let mut cached: Cached = serde_json::from_slice(&bytes[..newline]).ok()?;
-                cached.body = bytes[newline + 1..].to_vec();
-                Some(cached)
+                let cached: Cached = serde_json::from_slice(&bytes[..newline]).ok()?;
+                Some((newline, cached))
+            })
+            .map(|(newline, mut cached)| {
+                // The body is the rest, moved down in place, not copied.
+                bytes.drain(..=newline);
+                cached.body = bytes;
+                cached
             })
             .filter(|cached| hex::encode(Sha256::digest(&cached.body)) == cached.sha256);
         match parsed {
@@ -421,6 +440,7 @@ mod tests {
     fn entries_round_trip_and_corruption_is_a_miss() {
         let (_temp, store, _activity) = crate::kernel::resolve::testing::scratch_store("meta");
         let cache = MetaCache::open(&store).unwrap();
+        let budget = crate::kernel::resolve::http::Budget::new(u64::MAX);
         let headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("ETag".to_string(), "\"v1\"".to_string()),
@@ -430,14 +450,31 @@ mod tests {
         assert_eq!(entry.headers.len(), 2, "only kept headers are stored");
         let k = key("GET", "https://registry.test/a", &[], "");
         cache.save(&k, &entry).unwrap();
-        assert_eq!(cache.load(&k).unwrap(), Some(entry.clone()));
-        assert_eq!(cache.load(&"0".repeat(64)).unwrap(), None);
+        assert_eq!(
+            cache.load(&k, &mut budget.reservation()).unwrap(),
+            Some(entry.clone())
+        );
+        assert_eq!(
+            cache
+                .load(&"0".repeat(64), &mut budget.reservation())
+                .unwrap(),
+            None
+        );
+        // An entry larger than what is left of the budget is not read, and
+        // nothing stays reserved.
+        let small = crate::kernel::resolve::http::Budget::new(8);
+        let error = cache.load(&k, &mut small.reservation()).unwrap_err();
+        assert!(
+            crate::kernel::resolve::http::OverBudget::is(&error),
+            "{error}"
+        );
+        assert_eq!(small.used(), 0);
         // A body edited in place no longer matches its header.
         let path = store.root.join(META_DIR).join(&k);
         let mut bytes = fs::read(&path).unwrap();
         *bytes.last_mut().unwrap() = b'2';
         fs::write(&path, bytes).unwrap();
-        assert_eq!(cache.load(&k).unwrap(), None);
+        assert_eq!(cache.load(&k, &mut budget.reservation()).unwrap(), None);
         assert!(!path.exists(), "a corrupt entry is removed");
     }
 
@@ -445,6 +482,7 @@ mod tests {
     fn sweep_removes_old_entries_and_orphaned_index_entries() {
         let (_temp, store, _activity) = crate::kernel::resolve::testing::scratch_store("sweep");
         let cache = MetaCache::open(&store).unwrap();
+        let budget = crate::kernel::resolve::http::Budget::new(u64::MAX);
         let (old, fresh) = (
             key("GET", "https://r.test/old", &[], ""),
             key("GET", "https://r.test/new", &[], ""),
@@ -484,8 +522,11 @@ mod tests {
         );
         let real = sweep(&store, window, false).unwrap();
         assert_eq!(real, dry);
-        assert_eq!(cache.load(&old).unwrap(), None);
-        assert!(cache.load(&fresh).unwrap().is_some());
+        assert_eq!(cache.load(&old, &mut budget.reservation()).unwrap(), None);
+        assert!(cache
+            .load(&fresh, &mut budget.reservation())
+            .unwrap()
+            .is_some());
         assert!(!store.root.join("resolve/diag").join(&ledger).exists());
     }
 }

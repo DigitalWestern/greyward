@@ -1226,17 +1226,22 @@ fn project_check(dir: &Path, project: &io::Result<Option<ProjectRoot>>, checks: 
 /// order is the contract: host, then store, then everything that needs a
 /// known host, then the two project-local answers.
 /// The project is opened once, and every project read goes through it.
-pub fn doctor(dir: &Path, store: DoctorStore) -> Vec<Check> {
+pub fn doctor(dir: Result<&Path, &io::Error>, store: DoctorStore) -> Vec<Check> {
     let mut checks = Vec::new();
     let platform = host_platform_check(&mut checks);
     store_checks(store, &mut checks);
-    let project = open_project(dir);
+    // With the working directory removed there is no project to read, and
+    // every host row still is: the project row says why it is empty.
+    let project = dir.map_or(Ok(None), open_project);
     let held = project.as_ref().ok().and_then(Option::as_ref);
     if let Some(platform) = platform {
         platform_checks(platform, held, &mut checks);
     }
     policy_check(held, &mut checks);
-    project_check(dir, &project, &mut checks);
+    match dir {
+        Ok(dir) => project_check(dir, &project, &mut checks),
+        Err(error) => checks.push(check("project", Level::Warn, error.to_string())),
+    }
     checks
 }
 pub fn render_doctor(checks: &[Check], json: bool) -> io::Result<String> {
@@ -2347,7 +2352,7 @@ mod tests {
             Ok((store, activity))
         });
         doctor(
-            dir,
+            Ok(dir),
             opened
                 .as_ref()
                 .map(|(store, activity)| (store, activity.as_ref())),

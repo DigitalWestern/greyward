@@ -79,7 +79,7 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
     match pending {
         Pending::Command(command) => Ok(Resolved::Command(command)),
         Pending::Implicit => {
-            let cwd = project_dir();
+            let cwd = project_dir()?;
             if project_for(&cwd)?.is_some_and(|location| !location.detected.is_empty()) {
                 ui::trace("no command given inside a project: running sync");
                 return Ok(Resolved::Command(cli::Command::Sync {
@@ -102,7 +102,7 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
             args,
             message,
         } => {
-            let cwd = project_dir();
+            let cwd = project_dir()?;
             let root = project_root(&cwd)?;
             if package_script(&root, &name, &[])?.is_some() {
                 ui::trace(&format!("'{name}' is a package.json script: running it"));

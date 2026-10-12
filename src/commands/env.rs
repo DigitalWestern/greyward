@@ -19,7 +19,7 @@ type Variable = (String, Option<String>);
 /// explanation `run` gives when there is no project here at all.
 pub fn run(ctx: &Context, shell: Option<Shell>, frozen: bool) -> io::Result<i32> {
     let shell = shell.unwrap_or_else(shell_from_environment);
-    let cwd = ctx.project_dir();
+    let cwd = ctx.project_dir()?;
     // What is printed is the environment the inputs describe, as `run`
     // gives it: a missing or stale projection is synced first. Everything
     // that sync and its children print is sent to stderr for the duration,

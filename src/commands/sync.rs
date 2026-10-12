@@ -156,7 +156,7 @@ pub(crate) fn run_in_mode(
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
-    let dir = sync_dir(&context::project_dir())?;
+    let dir = sync_dir(&context::project_dir()?)?;
     // An interrupted resolution publication is undone before anything
     // reads the project. Its originals are in the store, so opening the
     // store early leaves no trace a refusal would have avoided.

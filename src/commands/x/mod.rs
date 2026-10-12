@@ -682,7 +682,10 @@ fn x_request_is_ready(
 /// checks. The dispatcher recorded `--strict` before this runs, so a
 /// strict `x` judges the tool under the policy a strict sync would apply.
 pub fn run(ctx: &Context, request: Request) -> io::Result<i32> {
-    let cwd = ctx.project_dir();
+    // `x` needs no project: with the working directory removed it runs as
+    // it does outside one, judged from `/`, where no project or project
+    // policy is. The tool still starts in the directory the shell is in.
+    let cwd = ctx.project_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let _policy = policy::init(&cwd)?;
     launch(ctx.platform, &cwd, request, &ctx.activity)
 }

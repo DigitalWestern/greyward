@@ -284,9 +284,9 @@ fn read_basis(object: &serde_json::Map<String, Value>, ecosystem: &str) -> io::R
     let value = object
         .get(BASIS_FIELD)
         .ok_or_else(|| refuse(&format!("names no `{BASIS_FIELD}`")))?;
-    let digests: Digests = serde_json::from_value(value.clone()).map_err(|_| {
+    let digests: Digests = serde_json::from_value(value.clone()).map_err(|error| {
         refuse(&format!(
-            "has a `{BASIS_FIELD}` that is not a path-to-digest map"
+            "has a `{BASIS_FIELD}` that is not a path-to-digest map ({error})"
         ))
     })?;
     if let Some((path, _)) = digests.iter().find(|(path, digest)| {

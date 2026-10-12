@@ -1193,6 +1193,23 @@ fn the_child_path_never_names_the_current_directory_or_a_split_entry() {
     }
 }
 
+/// `ward run <missing program>` names the program and exits 127, as a
+/// shell does, instead of a bare "No such file or directory".
+#[test]
+fn run_names_a_program_it_cannot_find() {
+    let home = TempDir::boundary("cli-run-missing-home");
+    let project = TempDir::boundary("cli-run-missing-project");
+    python_env_fixture(&project.0);
+    let out = ward(&project.0, &home.0, &["run", "pytset", "-x"]);
+    assert_eq!(out.status.code(), Some(127), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("'pytset' not found on the environment's PATH"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("os error"), "{stderr}");
+}
+
 #[test]
 fn store_path_honors_the_store_variable() {
     let home = TempDir::boundary("cli-store");
@@ -2503,6 +2520,40 @@ fn x_clean_is_offline_and_strict_about_trailing_arguments() {
             "{shell}"
         );
     }
+}
+
+/// The bash completion, sourced and run as bash runs it, offers exactly
+/// the package.json script names: ward reads the file as JSON, so a
+/// one-line file with later blocks, a `:` in a name and a `}` in a command
+/// come out right, and the `scripts` key itself is never offered.
+#[test]
+fn bash_completion_offers_the_package_json_scripts_and_nothing_else() {
+    let home = TempDir::boundary("cli-completion-scripts");
+    std::fs::write(
+        home.0.join("package.json"),
+        r#"{"scripts": {"test:unit": "jest", "lint": "echo }"}, "dependencies": {"react": "1"}}"#,
+    )
+    .unwrap();
+    let completion = text(&ward(&home.0, &home.0, &["completions", "bash"]).stdout);
+    std::fs::write(home.0.join("ward.bash"), completion).unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_ward")).parent().unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = common::child("bash", &home.0)
+        .current_dir(&home.0)
+        .env("PATH", path)
+        .arg("-c")
+        .arg(
+            "source ./ward.bash; _ward_scripts; echo ---; \
+             COMP_WORDS=(ward run ''); COMP_CWORD=2; _ward; printf '%s\\n' \"${COMPREPLY[@]}\" | grep -x -e lint -e test:unit -e scripts -e react",
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        text(&out.stdout),
+        "lint\ntest:unit\n---\nlint\ntest:unit\n",
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]

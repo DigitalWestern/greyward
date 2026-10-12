@@ -23,9 +23,23 @@ fn version_text() -> String {
 /// person types reaches it by accident.
 const RELAY_VERB: &str = "__resolution-relay";
 
+/// The hidden verb the completion scripts run for package.json script
+/// names (`Parsed::ScriptNames`). First argument only, and alone.
+const SCRIPTS_VERB: &str = "__scripts";
+
+/// The hidden verbs: ward's own processes and helpers start them, nobody
+/// types them, and they take no global option.
+fn hidden_verb(args: &[String]) -> Option<Result<Parsed, UsageError>> {
+    match args.first().map(String::as_str)? {
+        RELAY_VERB => Some(parse_relay(&args[1..]).map(Parsed::Relay)),
+        SCRIPTS_VERB if args.len() == 1 => Some(Ok(Parsed::ScriptNames)),
+        _ => None,
+    }
+}
+
 pub fn parse(args: &[String]) -> Result<Parsed, UsageError> {
-    if args.first().map(String::as_str) == Some(RELAY_VERB) {
-        return parse_relay(&args[1..]).map(Parsed::Relay);
+    if let Some(hidden) = hidden_verb(args) {
+        return hidden;
     }
     let mut options = Options::default();
     // `--frozen`, `--fresh` and `--strict` belong to the bare `ward`, so
@@ -695,11 +709,18 @@ fn parse_ls(args: &[String]) -> Result<Option<Command>, UsageError> {
 }
 
 /// `run` and `build` own only a leading help flag; `--` forces pass-through
-/// of a program argument that happens to be `-h`.
+/// of a program argument that happens to be `-h`. For `build`, a leading
+/// ecosystem word names the ecosystem, and after `--` no word does: `ward
+/// build -- go` passes `go` to the inferred ecosystem's build tool.
 fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Command>, UsageError> {
+    let mut ecosystem = None;
     let args = match args.first().map(String::as_str) {
         Some("-h" | "--help") => return Ok(None),
         Some("--") => &args[1..],
+        Some(word) if name == "build" && BUILD_WORDS.contains(&word) => {
+            ecosystem = Some(word.to_string());
+            &args[1..]
+        }
         // An ecosystem that does not build is a mistake, not an argument
         // for the one that does: `ward build python` in a Cargo project.
         Some(word)
@@ -722,7 +743,7 @@ fn parse_passthrough(args: &[String], name: &'static str) -> Result<Option<Comma
     let args = args.to_vec();
     Ok(Some(match name {
         "run" => Command::Run { command: args },
-        _ => Command::Build { args },
+        _ => Command::Build { ecosystem, args },
     }))
 }
 
@@ -826,7 +847,16 @@ fn parse_update_toolchain(positional: &[String], no_sync: bool) -> Result<Comman
             Some(section) => Some(section.to_string()),
             None => return Err(not_an_ecosystem(word)),
         },
-        [_, word, ..] => return Err(not_an_ecosystem(word)),
+        [first, ..] if toolchain_section(first).is_none() => return Err(not_an_ecosystem(first)),
+        [first, second, ..] => {
+            return Err(UsageError::new(
+                format!(
+                    "update --toolchain takes one ecosystem, not several ('{first}', \
+                     '{second}'): run it once for each, or name none to update every one"
+                ),
+                Some("update"),
+            ))
+        }
     };
     Ok(Command::Update {
         names: Vec::new(),
@@ -1279,6 +1309,11 @@ pub(super) fn with_suggestion<'a>(
 /// one edit. Short words never get distance-based guesses: `-q` must not
 /// become "did you mean -h".
 pub fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    // Dashes alone (`--`, `-`) name no option: as a prefix they would
+    // match every one.
+    if word.trim_start_matches('-').is_empty() {
+        return None;
+    }
     let word = word.to_ascii_lowercase();
     let budget = if word.len() >= 4 {
         (word.len() / 3).max(1)
@@ -1732,7 +1767,8 @@ mod tests {
             flagged(&["--strict", "--frozen", "build", "cargo"]),
             (
                 Command::Build {
-                    args: argv(&["cargo"]),
+                    ecosystem: Some("cargo".into()),
+                    args: vec![],
                 },
                 sync_flags(true, true)
             )
@@ -2242,8 +2278,17 @@ mod tests {
             .contains("takes an ecosystem name, not a package"));
         assert!(message(&["update", "serde", "--toolchain"])
             .contains("takes an ecosystem name, not a package"));
-        assert!(message(&["update", "--toolchain", "python", "node"])
-            .contains("takes an ecosystem name, not a package"));
+        // Two ecosystems are one too many, whichever they are: never
+        // "'node' is not one of ..., node; did you mean 'node'?".
+        let two = message(&["update", "--toolchain", "python", "node"]);
+        assert_eq!(
+            two,
+            "update --toolchain takes one ecosystem, not several ('python', 'node'): run it \
+             once for each, or name none to update every one"
+        );
+        assert!(
+            message(&["update", "--toolchain", "serde", "node"]).contains("'serde' is not one of")
+        );
         // `--self` is a third verb wearing the word: nothing goes with it.
         assert_eq!(command(&["update", "--self"]), Command::SelfUpdate);
         for (words, stray) in [
@@ -2459,26 +2504,26 @@ mod tests {
         );
         assert_eq!(message(&["run"]), "run: no command given");
         assert_eq!(message(&["run", "--"]), "run: no command given");
-        assert_eq!(command(&["build"]), Command::Build { args: vec![] });
-        assert_eq!(command(&["build", "--"]), Command::Build { args: vec![] });
+        let build = |ecosystem: Option<&str>, args: &[&str]| Command::Build {
+            ecosystem: ecosystem.map(str::to_string),
+            args: argv(args),
+        };
+        assert_eq!(command(&["build"]), build(None, &[]));
+        assert_eq!(command(&["build", "--"]), build(None, &[]));
         assert_eq!(
             command(&["build", "cargo", "--release", "-h"]),
-            Command::Build {
-                args: argv(&["cargo", "--release", "-h"]),
-            }
+            build(Some("cargo"), &["--release", "-h"])
         );
         assert_eq!(
             command(&["build", "--", "--help"]),
-            Command::Build {
-                args: argv(&["--help"]),
-            }
+            build(None, &["--help"])
         );
         assert_eq!(
             command(&["build", "--release"]),
-            Command::Build {
-                args: argv(&["--release"]),
-            }
+            build(None, &["--release"])
         );
+        // After `--` an ecosystem word is the build tool's argument.
+        assert_eq!(command(&["build", "--", "go"]), build(None, &["go"]));
     }
 
     #[test]
@@ -2600,13 +2645,15 @@ mod tests {
         assert_eq!(
             command(&["build", "cargo", "--release"]),
             Command::Build {
-                args: argv(&["cargo", "--release"])
+                ecosystem: Some("cargo".into()),
+                args: argv(&["--release"])
             }
         );
         // After `--` the word is the build tool's.
         assert_eq!(
             command(&["build", "--", "python"]),
             Command::Build {
+                ecosystem: None,
                 args: argv(&["python"])
             }
         );
@@ -3087,6 +3134,14 @@ mod tests {
         assert_eq!(suggest("bulid", commands()), Some("build"));
         assert_eq!(suggest("snyc", commands()), None);
         assert_eq!(suggest("deploy", commands()), None);
+        // Dashes alone are a prefix of every flag, and name none of them.
+        for dashes in ["--", "-"] {
+            assert_eq!(suggest(dashes, ["--json", "--directory"].into_iter()), None);
+        }
+        for words in [&["status", "--"][..], &["--", "status"]] {
+            let text = message(words);
+            assert!(!text.contains("did you mean"), "{words:?}: {text}");
+        }
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("snyc", "sync"), 1);

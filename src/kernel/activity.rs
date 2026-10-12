@@ -225,12 +225,160 @@ fn lock_file(file: &File, mode: ActivityMode, nonblocking: bool) -> io::Result<b
     Err(error)
 }
 
+/// The store namespace that holds the job notes.
+pub(crate) const JOBS: &str = "jobs";
+
+/// How old a note whose lock is free must be before a new note removes
+/// it: far older than the moment between a note's creation and its lock.
+const STALE_NOTE_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a held lease says about itself, for the command that finds the
+/// store busy: `jobs/<pid>-<random>`, one line naming the command and its
+/// pid. The lease is a bare `flock`, which says nobody's name, so without
+/// this `ward gc` could only say "a Greyward job" (#678).
+///
+/// The note's own descriptor holds an exclusive `flock` on it for as long
+/// as the lease lives, so a note whose lock can be taken is one a killed
+/// ward left, and the next note written removes it. It is close-on-exec,
+/// as the lease is. A note is best effort: a lease is never refused because
+/// its note could not be written, and none is written where `jobs/` is
+/// missing (a store `Store::open` has not created).
+#[derive(Debug)]
+struct JobNote {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Drop for JobNote {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+impl JobNote {
+    fn write(root: &Path, mode: ActivityMode) -> Option<Self> {
+        use std::io::Write as _;
+        let jobs = root.join(JOBS);
+        if !std::fs::symlink_metadata(&jobs).is_ok_and(|stat| stat.is_dir()) {
+            return None;
+        }
+        remove_stale_notes(&jobs);
+        let suffix = crate::kernel::fsroot::random_suffix().ok()?;
+        let path = jobs.join(format!("{}-{}", std::process::id(), &suffix[..16]));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .ok()?;
+        let note = Self {
+            path,
+            _file: file.try_clone().ok()?,
+        };
+        if !lock_file(&note._file, ActivityMode::Exclusive, true).unwrap_or(false) {
+            return None;
+        }
+        let what = match mode {
+            ActivityMode::Shared => "",
+            ActivityMode::Exclusive => ", exclusive",
+        };
+        writeln!(
+            file,
+            "{} (pid {}{what})",
+            command_line(),
+            std::process::id()
+        )
+        .ok()?;
+        Some(note)
+    }
+}
+
+/// This process's command line as a job note shows it: `ward` and its
+/// arguments, control characters replaced, cut at 120 characters.
+fn command_line() -> String {
+    let mut words = vec!["ward".to_string()];
+    words.extend(std::env::args().skip(1));
+    let line: String = words
+        .join(" ")
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    match line.char_indices().nth(120) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line,
+    }
+}
+
+/// Each note under `jobs` with its descriptor, and whether a running ward
+/// holds it.
+fn notes(jobs: &Path) -> Vec<(PathBuf, File, bool)> {
+    let Ok(entries) = std::fs::read_dir(jobs) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(entry.path())
+                .ok()?;
+            if !file.metadata().ok()?.is_file() {
+                return None;
+            }
+            // A lock another descriptor can take belongs to nobody alive.
+            let held = !lock_file(&file, ActivityMode::Shared, true).ok()?;
+            Some((entry.path(), file, held))
+        })
+        .collect()
+}
+
+/// Remove the notes killed wards left: lock free, and older than
+/// `STALE_NOTE_AGE`, so a note created a moment ago and not yet locked is
+/// never taken.
+fn remove_stale_notes(jobs: &Path) {
+    for (path, file, held) in notes(jobs) {
+        let old = file
+            .metadata()
+            .and_then(|stat| stat.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > STALE_NOTE_AGE);
+        if !held && old {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// What the live job notes of the store at `root` say: one line per lease
+/// held by a ward that is still running, deduplicated and sorted. Empty
+/// when nothing can be read, or when the holder is a ward from before the
+/// notes.
+pub(crate) fn live_jobs(root: &Path) -> Vec<String> {
+    let mut jobs: Vec<String> = notes(&root.join(JOBS))
+        .into_iter()
+        .filter(|(_, _, held)| *held)
+        .filter_map(|(_, file, _)| {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut io::Read::take(&file, 512), &mut text).ok()?;
+            let line = text.lines().next()?.trim().to_string();
+            (!line.is_empty()).then_some(line)
+        })
+        .collect();
+    jobs.sort();
+    jobs.dedup();
+    jobs
+}
+
 /// A live operation lease.  The OS descriptor is intentionally
 /// close-on-exec: the Greyward process, not a child tool, owns the protection.
 #[derive(Debug)]
 pub struct StoreActivity {
     root: PathBuf,
     mode: ActivityMode,
+    // Declared before the lock so the note goes while the lease is held.
+    _note: Option<Arc<JobNote>>,
     _file: Arc<File>,
     _local: Arc<LocalLease>,
 }
@@ -240,6 +388,7 @@ impl Clone for StoreActivity {
         Self {
             root: self.root.clone(),
             mode: self.mode,
+            _note: self._note.clone(),
             _file: Arc::clone(&self._file),
             _local: Arc::clone(&self._local),
         }
@@ -323,6 +472,7 @@ impl StoreActivity {
             Err(error) => return Err(error),
         };
         Ok(Some(Self {
+            _note: JobNote::write(&root, mode).map(Arc::new),
             root,
             mode,
             _file: Arc::new(file),
@@ -393,5 +543,60 @@ mod tests {
         // The other store was never affected.
         assert!(StoreActivity::try_exclusive(&second.0).unwrap().is_none());
         drop(b);
+    }
+
+    /// A held lease names itself in `jobs/`, so a command that finds the
+    /// store busy can say who holds it (#678). The note goes with the
+    /// lease; one a killed ward left is neither listed nor kept.
+    #[test]
+    fn a_held_lease_names_its_command_until_it_is_released() {
+        let root = temp_root("job-notes");
+        let jobs = root.0.join(JOBS);
+        std::fs::create_dir(&jobs).unwrap();
+        // What a ward killed with its lease held leaves: an unlocked note.
+        let dead = jobs.join("1-dead");
+        std::fs::write(&dead, "ward run gone (pid 1)\n").unwrap();
+        let fresh_dead = jobs.join("2-just-made");
+        std::fs::write(&fresh_dead, "ward sync (pid 2)\n").unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        File::options()
+            .write(true)
+            .open(&dead)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+
+        let shared = StoreActivity::acquire(&root.0, ActivityMode::Shared).unwrap();
+        let clone = shared.clone();
+        let jobs_now = live_jobs(&root.0);
+        assert_eq!(jobs_now.len(), 1, "{jobs_now:?}");
+        let pid = format!("(pid {})", std::process::id());
+        assert!(jobs_now[0].starts_with("ward "), "{jobs_now:?}");
+        assert!(jobs_now[0].ends_with(&pid), "{jobs_now:?}");
+        // The old dead note is gone; one that may be a moment from its
+        // lock is left alone, and neither is listed.
+        assert!(!dead.exists());
+        assert!(fresh_dead.exists());
+        drop(shared);
+        assert_eq!(live_jobs(&root.0).len(), 1, "a clone still holds it");
+        drop(clone);
+        assert!(live_jobs(&root.0).is_empty());
+        assert_eq!(std::fs::read_dir(&jobs).unwrap().count(), 1);
+
+        // Exclusive holders say so.
+        let exclusive = StoreActivity::acquire(&root.0, ActivityMode::Exclusive).unwrap();
+        let jobs_now = live_jobs(&root.0);
+        assert!(
+            jobs_now[0].ends_with(&format!("(pid {}, exclusive)", std::process::id())),
+            "{jobs_now:?}"
+        );
+        drop(exclusive);
+
+        // No `jobs/`, no note, and the lease still works.
+        let bare = temp_root("job-notes-none");
+        let lease = StoreActivity::acquire(&bare.0, ActivityMode::Shared).unwrap();
+        assert!(live_jobs(&bare.0).is_empty());
+        assert!(!bare.0.join(JOBS).exists());
+        drop(lease);
     }
 }

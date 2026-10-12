@@ -34,6 +34,8 @@ pub(super) const NAMESPACES: &[&str] = &[
     "root-locks",
     "run-homes",
     "records",
+    // What each held lease says about itself (`activity::JOBS`).
+    "jobs",
 ];
 
 /// What `ward gc --reset` removes from the root: everything written in the

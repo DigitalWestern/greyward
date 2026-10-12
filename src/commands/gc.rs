@@ -31,15 +31,11 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     let Some(activity) = store.try_activity_exclusive()? else {
         // An explicitly requested mutation fails loudly; an opportunistic
         // sweep skips quietly.
+        let using = busy(&store.root);
         if !args.forget.is_empty() || !args.drop_objects.is_empty() {
-            return Err(io::Error::other(
-                "a Greyward job is using this store; retry when it finishes",
-            ));
+            return Err(io::Error::other(format!("{using}; retry when it finishes")));
         }
-        writeln!(
-            narrate,
-            "ward: cleanup skipped: a Greyward job is using this store"
-        )?;
+        writeln!(narrate, "ward: cleanup skipped: {using}")?;
         return Ok(());
     };
     // Dropping is a targeted removal, not a sweep and not a registry edit.
@@ -123,6 +119,17 @@ pub fn run(args: &cli::GcArgs) -> io::Result<()> {
     Ok(())
 }
 
+/// Who is using the store at `root`, as the job notes of the leases held
+/// on it name them: a `ward run` holds its lease for as long as its child
+/// runs, so "a job" alone leaves the reader guessing which one (#678).
+fn busy(root: &std::path::Path) -> String {
+    let jobs = crate::kernel::activity::live_jobs(root);
+    if jobs.is_empty() {
+        return "a Greyward job is using this store".to_string();
+    }
+    format!("a Greyward job is using this store: {}", jobs.join("; "))
+}
+
 /// `ward gc --reset`: empty the store and start it again.
 // Reviewed site (tests/architecture.rs): operation boundary: command entry point.
 #[allow(clippy::disallowed_methods)]
@@ -157,9 +164,10 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
     // A reset is a requested mutation: it fails loudly rather than skipping
     // when another job holds the store.
     let Some(activity) = store.try_activity_exclusive_unchecked()? else {
-        return Err(io::Error::other(
-            "a Greyward job is using this store; retry when it finishes",
-        ));
+        return Err(io::Error::other(format!(
+            "{}; retry when it finishes",
+            busy(&store.root)
+        )));
     };
     let report = gc::reset(&store, &activity, args.dry_run, &mut narrate)?;
     if args.dry_run {
@@ -179,4 +187,34 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::activity::ActivityMode;
+    use crate::kernel::testutil::TempDir;
+
+    /// A busy store names what holds it: a `ward run` keeps its lease for
+    /// as long as its child runs, and a cron `ward gc` that only said "a
+    /// job" would leave its reader guessing which (#678).
+    #[test]
+    fn a_busy_store_names_the_job_holding_it() {
+        let temp = TempDir::named("gc-busy");
+        let store = store::Store::open_at(&temp.0.join("store")).unwrap();
+        assert_eq!(busy(&store.root), "a Greyward job is using this store");
+        let held = store.activity(ActivityMode::Shared).unwrap();
+        let message = busy(&store.root);
+        assert!(
+            message.starts_with("a Greyward job is using this store: ward "),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(&format!("(pid {})", std::process::id())),
+            "{message}"
+        );
+        assert!(store.try_activity_exclusive().unwrap().is_none());
+        drop(held);
+        assert_eq!(busy(&store.root), "a Greyward job is using this store");
+    }
 }

@@ -1598,7 +1598,7 @@ fn successful_reports_ignore_store_permissions_and_the_gc_lease() {
     let lock = store.root.join("activity.lock");
     let before = common::snapshot(&store.root);
 
-    let check_reports = || {
+    let check_reports = |before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>| {
         for args in [["status", "--json"].as_slice(), ["sbom"].as_slice()] {
             let mut child = command(&project.0, &home.0, &store.root)
                 .args(args)
@@ -1624,17 +1624,19 @@ fn successful_reports_ignore_store_permissions_and_the_gc_lease() {
                 assert_eq!(value["bomFormat"], "CycloneDX");
             }
         }
-        assert_eq!(common::snapshot(&store.root), before);
+        assert_eq!(&common::snapshot(&store.root), before);
     };
 
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
     std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o555)).unwrap();
-    check_reports();
+    check_reports(&before);
     std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let _gc = store.activity(ActivityMode::Exclusive).unwrap();
-    check_reports();
+    // The held lease names itself under jobs/ (#678): that note is this
+    // test's, so the reports are compared with the store as it is now.
+    check_reports(&common::snapshot(&store.root));
 }
 
 /// A closure whose inputs were never recorded cannot be compared with the

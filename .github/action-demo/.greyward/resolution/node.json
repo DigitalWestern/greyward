@@ -1,0 +1,38 @@
+{
+  "command": [
+    "npm",
+    "--loglevel=error",
+    "install",
+    "--package-lock-only",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--no-update-notifier"
+  ],
+  "door": "attest",
+  "ecosystem": "node",
+  "exceptions": [],
+  "inputs": {},
+  "isolation": "confined",
+  "ledger": {
+    "endpoints": [],
+    "entries": 0,
+    "object": "6e0af4bbd2804fd157b8da55774fcbdc25ce0088-node-1",
+    "portable_sha256": "0f2079da4c278fd4db1332ba4515578d24113c48090f2e36310a73d72bfd7024",
+    "refused": 0
+  },
+  "outputs": {
+    "package-lock.json": "9106bcc7f67725fcafaf236e213568b72b7f8dd9b72ad612952231814cfa446d",
+    "package.json": "d44283f22832b980f7dfb3995d2b168939cb7f584dd25138b77cce27b868c1c8"
+  },
+  "schema": "resolution/1",
+  "signature": {
+    "alg": "ed25519",
+    "key": "55bddc75bcf43d8ed84d8d4b035f0000d7a5ea33b46a96713875eca98e14e141",
+    "sig": "9d83af0c6061ef442c08348fb910af6fc8f304dbedc527e00b15e81f861e9b44b09dfe1153797df53ebfc6ba064b409d3a7e6d55d3195f61a07d409693be190b"
+  },
+  "tool": {
+    "name": "npm",
+    "version": "11.19.0"
+  }
+}

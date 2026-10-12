@@ -28,6 +28,8 @@ const MANIFEST_CONSTRAINTS: &str = ".greyward/manifest-constraints.txt";
 /// project's file (#499).
 const MANIFEST_CONSTRAINTS_NAME: &str = "manifest-constraints.txt";
 const LOCK_STAMP: &str = ".greyward/lock-source.hash";
+/// The requirements lock uv compiles and planning reads.
+const LOCK: &str = "requirements.lock.txt";
 
 pub fn planner_input_hash(
     platform: Platform,
@@ -110,164 +112,299 @@ fn resolver_input(project: &ProjectRoot, manifest: &manifest::Manifest) -> (Stri
     (text, as_is)
 }
 
+/// What planning reads from a project before it plans: the manifest, the
+/// interpreter selection checked against it, and the requirements text in
+/// the forms planning and uv need. Discovering it writes no project input:
+/// `read_plan` and `ensure_lock` both start here.
+struct Inputs {
+    manifest: manifest::Manifest,
+    selection: pyselect::PythonSelection,
+    /// The manifest's file name, for messages and uv's compile input.
+    input: String,
+    /// The requirements text as the manifest states it.
+    source: String,
+    /// The text uv compiles, and whether uv may read the manifest's own
+    /// file for it ([`resolver_input`]).
+    resolver_source: String,
+    as_is: bool,
+}
+
+/// Where a plan's pinned requirements come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pins {
+    /// The manifest pins nothing (an empty one), or its own lock (`uv.lock`,
+    /// `poetry.lock`, `pdm.lock`) already gave every package.
+    Manifest,
+    /// A hash-pinned requirements file the planner reads as it is.
+    AsWritten,
+    /// `requirements.lock.txt`, compiled by uv from the manifest.
+    /// `repinned` when the manifest was hash-pinned already but not in a
+    /// form the planner reads (markers, extras).
+    Lock { repinned: bool },
+}
+
+impl Inputs {
+    /// Discover the manifest and check the interpreter against it. The
+    /// interpreter is decided: it is the one this project's toolchain
+    /// selection names. Nothing here reselects, so a `setup.py` probe cannot
+    /// move the version out from under the lock. `announce` says what was
+    /// read (the setup.py fallback warning, the inputs note); `prepare`
+    /// reads quietly, so a sync says it once.
+    fn discover(
+        project: &ProjectRoot,
+        selected: &Selected,
+        door: &mut ResolutionDoor<'_>,
+        announce: bool,
+    ) -> io::Result<Self> {
+        let platform = door.platform();
+        let version = selected.version("cpython")?;
+        let mut manifest = manifest::discover(platform, project, version)?;
+        let mut selection = pyselect::locked(platform, version, &manifest.python)?;
+        if manifest.requires_setup() {
+            let dynamic_dependencies = manifest.dynamic_dependencies;
+            if let Err(error) = manifest.prepare_setup(project, selected, door) {
+                // Every ordinary failure in here is already `InvalidData`
+                // (`unreadable` in the manifest layer hardcodes it, and it
+                // wraps the sandboxed egg_info probe), so the kind cannot
+                // tell a descriptor refusal from a probe that did not work.
+                // Fall back on both: a symlinked `.greyward` is still
+                // refused at the first write through the project descriptor.
+                if !dynamic_dependencies {
+                    return Err(error);
+                }
+                let Some(mut fallback) = manifest::dynamic_requirements_fallback(project)? else {
+                    return Err(error);
+                };
+                if announce {
+                    warn_setup_fallback(&error);
+                }
+                fallback.python = manifest.python.clone();
+                manifest = fallback;
+            }
+            // The probe may have added a `requires-python` the lock never
+            // reads. It cannot change the interpreter, so it is checked
+            // against the locked one instead: the probe loop this replaces
+            // existed only to let selection chase its own metadata.
+            selection = pyselect::locked(platform, version, &manifest.python)?;
+        }
+        if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
+            manifest.provenance.push_str(" (empty manifest)");
+        }
+        if announce {
+            ui::note(&format!("python inputs: {}", manifest.provenance));
+        }
+        let input = manifest.input.clone();
+        let source = manifest.requirements_text();
+        let (resolver_source, as_is) = resolver_input(project, &manifest);
+        Ok(Self {
+            manifest,
+            selection,
+            input,
+            source,
+            resolver_source,
+            as_is,
+        })
+    }
+
+    /// Where the pins come from.
+    fn pins(&self) -> io::Result<Pins> {
+        if self.manifest.is_empty() || self.manifest.locked_packages.is_some() {
+            return Ok(Pins::Manifest);
+        }
+        if !is_fully_pinned(&self.source) {
+            return Ok(Pins::Lock { repinned: false });
+        }
+        match pypi::parse_requirements(&self.source) {
+            Ok(_) => Ok(Pins::AsWritten),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err(e),
+            Err(_) => Ok(Pins::Lock { repinned: true }),
+        }
+    }
+
+    /// The file uv compiles the lock from, as planning names it: the
+    /// generated text under `.greyward` when uv may not read the manifest's
+    /// own file, that file otherwise. Naming it writes nothing.
+    fn compile_path(&self, project: &ProjectRoot) -> Option<PathBuf> {
+        if needs_generated_input(&self.input, &self.source, self.as_is) {
+            Some(project.path().join(MANIFEST_REQUIREMENTS))
+        } else {
+            self.manifest.source_path.clone()
+        }
+    }
+
+    /// The stamp `requirements.lock.txt` is compiled under: the interpreter,
+    /// the text uv compiles, and, when uv reads a project file by path,
+    /// every file of its include tree.
+    fn lock_stamp(&self, project: &ProjectRoot, selected: &Selected) -> io::Result<String> {
+        let pyver = selected.version("cpython")?;
+        match self.compile_path(project) {
+            Some(path)
+                if !path
+                    .components()
+                    .any(|component| component.as_os_str() == ".greyward") =>
+            {
+                let tree_hash = manifest::requirements_tree_hash(project, &path)?;
+                Ok(lock_source_hash(
+                    pyver,
+                    &format!("{}\0{tree_hash}", self.resolver_source),
+                ))
+            }
+            _ => Ok(lock_source_hash(pyver, &self.resolver_source)),
+        }
+    }
+}
+
+/// The setup.py probe failed and planning fell back on the requirements
+/// directory convention: say why, once.
+fn warn_setup_fallback(error: &io::Error) {
+    // The probe's error carries the sandbox log's last lines after a
+    // marker; those go out as progress lines first, so the warning and its
+    // next line stay a pair.
+    let text = error.to_string();
+    let (reason, tail) = match text.split_once("last 20 lines:\n") {
+        Some((reason, tail)) => (reason.trim_end_matches("; ").to_string(), Some(tail)),
+        None => (text.clone(), None),
+    };
+    if let Some(tail) = tail {
+        ui::note("setup.py probe output, last 20 lines:");
+        for line in tail.lines() {
+            ui::note(&format!("  {line}"));
+        }
+    }
+    // `next:`, not `fix:`: re-running the probe by hand shows why it
+    // failed; it does not make it pass.
+    ui::warning_next(
+        &format!(
+            "setup.py metadata probe failed; using the requirements directory \
+             convention: {reason}"
+        ),
+        "ward run python setup.py egg_info",
+    );
+}
+
+/// `Tailor::prepare` for Python: compile `requirements.lock.txt` when the
+/// manifest needs one and the lock on disk was not compiled from it. This
+/// is the only step that writes a Python dependency lock, and the command
+/// layer skips it under `--frozen`, so a frozen sync only ever reads one.
+pub fn ensure_lock(
+    project: &ProjectRoot,
+    selected: &Selected,
+    door: &mut ResolutionDoor<'_>,
+) -> io::Result<()> {
+    let inputs = Inputs::discover(project, selected, door, false)?;
+    let Pins::Lock { repinned } = inputs.pins()? else {
+        return Ok(());
+    };
+    let stamp = inputs.lock_stamp(project, selected)?;
+    // The stamp is ward's own state (strict no-follow read); the lock is a
+    // project input. Anything unreadable is a miss, and compiles afresh.
+    if let (Ok(Some(found)), Ok(Some(lock))) = (
+        project.read_file(Path::new(LOCK_STAMP)),
+        project.read_input_string(Path::new(LOCK)),
+    ) {
+        if cached_lock_matches(&String::from_utf8_lossy(&found), &lock, &stamp) {
+            return Ok(());
+        }
+    }
+    if repinned {
+        ui::note(&format!(
+            "{} is pinned but not directly consumable; re-locking for this platform \
+             with uv into {LOCK}",
+            inputs.input
+        ));
+    } else {
+        ui::note(&format!(
+            "{} is not hash-pinned; resolving with the store uv...",
+            inputs.input
+        ));
+    }
+    let compile_path = match generated_compile_input(
+        project,
+        &inputs.manifest,
+        &inputs.input,
+        &inputs.source,
+        &inputs.resolver_source,
+        inputs.as_is,
+    )? {
+        Some(generated) => Some(generated),
+        None => inputs.manifest.source_path.clone(),
+    };
+    compile_lock(
+        door,
+        project,
+        &inputs.input,
+        selected,
+        compile_path.as_deref(),
+    )?;
+    // The stamp is the only file ward writes here, and it goes through the
+    // held project descriptor, so a `.greyward` swapped for a symlink is
+    // refused rather than followed. The lock beside it is the door's
+    // publication.
+    project.write_file(Path::new(LOCK_STAMP), stamp.as_bytes())?;
+    if repinned {
+        // Said once the lock exists, with its full path: an automatic sync
+        // can run from a subdirectory of the project.
+        let lock = project.path().join(LOCK);
+        ui::warning(
+            &format!(
+                "{} holds the pins this platform can consume; commit it so every \
+                 sync reads the same lock",
+                lock.display()
+            ),
+            &ui::shell_line(&["git", "add", &lock.display().to_string()]),
+        );
+    }
+    Ok(())
+}
+
 /// Plan from project inputs, returning the interpreter selection that was
 /// used. The manifest layer may only learn the constraint after a sandboxed
 /// `setup.py egg_info`, so the selection is made here and handed back to the
 /// caller: planning, realization and the closure all use this one value.
 ///
-/// Planning hits PyPI, so successful plans are cached in `.greyward/plan.json`
-/// keyed by a hash of the inputs; an unchanged lock replans offline.
+/// Planning only reads the dependency lock. `ensure_lock` (`prepare`)
+/// writes it, and under `--frozen` nothing does, so a lock that is missing
+/// or was compiled from other inputs is refused as stale. Planning hits
+/// PyPI, so successful plans are cached in `.greyward/plan.json` keyed by a
+/// hash of the inputs; an unchanged lock replans offline.
 ///
-/// The project is read, and `.greyward` written, through the held descriptor;
-/// its path only names files to uv and to the messages.
+/// The project is read, and `.greyward` written, through the held descriptor.
 pub fn read_plan(
     project: &ProjectRoot,
     selected: &Selected,
     door: &mut ResolutionDoor<'_>,
 ) -> io::Result<PythonPlan> {
-    let (dir, platform) = (project.path(), door.platform());
-    // The interpreter is decided: it is the one this project's toolchain
-    // selection names. Planning reads the manifest with it and checks it
-    // against every declared constraint; nothing here reselects, so a
-    // `setup.py` probe cannot move the version out from under the lock.
+    let platform = door.platform();
     let version = selected.version("cpython")?;
-    let mut manifest = manifest::discover(platform, project, version)?;
-    let mut selection = pyselect::locked(platform, version, &manifest.python)?;
-    if manifest.requires_setup() {
-        let dynamic_dependencies = manifest.dynamic_dependencies;
-        if let Err(error) = manifest.prepare_setup(project, selected, door) {
-            // Every ordinary failure in here is already `InvalidData`
-            // (`unreadable` in the manifest layer hardcodes it, and it
-            // wraps the sandboxed egg_info probe), so the kind cannot
-            // tell a descriptor refusal from a probe that did not work.
-            // Fall back on both: a symlinked `.greyward` is still refused a
-            // few lines below, at the first write through the project
-            // descriptor.
-            if !dynamic_dependencies {
-                return Err(error);
-            }
-            let Some(mut fallback) = manifest::dynamic_requirements_fallback(project)? else {
-                return Err(error);
+    let inputs = Inputs::discover(project, selected, door, true)?;
+    if !inputs.input.starts_with("requirements") {
+        record_skippable_specs(&inputs.source)?;
+    }
+    inputs.selection.emit_warnings();
+    let pins = inputs.pins()?;
+    let records = python_input_records(project, &inputs.manifest)?;
+    let text = match pins {
+        // A found manifest may intentionally declare no dependencies: the
+        // interpreter-only plan stays on the normal realization and
+        // projection path, and uv is never asked to compile it.
+        Pins::Manifest => {
+            let packages = match &inputs.manifest.locked_packages {
+                Some(packages) if !inputs.manifest.is_empty() => packages.clone(),
+                _ => Vec::new(),
             };
-            // The probe's error carries the sandbox log's last lines after
-            // a marker; those go out as progress lines first, so the
-            // warning and its next line stay a pair.
-            let text = error.to_string();
-            let (reason, tail) = match text.split_once("last 20 lines:\n") {
-                Some((reason, tail)) => (reason.trim_end_matches("; ").to_string(), Some(tail)),
-                None => (text.clone(), None),
-            };
-            if let Some(tail) = tail {
-                ui::note("setup.py probe output, last 20 lines:");
-                for line in tail.lines() {
-                    ui::note(&format!("  {line}"));
-                }
-            }
-            // `next:`, not `fix:`: re-running the probe by hand shows why
-            // it failed; it does not make it pass.
-            ui::warning_next(
-                &format!(
-                    "setup.py metadata probe failed; using the requirements directory \
-                     convention: {reason}"
-                ),
-                "ward run python setup.py egg_info",
-            );
-            fallback.python = manifest.python.clone();
-            manifest = fallback;
-        }
-        // The probe may have added a `requires-python` the lock never
-        // reads. It cannot change the interpreter, so it is checked
-        // against the locked one instead: the probe loop this replaces
-        // existed only to let selection chase its own metadata.
-        selection = pyselect::locked(platform, version, &manifest.python)?;
-    }
-    if manifest.is_empty() && !manifest.provenance.contains("empty manifest") {
-        manifest.provenance.push_str(" (empty manifest)");
-    }
-    ui::note(&format!("python inputs: {}", manifest.provenance));
-    let input = manifest.input.clone();
-    let source = manifest.requirements_text();
-    let (resolver_source, as_is) = resolver_input(project, &manifest);
-    if !input.starts_with("requirements") {
-        record_skippable_specs(&source)?;
-    }
-    selection.emit_warnings();
-
-    // A found manifest may intentionally declare no dependencies. Keep the
-    // interpreter-only plan on the normal realization/projection path, but do
-    // not ask uv to compile an empty setup.cfg or requirements file.
-    let inputs = python_input_records(project, &manifest)?;
-    if manifest.is_empty() {
-        return Ok((
-            types::Plan {
-                ecosystem: "python".into(),
-                python_version: version.into(),
-                packages: Vec::new(),
-            },
-            selection,
-            inputs,
-        ));
-    }
-
-    if let Some(packages) = manifest.locked_packages {
-        return Ok((
-            types::Plan {
+            let plan = types::Plan {
                 ecosystem: "python".into(),
                 python_version: version.into(),
                 packages,
-            },
-            selection,
-            inputs,
-        ));
-    }
-
-    let generated_input =
-        generated_compile_input(project, &manifest, &input, &source, &resolver_source, as_is)?;
-    let compile_path = if generated_input.is_some() {
-        generated_input.as_deref()
-    } else {
-        manifest.source_path.as_deref()
-    };
-    let text = if is_fully_pinned(&source) {
-        match pypi::parse_requirements(&source) {
-            Ok(_) => source,
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
-            Err(e) => {
-                ui::note(&format!(
-                    "requirements.txt is pinned but not directly consumable ({e}); \
-                     re-locking for this platform with uv into requirements.lock.txt"
-                ));
-                let text = locked_requirements(
-                    door,
-                    project,
-                    &input,
-                    &resolver_source,
-                    selected,
-                    compile_path,
-                )?;
-                // Said once the lock exists, with its full path: an
-                // automatic sync can run from a subdirectory of the project.
-                let lock = dir.join("requirements.lock.txt");
-                ui::warning(
-                    &format!(
-                        "{} holds the pins this platform can consume; commit it so every \
-                         sync reads the same lock",
-                        lock.display()
-                    ),
-                    &ui::shell_line(&["git", "add", &lock.display().to_string()]),
-                );
-                text
-            }
+            };
+            return Ok((plan, inputs.selection, records));
         }
-    } else {
-        locked_requirements(
-            door,
+        Pins::AsWritten => inputs.source,
+        Pins::Lock { .. } => read_lock(
             project,
-            &input,
-            &resolver_source,
-            selected,
-            compile_path,
-        )?
+            &inputs.input,
+            &inputs.lock_stamp(project, selected)?,
+        )?,
     };
 
     // These are project-local .greyward caches, not store identities; one
@@ -277,8 +414,6 @@ pub fn read_plan(
     } else {
         pypi::Glibc(0, 0)
     };
-    // The lock may have just been (re)written above: hash it now.
-    let inputs = python_input_records(project, &manifest)?;
     let input_hash = planner_input_hash(platform, version, &text, glibc);
     // A symlinked or non-regular cache is a refusal; an unreadable regular
     // file is a miss that the write below replaces.
@@ -291,7 +426,7 @@ pub fn read_plan(
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&cached) {
             if v["input_hash"] == input_hash.as_str() {
                 if let Ok(plan) = serde_json::from_value::<types::Plan>(v["plan"].clone()) {
-                    return Ok((plan, selection, inputs));
+                    return Ok((plan, inputs.selection, records));
                 }
             }
         }
@@ -305,7 +440,7 @@ pub fn read_plan(
             "plan": plan,
         }))?,
     )?;
-    Ok((plan, selection, inputs))
+    Ok((plan, inputs.selection, records))
 }
 
 pub fn record_skippable_specs(source: &str) -> io::Result<()> {
@@ -371,10 +506,16 @@ pub fn is_fully_pinned(text: &str) -> bool {
     any
 }
 
+/// Whether uv compiles a requirements text ward writes under `.greyward`
+/// rather than the manifest's own file: a pyproject or setup.cfg, or a
+/// requirements file uv may not reopen by path (an external include).
+fn needs_generated_input(input: &str, source: &str, as_is: bool) -> bool {
+    !(as_is && (input.starts_with("requirements") || is_fully_pinned(source)))
+}
+
 /// The requirements text ward writes under `.greyward` for uv to compile, when
-/// the manifest is not a requirements file uv can read as it is (a
-/// pyproject or setup.cfg, an external include): its path, or `None` when
-/// uv compiles the manifest's own file.
+/// [`needs_generated_input`]: its path, or `None` when uv compiles the
+/// manifest's own file.
 fn generated_compile_input(
     project: &ProjectRoot,
     manifest: &manifest::Manifest,
@@ -383,7 +524,7 @@ fn generated_compile_input(
     resolver_source: &str,
     as_is: bool,
 ) -> io::Result<Option<PathBuf>> {
-    if as_is && (input.starts_with("requirements") || is_fully_pinned(source)) {
+    if !needs_generated_input(input, source, as_is) {
         return Ok(None);
     }
     // The compile input is named to uv by pathname, but ward writes it
@@ -442,53 +583,56 @@ fn compile_name(project: &ProjectRoot, path: Option<&Path>, input: &str) -> Stri
         .to_string()
 }
 
-/// Resolve ranged requirements to a hash-pinned lock via uv, cached in
-/// requirements.lock.txt and regenerated when the source input changes.
-/// uv runs in the project by path; the lock it writes is read back through
-/// the held descriptor.
-///
-/// uv runs through a missing-lock door on `door`'s scope.
-pub fn locked_requirements(
+/// The lock a requirements manifest is planned from, or the refusal that
+/// names it: `prepare` compiles it, and the command layer skips `prepare`
+/// under `--frozen`.
+pub fn require_lock(project: &ProjectRoot) -> io::Result<String> {
+    project
+        .read_input_string(Path::new(LOCK))?
+        .ok_or_else(|| crate::tailors::missing_lock(project, LOCK))
+}
+
+/// The committed `requirements.lock.txt`, read and never written. A lock
+/// this machine compiled from other inputs than `stamp` names (the stamp
+/// beside it disagrees), or an empty one, is stale: `ensure_lock` would
+/// have compiled it afresh, and under `--frozen` nothing does. A lock with
+/// no stamp at all is a fresh checkout's committed lock, read as it is.
+fn read_lock(project: &ProjectRoot, input: &str, stamp: &str) -> io::Result<String> {
+    let lock = require_lock(project)?;
+    let found = project.read_file(Path::new(LOCK_STAMP))?;
+    let compiled_elsewhere = found
+        .is_some_and(|found| !cached_lock_matches(&String::from_utf8_lossy(&found), &lock, stamp));
+    if lock.is_empty() || compiled_elsewhere {
+        return Err(crate::kernel::error::stale(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} was not compiled from {input} as it is now, and --frozen never \
+                 re-locks; run `ward` once without --frozen and commit the file",
+                project.path().join(LOCK).display()
+            ),
+        ));
+    }
+    Ok(lock)
+}
+
+/// Compile `requirements.lock.txt` with uv from `compile_path` (the
+/// manifest's own file when `None`). uv runs in the project by path, through
+/// a missing-lock door on `door`'s scope; the lock it writes is the door's
+/// publication.
+fn compile_lock(
     door: &mut ResolutionDoor<'_>,
     project: &ProjectRoot,
     input: &str,
-    source: &str,
     selected: &Selected,
     compile_path: Option<&Path>,
-) -> io::Result<String> {
-    let dir = project.path();
+) -> io::Result<()> {
     let pyver = selected.version("cpython")?;
-    let lock_path = Path::new("requirements.lock.txt");
-    let source_hash = if compile_path.is_some_and(|path| {
-        !path
-            .components()
-            .any(|component| component.as_os_str() == ".greyward")
-    }) {
-        let path = compile_path.expect("checked above");
-        let tree_hash = manifest::requirements_tree_hash(project, path)?;
-        lock_source_hash(pyver, &format!("{source}\0{tree_hash}"))
-    } else {
-        lock_source_hash(pyver, source)
-    };
-    // The stamp is ward's own state (strict no-follow read); the lock is a
-    // project input. Anything unreadable is a miss, as before.
-    if let (Ok(Some(stamp)), Ok(Some(lock))) = (
-        project.read_file(Path::new(LOCK_STAMP)),
-        project.read_input_string(lock_path),
-    ) {
-        if cached_lock_matches(&String::from_utf8_lossy(&stamp), &lock, &source_hash) {
-            return Ok(lock);
-        }
-    }
-    ui::note(&format!(
-        "{input} is not hash-pinned; resolving with the store uv..."
-    ));
     // Store-pinned uv, not host uv: a bare machine needs only ward. It runs
     // confined through a missing-lock door, and the lock is published with
     // its signed record (none when an include lies outside the project).
     let compile_input = compile_name(project, compile_path, input);
     let uv = Uv::for_door(door, selected)?;
-    let args = resolve::compile_args(&compile_input, "requirements.lock.txt", pyver);
+    let args = resolve::compile_args(&compile_input, LOCK, pyver);
     let record = if resolve::has_external_includes(project)? {
         None
     } else {
@@ -509,7 +653,7 @@ pub fn locked_requirements(
         &mut missing_lock,
         UvRun {
             uv: &uv,
-            lock_root: dir,
+            lock_root: project.path(),
             cwd: None,
             args,
             index: Index::PipCompile,
@@ -526,18 +670,14 @@ pub fn locked_requirements(
         "uv pip compile failed",
     )?;
     drop(missing_lock);
-    project.regenerated_input(lock_path);
-    // The stamp is the only file ward writes here, and it goes through the
-    // held project descriptor, so a `.greyward` swapped for a symlink is refused
-    // rather than followed. `requirements.lock.txt` beside it is the door's
-    // publication.
-    project.write_file(Path::new(LOCK_STAMP), source_hash.as_bytes())?;
-    project.read_input_string(lock_path)?.ok_or_else(|| {
-        io::Error::new(
+    project.regenerated_input(Path::new(LOCK));
+    match project.read_input_string(Path::new(LOCK))? {
+        Some(_) => Ok(()),
+        None => Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{}: uv wrote no lock", dir.join(lock_path).display()),
-        )
-    })
+            format!("{}: uv wrote no lock", project.path().join(LOCK).display()),
+        )),
+    }
 }
 
 pub fn cached_lock_matches(stamp: &str, lock: &str, source_hash: &str) -> bool {
@@ -779,7 +919,7 @@ mod tests {
         let temp = crate::kernel::testutil::TempDir::new();
         let project_dir = temp.0.join("proj");
         std::fs::create_dir_all(&project_dir).unwrap();
-        // Unpinned, so planning has to re-lock and reach the stamp write.
+        // Unpinned, so preparing has to compile and reach the stamp write.
         std::fs::write(project_dir.join("requirements.txt"), "six==1.17.0\n").unwrap();
         let outside = temp.0.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
@@ -787,7 +927,7 @@ mod tests {
         let store = store_with_stub_uv(&temp.0.join("store"));
 
         let project = ProjectRoot::open(&project_dir).unwrap();
-        let error = read_plan(
+        let error = ensure_lock(
             &project,
             &selected(),
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -828,7 +968,7 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::write(project_dir.join("requirements.txt"), "decoy==1.0\n").unwrap();
 
-        let result = read_plan(
+        let result = ensure_lock(
             &project,
             &selected(),
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -931,7 +1071,7 @@ mod tests {
         // The first read happens here; the replacement after it is not seen.
         assert!(project.read_external(&external).unwrap().is_some());
         std::fs::write(&external, "decoy==1.0\n").unwrap();
-        let _ = read_plan(
+        let _ = ensure_lock(
             &project,
             &selected(),
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -978,7 +1118,7 @@ mod tests {
             .unwrap()
             .is_some());
         std::fs::write(&external, "decoy==1.0\n").unwrap();
-        let _ = read_plan(
+        let _ = ensure_lock(
             &project,
             &selected(),
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -1093,7 +1233,7 @@ mod tests {
         let store = store::Store::for_test(temp.0.join("absent-store"));
 
         let project = ProjectRoot::open(&project_dir).unwrap();
-        let error = read_plan(
+        let error = ensure_lock(
             &project,
             &selected(),
             &mut crate::kernel::testutil::DoorScope::new().door(
@@ -1110,6 +1250,141 @@ mod tests {
         assert!(
             std::fs::read_dir(&outside).unwrap().next().is_none(),
             "wrote a manifest snapshot through the symlinked .greyward"
+        );
+    }
+
+    /// Every file under `dir`, by relative path, with its bytes.
+    fn tree(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).unwrap();
+                    files.insert(path.strip_prefix(dir).unwrap().to_path_buf(), bytes);
+                }
+            }
+        }
+        files
+    }
+
+    /// Planning an unpinned project with no lock is the missing-lock
+    /// refusal, exit 4, and it writes nothing: compiling the lock is
+    /// `prepare`'s, which `--frozen` skips (#673).
+    #[test]
+    fn planning_with_no_lock_is_stale_and_writes_nothing() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("requirements.txt"), "six>=1\n").unwrap();
+        let before = tree(&project_dir);
+        let store = store::Store::for_test(temp.0.join("absent-store"));
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let error = read_plan(
+            &project,
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &crate::kernel::testutil::detached_lease().1,
+                Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::Planner,
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Stale),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("requirements.lock.txt is missing and --frozen never creates it"),
+            "{error}"
+        );
+        assert_eq!(tree(&project_dir), before);
+        assert!(!store.root.exists(), "planning touched the store");
+    }
+
+    /// A lock this machine compiled from other requirements is stale when
+    /// planned without `prepare`, as `--frozen` plans: the refusal is exit 4
+    /// and every project file, `.greyward` included, stays byte for byte
+    /// what it was (#673). `prepare` compiles it afresh.
+    #[test]
+    fn planning_reads_the_lock_and_refuses_one_compiled_from_other_inputs() {
+        let Some(_relay) =
+            stub_relay("planning_reads_the_lock_and_refuses_one_compiled_from_other_inputs")
+        else {
+            return;
+        };
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project_dir = temp.0.join("proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("requirements.txt"), "six>=1\n").unwrap();
+        let store = store_with_stub_uv(&temp.0.join("store"));
+        let project = ProjectRoot::open(&project_dir).unwrap();
+        let mut scope = crate::kernel::testutil::DoorScope::new();
+        let activity = test_activity(&store);
+        let platform = Platform::host().unwrap();
+        ensure_lock(
+            &project,
+            &selected(),
+            &mut scope.door(&store, &activity, platform, DoorKind::MissingLock),
+        )
+        .unwrap();
+        assert_eq!(stub_input(&project_dir), "six>=1\n");
+        assert!(project_dir.join(LOCK_STAMP).is_file());
+
+        std::fs::write(project_dir.join("requirements.txt"), "six>=1.16\n").unwrap();
+        let before = tree(&project_dir);
+        let error = read_plan(
+            &project,
+            &selected(),
+            &mut scope.door(&store, &activity, platform, DoorKind::Planner),
+        )
+        .unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Stale),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("was not compiled from requirements.txt as it is now"),
+            "{error}"
+        );
+        assert_eq!(tree(&project_dir), before, "a stale plan wrote a file");
+
+        ensure_lock(
+            &project,
+            &selected(),
+            &mut scope.door(&store, &activity, platform, DoorKind::MissingLock),
+        )
+        .unwrap();
+        assert_eq!(stub_input(&project_dir), "six>=1.16\n");
+    }
+
+    /// A committed lock with no stamp beside it (a fresh checkout: the
+    /// stamp is machine-local) is read as it is, and an empty one is stale.
+    #[test]
+    fn a_committed_lock_without_a_stamp_is_read_and_an_empty_one_is_stale() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        std::fs::write(temp.0.join(LOCK), "six==1.17.0 --hash=sha256:aa\n").unwrap();
+        assert_eq!(
+            read_lock(&project, "requirements.txt", "stamp").unwrap(),
+            "six==1.17.0 --hash=sha256:aa\n"
+        );
+        std::fs::write(temp.0.join(LOCK), "").unwrap();
+        let error = read_lock(&project, "requirements.txt", "stamp").unwrap_err();
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Stale),
+            "{error}"
         );
     }
 

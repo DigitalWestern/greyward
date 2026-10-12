@@ -295,7 +295,10 @@ wheels do not change; `ward update --toolchain python` pins today's
 default.
 
 `--frozen` validates the committed lock instead of creating one and refuses
-a missing or stale one.
+a missing or stale one. For Python that includes `requirements.lock.txt`:
+`--frozen` never compiles it, and a lock this machine compiled from other
+requirements than the current ones exits 4 (see
+[LIMITATIONS.md](LIMITATIONS.md) for a fresh checkout).
 
 --frozen never modifies project inputs, greyward-toolchain.toml, or the catalog
 cache; it may realize store objects and write the projection after validation

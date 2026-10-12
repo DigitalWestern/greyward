@@ -143,6 +143,19 @@ impl Tailor for Python {
         python::preflight(platform, selection.pin.version)
     }
 
+    /// Compile `requirements.lock.txt` when the manifest needs one and the
+    /// lock was not compiled from it. Planning only reads it, so a frozen
+    /// run, which skips this, never re-locks.
+    fn prepare(
+        &self,
+        _ctx: &Context,
+        project: &ProjectRoot,
+        selected: &Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<()> {
+        inputs::ensure_lock(project, selected, door)
+    }
+
     fn plan(
         &self,
         _ctx: &Context,

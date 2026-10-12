@@ -12,7 +12,10 @@ use greyward::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, text, ward, ward_at, warm_store, TempDir};
+use common::{
+    assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree, fixture, snapshot, text,
+    ward, ward_at, warm_store, TempDir,
+};
 
 #[test]
 #[ignore]
@@ -204,6 +207,39 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     );
     assert!(stderr.contains("request one of:"), "{stderr}");
     assert!(!store.exists(), "store was opened: {store:?}");
+}
+
+/// `--frozen` only reads the requirements lock (#673): after an edit to
+/// `requirements.txt` the lock this machine compiled no longer matches, and
+/// the frozen sync is refused as stale (exit 4) with every project file left
+/// byte for byte as it was, rather than re-locked over the network. Without
+/// the lock it is refused by name, and a plain plan compiles it again.
+/// Ignored: the first sync downloads CPython and resolves against PyPI.
+#[test]
+#[ignore]
+fn frozen_python_sync_never_relocks_an_edited_requirements_file() {
+    let temp = TempDir::new("python-frozen");
+    let project = temp.0.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("requirements.txt"), "six>=1.16\n").unwrap();
+    assert_ok(ward(&project, &temp.0, &[]), "first sync");
+    let lock = std::fs::read(project.join("requirements.lock.txt")).unwrap();
+
+    std::fs::write(project.join("requirements.txt"), "six>=1.15\n").unwrap();
+    let before = snapshot(&project);
+    let frozen = ward(&project, &temp.0, &["--frozen"]);
+    let stderr = text(&frozen.stderr);
+    assert_eq!(frozen.status.code(), Some(4), "{stderr}");
+    assert!(
+        stderr.contains("was not compiled from requirements.txt as it is now"),
+        "{stderr}"
+    );
+    assert_eq!(snapshot(&project), before, "--frozen changed the project");
+    assert_eq!(
+        std::fs::read(project.join("requirements.lock.txt")).unwrap(),
+        lock
+    );
+    assert_frozen_never_writes_the_lock(&project, &temp.0, "requirements.lock.txt");
 }
 
 /// `ward run` itself refuses a runtime its project's environment does not

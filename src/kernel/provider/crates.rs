@@ -405,14 +405,8 @@ fn realize_vendor_inner(
     let mut git_roots = Vec::new();
     for krate in &crates {
         if let Some(git) = &krate.git {
-            // Recorded before the fetch, so a policy denying either kind
-            // stops the sync before the host is contacted.
-            crate::kernel::policy::record(
-                crate::kernel::policy::GIT_DEPENDENCY,
-                &format!("{}@{}", krate.name, krate.version),
-                &format!("{} at {}", git.inner.url, git.inner.commit),
-            )?;
-            crate::kernel::gitsrc::record_transport(&git.inner)?;
+            let subject = format!("{}@{}", krate.name, krate.version);
+            crate::kernel::gitsrc::record_git_dependency(&subject, &git.inner)?;
             let object = crate::kernel::gitsrc::ensure_git_source(store, activity, &git.inner)
                 .map_err(|e| {
                     io::Error::new(

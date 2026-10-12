@@ -154,6 +154,11 @@ impl Tailor for Ruby {
         for objects in &ledgers {
             crate::kernel::resolve::ledger::root(store, activity, project, objects)?;
         }
+        // Before any gem is fetched: a policy that requires lock-pinned
+        // digests stops here.
+        ruby::record_unpinned_digests(&plan, |kind, subject, detail| {
+            attribution.record(kind, subject, detail)
+        })?;
         let gems = ruby::realize_gems(store, activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
             activity,

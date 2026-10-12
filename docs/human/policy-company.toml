@@ -165,6 +165,15 @@ deny = [
 #                                    denies already. A team that allows git
 #                                    dependencies over https only may add
 #                                    this kind to the list above.
+#   unpinned-digest                  a Gemfile.lock has no CHECKSUMS entry
+#                                    for a gem, so ward verified the gem
+#                                    against the sha256 rubygems.org served
+#                                    the first time it asked (trust on first
+#                                    use; the store keeps that answer).
+#                                    Every byte is still checked. Teams that
+#                                    require lock-pinned digests may add this
+#                                    kind to the list above; locks then need
+#                                    `bundle lock --add-checksums`.
 
 # Closure signing. With a [signing] table in the machine policy, `ward audit`
 # accepts only records signed by a key it lists; a project or --policy copy

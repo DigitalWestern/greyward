@@ -618,6 +618,31 @@ pub struct RubyGem {
     /// identities are unchanged by it.
     #[serde(skip)]
     pub digest_from_api: bool,
+    /// The lock's CHECKSUMS section pinned `sha256`. Without one the digest
+    /// is rubygems.org's answer (now, or as the store recorded it), and the
+    /// sync records `unpinned-digest` for the gem. Planning state only,
+    /// like `digest_from_api`.
+    #[serde(skip)]
+    pub digest_in_lock: bool,
+}
+
+/// Record `unpinned-digest` for each gem in `plan` whose digest the lock
+/// did not pin, through `record` (the sync's attribution). A policy that
+/// denies the kind refuses the sync until the lock carries a CHECKSUMS
+/// section (`bundle lock --add-checksums`).
+pub(crate) fn record_unpinned_digests(
+    plan: &RubyPlan,
+    record: impl Fn(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<()> {
+    for gem in plan.gems.iter().filter(|gem| !gem.digest_in_lock) {
+        record(
+            crate::kernel::policy::UNPINNED_DIGEST,
+            &gem.full_name,
+            "Gemfile.lock has no CHECKSUMS entry for it, so its sha256 is the one rubygems.org \
+             served; `bundle lock --add-checksums` pins it in the lock",
+        )?;
+    }
+    Ok(())
 }
 
 /// The store record kind holding rubygems.org's sha256 for one gem
@@ -823,6 +848,7 @@ pub fn plan_ruby(
             )));
         }
         let mut digest_from_api = false;
+        let digest_in_lock = g.checksum.is_some();
         let recorded = match g.checksum {
             Some(_) => None,
             None => recorded_gem_digest(store, &g.name, &g.version, &g.platform)?,
@@ -851,6 +877,7 @@ pub fn plan_ruby(
             full_name: g.full_name,
             sha256,
             digest_from_api,
+            digest_in_lock,
         });
     }
     let plan = RubyPlan {
@@ -1390,6 +1417,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             full_name: "rake-13.2.1".into(),
             sha256: "a".repeat(64),
             digest_from_api: false,
+            digest_in_lock: false,
         }],
         ..empty_plan.clone()
     };
@@ -1569,6 +1597,7 @@ mod tests {
                 full_name: "rake-13.2.1".into(),
                 sha256: "a".repeat(64),
                 digest_from_api: false,
+                digest_in_lock: false,
             }],
         }
     }
@@ -1799,6 +1828,7 @@ mod tests {
                 full_name: "rake-13.2.1".into(),
                 sha256: "a".repeat(64),
                 digest_from_api: false,
+                digest_in_lock: false,
             }],
         };
         let identity = ruby_gems_identity(&spec, &plan, None);
@@ -1817,6 +1847,7 @@ mod tests {
             full_name: "rake-13.2.1".into(),
             sha256: "a".repeat(64),
             digest_from_api: false,
+            digest_in_lock: false,
         };
         let ok = RubyPlan {
             ruby_version: RUBY_VERSION.into(),
@@ -1860,6 +1891,7 @@ mod tests {
                     full_name: "mini_portile2-2.8.9".into(),
                     sha256: "a".repeat(64),
                     digest_from_api: false,
+                    digest_in_lock: false,
                 },
                 RubyGem {
                     name: "nokogiri".into(),
@@ -1868,6 +1900,7 @@ mod tests {
                     full_name: "nokogiri-1.18.10-x86_64-linux".into(),
                     sha256: "b".repeat(64),
                     digest_from_api: false,
+                    digest_in_lock: false,
                 },
             ],
         };
@@ -2060,6 +2093,7 @@ mod tests {
             full_name: "racc-1.8.1".into(),
             sha256: "c".repeat(64),
             digest_from_api: true,
+            digest_in_lock: false,
         };
         assert_eq!(
             recorded_gem_digest(&store, "racc", "1.8.1", "ruby").unwrap(),
@@ -2097,6 +2131,56 @@ mod tests {
         // The digest is planning state: it never reaches a serialized plan.
         let json = serde_json::to_value(&gem).unwrap();
         assert!(json.get("digest_from_api").is_none(), "{json}");
+        assert!(json.get("digest_in_lock").is_none(), "{json}");
+    }
+
+    /// A gem whose digest the lock's CHECKSUMS section pinned records
+    /// nothing; one whose digest came from rubygems.org, now or through the
+    /// store's record, records `unpinned-digest` under its full name.
+    #[test]
+    fn a_digest_the_lock_did_not_pin_is_recorded() {
+        let gem = |name: &str, in_lock: bool, from_api: bool| RubyGem {
+            name: name.into(),
+            version: "1.0.0".into(),
+            platform: "ruby".into(),
+            full_name: format!("{name}-1.0.0"),
+            sha256: "c".repeat(64),
+            digest_from_api: from_api,
+            digest_in_lock: in_lock,
+        };
+        let plan = RubyPlan {
+            ruby_version: "3.4.6".into(),
+            ruby_platform: "x86_64-linux".into(),
+            bundler_version: "2.6.9".into(),
+            gems: vec![
+                gem("pinned", true, false),
+                gem("asked", false, true),
+                gem("remembered", false, false),
+            ],
+        };
+        let recorded = std::cell::RefCell::new(Vec::new());
+        record_unpinned_digests(&plan, |kind, subject, _| {
+            recorded
+                .borrow_mut()
+                .push((kind.to_string(), subject.to_string()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            recorded.into_inner(),
+            [
+                ("unpinned-digest".to_string(), "asked-1.0.0".to_string()),
+                (
+                    "unpinned-digest".to_string(),
+                    "remembered-1.0.0".to_string()
+                ),
+            ]
+        );
+        let denied = record_unpinned_digests(&plan, |_, subject, _| {
+            Err(io::Error::other(format!("denied {subject}")))
+        })
+        .unwrap_err();
+        assert_eq!(denied.to_string(), "denied asked-1.0.0");
     }
 
     /// ward's own Bundler runs start inside the held project directory and
@@ -2284,6 +2368,7 @@ mod rubygems_check_tests {
             full_name: full_name.into(),
             sha256: SHA.into(),
             digest_from_api: false,
+            digest_in_lock: false,
         }
     }
 

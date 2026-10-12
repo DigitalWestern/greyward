@@ -1099,6 +1099,119 @@ dependencies = [{ name = "six" }]
         );
     }
 
+    /// A uv.lock source is classified by its key (#687): a GitLab or Gitea
+    /// index URL, which contains `git`, `path` or `url` in its text, is a
+    /// registry with an unattested index; a local wheel, a local sdist and a
+    /// find-links directory, whose files uv writes with no URL, are each
+    /// skipped by name instead of making the whole lock unreadable.
+    #[test]
+    fn uv_lock_sources_are_classified_by_key() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let gitlab = "https://gitlab.example.com/api/v4/projects/7/packages/pypi/simple";
+        let packages = parse_uv_lock(&format!(
+            r#"[[package]]
+name = "six"
+version = "1.17.0"
+source = {{ registry = "https://pypi.org/simple" }}
+wheels = [{{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "{hash}" }}]
+
+[[package]]
+name = "internal"
+version = "1.0.0"
+source = {{ registry = "{gitlab}" }}
+wheels = [{{ url = "https://gitlab.example.com/files/internal-1.0.0-py3-none-any.whl", hash = "{hash}" }}]
+
+[[package]]
+name = "localwheel"
+version = "1.0.0"
+source = {{ path = "wheels/localwheel-1.0.0-py3-none-any.whl" }}
+wheels = [{{ filename = "localwheel-1.0.0-py3-none-any.whl", hash = "{hash}" }}]
+
+[[package]]
+name = "localsdist"
+version = "1.0.0"
+source = {{ path = "dist/localsdist-1.0.0.tar.gz" }}
+sdist = {{ hash = "{hash}" }}
+
+[[package]]
+name = "findlinks"
+version = "1.0.0"
+source = {{ registry = "wheels" }}
+wheels = [{{ path = "findlinks-1.0.0-py3-none-any.whl", hash = "{hash}" }}]
+"#
+        ))
+        .unwrap();
+        assert_eq!(
+            packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.files.len()))
+                .collect::<Vec<_>>(),
+            [
+                ("six", 1),
+                ("internal", 1),
+                ("localwheel", 0),
+                ("localsdist", 0),
+                ("findlinks", 0)
+            ]
+        );
+        let selected = uv_lock_manifest(
+            &packages,
+            &[],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|package| package.name.as_str())
+                .collect::<Vec<_>>(),
+            ["internal", "six"]
+        );
+        use crate::kernel::policy::{REQUIREMENT_SKIPPED, UNATTESTED_INDEX};
+        let local = "uv lock package is a local or VCS source, not a locked registry artifact";
+        assert_eq!(
+            drained_records(),
+            [
+                record(
+                    REQUIREMENT_SKIPPED,
+                    "findlinks",
+                    "uv lock package is from a find-links directory on disk, not a locked \
+                     registry artifact"
+                ),
+                record(
+                    UNATTESTED_INDEX,
+                    "internal",
+                    "uv lock package names a non-public registry source"
+                ),
+                record(REQUIREMENT_SKIPPED, "localsdist", local),
+                record(REQUIREMENT_SKIPPED, "localwheel", local),
+            ]
+        );
+        // The project itself is found by key and value, and a source uv
+        // never writes is refused rather than guessed at.
+        assert!(uv::is_uv_project_root("{ editable = \".\" }"));
+        assert!(uv::is_uv_project_root("{ virtual = \".\" }"));
+        assert!(!uv::is_uv_project_root("{ editable = \"packages/a\" }"));
+        assert!(!uv::is_uv_project_root(&format!(
+            "{{ registry = \"{gitlab}\" }}"
+        )));
+        let error = parse_uv_lock(
+            "[[package]]\nname = \"odd\"\nversion = \"1\"\nsource = { mirror = \"x\" }\n",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("uv.lock odd has a source ward does not know"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn setup_cfg_multiline_and_comments() {
         let cfg = pyselect::parse_setup_cfg(

@@ -56,15 +56,57 @@ pub(super) fn is_public_pypi_url(url: &str) -> bool {
     })
 }
 
-/// The registry URL of a uv.lock package `source`, as [`UvPackage::source`]
-/// spells it: `{ registry = "https://pypi.org/simple" }`.
-fn uv_registry_url(source: &str) -> Option<String> {
+/// What a uv.lock package's `source` names, decided by the table's key and
+/// never by its text: a registry URL that happens to contain `git` or
+/// `path` (a GitLab or Gitea index) is still a registry (#687).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UvSource {
+    /// An index, by the URL uv wrote (empty: no `source`, the default).
+    Registry(String),
+    /// `registry = "<directory>"`: a find-links directory on disk, whose
+    /// files uv records by path.
+    LocalRegistry,
+    /// `path`, `directory`, `editable` or `virtual`: a file or tree on
+    /// disk. `root` when it is the project itself (`"."`).
+    Local { root: bool },
+    /// `git` or `url`: fetched by uv from where it names.
+    Remote,
+}
+
+/// Classify a uv.lock package `source`, as [`UvPackage::source`] spells it
+/// (`{ registry = "https://pypi.org/simple" }`, or `registry` when the
+/// package has none). `None` for a source uv does not write.
+pub(super) fn uv_source(source: &str) -> Option<UvSource> {
+    if source == "registry" {
+        return Some(UvSource::Registry(String::new()));
+    }
     let table: toml::Table = toml::from_str(&format!("source = {source}")).ok()?;
-    table
-        .get("source")?
-        .get("registry")?
-        .as_str()
-        .map(str::to_string)
+    let table = table.get("source")?.as_table()?;
+    if let Some(registry) = table.get("registry") {
+        let registry = registry.as_str()?;
+        return Some(if registry.is_empty() || registry.contains("://") {
+            UvSource::Registry(registry.to_string())
+        } else {
+            UvSource::LocalRegistry
+        });
+    }
+    for key in ["editable", "virtual"] {
+        if let Some(at) = table.get(key) {
+            return Some(UvSource::Local {
+                root: at.as_str()? == ".",
+            });
+        }
+    }
+    if ["path", "directory", "workspace"]
+        .iter()
+        .any(|key| table.contains_key(*key))
+    {
+        return Some(UvSource::Local { root: false });
+    }
+    if ["git", "url"].iter().any(|key| table.contains_key(*key)) {
+        return Some(UvSource::Remote);
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,11 +169,18 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
                 .get("source")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "registry".into());
+            let Some(kind) = uv_source(&source) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("uv.lock {name} has a source ward does not know: {source}"),
+                ));
+            };
+            let registry = matches!(kind, UvSource::Registry(_));
             let version = table
                 .get("version")
                 .and_then(toml::Value::as_str)
                 .unwrap_or_default();
-            if version.is_empty() && !is_local_uv_source(&source) {
+            if version.is_empty() && registry {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("uv.lock {name} has no version"),
@@ -167,43 +216,14 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
                 .filter_map(toml::Value::as_str)
                 .map(str::to_string)
                 .collect();
-            let mut files = Vec::new();
-            if let Some(sdist) = table.get("sdist") {
-                let sdist = sdist.as_table().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("uv.lock {name}.sdist is not a table"),
-                    )
-                })?;
-                files.push(uv_file(sdist, ArtifactKind::Sdist).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("uv.lock {name}.sdist lacks a URL and sha256 hash"),
-                    )
-                })?);
-            }
-            if let Some(wheels) = table.get("wheels") {
-                let wheels = wheels.as_array().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("uv.lock {name}.wheels is not an array"),
-                    )
-                })?;
-                for wheel in wheels {
-                    let wheel = wheel.as_table().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("uv.lock {name} wheel is not a table"),
-                        )
-                    })?;
-                    files.push(uv_file(wheel, ArtifactKind::Wheel).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("uv.lock {name} wheel lacks a URL and sha256 hash"),
-                        )
-                    })?);
-                }
-            }
+            // Only a registry package's files are ever fetched. A local one
+            // is recorded skipped, and uv writes its files by path or with
+            // no location at all, so they are not read.
+            let files = if registry {
+                uv_files(name, table)?
+            } else {
+                Vec::new()
+            };
             Ok(UvPackage {
                 name: normalize_name(name),
                 version: version.into(),
@@ -216,6 +236,37 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
             })
         })
         .collect()
+}
+
+/// A registry package's `sdist` and `wheels`, each with the URL and sha256
+/// it is fetched and checked by.
+fn uv_files(name: &str, table: &toml::Table) -> io::Result<Vec<UvFile>> {
+    let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
+    let mut files = Vec::new();
+    if let Some(sdist) = table.get("sdist") {
+        let sdist = sdist
+            .as_table()
+            .ok_or_else(|| invalid(format!("uv.lock {name}.sdist is not a table")))?;
+        files.push(
+            uv_file(sdist, ArtifactKind::Sdist).ok_or_else(|| {
+                invalid(format!("uv.lock {name}.sdist lacks a URL and sha256 hash"))
+            })?,
+        );
+    }
+    if let Some(wheels) = table.get("wheels") {
+        let wheels = wheels
+            .as_array()
+            .ok_or_else(|| invalid(format!("uv.lock {name}.wheels is not an array")))?;
+        for wheel in wheels {
+            let wheel = wheel
+                .as_table()
+                .ok_or_else(|| invalid(format!("uv.lock {name} wheel is not a table")))?;
+            files.push(uv_file(wheel, ArtifactKind::Wheel).ok_or_else(|| {
+                invalid(format!("uv.lock {name} wheel lacks a URL and sha256 hash"))
+            })?);
+        }
+    }
+    Ok(files)
 }
 
 /// A package's `optional-dependencies`, by lowercased extra. Every group
@@ -551,23 +602,31 @@ fn resolve_uv_package<'a>(
 /// Record what this package's source costs us in attestation. Returns true
 /// when the package carries no locked registry artifact and must be skipped.
 fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
-    if is_local_uv_source(&package.source) {
-        if !is_uv_project_root(&package.source) {
+    let url = match uv_source(&package.source) {
+        Some(UvSource::Registry(url)) => url,
+        Some(UvSource::Local { root: true }) => return Ok(true),
+        Some(UvSource::LocalRegistry) => {
+            crate::kernel::policy::record(
+                crate::kernel::policy::REQUIREMENT_SKIPPED,
+                &package.name,
+                "uv lock package is from a find-links directory on disk, not a locked \
+                 registry artifact",
+            )?;
+            return Ok(true);
+        }
+        _ => {
             crate::kernel::policy::record(
                 crate::kernel::policy::REQUIREMENT_SKIPPED,
                 &package.name,
                 "uv lock package is a local or VCS source, not a locked registry artifact",
             )?;
+            return Ok(true);
         }
-        return Ok(true);
-    }
-    if package.source != "registry"
-        && package.source.contains("registry")
-        // An empty registry is not the default index here: uv always
-        // writes the URL, so an empty one is some other source.
-        && !uv_registry_url(&package.source)
-            .is_some_and(|url| !url.is_empty() && is_public_pypi_url(&url))
-    {
+    };
+    // An empty registry is not the default index here: uv always writes
+    // the URL, so an empty one is some other source. A package with no
+    // source at all is the default index.
+    if package.source != "registry" && (url.is_empty() || !is_public_pypi_url(&url)) {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_INDEX,
             &package.name,
@@ -662,19 +721,10 @@ pub(super) fn select_uv_package<'a>(
     Ok(None)
 }
 
-pub(super) fn is_local_uv_source(source: &str) -> bool {
-    source.contains("editable")
-        || source.contains("virtual")
-        || source.contains("directory")
-        || source.contains("path")
-        || source.contains("git")
-        || source.contains("url")
-        || source.contains("workspace")
-}
-
+/// Whether a uv.lock package is the project itself: `editable` or
+/// `virtual` at `"."`, by the source table's key and value.
 pub(super) fn is_uv_project_root(source: &str) -> bool {
-    (source.contains("editable") || source.contains("virtual"))
-        && (source.contains("\".\"") || source.contains("'.'"))
+    uv_source(source) == Some(UvSource::Local { root: true })
 }
 
 pub(super) fn parse_uv_requirement(requirement: &str) -> io::Result<UvDependency> {

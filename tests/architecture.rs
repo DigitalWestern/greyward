@@ -4,8 +4,11 @@
 //! not name a tailor's module or spell its name as a string either (the
 //! tokens scan below).
 //!
-//! Test code (everything from `#[cfg(test)] mod tests` on) is exempt: tests
-//! may wire the whole crate together. Size budgets (layering rule 5) are a
+//! The scans read the crate as rustc does: the files its module tree
+//! reaches from the crate roots, each with its module path, which decides
+//! its layer. Test code (whatever cannot compile without `cfg(test)`,
+//! found by attribute wherever it sits, or a file only a test-only `mod`
+//! reaches) is exempt: tests may wire the whole crate together. Size budgets (layering rule 5) are a
 //! ratchet against `tests/size_baseline.txt`: what is over budget today may
 //! shrink, nothing may grow or newly cross a budget.
 //!
@@ -21,6 +24,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
 
 fn src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -62,133 +68,825 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     out.sort();
 }
 
-/// The non-test part of a file: everything before its `mod tests`.
-fn non_test(text: &str) -> &str {
-    match text.find("#[cfg(test)]\nmod tests") {
-        Some(index) => &text[..index],
-        None => text,
+/// A source file of one of the package's crates, reached from the crate's
+/// root through its `mod` declarations, the way the compiler finds it.
+#[derive(Debug)]
+struct Module {
+    /// Repo-relative: `src/kernel/gc/mod.rs`.
+    relative: String,
+    /// Whether it belongs to the library (`src/lib.rs`), not a binary.
+    library: bool,
+    /// Its module path from the crate root: `["kernel", "gc"]`.
+    path: Vec<String>,
+    /// Whether it is compiled only with `test` on: its `mod` declaration,
+    /// an inline module around that, a module above it, or the file itself
+    /// (`#![cfg(test)]`) is marked test-only (`marks_test_code`).
+    test_only: bool,
+    text: String,
+}
+
+/// Every module file of the package's crates. Which layer a file is in,
+/// and whether it is test code, come from the module tree rather than the
+/// folder it sits in: `#[path = "../compat.rs"] mod compat;` in
+/// `kernel/mod.rs` is a kernel module, and a file declared by
+/// `#[cfg(test)] mod helper;` is test code wherever it lives.
+fn crate_modules() -> &'static [Module] {
+    static MODULES: std::sync::OnceLock<Vec<Module>> = std::sync::OnceLock::new();
+    MODULES.get_or_init(|| module_tree(&repo(), crate_roots()))
+}
+
+/// The package's crate roots, as (file, is the library): `src/lib.rs`,
+/// and each binary: those `[[bin]]` sections of Cargo.toml name, `src/main.rs`
+/// and `src/bin/`.
+fn crate_roots() -> Vec<(PathBuf, bool)> {
+    let root = repo();
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let mut bins = vec![root.join("src/main.rs")];
+    let mut in_bin = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_bin = line == "[[bin]]";
+        } else if let Some(value) = line
+            .strip_prefix("path")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .filter(|_| in_bin)
+        {
+            bins.push(root.join(value.trim().trim_matches('"')));
+        }
+    }
+    if let Ok(entries) = fs::read_dir(root.join("src/bin")) {
+        for entry in entries {
+            let path = entry.unwrap().path();
+            bins.push(if path.is_dir() {
+                path.join("main.rs")
+            } else {
+                path
+            });
+        }
+    }
+    bins.sort();
+    bins.dedup();
+    let mut roots = vec![(root.join("src/lib.rs"), true)];
+    roots.extend(
+        bins.into_iter()
+            .filter(|bin| bin.extension().is_some_and(|ext| ext == "rs") && bin.exists())
+            .map(|bin| (bin, false)),
+    );
+    roots
+}
+
+/// The module files reached from `roots`, with paths relative to `base`.
+/// A file reached more than once with the same module path (a module
+/// declared under two cfgs) is one entry, test-only only if every
+/// declaration reaching it is.
+fn module_tree(base: &Path, roots: Vec<(PathBuf, bool)>) -> Vec<Module> {
+    let mut found = std::collections::BTreeMap::<(String, Vec<String>), Module>::new();
+    // (file, whether it is a mod-rs file, module path, test-only, library)
+    let mut pending: Vec<(PathBuf, bool, Vec<String>, bool, bool)> = roots
+        .into_iter()
+        .map(|(file, library)| (file, true, Vec::new(), false, library))
+        .collect();
+    while let Some((file, mod_rs, path, test_only, library)) = pending.pop() {
+        let relative = file
+            .strip_prefix(base)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let key = (relative.clone(), path.clone());
+        if found
+            .get(&key)
+            .is_some_and(|seen| !seen.test_only || test_only)
+        {
+            continue;
+        }
+        let text = fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("{relative}, declared as module {path:?}: {error}"));
+        let parsed = parse(&text);
+        let test_only = test_only || marks_test_code(&parsed.attrs);
+        let dir = file.parent().unwrap().to_path_buf();
+        // A mod-rs file (a crate root, a `mod.rs`, or a file a `#[path]`
+        // names) keeps its children beside it; `a/b.rs` keeps them in `a/b/`.
+        let children = if mod_rs {
+            dir.clone()
+        } else {
+            dir.join(file.file_stem().unwrap())
+        };
+        let mut declared = Vec::new();
+        declared_modules(
+            &parsed.items,
+            &dir,
+            &children,
+            false,
+            &path,
+            test_only,
+            &mut declared,
+        );
+        pending.extend(
+            declared
+                .into_iter()
+                .map(|(file, mod_rs, path, test_only)| (file, mod_rs, path, test_only, library)),
+        );
+        found.insert(
+            key,
+            Module {
+                relative,
+                library,
+                path,
+                test_only,
+                text,
+            },
+        );
+    }
+    found.into_values().collect()
+}
+
+/// The files `items` declare as modules (`mod x;`), here and inside inline
+/// modules, as (file, whether it is mod-rs, module path, test-only).
+/// `file_dir` is the folder of the file the items are in, `dir` the folder
+/// its children live in (with the inline modules around `items` added).
+/// A `#[path]` is relative to `file_dir` at the file's top level and to
+/// `dir` inside an inline module, as rustc reads it.
+fn declared_modules(
+    items: &[syn::Item],
+    file_dir: &Path,
+    dir: &Path,
+    inline: bool,
+    path: &[String],
+    test_only: bool,
+    out: &mut Vec<(PathBuf, bool, Vec<String>, bool)>,
+) {
+    use syn::ext::IdentExt;
+    for item in items {
+        let syn::Item::Mod(module) = item else {
+            continue;
+        };
+        let name = module.ident.unraw().to_string();
+        let mut child = path.to_vec();
+        child.push(name.clone());
+        let test_only = test_only || marks_test_code(&module.attrs);
+        let named = path_attribute(&module.attrs).map(|named| {
+            lexical(&if inline {
+                dir.join(named)
+            } else {
+                file_dir.join(named)
+            })
+        });
+        match (&module.content, named) {
+            (Some((_, items)), named) => declared_modules(
+                items,
+                file_dir,
+                &named.unwrap_or_else(|| dir.join(&name)),
+                true,
+                &child,
+                test_only,
+                out,
+            ),
+            (None, Some(file)) => out.push((file, true, child, test_only)),
+            (None, None) if dir.join(format!("{name}.rs")).exists() => {
+                out.push((dir.join(format!("{name}.rs")), false, child, test_only))
+            }
+            (None, None) => out.push((dir.join(&name).join("mod.rs"), true, child, test_only)),
+        }
     }
 }
 
-/// Every path `text` names into the crate, as segment vectors from the
-/// crate root: `crate::a::b`, `$crate::a::b`, and `super::…` resolved
-/// against `module` (the module path of the file, `["kernel", "gc"]` for
-/// `src/kernel/gc/mod.rs`). Grouped imports expand at any depth:
-/// `use crate::{a::{b, c}, d}` yields `a::b`, `a::c` and `d`, and `self` in
-/// a group names the group's own prefix. Inline modules are not counted:
-/// a `super` inside one resolves one level too high, which can report a
-/// violation that is not there and can hide one that is
-/// (`super::super::archive` in an inline module of `kernel/foo.rs` reads as
-/// `archive`, not `kernel::archive`). The archive scan reads `use`
-/// declarations with `use_bindings`, which counts them.
-fn crate_paths(text: &str, module: &[String]) -> Vec<Vec<String>> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let boundary = i == 0 || !is_ident_char(chars[i - 1]);
-        if boundary && starts_with_at(&chars, i, "crate::") {
-            let mut at = i + "crate::".len();
-            parse_use_tree(&chars, &mut at, Vec::new(), &mut out);
-            i = at.max(i + 1);
-        } else if boundary && starts_with_at(&chars, i, "super::") {
-            let mut prefix = module.to_vec();
-            let mut at = i;
-            while starts_with_at(&chars, at, "super::") {
-                prefix.pop();
-                at += "super::".len();
+/// `path` with `.` and `..` resolved as text: `src/kernel/../compat.rs`
+/// is `src/compat.rs`.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
             }
-            parse_use_tree(&chars, &mut at, prefix, &mut out);
-            i = at.max(i + 1);
-        } else {
-            i += 1;
+            other => out.push(other),
         }
     }
     out
 }
 
-fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+/// The value of a `#[path = "…"]` attribute.
+fn path_attribute(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attr| match &attr.meta {
+        syn::Meta::NameValue(pair) if pair.path.is_ident("path") => match &pair.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(value),
+                ..
+            }) => Some(value.value()),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
-fn starts_with_at(chars: &[char], at: usize, word: &str) -> bool {
-    word.chars()
-        .enumerate()
-        .all(|(offset, c)| chars.get(at + offset) == Some(&c))
+/// The production files of the package's crates (every module file not
+/// test-only), each file once.
+fn production_sources() -> Vec<&'static Module> {
+    let mut seen = std::collections::BTreeSet::new();
+    crate_modules()
+        .iter()
+        .filter(|module| !module.test_only && seen.insert(module.relative.as_str()))
+        .collect()
 }
 
-fn skip_whitespace(chars: &[char], at: &mut usize) {
-    while chars.get(*at).is_some_and(|c| c.is_whitespace()) {
-        *at += 1;
+/// `production_sources` as (repo-relative path, text).
+fn production_files() -> Vec<(String, String)> {
+    production_sources()
+        .into_iter()
+        .map(|module| (module.relative.clone(), module.text.clone()))
+        .collect()
+}
+
+/// The scans read the module tree, so a file no crate root reaches would
+/// go unchecked: every `.rs` file under `src/` must be a module.
+#[test]
+fn every_source_file_is_a_module() {
+    let root = repo();
+    let mut files = Vec::new();
+    rust_files(&src(), &mut files);
+    let reached: std::collections::BTreeSet<&str> = crate_modules()
+        .iter()
+        .map(|module| module.relative.as_str())
+        .collect();
+    let unreached: Vec<String> = files
+        .iter()
+        .map(|file| {
+            file.strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .filter(|relative| !reached.contains(relative.as_str()))
+        .collect();
+    assert!(
+        unreached.is_empty(),
+        "files under src/ that no crate root declares as a module:\n  {}",
+        unreached.join("\n  ")
+    );
+    // The crate root itself is production code, and so is the kernel.
+    let kernel = crate_modules()
+        .iter()
+        .find(|module| module.relative == "src/kernel/mod.rs")
+        .unwrap();
+    assert!(kernel.library && kernel.path == ["kernel"] && !kernel.test_only);
+}
+
+/// The module tree follows `#[path]` in every position, carries test-only
+/// status down to every file below a test-only declaration, and the layer a
+/// file is in is the module it is, not the folder.
+#[test]
+fn the_module_tree_is_read_as_rustc_reads_it() {
+    let base = std::env::temp_dir().join(format!("greyward-arch-modules-{}", std::process::id()));
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod kernel;\nmod tailors;\n#[cfg(test)]\nmod helper;\n",
+        ),
+        (
+            "src/kernel/mod.rs",
+            "#[path = \"../compat.rs\"]\nmod compat;\nmod inner {\n    #[path = \"deep.rs\"]\n    mod deep;\n}\n",
+        ),
+        ("src/compat.rs", "mod child;\nfn f() { crate::tailors::x(); }\n"),
+        ("src/child.rs", ""),
+        ("src/kernel/inner/deep.rs", ""),
+        (
+            "src/tailors.rs",
+            "#[path = \"elsewhere.rs\"]\nmod top;\nmod inline {\n    #[path = \"nested.rs\"]\n    mod nested;\n}\n",
+        ),
+        ("src/elsewhere.rs", ""),
+        ("src/tailors/inline/nested.rs", ""),
+        ("src/helper.rs", "mod below;\n"),
+        ("src/helper/below.rs", ""),
+        ("src/main.rs", "fn main() {}\n"),
+    ];
+    for (file, text) in files {
+        let path = base.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let modules = module_tree(
+        &base,
+        vec![
+            (base.join("src/lib.rs"), true),
+            (base.join("src/main.rs"), false),
+        ],
+    );
+    fs::remove_dir_all(&base).unwrap();
+    let mut read: Vec<(String, String, bool, bool)> = modules
+        .iter()
+        .map(|module| {
+            (
+                module.relative.clone(),
+                module.path.join("::"),
+                module.library,
+                module.test_only,
+            )
+        })
+        .collect();
+    read.sort();
+    let expected: Vec<(String, String, bool, bool)> = [
+        ("src/child.rs", "kernel::compat::child", true, false),
+        ("src/compat.rs", "kernel::compat", true, false),
+        ("src/elsewhere.rs", "tailors::top", true, false),
+        ("src/helper.rs", "helper", true, true),
+        ("src/helper/below.rs", "helper::below", true, true),
+        (
+            "src/kernel/inner/deep.rs",
+            "kernel::inner::deep",
+            true,
+            false,
+        ),
+        ("src/kernel/mod.rs", "kernel", true, false),
+        ("src/lib.rs", "", true, false),
+        ("src/main.rs", "", false, false),
+        ("src/tailors.rs", "tailors", true, false),
+        (
+            "src/tailors/inline/nested.rs",
+            "tailors::inline::nested",
+            true,
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(file, path, library, test_only)| {
+        (file.to_string(), path.to_string(), library, test_only)
+    })
+    .collect();
+    assert_eq!(read, expected);
+    // `compat.rs` sits outside `src/kernel/` and is held to the kernel's rules.
+    let compat = modules
+        .iter()
+        .find(|module| module.relative == "src/compat.rs")
+        .unwrap();
+    let (found, _) = layer_violations("compat.rs", &compat.path, &compat.text, &[], &[]);
+    assert_eq!(found, ["compat.rs:2: crate::tailors::x"]);
+}
+
+/// Where a path a file names leads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Root {
+    /// Into this crate, from its root.
+    Crate,
+    /// Anywhere else: an extern crate (`::zip`, `std`, a name only an
+    /// extern crate binds), or a name nothing in scope binds (a local item,
+    /// a type parameter, an enum).
+    Other,
+}
+
+/// What a name, or a path being read, stands for before it is resolved.
+#[derive(Clone, Debug)]
+enum Target {
+    /// A path from a root: `crate::a`, `self::a`, `super::a`, a child
+    /// `mod a`, or `::zip`.
+    Rooted(Root, Vec<String>),
+    /// A path starting with a name to resolve where it is written:
+    /// `t::python` after `use crate::tailors as t;`.
+    Relative(String, Vec<String>),
+}
+
+/// `target` with `segment` added, in `module`: a leading `crate`, `self`
+/// or `super` (and `super` after it) moves the root, `self` after a prefix
+/// names the prefix.
+fn extend(target: Option<Target>, segment: &str, module: &[String]) -> Target {
+    match (target, segment) {
+        (None, "crate") => Target::Rooted(Root::Crate, Vec::new()),
+        (None, "self") => Target::Rooted(Root::Crate, module.to_vec()),
+        (None, "super") => Target::Rooted(
+            Root::Crate,
+            module[..module.len().saturating_sub(1)].to_vec(),
+        ),
+        (None, name) => Target::Relative(name.to_string(), Vec::new()),
+        (Some(Target::Rooted(Root::Crate, mut path)), "super") => {
+            path.pop();
+            Target::Rooted(Root::Crate, path)
+        }
+        (Some(target), "self") => target,
+        (Some(Target::Rooted(root, mut path)), name) => {
+            path.push(name.to_string());
+            Target::Rooted(root, path)
+        }
+        (Some(Target::Relative(first, mut path)), name) => {
+            path.push(name.to_string());
+            Target::Relative(first, path)
+        }
     }
 }
 
-/// One use tree starting at `at` (`a::b`, `a::{b, c::{d}}`, `a as x`),
-/// every leaf path of it pushed to `out` behind `prefix`.
-fn parse_use_tree(chars: &[char], at: &mut usize, prefix: Vec<String>, out: &mut Vec<Vec<String>>) {
-    let mut segments = prefix;
-    loop {
-        skip_whitespace(chars, at);
-        if chars.get(*at) == Some(&'{') {
-            *at += 1;
-            loop {
-                skip_whitespace(chars, at);
-                match chars.get(*at) {
-                    None => return,
-                    Some('}') => {
-                        *at += 1;
-                        return;
+/// The leaves of a `use` tree in `module`: each name it binds (`None` for a
+/// glob) with the path it binds it to, and where it is written.
+fn use_leaves(
+    tree: &syn::UseTree,
+    prefix: Option<Target>,
+    module: &[String],
+    out: &mut Vec<(Option<String>, Target, Position)>,
+) {
+    use syn::ext::IdentExt;
+    match tree {
+        syn::UseTree::Path(path) => use_leaves(
+            &path.tree,
+            Some(extend(prefix, &path.ident.unraw().to_string(), module)),
+            module,
+            out,
+        ),
+        syn::UseTree::Name(name) => {
+            let ident = name.ident.unraw().to_string();
+            let target = extend(prefix, &ident, module);
+            let local = match (&target, ident.as_str()) {
+                (Target::Rooted(_, path), "self" | "crate" | "super") => {
+                    path.last().cloned().unwrap_or_default()
+                }
+                (Target::Relative(first, path), "self") => path.last().unwrap_or(first).clone(),
+                _ => ident,
+            };
+            out.push((Some(local), target, position(name.ident.span().start())));
+        }
+        syn::UseTree::Rename(rename) => out.push((
+            Some(rename.rename.unraw().to_string()),
+            extend(prefix, &rename.ident.unraw().to_string(), module),
+            position(rename.ident.span().start()),
+        )),
+        syn::UseTree::Glob(glob) => {
+            if let Some(prefix) = prefix {
+                out.push((None, prefix, position(glob.star_token.span.start())));
+            }
+        }
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .for_each(|tree| use_leaves(tree, prefix.clone(), module, out)),
+    }
+}
+
+/// The names one module or block binds, from its production items: what
+/// each `use` binds, each glob it imports, each child `mod` and each
+/// `extern crate`.
+#[derive(Default)]
+struct Scope {
+    /// A module's scope: no name bound outside it is seen inside it.
+    module: bool,
+    bindings: Vec<(String, Target)>,
+    globs: Vec<Target>,
+}
+
+fn scope_of<'a>(
+    items: impl IntoIterator<Item = &'a syn::Item>,
+    module: &[String],
+    is_module: bool,
+) -> Scope {
+    use syn::ext::IdentExt;
+    let mut scope = Scope {
+        module: is_module,
+        ..Scope::default()
+    };
+    for item in items {
+        if marks_test_code(item.attrs()) {
+            continue;
+        }
+        match item {
+            syn::Item::Use(declaration) => {
+                let mut leaves = Vec::new();
+                let root = declaration
+                    .leading_colon
+                    .map(|_| Target::Rooted(Root::Other, Vec::new()));
+                use_leaves(&declaration.tree, root, module, &mut leaves);
+                for (local, target, _) in leaves {
+                    match local {
+                        Some(local) => scope.bindings.push((local, target)),
+                        None => scope.globs.push(target),
                     }
-                    Some(',') => *at += 1,
-                    Some(_) => {
-                        let before = *at;
-                        parse_use_tree(chars, at, segments.clone(), out);
-                        if *at == before {
-                            // Not a use tree (`*`, a stray token): step over it.
-                            *at += 1;
+                }
+            }
+            syn::Item::Mod(child) => {
+                let name = child.ident.unraw().to_string();
+                let path = [module, std::slice::from_ref(&name)].concat();
+                scope
+                    .bindings
+                    .push((name, Target::Rooted(Root::Crate, path)));
+            }
+            syn::Item::ExternCrate(krate) => {
+                let name = krate.ident.unraw().to_string();
+                let target = if name == "self" {
+                    Target::Rooted(Root::Crate, Vec::new())
+                } else {
+                    Target::Rooted(Root::Other, vec![name.clone()])
+                };
+                let local = krate
+                    .rename
+                    .as_ref()
+                    .map_or(name, |(_, rename)| rename.unraw().to_string());
+                scope.bindings.push((local, target));
+            }
+            _ => {}
+        }
+    }
+    scope
+}
+
+/// One path a file names, resolved.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Named {
+    at: Position,
+    /// The module it is written in: the file's, and inline modules inside.
+    module: Vec<String>,
+    root: Root,
+    path: Vec<String>,
+}
+
+/// Every path one parsed file names, resolved the way the compiler
+/// resolves names: from the module or block it is written in, through the
+/// `use` declarations, child modules and `extern crate`s in scope there
+/// (an inner block's shadowing an outer one's, a module seeing none of the
+/// modules around it), following a binding of a binding to the end, and
+/// trying each glob import for a name nothing binds. Paths in code, in
+/// `use` declarations, and in macro input read as code; tokens where the
+/// input is not code (`if_chain!`).
+struct PathScan<'a> {
+    module: Vec<String>,
+    scopes: Vec<Scope>,
+    named: Vec<Named>,
+    rules: UnreadRules<'a>,
+}
+
+impl PathScan<'_> {
+    /// What `name` stands for at scope `top`: its binding (resolved in turn,
+    /// never twice), or, bound nowhere, itself and each glob's path with it.
+    fn resolve_name(
+        &self,
+        name: &str,
+        top: usize,
+        seen: &[(usize, String)],
+    ) -> Vec<(Root, Vec<String>)> {
+        let bottom = (0..=top)
+            .rev()
+            .find(|&i| self.scopes[i].module)
+            .unwrap_or(0);
+        for i in (bottom..=top).rev() {
+            if let Some((_, target)) = self.scopes[i]
+                .bindings
+                .iter()
+                .find(|(local, _)| local == name)
+            {
+                let key = (i, name.to_string());
+                if seen.contains(&key) {
+                    return Vec::new();
+                }
+                return self.resolve(target, i, &[seen, &[key]].concat());
+            }
+        }
+        let mut out = vec![(Root::Other, vec![name.to_string()])];
+        for i in (bottom..=top).rev() {
+            for (index, glob) in self.scopes[i].globs.iter().enumerate() {
+                let key = (i, format!("*{index}"));
+                if seen.contains(&key) {
+                    continue;
+                }
+                for (root, mut path) in self.resolve(glob, i, &[seen, &[key]].concat()) {
+                    if root == Root::Crate {
+                        path.push(name.to_string());
+                        out.push((root, path));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn resolve(
+        &self,
+        target: &Target,
+        top: usize,
+        seen: &[(usize, String)],
+    ) -> Vec<(Root, Vec<String>)> {
+        match target {
+            Target::Rooted(root, path) => vec![(*root, path.clone())],
+            Target::Relative(name, rest) => self
+                .resolve_name(name, top, seen)
+                .into_iter()
+                .map(|(root, path)| (root, [path, rest.clone()].concat()))
+                .collect(),
+        }
+    }
+
+    fn record(&mut self, at: Position, target: &Target) {
+        let top = self.scopes.len() - 1;
+        for (root, path) in self.resolve(target, top, &[]) {
+            if !path.is_empty() {
+                self.named.push(Named {
+                    at,
+                    module: self.module.clone(),
+                    root,
+                    path,
+                });
+            }
+        }
+    }
+
+    /// A path written as `segments` (after `::` when `rooted`). A single
+    /// name that is not `crate`, `self` or `super` names no module, and
+    /// `Self` is the type at hand.
+    fn path(&mut self, at: Position, rooted: bool, segments: &[String]) {
+        if segments.is_empty() || segments[0] == "Self" {
+            return;
+        }
+        let start = rooted.then(|| Target::Rooted(Root::Other, Vec::new()));
+        let target = segments
+            .iter()
+            .fold(start, |target, segment| {
+                Some(extend(target, segment, &self.module))
+            })
+            .unwrap();
+        if matches!(&target, Target::Relative(_, rest) if rest.is_empty()) {
+            return;
+        }
+        self.record(at, &target);
+    }
+
+    /// Paths in tokens that are not code: each run of `name :: name …`,
+    /// rooted when a `::` opens it.
+    fn token_paths(&mut self, tokens: proc_macro2::TokenStream) {
+        use proc_macro2::{Spacing, TokenTree};
+        let mut flat = Vec::new();
+        flatten(tokens, &mut flat);
+        let ident = |at: usize| match flat.get(at) {
+            Some(Some(TokenTree::Ident(ident))) => Some(ident.clone()),
+            _ => None,
+        };
+        let separator = |at: usize| {
+            matches!(flat.get(at), Some(Some(TokenTree::Punct(p))) if p.as_char() == ':' && p.spacing() == Spacing::Joint)
+                && matches!(flat.get(at + 1), Some(Some(TokenTree::Punct(p))) if p.as_char() == ':')
+        };
+        let mut at = 0;
+        while at < flat.len() {
+            let Some(first) = ident(at) else {
+                at += 1;
+                continue;
+            };
+            let after_separator = at >= 2 && separator(at - 2);
+            // `::name` opens a path unless a name or `>` stands before it.
+            let before = at.checked_sub(3).and_then(|index| flat.get(index));
+            let rooted = after_separator
+                && !matches!(before, Some(Some(TokenTree::Ident(_))))
+                && !matches!(before, Some(Some(TokenTree::Punct(p))) if p.as_char() == '>');
+            let mut segments = vec![first.to_string()];
+            let mut next = at + 1;
+            while separator(next) {
+                let Some(segment) = ident(next + 2) else {
+                    break;
+                };
+                segments.push(segment.to_string());
+                next += 3;
+            }
+            if !after_separator || rooted {
+                self.path(position(first.span().start()), rooted, &segments);
+            }
+            at = next;
+        }
+    }
+
+    fn in_scope(&mut self, scope: Scope, visit: impl FnOnce(&mut Self)) {
+        self.scopes.push(scope);
+        visit(self);
+        self.scopes.pop();
+    }
+
+    /// Statements a macro holds, in a block of their own.
+    fn statements(&mut self, statements: &[syn::Stmt]) {
+        let items = statements.iter().filter_map(|stmt| match stmt {
+            syn::Stmt::Item(item) => Some(item),
+            _ => None,
+        });
+        let scope = scope_of(items, &self.module, false);
+        self.in_scope(scope, |scan| {
+            statements.iter().for_each(|stmt| scan.visit_stmt(stmt))
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for PathScan<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        use syn::ext::IdentExt;
+        let Some((_, items)) = &node.content else {
+            return visit::visit_item_mod(self, node);
+        };
+        self.module.push(node.ident.unraw().to_string());
+        let scope = scope_of(items, &self.module, true);
+        self.in_scope(scope, |scan| visit::visit_item_mod(scan, node));
+        self.module.pop();
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let items = node.stmts.iter().filter_map(|stmt| match stmt {
+            syn::Stmt::Item(item) => Some(item),
+            _ => None,
+        });
+        let scope = scope_of(items, &self.module, false);
+        self.in_scope(scope, |scan| visit::visit_block(scan, node));
+    }
+
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        let mut leaves = Vec::new();
+        let root = node
+            .leading_colon
+            .map(|_| Target::Rooted(Root::Other, Vec::new()));
+        use_leaves(&node.tree, root, &self.module, &mut leaves);
+        for (_, target, at) in leaves {
+            self.record(at, &target);
+        }
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        use syn::ext::IdentExt;
+        let name = node.ident.unraw().to_string();
+        self.path(position(node.ident.span().start()), name != "self", &[name]);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        use syn::ext::IdentExt;
+        let segments: Vec<String> = node
+            .segments
+            .iter()
+            .map(|segment| segment.ident.unraw().to_string())
+            .collect();
+        self.path(
+            position(node.span().start()),
+            node.leading_colon.is_some(),
+            &segments,
+        );
+        visit::visit_path(self, node);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        let outer = self.rules.entering(node);
+        visit::visit_item_macro(self, node);
+        self.rules.name = outer;
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.visit_path(&node.path);
+        match macro_input(node) {
+            MacroInput::Opaque => self.token_paths(node.tokens.clone()),
+            MacroInput::Statements(statements) => self.statements(&statements),
+            MacroInput::Rules(rules) => {
+                for rule in rules {
+                    match rule {
+                        Ok(statements) => self.statements(&statements),
+                        Err((at, tokens)) => {
+                            if self.rules.read_as_tokens(at) {
+                                self.token_paths(tokens);
+                            }
                         }
                     }
                 }
             }
-        }
-        let start = *at;
-        while chars.get(*at).is_some_and(|&c| is_ident_char(c)) {
-            *at += 1;
-        }
-        let word: String = chars[start..*at].iter().collect();
-        if word.is_empty() {
-            if !segments.is_empty() {
-                out.push(segments);
-            }
-            return;
-        }
-        if word != "self" {
-            segments.push(word);
-        }
-        let mut next = *at;
-        skip_whitespace(chars, &mut next);
-        if starts_with_at(chars, next, "::") {
-            *at = next + 2;
-        } else {
-            // `a as x`: the alias is a local name, not a path segment.
-            if starts_with_at(chars, next, "as")
-                && chars.get(next + 2).is_some_and(|c| c.is_whitespace())
-            {
-                *at = next + 2;
-                skip_whitespace(chars, at);
-                while chars.get(*at).is_some_and(|&c| is_ident_char(c)) {
-                    *at += 1;
-                }
-            }
-            out.push(segments);
-            return;
+            input => walk_macro_input(self, &input),
         }
     }
 }
 
-/// The module path of a file under `src/`: `kernel/gc/mod.rs` is
-/// `kernel::gc`, `kernel/gc/sweep.rs` is `kernel::gc::sweep`, and the crate
-/// roots `lib.rs` and `main.rs` are the empty path.
+/// The production paths `text` names, read as the module `module`, and
+/// the `macro_rules!` rules in it no context reads (`UnreadRules`).
+/// `relative` is the file under `src/`; `opaque_rules` the rules it may
+/// read as tokens instead.
+fn named_paths(
+    relative: &str,
+    text: &str,
+    module: &[String],
+    opaque_rules: &[(&str, &str, &str)],
+) -> (Vec<Named>, Vec<String>) {
+    let file = parse(text);
+    let tests = test_spans(&file);
+    let in_test = |at: &Position| tests.iter().any(|(start, end)| (*start..*end).contains(at));
+    let path = format!("src/{relative}");
+    let mut scan = PathScan {
+        module: module.to_vec(),
+        scopes: vec![scope_of(&file.items, module, true)],
+        named: Vec::new(),
+        rules: UnreadRules::new(&path, opaque_rules),
+    };
+    scan.visit_file(&file);
+    // A path read twice (a rule read in two contexts) is one path.
+    let mut named: Vec<Named> = scan
+        .named
+        .into_iter()
+        .filter(|named| !in_test(&named.at))
+        .collect();
+    named.sort();
+    named.dedup();
+    let unread = scan
+        .rules
+        .findings
+        .iter()
+        .filter(|(at, _, _)| !in_test(at))
+        .map(|(at, name, _)| unread_rule_message(relative, at.0, name))
+        .collect();
+    (named, unread)
+}
+
+/// The module path a file under `src/` has when the module tree follows
+/// the folders: `kernel/gc/mod.rs` is `kernel::gc`, `kernel/gc/sweep.rs`
+/// is `kernel::gc::sweep`, and the crate roots `lib.rs` and `main.rs` are
+/// the empty path. Fixtures stand at such a path.
 fn module_path(relative: &Path) -> Vec<String> {
     let mut segments: Vec<String> = relative
         .with_extension("")
@@ -204,15 +902,8 @@ fn module_path(relative: &Path) -> Vec<String> {
     segments
 }
 
-/// Layer of a source file: the first folder under `src/`, or the file stem.
-fn layer(relative: &Path) -> String {
-    let mut components = relative.components();
-    let first = components.next().unwrap().as_os_str().to_string_lossy();
-    if first.ends_with(".rs") {
-        first.trim_end_matches(".rs").to_string()
-    } else {
-        first.to_string()
-    }
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// The one-way exceptions, each documented where it lives. Adding to this
@@ -254,49 +945,53 @@ fn allowed(relative: &str, path: &[String]) -> bool {
         .any(|(file, exact, _)| relative == *file && joined == *exact)
 }
 
-/// The paths `text`, the source of `relative` (under `src/`), names against
-/// the layering rules, and how many crate paths it named in all.
-/// `tailor_dirs` are the folders under `src/tailors/`, one per tailor.
-fn layer_violations(relative: &Path, text: &str, tailor_dirs: &[String]) -> (Vec<String>, usize) {
-    let relative_str = relative.to_string_lossy().replace('\\', "/");
-    let layer = layer(relative);
-    let paths = crate_paths(non_test(text), &module_path(relative));
-    let mut violations = Vec::new();
-    for path in &paths {
-        let Some(target) = path.first() else { continue };
-        let forbidden = match layer.as_str() {
-            "kernel" => matches!(
-                target.as_str(),
-                "tailors" | "comforter" | "commands" | "cli"
-            ),
-            "comforter" => matches!(target.as_str(), "tailors" | "commands" | "cli"),
-            "tailors" => {
-                matches!(target.as_str(), "commands" | "cli")
-                    || (target == "tailors"
-                        && path.len() >= 2
-                        && relative.components().nth(1).is_some_and(|own| {
-                            let own = own.as_os_str().to_string_lossy();
-                            // another tailor's folder: tailors::<other>::…
-                            path[1] != own && tailor_dirs.contains(&path[1])
-                        }))
+/// The paths `text`, the library module `module` in `relative` (under
+/// `src/`), names against the layering rules, and how many crate paths it
+/// named in all. The layer is the module a path is written in: its first
+/// segment, and for a tailor's code the second is the tailor.
+/// `tailor_dirs` are the tailors (the modules under `tailors`).
+fn layer_violations(
+    relative: &str,
+    module: &[String],
+    text: &str,
+    tailor_dirs: &[String],
+    opaque_rules: &[(&str, &str, &str)],
+) -> (Vec<String>, usize) {
+    let (named, mut violations) = named_paths(relative, text, module, opaque_rules);
+    let mut seen = 0;
+    for Named {
+        at, module, path, ..
+    } in named.iter().filter(|named| named.root == Root::Crate)
+    {
+        seen += 1;
+        let target = path[0].as_str();
+        let tailor = |path: &[String]| {
+            path.first().is_some_and(|first| first == "tailors")
+                && path.get(1).is_some_and(|name| tailor_dirs.contains(name))
+        };
+        let forbidden = match module.first().map(String::as_str) {
+            Some("kernel") => matches!(target, "tailors" | "comforter" | "commands" | "cli"),
+            Some("comforter") => matches!(target, "tailors" | "commands" | "cli"),
+            // A tailor's code names no other tailor: tailors::<other>::…
+            // The layer's own root (the registry) is no tailor.
+            Some("tailors") => {
+                matches!(target, "commands" | "cli")
+                    || (tailor(module) && tailor(path) && module[1] != path[1])
             }
             // A command reaches a tailor through the trait and the
             // registry, never by its module: tailors::<name>::… (rule 3).
-            "commands" => target == "tailors" && path.len() >= 2 && tailor_dirs.contains(&path[1]),
-            "cli" => matches!(
-                target.as_str(),
-                "tailors" | "comforter" | "kernel" | "commands"
-            ),
+            Some("commands") => tailor(path),
+            Some("cli") => matches!(target, "tailors" | "comforter" | "kernel" | "commands"),
             _ => false,
         };
-        if forbidden && !allowed(&relative_str, path) {
-            violations.push(format!("{relative_str}: crate::{}", path.join("::")));
+        if forbidden && !allowed(relative, path) {
+            violations.push(format!("{relative}:{}: crate::{}", at.0, path.join("::")));
         }
     }
-    (violations, paths.len())
+    (violations, seen)
 }
 
-/// The folders under `src/tailors/`: one per tailor.
+/// The tailors: the modules under `tailors` that are folders.
 fn tailor_dirs() -> Vec<String> {
     fs::read_dir(src().join("tailors"))
         .unwrap()
@@ -308,16 +1003,21 @@ fn tailor_dirs() -> Vec<String> {
 
 #[test]
 fn layers_point_one_way() {
-    let root = src();
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
     let dirs = tailor_dirs();
     let mut violations = Vec::new();
     let mut seen = 0;
-    for file in &files {
-        let relative = file.strip_prefix(&root).unwrap();
-        let text = fs::read_to_string(file).unwrap();
-        let (found, paths) = layer_violations(relative, &text, &dirs);
+    for module in crate_modules() {
+        if !module.library || module.test_only {
+            continue;
+        }
+        let relative = module.relative.trim_start_matches("src/");
+        let (found, paths) = layer_violations(
+            relative,
+            &module.path,
+            &module.text,
+            &dirs,
+            OPAQUE_MACRO_RULES,
+        );
         violations.extend(found);
         seen += paths;
     }
@@ -352,19 +1052,18 @@ fn the_kernel_branches_on_no_ecosystem_name() {
         .collect();
     names.sort();
     names.dedup();
-    let root = src();
-    let mut files = Vec::new();
-    rust_files(&root.join("kernel"), &mut files);
     let mut violations = Vec::new();
     let mut allowed_counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
-    for file in &files {
-        let relative = file.strip_prefix(&root).unwrap();
-        let text = fs::read_to_string(file).unwrap();
+    let kernel = crate_modules().iter().filter(|module| {
+        module.library && !module.test_only && module.path.first().is_some_and(|m| m == "kernel")
+    });
+    for module in kernel {
         violations.extend(ecosystem_violations(
-            relative,
-            &text,
+            module.relative.trim_start_matches("src/"),
+            &module.text,
             &names,
             &mut allowed_counts,
+            OPAQUE_MACRO_RULES,
         ));
     }
     assert!(
@@ -380,23 +1079,43 @@ fn the_kernel_branches_on_no_ecosystem_name() {
     );
 }
 
+/// The ecosystem names `text`, the kernel file `relative` (under `src/`),
+/// branches on, and its `macro_rules!` rules no context reads.
+/// `opaque_rules` are the rules it may read as tokens instead.
 fn ecosystem_violations(
-    relative: &Path,
+    relative: &str,
     text: &str,
     names: &[&str],
     allowed_counts: &mut [usize],
+    opaque_rules: &[(&str, &str, &str)],
 ) -> Vec<String> {
+    let file = parse(text);
+    let tests = test_spans(&file);
+    let in_test = |at: &Position| tests.iter().any(|(start, end)| (*start..*end).contains(at));
+    let path = format!("src/{relative}");
+    let mut scan = EcosystemScan {
+        names,
+        functions: Vec::new(),
+        allowing: None,
+        sites: Vec::new(),
+        rules: UnreadRules::new(&path, opaque_rules),
+    };
+    scan.visit_file(&file);
+    scan.sites.sort();
+    scan.sites.dedup();
     let mut violations = Vec::new();
-    for (number, line) in non_test(text).lines().enumerate() {
-        let Some(name) = ecosystem_arm(line, names) else {
+    for (at, name, allowance) in scan.sites {
+        if in_test(&at) {
             continue;
-        };
-        let allowed = ECOSYSTEM_COMPARISONS.iter().position(|(path, code, _)| {
-            relative == Path::new(path).strip_prefix("src").unwrap() && line.trim() == *code
-        });
-        match allowed {
+        }
+        match allowance {
             Some(index) => allowed_counts[index] += 1,
-            None => violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1)),
+            None => violations.push(format!("{relative}:{}: \"{name}\"", at.0)),
+        }
+    }
+    for (at, name, _) in &scan.rules.findings {
+        if !in_test(at) {
+            violations.push(unread_rule_message(relative, at.0, name));
         }
     }
     violations
@@ -407,154 +1126,1191 @@ fn ecosystem_allowance_violations(allowed_counts: &[usize]) -> Vec<String> {
         .iter()
         .zip(allowed_counts)
         .filter(|(_, count)| **count != 1)
-        .map(|((path, code, _), count)| format!("{path}: {code} (found {count}, expected 1)"))
+        .map(|((path, function, condition, _), count)| {
+            format!("{path}: fn {function}: if {condition} (found {count}, expected 1)")
+        })
         .collect()
 }
 
-#[test]
-fn ecosystem_allowances_cover_one_live_site_only() {
-    let path = Path::new("kernel/provider/cpython.rs");
-    let guard = "if selected.ecosystem != \"python\" {\n    return Err(refused());\n}\n";
-    for (source, accepted) in [
-        (String::new(), false),
-        (guard.into(), true),
-        (guard.repeat(2), false),
-    ] {
-        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
-        assert!(ecosystem_violations(path, &source, &["python"], &mut counts).is_empty());
-        assert_eq!(ecosystem_allowance_violations(&counts).is_empty(), accepted);
-    }
-    // Neither another provider nor another comparison in the same provider
-    // inherits the reviewed input guard's permission.
-    for (path, source) in [
-        (Path::new("kernel/provider/rust.rs"), guard),
-        (
-            path,
-            "if selected.ecosystem == \"python\" {\n    choose_runtime();\n}\n",
-        ),
-    ] {
-        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
-        assert_eq!(
-            ecosystem_violations(path, source, &["python"], &mut counts).len(),
-            1
-        );
-        assert!(!ecosystem_allowance_violations(&counts).is_empty());
-    }
-}
-
 /// The kernel's reviewed comparisons with an ecosystem name: the file, the
-/// whole line as it reads trimmed, and why it is not a branch an eighth
-/// ecosystem would have to edit.
-const ECOSYSTEM_COMPARISONS: &[(&str, &str, &str)] = &[(
+/// function, the whole condition of the `if` it is (compared as parsed, so
+/// however it is spread over lines or commented), and why it is not a
+/// branch an eighth ecosystem would have to edit.
+const ECOSYSTEM_COMPARISONS: &[(&str, &str, &str, &str)] = &[(
     "src/kernel/provider/cpython.rs",
-    "if selected.ecosystem != \"python\" {",
+    "row",
+    "selected.ecosystem != \"python\"",
     "the CPython provider refuses a selection from another ecosystem's \
      section: a guard on its own input, not a branch per ecosystem",
 )];
 
-/// The ecosystem `line` branches on: a quoted name in a pattern, which is
-/// anything before a `=>` on its line (a plain arm, a guard arm, a tuple
-/// or `Some(..)` pattern), one `|` alternative of a pattern continued over
-/// several lines, or an argument of `matches!`; and a quoted name beside
-/// `==` or `!=`.
-fn ecosystem_arm<'a>(line: &str, names: &[&'a str]) -> Option<&'a str> {
-    let code = line.split("//").next().unwrap_or(line);
-    names.iter().copied().find(|name| {
-        let quoted = format!("\"{name}\"");
-        code.match_indices(&quoted).any(|(at, _)| {
-            let after = code[at + quoted.len()..].trim_start();
-            let before = code[..at].trim_end();
-            let alternative = (after.starts_with('|') && !after.starts_with("||"))
-                || (before.ends_with('|') && !before.ends_with("||"));
-            let pattern = after.contains("=>") || before.contains("matches!(");
-            let compared = ["==", "!="]
+/// Methods that compare their receiver with their argument.
+const COMPARING_METHODS: &[&str] = &["eq", "ne"];
+
+/// Macros that compare their first two arguments.
+const COMPARING_MACROS: &[&str] = &[
+    "assert_eq",
+    "assert_ne",
+    "debug_assert_eq",
+    "debug_assert_ne",
+];
+
+/// Macros that take an expression, then a pattern with an optional guard.
+const PATTERN_MACROS: &[&str] = &["matches", "assert_matches", "debug_assert_matches"];
+
+/// The ecosystem names one parsed file branches on: a string literal in
+/// any pattern (`match` arms, `if let`, `while let`, `let … else`, a
+/// `matches!`), or an operand of `==`, `!=`, `.eq()`, `.ne()` or
+/// `assert_eq!`. An operand is seen through parentheses, references and
+/// constructor calls (`Some("go") == x`). A guard is an expression, not a
+/// pattern, and a literal anywhere else is data.
+struct EcosystemScan<'a> {
+    names: &'a [&'a str],
+    /// The functions around the node being visited, innermost last.
+    functions: Vec<String>,
+    /// The `ECOSYSTEM_COMPARISONS` entry the condition being visited is.
+    allowing: Option<usize>,
+    /// (where, name, the entry allowing it).
+    sites: Vec<(Position, &'a str, Option<usize>)>,
+    /// The file's `macro_rules!` rules no context reads.
+    rules: UnreadRules<'a>,
+}
+
+impl EcosystemScan<'_> {
+    fn literal(&mut self, lit: &syn::LitStr) {
+        let value = lit.value();
+        if let Some(name) = self.names.iter().copied().find(|name| *name == value) {
+            self.sites
+                .push((position(lit.span().start()), name, self.allowing));
+        }
+    }
+
+    /// The ecosystem literals a comparison operand is, through parentheses,
+    /// references, dereferences, tuples, arrays, a block's final expression
+    /// and constructor calls (a path ending in an upper-case name:
+    /// `Some("go")`, `Kind::Go("go")`).
+    /// A call to anything else, or a method on the literal
+    /// (`"python".len()`), computes a value from it and is not one.
+    fn operand(&mut self, expr: &syn::Expr) {
+        match expr {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit),
+                ..
+            }) => self.literal(lit),
+            syn::Expr::Paren(e) => self.operand(&e.expr),
+            syn::Expr::Group(e) => self.operand(&e.expr),
+            syn::Expr::Reference(e) => self.operand(&e.expr),
+            syn::Expr::Unary(e) if matches!(e.op, syn::UnOp::Deref(_)) => self.operand(&e.expr),
+            syn::Expr::Tuple(e) => e.elems.iter().for_each(|elem| self.operand(elem)),
+            syn::Expr::Array(e) => e.elems.iter().for_each(|elem| self.operand(elem)),
+            syn::Expr::Call(e) if constructor(&e.func) => {
+                e.args.iter().for_each(|arg| self.operand(arg))
+            }
+            syn::Expr::Block(e) => self.block_operand(&e.block),
+            syn::Expr::Const(e) => self.block_operand(&e.block),
+            syn::Expr::Unsafe(e) => self.block_operand(&e.block),
+            _ => {}
+        }
+    }
+
+    /// A block as an operand is its final expression (`{ "go" }`).
+    fn block_operand(&mut self, block: &syn::Block) {
+        if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
+            self.operand(tail);
+        }
+    }
+
+    /// Macro input no parser reads (`MacroInput::Opaque`, such as
+    /// `if_chain!`, or a `macro_rules!` transcriber that is not Rust even
+    /// made plain) is still read as tokens: an ecosystem literal right
+    /// beside `==` or `!=`, past any `&`. The one token heuristic left, and
+    /// only for input that is not code until it is expanded.
+    fn opaque_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        let mut flat = Vec::new();
+        flatten(tokens, &mut flat);
+        let punct = |at: usize| match flat.get(at) {
+            Some(Some(proc_macro2::TokenTree::Punct(p))) => Some(p.as_char()),
+            _ => None,
+        };
+        let operator_at = |first: usize| {
+            COMPARISONS
                 .iter()
-                .any(|op| after.starts_with(op) || before.ends_with(op));
-            alternative || pattern || compared
+                .any(|[a, b]| punct(first) == Some(*a) && punct(first + 1) == Some(*b))
+        };
+        for (at, tree) in flat.iter().enumerate() {
+            let Some(proc_macro2::TokenTree::Literal(literal)) = tree else {
+                continue;
+            };
+            let syn::Lit::Str(lit) = syn::Lit::new(literal.clone()) else {
+                continue;
+            };
+            let mut before = at;
+            while before > 0 && punct(before - 1) == Some('&') {
+                before -= 1;
+            }
+            if operator_at(at + 1) || (before >= 2 && operator_at(before - 2)) {
+                self.literal(&lit);
+            }
+        }
+    }
+}
+
+/// The comparison operators, as the one-character tokens they are made of.
+const COMPARISONS: &[[char; 2]] = &[['=', '='], ['!', '=']];
+
+/// `tokens` as one flat list, with `None` where a bracket group opens or
+/// closes, so nothing reads as adjacent across a bracket.
+fn flatten(tokens: proc_macro2::TokenStream, out: &mut Vec<Option<proc_macro2::TokenTree>>) {
+    for tree in tokens {
+        if let proc_macro2::TokenTree::Group(group) = tree {
+            out.push(None);
+            flatten(group.stream(), out);
+            out.push(None);
+        } else {
+            out.push(Some(tree));
+        }
+    }
+}
+
+/// A macro's input, parsed as what the macro takes. The test-code search
+/// and the scans all read macros through this, so they see the same code
+/// inside them.
+enum MacroInput {
+    /// A pattern macro's expression, pattern, guard and any message.
+    Pattern(Box<(syn::Expr, syn::Pat, Option<syn::Expr>, Vec<syn::Expr>)>),
+    Expressions(Vec<syn::Expr>),
+    Statements(Vec<syn::Stmt>),
+    /// A `macro_rules!` definition: each rule's transcriber as the code it
+    /// reads as (`rule_statements`), or, if it reads as none, where it is
+    /// and its tokens.
+    Rules(Vec<Result<Vec<syn::Stmt>, (Position, proc_macro2::TokenStream)>>),
+    /// None of these: not code until the macro expands it.
+    Opaque,
+}
+
+fn macro_name(mac: &syn::Macro) -> String {
+    mac.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default()
+}
+
+/// A macro's input as a pattern macro's (`PATTERN_MACROS`), as
+/// `macro_rules!` rules, or else as comma-separated expressions, or else
+/// as statements.
+fn macro_input(mac: &syn::Macro) -> MacroInput {
+    if macro_name(mac) == "macro_rules" {
+        if let Some(rules) = rules(mac.tokens.clone()) {
+            return MacroInput::Rules(
+                rules
+                    .into_iter()
+                    .map(|(matcher, body)| {
+                        rule_statements(&matcher, &body)
+                            .ok_or_else(|| (position(body.span().start()), body.stream()))
+                    })
+                    .collect(),
+            );
+        }
+    }
+    if PATTERN_MACROS.contains(&macro_name(mac).as_str()) {
+        if let Ok(parts) = mac.parse_body_with(pattern_macro) {
+            return MacroInput::Pattern(Box::new(parts));
+        }
+    }
+    let expressions = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+    if let Ok(args) = mac.parse_body_with(expressions) {
+        MacroInput::Expressions(args.into_iter().collect())
+    } else if let Ok(statements) = mac.parse_body_with(syn::Block::parse_within) {
+        MacroInput::Statements(statements)
+    } else {
+        MacroInput::Opaque
+    }
+}
+
+/// Walk a macro's parsed input with `visitor`, as the code it is.
+fn walk_macro_input<V: for<'a> Visit<'a>>(visitor: &mut V, input: &MacroInput) {
+    match input {
+        MacroInput::Pattern(parts) => {
+            let (scrutinee, pattern, guard, rest) = &**parts;
+            visitor.visit_expr(scrutinee);
+            visitor.visit_pat(pattern);
+            guard.iter().chain(rest).for_each(|e| visitor.visit_expr(e));
+        }
+        MacroInput::Expressions(args) => args.iter().for_each(|arg| visitor.visit_expr(arg)),
+        MacroInput::Statements(statements) => {
+            statements.iter().for_each(|stmt| visitor.visit_stmt(stmt))
+        }
+        MacroInput::Rules(rules) => rules
+            .iter()
+            .flatten()
+            .flatten()
+            .for_each(|stmt| visitor.visit_stmt(stmt)),
+        MacroInput::Opaque => {}
+    }
+}
+
+/// The rules of `macro_rules!` input (`(matcher) => {transcriber}`,
+/// separated by `;`), or `None` if it is not rules.
+fn rules(
+    tokens: proc_macro2::TokenStream,
+) -> Option<Vec<(proc_macro2::Group, proc_macro2::Group)>> {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let punct =
+        |at: usize, c: char| matches!(trees.get(at), Some(TokenTree::Punct(p)) if p.as_char() == c);
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < trees.len() {
+        let (TokenTree::Group(matcher), Some(TokenTree::Group(body))) =
+            (&trees[at], trees.get(at + 3))
+        else {
+            return None;
+        };
+        if !punct(at + 1, '=') || !punct(at + 2, '>') {
+            return None;
+        }
+        out.push((matcher.clone(), body.clone()));
+        at += 4 + usize::from(punct(at + 4, ';'));
+    }
+    Some(out)
+}
+
+/// Where a transcriber's expansion can stand, each as code around the
+/// placeholder `__mv_body`: as it is (statements, items, associated items,
+/// an expression), a `match`'s arms, a struct's fields, an enum's variants,
+/// a type, a pattern, call arguments, or a struct literal's fields. Which
+/// one a rule is depends on where the macro is invoked, so a rule is read
+/// in every context it parses in: `"go" | "golang"` is an expression and a
+/// pattern, and a scan sees both.
+const RULE_CONTEXTS: &[&str] = &[
+    "__mv_body",
+    "match __mv_scrutinee { __mv_body }",
+    "struct __mv_Struct { __mv_body }",
+    "enum __mv_Enum { __mv_body }",
+    "let _: __mv_body;",
+    "match __mv_scrutinee { __mv_body => {} }",
+    "__mv_call(__mv_body);",
+    "__mv_Struct { __mv_body };",
+];
+
+/// A rule's transcriber read as code, in every one of `RULE_CONTEXTS` it
+/// parses in, with each metavariable replaced as its fragment kind in the
+/// matcher says (`placeholder`). `None` if it parses in none.
+fn rule_statements(
+    matcher: &proc_macro2::Group,
+    body: &proc_macro2::Group,
+) -> Option<Vec<syn::Stmt>> {
+    let mut kinds = Vec::new();
+    fragments(matcher.stream(), &mut kinds);
+    let plain = plain_transcriber(body.stream(), &kinds);
+    let readings: Vec<Vec<syn::Stmt>> = RULE_CONTEXTS
+        .iter()
+        .filter_map(|context| {
+            let context: proc_macro2::TokenStream = context.parse().unwrap();
+            let tokens = fill_context(context, &plain, body.span());
+            syn::parse::Parser::parse2(syn::Block::parse_within, tokens).ok()
         })
-    })
+        .collect();
+    (!readings.is_empty()).then(|| readings.into_iter().flatten().collect())
+}
+
+/// `context` with `__mv_body` replaced by `body`, and its own tokens at
+/// `span` (the transcriber's), so every node read spans one source.
+fn fill_context(
+    context: proc_macro2::TokenStream,
+    body: &proc_macro2::TokenStream,
+    span: proc_macro2::Span,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    let mut out = Vec::new();
+    for mut tree in context {
+        match &tree {
+            TokenTree::Ident(ident) if ident == "__mv_body" => out.extend(body.clone()),
+            TokenTree::Group(group) => {
+                let mut filled =
+                    Group::new(group.delimiter(), fill_context(group.stream(), body, span));
+                filled.set_span(span);
+                out.push(TokenTree::Group(filled));
+            }
+            _ => {
+                tree.set_span(span);
+                out.push(tree);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The fragment kind of each metavariable a matcher declares
+/// (`$name:expr`), inside repetitions and groups too.
+fn fragments(tokens: proc_macro2::TokenStream, out: &mut Vec<(String, String)>) {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (at, tree) in trees.iter().enumerate() {
+        match (
+            tree,
+            trees.get(at + 1),
+            trees.get(at + 2),
+            trees.get(at + 3),
+        ) {
+            (TokenTree::Group(group), ..) => fragments(group.stream(), out),
+            (
+                TokenTree::Punct(dollar),
+                Some(TokenTree::Ident(name)),
+                Some(TokenTree::Punct(colon)),
+                Some(TokenTree::Ident(kind)),
+            ) if dollar.as_char() == '$' && colon.as_char() == ':' => {
+                out.push((name.to_string(), kind.to_string()))
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What the metavariable `name` of fragment kind `kind` reads as: tokens
+/// that parse wherever a fragment of that kind does. A name is `__mv_name`,
+/// which no name in code equals, so `#[cfg($test)]` reads as
+/// `cfg(__mv_test)`, an option free to hold, not as `cfg(test)`. A
+/// visibility or an item may be empty, so it reads as nothing; a block or
+/// statement as `{}`, a literal as `0`, a lifetime as `'__mv_name`, and an
+/// expression, identifier, type, path, pattern, meta or token tree (or a
+/// name the matcher does not declare) as the name.
+fn placeholder(name: &proc_macro2::Ident, kind: Option<&str>) -> Vec<proc_macro2::TokenTree> {
+    use proc_macro2::{Delimiter, Group, Ident, Literal, Punct, Spacing, TokenTree};
+    let span = name.span();
+    let ident = TokenTree::Ident(Ident::new(&format!("__mv_{name}"), span));
+    let mut tokens = match kind {
+        Some("vis" | "item") => Vec::new(),
+        Some("block" | "stmt") => vec![TokenTree::Group(Group::new(
+            Delimiter::Brace,
+            proc_macro2::TokenStream::new(),
+        ))],
+        Some("literal") => vec![TokenTree::Literal(Literal::u8_unsuffixed(0))],
+        Some("lifetime") => vec![TokenTree::Punct(Punct::new('\'', Spacing::Joint)), ident],
+        _ => vec![ident],
+    };
+    tokens.iter_mut().for_each(|token| token.set_span(span));
+    tokens
+}
+
+/// A transcriber as plain Rust a parser reads: each `$name` replaced by
+/// its `placeholder` (from `kinds`, the matcher's fragments), `$crate` by
+/// `crate`, and a repetition `$( … ) sep op` by one copy of its body.
+/// Spans are kept, so a finding still names its line.
+fn plain_transcriber(
+    tokens: proc_macro2::TokenStream,
+    kinds: &[(String, String)],
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    let mut out = Vec::new();
+    let mut trees = tokens.into_iter().peekable();
+    while let Some(tree) = trees.next() {
+        match tree {
+            TokenTree::Punct(dollar) if dollar.as_char() == '$' => match trees.next() {
+                Some(TokenTree::Group(repeated)) => {
+                    out.extend(plain_transcriber(repeated.stream(), kinds));
+                    // An optional separator, then `*`, `+` or `?`.
+                    let operator = |tree: Option<&TokenTree>| matches!(tree, Some(TokenTree::Punct(p)) if matches!(p.as_char(), '*' | '+' | '?'));
+                    if !operator(trees.peek()) {
+                        trees.next();
+                    }
+                    trees.next();
+                }
+                Some(TokenTree::Ident(name)) if name == "crate" => out.push(TokenTree::Ident(name)),
+                Some(TokenTree::Ident(name)) => {
+                    let kind = kinds
+                        .iter()
+                        .find(|(declared, _)| name == declared)
+                        .map(|(_, kind)| kind.as_str());
+                    out.extend(placeholder(&name, kind));
+                }
+                Some(other) => out.push(other),
+                None => {}
+            },
+            TokenTree::Group(group) => {
+                let mut plain =
+                    Group::new(group.delimiter(), plain_transcriber(group.stream(), kinds));
+                plain.set_span(group.span());
+                out.push(TokenTree::Group(plain));
+            }
+            other => out.push(other),
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The `macro_rules!` rules a scan cannot read as code: a transcriber that
+/// parses in none of `RULE_CONTEXTS` however its metavariables are filled.
+/// Each is a finding, since a scan that skipped it would pass whatever the
+/// rule expands to, unless `OPAQUE_MACRO_RULES` lists its macro: its rules
+/// are then read as tokens, a weaker reading, and so a reviewed one.
+struct UnreadRules<'a> {
+    /// The file, as `src/…`.
+    file: &'a str,
+    /// The macros whose rules may be read as tokens: (file, macro, reason).
+    allowed: &'a [(&'a str, &'a str, &'a str)],
+    /// The `macro_rules!` being visited, and where it starts.
+    name: Option<(String, Position)>,
+    /// The rules neither read nor allowed: (where, macro, where the macro starts).
+    findings: Vec<(Position, String, Position)>,
+}
+
+impl<'a> UnreadRules<'a> {
+    fn new(file: &'a str, allowed: &'a [(&'a str, &'a str, &'a str)]) -> Self {
+        UnreadRules {
+            file,
+            allowed,
+            name: None,
+            findings: Vec::new(),
+        }
+    }
+
+    /// Enter the item `node`; returns the macro the scan was in before.
+    fn entering(&mut self, node: &syn::ItemMacro) -> Option<(String, Position)> {
+        let name = node
+            .ident
+            .as_ref()
+            .map(|ident| (ident.to_string(), position(node.span().start())));
+        std::mem::replace(&mut self.name, name)
+    }
+
+    /// Whether the unread rule at `at` may be read as tokens. If not, it is
+    /// a finding.
+    fn read_as_tokens(&mut self, at: Position) -> bool {
+        let (name, start) = self.name.clone().unwrap_or_default();
+        if self
+            .allowed
+            .iter()
+            .any(|(file, allowed, _)| *file == self.file && *allowed == name)
+        {
+            return true;
+        }
+        self.findings.push((at, name, start));
+        false
+    }
+}
+
+fn unread_rule_message(relative: &str, line: usize, name: &str) -> String {
+    format!(
+        "{relative}:{line}: macro_rules! {name}: a rule that does not parse as code in any \
+         context the scans know; give it a form that parses, or list the macro in \
+         OPAQUE_MACRO_RULES with a reason"
+    )
+}
+
+/// The `macro_rules!` whose rules the scans read as tokens, as (file,
+/// macro, why no rule of it can be written in a form that parses). Every
+/// entry must name one macro with such a rule.
+const OPAQUE_MACRO_RULES: &[(&str, &str, &str)] = &[];
+
+/// Every `macro_rules!` rule in production code reads as code, or its
+/// macro is a listed exception, and every exception is still needed.
+#[test]
+fn macro_rules_read_as_code() {
+    let mut unread = Vec::new();
+    let mut counts = vec![0; OPAQUE_MACRO_RULES.len()];
+    for module in production_sources() {
+        let relative = module.relative.trim_start_matches("src/");
+        let file = parse(&module.text);
+        let mut scan = PathScan {
+            module: module.path.clone(),
+            scopes: vec![scope_of(&file.items, &module.path, true)],
+            named: Vec::new(),
+            rules: UnreadRules::new(&module.relative, &[]),
+        };
+        scan.visit_file(&file);
+        let tests = test_spans(&file);
+        let mut macros = Vec::new();
+        for (at, name, start) in &scan.rules.findings {
+            if tests
+                .iter()
+                .any(|(first, last)| (*first..*last).contains(at))
+            {
+                continue;
+            }
+            let entry = OPAQUE_MACRO_RULES
+                .iter()
+                .position(|(file, allowed, _)| *file == module.relative && allowed == name);
+            match entry {
+                Some(index) => macros.push((index, *start)),
+                None => unread.push(unread_rule_message(relative, at.0, name)),
+            }
+        }
+        macros.sort();
+        macros.dedup();
+        for (index, _) in macros {
+            counts[index] += 1;
+        }
+    }
+    assert!(unread.is_empty(), "{}", unread.join("\n"));
+    for ((file, name, _), count) in OPAQUE_MACRO_RULES.iter().zip(counts) {
+        assert_eq!(
+            count, 1,
+            "OPAQUE_MACRO_RULES: {file}: macro_rules! {name} must be one macro with a rule \
+             that does not parse; remove a stale entry"
+        );
+    }
+}
+
+/// `matches!` input:`expression, pattern [if guard] [, message…]`.
+fn pattern_macro(
+    input: syn::parse::ParseStream,
+) -> syn::Result<(syn::Expr, syn::Pat, Option<syn::Expr>, Vec<syn::Expr>)> {
+    let scrutinee = input.parse()?;
+    input.parse::<syn::Token![,]>()?;
+    let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+    let guard = match input.parse::<Option<syn::Token![if]>>()? {
+        Some(_) => Some(input.parse()?),
+        None => None,
+    };
+    let mut rest = Vec::new();
+    if input.parse::<Option<syn::Token![,]>>()?.is_some() {
+        rest.extend(
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated(input)?,
+        );
+    }
+    Ok((scrutinee, pattern, guard, rest))
+}
+
+/// Whether a called path is a tuple struct or enum variant: its last
+/// segment starts upper-case.
+fn constructor(func: &syn::Expr) -> bool {
+    let syn::Expr::Path(path) = func else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident.to_string().starts_with(char::is_uppercase))
+}
+
+impl<'ast> Visit<'ast> for EcosystemScan<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.functions.push(node.sig.ident.to_string());
+        visit::visit_item_fn(self, node);
+        self.functions.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.functions.push(node.sig.ident.to_string());
+        visit::visit_impl_item_fn(self, node);
+        self.functions.pop();
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.functions.push(node.sig.ident.to_string());
+        visit::visit_trait_item_fn(self, node);
+        self.functions.pop();
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+            self.operand(&node.left);
+            self.operand(&node.right);
+        }
+        visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if COMPARING_METHODS.contains(&node.method.to_string().as_str()) {
+            self.operand(&node.receiver);
+            node.args.iter().for_each(|arg| self.operand(arg));
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        if let syn::Pat::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(lit),
+            ..
+        }) = node
+        {
+            self.literal(lit);
+        }
+        visit::visit_pat(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let input = macro_input(node);
+        match &input {
+            MacroInput::Expressions(args)
+                if COMPARING_MACROS.contains(&macro_name(node).as_str()) =>
+            {
+                args.iter().take(2).for_each(|arg| self.operand(arg));
+            }
+            MacroInput::Opaque => self.opaque_tokens(node.tokens.clone()),
+            MacroInput::Rules(rules) => {
+                for (at, tokens) in rules.iter().filter_map(|rule| rule.as_ref().err()) {
+                    if self.rules.read_as_tokens(*at) {
+                        self.opaque_tokens(tokens.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        walk_macro_input(self, &input);
+    }
+
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        let outer = self.rules.entering(node);
+        visit::visit_item_macro(self, node);
+        self.rules.name = outer;
+    }
+
+    /// The condition of an `if` is allowed when it is, as parsed, one
+    /// `ECOSYSTEM_COMPARISONS` entry in that entry's file and function.
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        let allowance = ECOSYSTEM_COMPARISONS
+            .iter()
+            .position(|(file, function, condition, _)| {
+                self.rules.file == *file
+                    && self.functions.last().is_some_and(|name| name == function)
+                    && syn::parse_str::<syn::Expr>(condition).is_ok_and(|c| *node.cond == c)
+            });
+        let outer = std::mem::replace(&mut self.allowing, allowance);
+        self.visit_expr(&node.cond);
+        self.allowing = outer;
+        self.visit_block(&node.then_branch);
+        if let Some((_, otherwise)) = &node.else_branch {
+            self.visit_expr(otherwise);
+        }
+    }
+}
+
+/// A fixture run as a kernel file where no reviewed comparison lives,
+/// inside a function opened on its first line, so its lines are the
+/// fixture's own.
+fn ecosystem_fixture(source: &str) -> Vec<String> {
+    ecosystem_fixture_allowing(source, &[])
+}
+
+/// `ecosystem_fixture` with `opaque_rules` as `OPAQUE_MACRO_RULES`.
+fn ecosystem_fixture_allowing(source: &str, opaque_rules: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+    ecosystem_violations(
+        "kernel/fixture.rs",
+        &format!("fn fixture() {{ {source}\n}}\n"),
+        &["go", "python"],
+        &mut counts,
+        opaque_rules,
+    )
 }
 
 #[test]
-fn the_ecosystem_arm_scan_sees_every_spelling() {
-    let names = ["go", "python"];
-    for line in [
-        "        \"python\" => {",
-        "        \"go\" | \"python\" => true,",
-        "    matches!(name, \"node\" | \"go\")",
-        "    matches!(name, \"go\")",
-        "        \"python\"=> 1,",
-        "        \"go\" if rows.is_empty() => newest(),",
-        "        (\"python\", _) => cpython(),",
-        "        (_, Some(\"go\")) => std_only(),",
-        "        Some(\"go\") => {",
-        "        | \"python\"",
-        "    if selected.ecosystem != \"python\" {",
-        "    name == \"go\" || other",
+fn ecosystem_allowances_cover_one_live_site_only() {
+    let path = "kernel/provider/cpython.rs";
+    let guard = "fn row() {\n    if selected.ecosystem != \"python\" {\n        return Err(refused());\n    }\n}\n";
+    let spread = "fn row() {\n    if selected\n        .ecosystem // the section\n        !=\n        \"python\"\n    {\n    }\n}\n";
+    let in_test = format!("#[cfg(test)]\nmod tests {{\n{guard}}}\n");
+    for (source, accepted) in [
+        (String::new(), false),
+        (guard.into(), true),
+        (spread.into(), true),
+        (in_test.clone(), false),
+        (format!("{guard}{in_test}"), true),
+        (guard.repeat(2), false),
+        (format!("{guard}{spread}"), false),
     ] {
-        assert!(ecosystem_arm(line, &names).is_some(), "{line}");
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert!(ecosystem_violations(path, &source, &["python"], &mut counts, &[]).is_empty());
+        assert_eq!(
+            ecosystem_allowance_violations(&counts).is_empty(),
+            accepted,
+            "{source}"
+        );
     }
-    for line in [
-        "    let tool = \"go\";",
-        "    run(&[\"go\", \"build\"]);",
-        "    Component::new(\"go\", \"1.27.0\"),",
-        "            (\"python\", \"old\"),",
-        "        _ => Some(\"go\"),",
-        "        Other => format!(\"{}\", \"python\"),",
-        "    // \"python\" => no longer here",
-        "        \"golang\" => {",
+    // Neither another provider, another function, nor another comparison
+    // in the same function inherits the reviewed input guard's permission.
+    for (path, source) in [
+        ("kernel/provider/rust.rs", guard),
+        (
+            path,
+            "fn row() {\n    if selected.ecosystem == \"python\" {\n        choose_runtime();\n    }\n}\n",
+        ),
+        (path, "fn row() {\n    if other.ecosystem != \"python\" {}\n}\n"),
+        (
+            path,
+            "fn row() {\n    if selected.ecosystem != \"python\" && x {}\n}\n",
+        ),
+        (
+            path,
+            "fn row() {\n    let foreign = selected.ecosystem != \"python\";\n}\n",
+        ),
+        (
+            path,
+            "fn other() {\n    if selected.ecosystem != \"python\" {}\n}\n",
+        ),
+        (
+            path,
+            "fn row() {\n    if selected.ecosystem != \"python\" {\n        if selected.ecosystem != \"python\" {}\n    }\n}\n",
+        ),
     ] {
-        assert_eq!(ecosystem_arm(line, &names), None, "{line}");
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        let violations = ecosystem_violations(path, source, &["python"], &mut counts, &[]);
+        // Every comparison is seen, as a violation or a (spent) allowance.
+        let allowed = counts.iter().sum::<usize>();
+        assert_eq!(
+            violations.len() + allowed,
+            source.matches("\"python\"").count(),
+            "{source}"
+        );
+        assert!(!ecosystem_allowance_violations(&counts).is_empty(), "{source}");
+    }
+}
+
+/// The scan reads every production kernel module, and a comparison split
+/// over lines is caught under every kernel directory, at the line its name
+/// is on.
+#[test]
+fn the_ecosystem_scan_covers_every_kernel_directory() {
+    for module in production_sources() {
+        if module.relative.starts_with("src/kernel/") {
+            assert!(
+                module.library && module.path.first().is_some_and(|m| m == "kernel"),
+                "{} is not read as a kernel module",
+                module.relative
+            );
+        }
+    }
+    let split = "fn f() {\n    if selected.ecosystem\n        !=\n        \"python\"\n    {\n        choose_runtime();\n    }\n}\n";
+    let root = src();
+    let mut dirs = vec![root.join("kernel")];
+    let mut seen = 0;
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+        let relative = dir
+            .strip_prefix(&root)
+            .unwrap()
+            .join("fixture.rs")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert_eq!(
+            ecosystem_violations(&relative, split, &["python"], &mut counts, &[]),
+            [format!("{relative}:4: \"python\"")]
+        );
+        seen += 1;
+    }
+    assert!(seen > 1, "no kernel subdirectories found");
+}
+
+#[test]
+fn the_ecosystem_scan_sees_every_spelling() {
+    for (source, expected) in [
+        ("match name {\n    \"python\" => {}\n}", &["2: \"python\""][..]),
+        (
+            "match name {\n    \"go\"\n    | \"node\" => true,\n    _ => false,\n}",
+            &["2: \"go\""],
+        ),
+        ("x = matches!(name, \"node\" | \"go\");", &["1: \"go\""]),
+        (
+            "x = matches!(\n    name,\n    \"node\"\n        | \"go\"\n);",
+            &["4: \"go\""],
+        ),
+        ("x = matches! { name, \"go\" };", &["1: \"go\""]),
+        ("x = matches!(x, Some(n) if n == \"go\");", &["1: \"go\""]),
+        (
+            "x = matches!(get::<A, B>(x), Some(\"go\"));",
+            &["1: \"go\""],
+        ),
+        ("match name {\n    \"python\"=> 1,\n    _ => 2,\n}", &["2: \"python\""]),
+        (
+            "match rows {\n    \"go\" if rows.is_empty() => newest(),\n    _ => old(),\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "match pair {\n    (\n        \"python\",\n        _,\n    ) => cpython(),\n    _ => {}\n}",
+            &["3: \"python\""],
+        ),
+        (
+            "match pair {\n    (_, Some(\"go\")) => std_only(),\n    _ => {}\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "match pair {\n    _ if done => {}\n    Some(\"go\") => {}\n}",
+            &["3: \"go\""],
+        ),
+        // Arm bodies that need no comma before the next arm.
+        (
+            "match a {\n    _ if x => if y { 1 } else { 2 }\n    \"go\" => 3,\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "match x {\n    _ if flag => const { () }\n    \"go\" => {}\n}",
+            &["3: \"go\""],
+        ),
+        // A block as the scrutinee.
+        (
+            "match { name } {\n    \"go\" => (),\n    _ => (),\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "match outer {\n    _ => match inner {\n        \"go\" => 1,\n        _ => 2,\n    },\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "if selected.ecosystem\n    !=\n    \"python\"\n{\n    choose_runtime();\n}",
+            &["3: \"python\""],
+        ),
+        ("let go = name\n    == \"go\" || other;", &["2: \"go\""]),
+        ("if \"go\"\n    == name {}", &["1: \"go\""]),
+        ("if name != &\"go\" {}", &["1: \"go\""]),
+        ("if name == (\"python\") {}", &["1: \"python\""]),
+        ("if Some(\"python\") == x {}", &["1: \"python\""]),
+        ("if (\"go\", 1) == pair {}", &["1: \"go\""]),
+        ("if let Some(\"python\") = x {}", &["1: \"python\""]),
+        ("while let Some(\"go\") = it.next() {}", &["1: \"go\""]),
+        ("let Some(\"go\") = x else {\n    return;\n};", &["1: \"go\""]),
+        ("if x.eq(\"python\") {}", &["1: \"python\""]),
+        ("if \"go\".ne(&x) {}", &["1: \"go\""]),
+        ("assert_eq!(\n    x,\n    \"python\"\n);", &["3: \"python\""]),
+        ("assert!(name == \"go\");", &["1: \"go\""]),
+        ("if name == /* c */ \"go\" {}", &["1: \"go\""]),
+        ("if name == \"pyth\\x6fn\" {}", &["1: \"python\""]),
+        (
+            "if name == r\"go\" ||\n    name == r#\"python\"# {}",
+            &["1: \"go\"", "2: \"python\""],
+        ),
+        // A block's final expression.
+        ("let b = name == { \"python\" };", &["1: \"python\""]),
+        ("let b = name == const { \"go\" };", &["1: \"go\""]),
+        ("let b = unsafe { \"go\" } != name;", &["1: \"go\""]),
+        // Macro input no parser reads is still read for comparisons.
+        (
+            "if_chain! {\n    if name == \"python\";\n    then { choose_runtime(); }\n}",
+            &["2: \"python\""],
+        ),
+        (
+            "macro_rules! m {\n    ($x:expr) => { $x == \"python\" };\n}",
+            &["2: \"python\""],
+        ),
+        // A `macro_rules!` transcriber is read as the code it expands to.
+        (
+            "macro_rules! is_python {\n    ($name:expr) => {\n        matches!($name, \"python\")\n    };\n}",
+            &["3: \"python\""],
+        ),
+        (
+            "macro_rules! pick {\n    ($name:expr) => {\n        match $name {\n            \"python\" => 1,\n            _ => 2,\n        }\n    };\n}",
+            &["4: \"python\""],
+        ),
+        (
+            "macro_rules! any_go {\n    () => { false };\n    ($($x:expr),+ $(,)?) => { false $(|| $x == \"go\")+ };\n}",
+            &["3: \"go\""],
+        ),
+        // A repetition is read once, whatever it holds.
+        (
+            "macro_rules! any_go {\n    ($($x:expr),*) => {\n        $(if matches!($x, \"go\") {})*\n    };\n}",
+            &["3: \"go\""],
+        ),
+        // A metavariable reads as what its fragment kind parses as.
+        (
+            "macro_rules! define {\n    ($vis:vis) => {\n        $vis fn is_python(name: &str) -> bool {\n            matches!(name, \"python\")\n        }\n    };\n}\ndefine!(pub);",
+            &["4: \"python\""],
+        ),
+        (
+            "macro_rules! kinds {\n    ($l:lifetime, $n:literal, $b:block, $s:stmt, $i:item, $t:ty) => {\n        $i\n        fn f<$l>(x: &$l $t) -> bool { $s; let _ = $n; $b; x == \"go\" }\n    };\n}",
+            &["4: \"go\""],
+        ),
+        // A metavariable is never a cfg option: `$test` is not `test`.
+        (
+            "macro_rules! gated {\n    ($test:meta) => {\n        #[cfg($test)]\n        fn is_python(name: &str) -> bool {\n            name == \"python\"\n        }\n    };\n}\ngated!(unix);",
+            &["5: \"python\""],
+        ),
+        // A transcriber is read wherever it can stand: match arms, fields,
+        // variants, a type, a pattern (which is also an expression here),
+        // call arguments, struct literal fields.
+        (
+            "macro_rules! arms {\n    () => {\n        \"go\" => 1,\n        _ => 2,\n    };\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "macro_rules! field {\n    () => { pub name: [u8; { if x == \"go\" { 1 } else { 2 } }], };\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "macro_rules! variant {\n    () => { Go(&'static str) = { if x == \"go\" { 1 } else { 2 } }, };\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "macro_rules! ty {\n    () => { [&'static str; { if x == \"go\" { 1 } else { 2 } }] };\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "macro_rules! go_pattern {\n    () => { \"go\" | \"golang\" };\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "macro_rules! args {\n    ($a:expr) => { $a, \"go\" == b };\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "macro_rules! fields {\n    () => { name: { x == \"go\" }, ..Default::default() };\n}",
+            &["2: \"go\""],
+        ),
+        // A lone literal may be a pattern where the macro is invoked.
+        (
+            "macro_rules! m {\n    ($x:expr) => { \"go\" };\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "macro_rules! site {\n    () => { $crate::kernel::is(x, \"go\") || matches!(y, Some(\"go\")) };\n}",
+            &["2: \"go\""],
+        ),
+        // A transcriber that parses in no context is a finding.
+        (
+            "macro_rules! tail {\n    ($x:ident) => { $x == \"go\" && };\n}",
+            &["2: macro_rules! tail: a rule that does not parse as code in any context the \
+               scans know; give it a form that parses, or list the macro in \
+               OPAQUE_MACRO_RULES with a reason"],
+        ),
+        // Test code is what cannot compile without `test`, no more.
+        (
+            "#[cfg(any(test, feature = \"x\"))]\nfn h() {\n    if name == \"go\" {}\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "#[cfg(not(test))]\nfn h() {\n    if name == \"go\" {}\n}",
+            &["3: \"go\""],
+        ),
+        // A quote in a char literal opens no string.
+        ("let q = '\"';\nif name == \"go\" {}", &["2: \"go\""]),
+        // Production code after test-only code is still production code.
+        (
+            "#[cfg(test)]\nmod tests {}\nfn late() {\n    if name == \"go\" {}\n}",
+            &["4: \"go\""],
+        ),
+        (
+            "#[cfg(test)]\nconst LESS: bool = 1 < 2;\nif name == \"go\" {}",
+            &["3: \"go\""],
+        ),
+    ] {
+        let expected: Vec<String> = expected
+            .iter()
+            .map(|site| format!("kernel/fixture.rs:{site}"))
+            .collect();
+        assert_eq!(ecosystem_fixture(source), expected, "{source}");
+    }
+    // A macro listed in `OPAQUE_MACRO_RULES` has its unread rules read as
+    // tokens instead.
+    assert_eq!(
+        ecosystem_fixture_allowing(
+            "macro_rules! tail {\n    ($x:ident) => { $x == \"go\" && };\n}",
+            &[("src/kernel/fixture.rs", "tail", "a fixture")],
+        ),
+        ["kernel/fixture.rs:2: \"go\""]
+    );
+    for source in [
+        "let tool = \"go\";",
+        "run(&[\"go\", \"build\"]);",
+        "let c = vec![Component::new(\"go\", \"1.27.0\")];",
+        "const OLD: &[(&str, &str)] = &[\n    (\"python\", \"old\"),\n];",
+        "match name {\n    _ => Some(\"go\"),\n    Other => format!(\"{}\", \"python\"),\n}",
+        "match name {\n    _ if x => if y { \"go\" } else { \"python\" }\n    _ => {}\n}",
+        "match name {\n    \"golang\" => {}\n    _ => {}\n}",
+        "let longer = name.len() >= \"go\".len();",
+        "let same = count == \"python\".len();",
+        "assert_eq!(x.len(), \"python\".len());",
+        "if x == normalize(\"go\") {}",
+        "macro_rules! tools {\n    ($($x:expr),*) => {\n        vec![\"go\", \"python\" $(, $x)*]\n    };\n}",
+        "macro_rules! named {\n    ($name:ident) => {\n        match $name.kind() {\n            Kind::Tool => \"python\",\n            _ => \"go\",\n        }\n    };\n}",
+        "macro_rules! test_only {\n    () => {\n        #[cfg(test)]\n        fn helper() -> bool {\n            matches!(NAME, \"go\")\n        }\n    };\n}",
+        // An arm body is not a pattern, however the arms are laid out.
+        "match x {\n    true => if { ready() } { log(\"python\"); }\n    false => {}\n}",
+        // A guard is an expression, not a pattern.
+        "match x {\n    _ if { log(\"python\"); ready() } => {}\n}",
+        // Commas in a turbofish split nothing.
+        "x = matches!(get::<A, B>(\"python\"), Some(_));",
+        "match get::<A, B>(\"python\") {\n    _ => {}\n}",
+        // Comments, every kind.
+        "// if name == \"python\" {}",
+        "/// matches!(name, \"go\")\nfn f() {}",
+        "//! \"go\" => x",
+        "/* name == \"go\" */",
+        "/* outer /* inner */ name\n    == \"go\" */",
+        "/** \"python\" => doc */\nfn f() {}",
+        // String data that spells a comparison.
+        "let s = \"if name == \\\"python\\\" {}\";",
+        "let s = r#\"name == \"go\"\"#;",
+        "let s = r##\"match x {\n    \"go\" => 1,\n}\"##;",
+        "let s = b\"x != \\\"go\\\"\";",
+        // Test-only code.
+        "#[cfg(test)]\nmod tests {\n    fn t() {\n        assert!(name\n            == \"python\");\n    }\n}",
+        "#[cfg(test)]\nfn helper(name: &str) -> bool {\n    matches!(\n        name,\n        \"go\"\n    )\n}",
+        "#[cfg(test)]\nmod fixture_tests {\n    const X: bool = matches!(N, \"go\");\n}",
+        "#[cfg(test)]\nif name == \"go\" {}",
+        "match x {\n    #[cfg(test)]\n    \"go\" => {}\n    _ => {}\n}",
+        "#[cfg(all(test, unix))]\nfn h() {\n    if name == \"go\" {}\n}",
+        "#[cfg(all(test, debug_assertions))]\nfn h() {\n    if name == \"go\" {}\n}",
+        "#[cfg_attr(not(test), cfg(any()))]\nfn h() {\n    if name == \"go\" {}\n}",
+        // Test code inside a macro's input is test code too.
+        "identity! {\n    #[cfg(test)]\n    fn helper() {\n        if name == \"go\" {}\n    }\n}",
+    ] {
+        assert_eq!(ecosystem_fixture(source), Vec::<String>::new(), "{source}");
     }
 }
 
 /// Every spelling of a path into another layer is seen: nested groups,
-/// `self` in a group, `super` chains, `$crate`, whitespace inside a group;
-/// and paths that stay in the layer are not reported.
+/// `self` in a group, `super` chains (from inline modules too), `$crate`,
+/// a comment inside a path, a name a `use` bound (through another such
+/// name, in the scope it is bound in), a glob, and macro input that is not
+/// code; and paths that stay in the layer, or are only text, are not
+/// reported.
 #[test]
 fn the_layering_scan_sees_every_spelling() {
     let dirs = vec!["node".to_string(), "python".to_string()];
-    let kernel = "use crate::{store::Store, kernel::{ui, gc::{sweep::{self, Plan}}}};\n\
-        use crate::{\n    comforter::{\n        toolchain as t,\n    },\n};\n\
-        use super::super::super::commands::gc;\n\
-        use super::sibling;\n\
-        fn f() { $crate::cli::parse(); not_crate::tailors::x(); }";
-    let (found, _) = layer_violations(Path::new("kernel/gc/sweep.rs"), kernel, &dirs);
+    let check = |relative: &str, source: &str| {
+        let module = module_path(Path::new(relative));
+        let (mut found, _) = layer_violations(relative, &module, source, &dirs, &[]);
+        found.sort();
+        found
+    };
+    for (relative, source, expected) in [
+        (
+            "kernel/gc/sweep.rs",
+            "use crate::{store::Store, kernel::{ui, gc::{sweep::{self, Plan}}}};\n\
+             use crate::{\n    comforter::{\n        toolchain as t,\n    },\n};\n\
+             use super::super::super::commands::gc;\n\
+             use super::sibling;\n\
+             macro_rules! m { () => { $crate::cli::parse() }; }\n\
+             fn f() { not_crate::tailors::x(); }",
+            &[
+                "kernel/gc/sweep.rs:4: crate::comforter::toolchain",
+                "kernel/gc/sweep.rs:7: crate::commands::gc",
+                "kernel/gc/sweep.rs:9: crate::cli::parse",
+            ][..],
+        ),
+        (
+            "tailors/python/sync.rs",
+            "use super::super::node::Lock;\n\
+             use super::wheel;\n\
+             use crate::tailors::{python::venv, Tailor};",
+            &["tailors/python/sync.rs:1: crate::tailors::node::Lock"],
+        ),
+        // Test modules are exempt; production code below one is not (#706).
+        (
+            "kernel/mod.rs",
+            "#[cfg(test)]\nmod tests { use crate::tailors::x; }",
+            &[],
+        ),
+        (
+            "kernel/gitsrc.rs",
+            "#[cfg(test)]\nmod tests { use crate::tailors::x; }\n\
+             fn late() { crate::comforter::clone_tree_with_activity(); }\n\
+             #[cfg(test)]\nmod more_tests {}",
+            &["kernel/gitsrc.rs:3: crate::comforter::clone_tree_with_activity"],
+        ),
+        // A name a `use` bound to a crate path reaches through it (#706).
+        (
+            "commands/sync.rs",
+            "use crate::tailors as t;\nfn f() { t::python::venv::make(); t::registry(); }",
+            &["commands/sync.rs:2: crate::tailors::python::venv::make"],
+        ),
+        (
+            "commands/sync.rs",
+            "use crate::tailors;\nuse tailors::{node::Lock, Tailor};\n\
+             fn f() { tailors::python::run(); tailors::registry(); }",
+            &[
+                "commands/sync.rs:2: crate::tailors::node::Lock",
+                "commands/sync.rs:3: crate::tailors::python::run",
+            ],
+        ),
+        (
+            "tailors/python/sync.rs",
+            "use crate::tailors as all;\nfn f() { all::node::Lock::new(); all::python::own(); }",
+            &["tailors/python/sync.rs:2: crate::tailors::node::Lock::new"],
+        ),
+        (
+            "kernel/fetch.rs",
+            "use crate::kernel::store;\nuse crate::kernel as k;\n\
+             fn f() { store::Store::open(); k::ui::say(); std::store::x(); }",
+            &[],
+        ),
+        // A binding of a binding, to the end; a cycle ends.
+        (
+            "commands/sync.rs",
+            "use crate::tailors as t;\nuse t as u;\nuse u as v;\nfn f() { v::python::run(); }",
+            &["commands/sync.rs:4: crate::tailors::python::run"],
+        ),
+        (
+            "commands/sync.rs",
+            "use a as b;\nuse b as a;\nfn f() { a::python::run(); }",
+            &[],
+        ),
+        // A name resolves in the module or block it is written in.
+        (
+            "commands/sync.rs",
+            "mod a {\n    use crate::kernel as t;\n    fn f() { t::python::run(); }\n}\n\
+             mod b {\n    use crate::tailors as t;\n    fn g() { t::python::run(); }\n}",
+            &["commands/sync.rs:7: crate::tailors::python::run"],
+        ),
+        (
+            "commands/sync.rs",
+            "use crate::tailors as t;\nfn f() {\n    use crate::kernel as t;\n    t::python::run();\n}\n\
+             fn g() { t::node::x(); }",
+            &["commands/sync.rs:6: crate::tailors::node::x"],
+        ),
+        (
+            "commands/sync.rs",
+            "use crate::tailors as t;\nmod inner {\n    fn f() { t::python::run(); }\n}",
+            &[],
+        ),
+        // A glob import, for a name nothing else binds.
+        (
+            "commands/sync.rs",
+            "use crate::tailors::*;\nfn f() { python::run(); }",
+            &["commands/sync.rs:2: crate::tailors::python::run"],
+        ),
+        // A path is tokens: a comment inside it is nothing, a string
+        // spelling one is no path.
+        (
+            "kernel/x.rs",
+            "fn f() { crate /* c */ ::comforter::x(); }",
+            &["kernel/x.rs:1: crate::comforter::x"],
+        ),
+        (
+            "kernel/x.rs",
+            "fn f() { let s = \"crate::comforter::x\"; log!(\"crate::cli::y\"); }",
+            &[],
+        ),
+        // `super` counts the inline modules it is in: here it names
+        // another tailor, though from the file's own module it would not.
+        (
+            "tailors/python/mod.rs",
+            "mod inner {\n    fn f() { super::super::node::f(); }\n}\nfn g() { super::super::node::f(); }",
+            &["tailors/python/mod.rs:2: crate::tailors::node::f"],
+        ),
+        // Macro input that is not code is read as tokens.
+        (
+            "kernel/x.rs",
+            "fn f() {\n    if_chain! {\n        if crate::comforter::ready();\n        then { go(\"crate::cli::x\"); }\n    }\n}",
+            &["kernel/x.rs:3: crate::comforter::ready"],
+        ),
+    ] {
+        assert_eq!(check(relative, source), expected, "{source}");
+    }
+    let (named, _) = named_paths(
+        "kernel/gc/sweep.rs",
+        "use crate::{store::Store, kernel::{ui, gc::{sweep::{self, Plan}}}};",
+        &module_path(Path::new("kernel/gc/sweep.rs")),
+        &[],
+    );
+    let paths: Vec<String> = named.iter().map(|named| named.path.join("::")).collect();
     assert_eq!(
-        found,
+        paths,
         [
-            "kernel/gc/sweep.rs: crate::comforter::toolchain",
-            "kernel/gc/sweep.rs: crate::commands::gc",
-            "kernel/gc/sweep.rs: crate::cli::parse",
+            "store::Store",
+            "kernel::ui",
+            "kernel::gc::sweep",
+            "kernel::gc::sweep::Plan"
         ]
     );
-    assert_eq!(
-        crate_paths(kernel, &module_path(Path::new("kernel/gc/sweep.rs")))[..4],
-        [
-            vec!["store", "Store"],
-            vec!["kernel", "ui"],
-            vec!["kernel", "gc", "sweep"],
-            vec!["kernel", "gc", "sweep", "Plan"],
-        ]
-    );
-
-    let tailor = "use super::super::node::Lock;\n\
-        use super::wheel;\n\
-        use crate::tailors::{python::venv, Tailor};";
-    let (found, _) = layer_violations(Path::new("tailors/python/sync.rs"), tailor, &dirs);
-    assert_eq!(
-        found,
-        ["tailors/python/sync.rs: crate::tailors::node::Lock"]
-    );
-
-    let (found, _) = layer_violations(
-        Path::new("kernel/mod.rs"),
-        "#[cfg(test)]\nmod tests { use crate::tailors::x; }",
-        &dirs,
-    );
-    assert!(found.is_empty(), "test modules are exempt: {found:?}");
 }
-
 /// Size budgets as a ratchet. `tests/size_baseline.txt` lists every file
 /// over 1,500 non-test lines and every non-test function over 150 lines,
 /// with its size today. Nothing new may cross a budget, nothing listed may
@@ -578,23 +2334,16 @@ fn size_budgets_ratchet() {
     const FILE_BUDGET: usize = 1500;
     const FUNCTION_BUDGET: usize = 150;
     let root = repo();
-    let mut files = Vec::new();
-    rust_files(&src(), &mut files);
     let mut current = std::collections::BTreeMap::new();
-    for file in &files {
-        let relative = file
-            .strip_prefix(&root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let text = fs::read_to_string(file).unwrap();
-        let body = non_test(&text);
-        let lines = body.lines().count();
+    // A file only a test-only `mod` reaches is a test module whole.
+    for module in production_sources() {
+        let (relative, text) = (&module.relative, &module.text);
+        let lines = text.lines().count() - test_module_lines(text).len();
         if lines > FILE_BUDGET {
             current.insert(format!("file {relative}"), lines);
         }
         let mut seen = std::collections::BTreeMap::<String, usize>::new();
-        for (name, length) in function_lengths(body) {
+        for (name, length) in function_lengths(&production_text(text)) {
             let count = seen.entry(name.clone()).or_default();
             *count += 1;
             let name = if *count == 1 {
@@ -707,8 +2456,8 @@ const BASELINE_HEADER: &str = "\
 /// brace, with strings, chars, and comments blanked so their braces do not
 /// count. A function under `#[cfg(test)]` is test code wherever it sits in
 /// the file, so it is measured (to step over its body) and left out of the
-/// function budget. The file budget still counts its lines: `non_test`
-/// cuts only at `mod tests`.
+/// function budget. (`size_budgets_ratchet` hands this production text,
+/// where test code is already blanked.)
 fn function_lengths(text: &str) -> Vec<(String, usize)> {
     let clean = blank_literals(text);
     let lines: Vec<&str> = clean.lines().collect();
@@ -1174,11 +2923,11 @@ fn writes_stderr(line: &str) -> bool {
 fn narration_goes_through_kernel_ui() {
     let mut violations = Vec::new();
     let mut listed = vec![false; STDERR_HANDLES.len()];
-    for (relative, text) in all_sources() {
-        if !relative.starts_with("src/") || relative == "src/kernel/ui.rs" {
+    for (relative, text) in production_files() {
+        if relative == "src/kernel/ui.rs" {
             continue;
         }
-        for (index, line) in outside_test_modules(&text).lines().enumerate() {
+        for (index, line) in production_text(&text).lines().enumerate() {
             if !writes_stderr(line) {
                 continue;
             }
@@ -1230,24 +2979,6 @@ fn the_stderr_scan_sees_every_spelling() {
     ] {
         assert!(!writes_stderr(line), "{line}");
     }
-}
-
-/// The part of a file before its first `#[cfg(test)]` module. Unlike
-/// `non_test`, this finds a test module under any name (`mod tests`,
-/// `mod fixture_tests`), which is what a scan for test-only output
-/// needs; a `#[cfg(test)]` helper `fn` is not a module and does not cut.
-fn outside_test_modules(text: &str) -> &str {
-    let mut rest = text;
-    let mut consumed = 0;
-    while let Some(index) = rest.find("#[cfg(test)]\n") {
-        let after = &rest[index + "#[cfg(test)]\n".len()..];
-        if after.starts_with("mod ") || after.starts_with("pub mod ") {
-            return &text[..consumed + index];
-        }
-        consumed += index + "#[cfg(test)]\n".len();
-        rest = after;
-    }
-    text
 }
 
 /// `docs/agent/` is two files. Ledgers, review reports, and evidence dumps
@@ -1477,10 +3208,10 @@ fn is_punct(token: Option<&Token>, c: char) -> bool {
 }
 
 /// Production tokens of a file, each tagged with the innermost named `fn`
-/// around it. Items under `#[cfg(test)]` (test modules and test-only
-/// helpers) are dropped whole.
+/// around it. Test-only code (`test_spans`: test modules, test-only
+/// helpers, fields, arms and statements) is blanked out first.
 fn production_tokens(text: &str) -> Vec<(Token, String)> {
-    let tokens = tokenize(text);
+    let tokens = tokenize(&production_text(text));
     let mut out = Vec::new();
     // (fn name, brace depth its body opened at)
     let mut functions: Vec<(String, usize)> = Vec::new();
@@ -1488,48 +3219,6 @@ fn production_tokens(text: &str) -> Vec<(Token, String)> {
     let mut depth = 0usize;
     let mut i = 0;
     while i < tokens.len() {
-        // `# [ cfg ( test ) ]` drops the next item: through its matching
-        // brace, or through the `;` or `,` that ends an item, field or
-        // expression without a body. A `}` that closes the enclosing block
-        // ends it too and is kept.
-        if is_punct(tokens.get(i), '#')
-            && is_punct(tokens.get(i + 1), '[')
-            && is_ident(tokens.get(i + 2), "cfg")
-            && is_punct(tokens.get(i + 3), '(')
-            && is_ident(tokens.get(i + 4), "test")
-            && is_punct(tokens.get(i + 5), ')')
-            && is_punct(tokens.get(i + 6), ']')
-        {
-            let mut j = i + 7;
-            let mut braces = 0usize;
-            let mut groups = 0usize;
-            let mut consumed_close = true;
-            while j < tokens.len() {
-                let arrow = j > 0 && tokens[j - 1] == Token::Punct('-');
-                match &tokens[j] {
-                    Token::Punct('{') => braces += 1,
-                    Token::Punct('}') if braces == 0 => {
-                        consumed_close = false;
-                        break;
-                    }
-                    Token::Punct('}') => {
-                        braces -= 1;
-                        if braces == 0 && groups == 0 {
-                            break;
-                        }
-                    }
-                    Token::Punct('(' | '[') if braces == 0 => groups += 1,
-                    Token::Punct(')' | ']') if braces == 0 => groups = groups.saturating_sub(1),
-                    Token::Punct('<') if braces == 0 => groups += 1,
-                    Token::Punct('>') if braces == 0 && !arrow => groups = groups.saturating_sub(1),
-                    Token::Punct(';' | ',') if braces == 0 && groups == 0 => break,
-                    _ => {}
-                }
-                j += 1;
-            }
-            i = if consumed_close { j + 1 } else { j };
-            continue;
-        }
         let token = tokens[i].clone();
         match &token {
             Token::Ident(word) if word == "fn" => {
@@ -1565,6 +3254,447 @@ fn production_tokens(text: &str) -> Vec<(Token, String)> {
         i += 1;
     }
     out
+}
+
+/// A place in a source file: 1-based line, 0-based column in characters.
+type Position = (usize, usize);
+
+fn position(at: proc_macro2::LineColumn) -> Position {
+    (at.line, at.column)
+}
+
+/// Where `node` starts and ends, outer attributes included.
+fn span_of(node: &impl Spanned) -> (Position, Position) {
+    let span = node.span();
+    (position(span.start()), position(span.end()))
+}
+
+/// `text` parsed as a Rust file. Every file the scans read is one, and so
+/// is every fixture.
+fn parse(text: &str) -> syn::File {
+    syn::parse_file(text).unwrap_or_else(|error| {
+        let (line, column) = position(error.span().start());
+        panic!(
+            "not Rust at line {line}, column {}: {error}\n{text}",
+            column + 1
+        )
+    })
+}
+
+/// `text` with its test-only code (`test_spans`) blanked to spaces, so
+/// what is left keeps its lines and columns.
+fn production_text(text: &str) -> String {
+    let mut chars: Vec<char> = text.chars().collect();
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            chars
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == '\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect();
+    let len = chars.len();
+    let offset = |(line, column): Position| (line_starts[line - 1] + column).min(len);
+    for (start, end) in test_spans(&parse(text)) {
+        let (start, end) = (offset(start), offset(end));
+        for c in &mut chars[start..end] {
+            if *c != '\n' {
+                *c = ' ';
+            }
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// Whether `attrs` mark test-only code: code that is never compiled when
+/// `test` is off. Each attribute that can drop code is one condition:
+/// `#[test]`, a `cfg`, and a `cfg_attr` (the attributes it applies,
+/// conditioned on its predicate). The code compiles when all of them hold,
+/// so it is test-only when that one formula cannot hold with `test` off,
+/// whatever every other option is: `cfg(all(test, unix))`, or
+/// `cfg(feature = "x")` beside `cfg_attr(feature = "x", cfg(test))`.
+fn marks_test_code(attrs: &[syn::Attribute]) -> bool {
+    !Cfg::All(attrs.iter().map(|attr| compiled_when(&attr.meta)).collect()).satisfiable()
+}
+
+/// A cfg condition with `test` off: a constant, a free option, or the
+/// predicates' `all`, `any` and `not`.
+enum Cfg {
+    Const(bool),
+    Option(String),
+    All(Vec<Cfg>),
+    Any(Vec<Cfg>),
+    Not(Box<Cfg>),
+}
+
+impl Cfg {
+    /// The most free options `satisfiable` tries every assignment of.
+    /// Past it the formula is taken to hold, so code is kept as production
+    /// code: a scan may read too much, never too little.
+    const MAX_OPTIONS: usize = 16;
+
+    fn options<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Cfg::Const(_) => {}
+            Cfg::Option(name) => out.push(name),
+            Cfg::All(all) | Cfg::Any(all) => all.iter().for_each(|cfg| cfg.options(out)),
+            Cfg::Not(cfg) => cfg.options(out),
+        }
+    }
+
+    fn holds(&self, set: &dyn Fn(&str) -> bool) -> bool {
+        match self {
+            Cfg::Const(value) => *value,
+            Cfg::Option(name) => set(name),
+            Cfg::All(all) => all.iter().all(|cfg| cfg.holds(set)),
+            Cfg::Any(any) => any.iter().any(|cfg| cfg.holds(set)),
+            Cfg::Not(cfg) => !cfg.holds(set),
+        }
+    }
+
+    /// Whether some setting of the free options makes the formula hold.
+    fn satisfiable(&self) -> bool {
+        let mut options = Vec::new();
+        self.options(&mut options);
+        options.sort();
+        options.dedup();
+        if options.len() > Self::MAX_OPTIONS {
+            return true;
+        }
+        (0u32..1 << options.len())
+            .any(|bits| self.holds(&|name| bits >> options.binary_search(&name).unwrap() & 1 == 1))
+    }
+}
+
+/// The condition under which code carrying the attribute `meta` is
+/// compiled with `test` off.
+fn compiled_when(meta: &syn::Meta) -> Cfg {
+    if meta.path().is_ident("test") {
+        return Cfg::Const(false);
+    }
+    let syn::Meta::List(list) = meta else {
+        return Cfg::Const(true);
+    };
+    if !list.path.is_ident("cfg") && !list.path.is_ident("cfg_attr") {
+        return Cfg::Const(true);
+    }
+    let Ok(args) = list.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    ) else {
+        // Not read: a condition of its own, free to hold.
+        return Cfg::Option(list.tokens.to_string());
+    };
+    let mut args = args.iter();
+    let Some(predicate) = args.next().map(cfg_predicate) else {
+        return Cfg::Const(true);
+    };
+    if list.path.is_ident("cfg") {
+        return predicate;
+    }
+    // `cfg_attr(C, a, b)`: compiled when `C` fails, or when every
+    // attribute it applies lets the code compile.
+    Cfg::Any(vec![
+        Cfg::Not(Box::new(predicate)),
+        Cfg::All(args.map(compiled_when).collect()),
+    ])
+}
+
+/// A cfg predicate as a `Cfg`: `test` is off, `all`, `any` and `not` are
+/// read, and any other option is free (named by its text, so the same
+/// option written twice is one option).
+fn cfg_predicate(predicate: &syn::Meta) -> Cfg {
+    let operator = ["all", "any", "not"]
+        .into_iter()
+        .find(|op| predicate.path().is_ident(op));
+    match (predicate, operator) {
+        (syn::Meta::Path(path), _) if path.is_ident("test") => Cfg::Const(false),
+        (syn::Meta::List(list), Some(operator)) => {
+            let Ok(args) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return Cfg::Option(list.tokens.to_string());
+            };
+            let args: Vec<Cfg> = args.iter().map(cfg_predicate).collect();
+            match operator {
+                "all" => Cfg::All(args),
+                "any" => Cfg::Any(args),
+                _ => Cfg::Not(Box::new(Cfg::All(args))),
+            }
+        }
+        _ => Cfg::Option(cfg_option_name(predicate)),
+    }
+}
+
+/// An option's text: `unix`, `feature = "x"`.
+fn cfg_option_name(predicate: &syn::Meta) -> String {
+    let path = predicate
+        .path()
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    match predicate {
+        syn::Meta::Path(_) => path,
+        syn::Meta::List(list) => format!("{path}({})", list.tokens),
+        syn::Meta::NameValue(pair) => match &pair.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(value),
+                ..
+            }) => format!("{path} = {:?}", value.value()),
+            // A value no cfg takes: an option no other is.
+            other => format!("{path} = {other:p}"),
+        },
+    }
+}
+
+#[test]
+fn test_only_cfgs_are_evaluated_without_test() {
+    let marks = |attrs: &str| {
+        let item: syn::ItemFn = syn::parse_str(&format!("{attrs}\nfn f() {{}}")).unwrap();
+        marks_test_code(&item.attrs)
+    };
+    for attrs in [
+        "#[test]",
+        "#[cfg(test)]",
+        "#[cfg(all(test, unix))]",
+        "#[cfg(all(test, debug_assertions))]",
+        "#[cfg(all(unix, any(test, any())))]",
+        "#[cfg(not(not(test)))]",
+        "#[cfg(any())]",
+        "#[cfg_attr(not(test), cfg(any()))]",
+        "#[cfg_attr(all(), cfg(test))]",
+        // Test-only together, though neither is alone.
+        "#[cfg(feature = \"fixtures\")]\n#[cfg_attr(feature = \"fixtures\", cfg(test))]",
+        "#[cfg(unix)]\n#[cfg(not(unix))]",
+        "#[cfg(any(test, unix))]\n#[cfg_attr(unix, test)]",
+    ] {
+        assert!(marks(attrs), "{attrs}");
+    }
+    for attrs in [
+        "#[inline]",
+        "#[cfg(unix)]",
+        "#[cfg(not(test))]",
+        "#[cfg(any(test, feature = \"x\"))]",
+        "#[cfg(any(test, unix))]",
+        "#[cfg(all())]",
+        "#[cfg_attr(test, cfg(any()))]",
+        "#[cfg_attr(unix, cfg(test))]",
+        "#[cfg_attr(test, allow(dead_code))]",
+        // The crate root's own attribute (src/lib.rs): production code.
+        "#[cfg_attr(test, allow(clippy::disallowed_methods))]",
+        "#[cfg(feature = \"a\")]\n#[cfg_attr(feature = \"b\", cfg(test))]",
+        "#[cfg(unix)]\n#[cfg(windows)]",
+    ] {
+        assert!(!marks(attrs), "{attrs}");
+    }
+}
+
+/// The lines a file's test modules cover: every `mod` marked test-only,
+/// at any depth (inside an inline production module too), attributes and
+/// doc comments included. The file budget counts the rest, a test-only
+/// helper `fn` among them.
+fn test_module_lines(text: &str) -> std::collections::BTreeSet<usize> {
+    struct TestModules(std::collections::BTreeSet<usize>);
+    impl<'ast> Visit<'ast> for TestModules {
+        fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+            if marks_test_code(&node.attrs) {
+                let ((first, _), (last, _)) = span_of(node);
+                self.0.extend(first..=last);
+            } else {
+                visit::visit_item_mod(self, node);
+            }
+        }
+    }
+    let mut modules = TestModules(Default::default());
+    modules.visit_file(&parse(text));
+    modules.0
+}
+
+#[test]
+fn test_modules_are_found_at_any_depth() {
+    let text = "mod inner {\n    #[cfg(test)]\n    mod tests {\n        fn t() {}\n    }\n    fn kept() {}\n}\n\
+                #[cfg(test)]\nfn helper() {}\n#[cfg(test)]\nmod top {}\n";
+    let lines: Vec<usize> = test_module_lines(text).into_iter().collect();
+    // The nested test module and the top-level one; not the helper `fn`.
+    assert_eq!(lines, [2, 3, 4, 5, 10, 11]);
+}
+
+/// The spans of a file's test-only code: each item, impl or trait member,
+/// statement, expression, field, variant, match arm and field value marked
+/// `#[cfg(test)]` or `#[test]`, and the whole file if it is marked so
+/// inside. Found by attribute in the parsed file, so nothing inside a
+/// test-only item (a `<` in `1 < 2`, say) can make it end early or late.
+fn test_spans(file: &syn::File) -> Vec<(Position, Position)> {
+    let mut spans = TestSpans(Vec::new());
+    if marks_test_code(&file.attrs) {
+        spans.0.push(span_of(file));
+    } else {
+        spans.visit_file(file);
+    }
+    spans.0
+}
+
+struct TestSpans(Vec<(Position, Position)>);
+
+/// A syntax node's outer attributes.
+trait Attrs {
+    fn attrs(&self) -> &[syn::Attribute];
+}
+
+/// `Attrs` for node structs, which hold their attributes in `attrs`.
+macro_rules! struct_attrs {
+    ($($ty:ident),*) => {$(
+        impl Attrs for syn::$ty {
+            fn attrs(&self) -> &[syn::Attribute] {
+                &self.attrs
+            }
+        }
+    )*};
+}
+
+/// `Attrs` for node enums, whose variants each hold a struct with `attrs`
+/// (a `Verbatim` variant has none).
+macro_rules! enum_attrs {
+    ($($ty:ident { $($variant:ident),* })*) => {$(
+        impl Attrs for syn::$ty {
+            fn attrs(&self) -> &[syn::Attribute] {
+                match self {
+                    $(syn::$ty::$variant(node) => &node.attrs,)*
+                    _ => &[],
+                }
+            }
+        }
+    )*};
+}
+
+struct_attrs!(Local, Field, Variant, Arm, FieldValue, FieldPat, StmtMacro);
+enum_attrs! {
+    Item {
+        Const, Enum, ExternCrate, Fn, ForeignMod, Impl, Macro, Mod, Static, Struct, Trait,
+        TraitAlias, Type, Union, Use
+    }
+    ImplItem { Const, Fn, Type, Macro }
+    TraitItem { Const, Fn, Type, Macro }
+    ForeignItem { Fn, Static, Type, Macro }
+    Expr {
+        Array, Assign, Async, Await, Binary, Block, Break, Call, Cast, Closure, Const, Continue,
+        Field, ForLoop, Group, If, Index, Infer, Let, Lit, Loop, Macro, Match, MethodCall,
+        Paren, Path, Range, RawAddr, Reference, Repeat, Return, Struct, Try, TryBlock, Tuple,
+        Unary, Unsafe, While, Yield
+    }
+}
+
+/// `TestSpans` methods for nodes that carry attributes: record a test-only
+/// node's span and do not look inside it, walk into any other.
+macro_rules! skip_test_only {
+    ($($method:ident($ty:ident);)*) => {$(
+        fn $method(&mut self, node: &'ast syn::$ty) {
+            if marks_test_code(node.attrs()) {
+                self.0.push(span_of(node));
+            } else {
+                visit::$method(self, node);
+            }
+        }
+    )*};
+}
+
+impl<'ast> Visit<'ast> for TestSpans {
+    skip_test_only! {
+        visit_item(Item);
+        visit_impl_item(ImplItem);
+        visit_trait_item(TraitItem);
+        visit_foreign_item(ForeignItem);
+        visit_expr(Expr);
+        visit_local(Local);
+        visit_field(Field);
+        visit_variant(Variant);
+        visit_arm(Arm);
+        visit_field_value(FieldValue);
+        visit_field_pat(FieldPat);
+        visit_stmt_macro(StmtMacro);
+    }
+
+    /// An attribute on an expression statement belongs to the whole
+    /// statement, but the parser hangs it on the leftmost operand
+    /// (`#[cfg(test)] a = b;` marks `a`).
+    fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+        if let syn::Stmt::Expr(expr, _) = node {
+            let mut leftmost = expr;
+            loop {
+                leftmost = match leftmost {
+                    syn::Expr::Assign(e) => &e.left,
+                    syn::Expr::Binary(e) => &e.left,
+                    syn::Expr::Cast(e) => &e.expr,
+                    _ => break,
+                };
+            }
+            if marks_test_code(leftmost.attrs()) {
+                self.0.push(span_of(node));
+                return;
+            }
+        }
+        visit::visit_stmt(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        walk_macro_input(self, &macro_input(node));
+    }
+}
+
+#[test]
+fn test_code_is_found_by_attribute() {
+    let owners = |text: &str| {
+        let mut owners: Vec<String> = production_tokens(text)
+            .into_iter()
+            .map(|(_, owner)| owner)
+            .filter(|owner| !owner.is_empty())
+            .collect();
+        owners.dedup();
+        owners
+    };
+    // A `<` in a test-only item is no generic opener.
+    assert_eq!(
+        owners("#[cfg(test)]\nconst LESS: bool = 1 < 2;\nfn kept() { c.spawn(); }"),
+        ["kept"]
+    );
+    let source = "#[cfg(test)]\nfn generic<A, B>() -> Map<A, B> { a() }\n\
+             #[cfg(test)]\nmod tests { fn t() {} }\n\
+             #[test]\nfn unit() {}\n\
+             enum E { #[cfg(test)]\nTest(Vec<u8>), Kept }\n\
+             fn kept(x: u8) {\n    #[cfg(test)]\n    let a = 1 < 2;\n    #[cfg(test)]\n    \
+             hook = x > 1;\n    #[cfg(test)]\n    {\n        inner();\n    }\n    \
+             match x {\n        #[cfg(test)]\n        0 => test_arm(),\n        _ => kept_arm(),\n    }\n}";
+    assert_eq!(owners(source), ["kept"]);
+    let idents: Vec<String> = production_tokens(source)
+        .into_iter()
+        .filter_map(|(token, _)| match token {
+            Token::Ident(word) => Some(word),
+            _ => None,
+        })
+        .collect();
+    for gone in [
+        "generic", "Map", "tests", "unit", "Test", "a", "hook", "inner", "test_arm",
+    ] {
+        assert!(
+            !idents.iter().any(|word| word == gone),
+            "{gone} is test code"
+        );
+    }
+    for kept in ["E", "Kept", "kept", "x", "match", "kept_arm"] {
+        assert!(
+            idents.iter().any(|word| word == kept),
+            "{kept} is production code"
+        );
+    }
+    let text = production_text("fn a() {\n    #[cfg(test)]\n    hook = x > 1;\n    b();\n}");
+    assert!(!text.contains("hook") && text.contains("b();"), "{text}");
+    assert_eq!(text.lines().count(), 5);
+    assert_eq!(
+        owners("#![cfg(test)]\nfn t() { c.spawn(); }"),
+        Vec::<String>::new()
+    );
 }
 
 /// The names a file uses for `ty`: `ty` itself plus every `ty as Alias`
@@ -1671,8 +3801,8 @@ fn count_sites(
     hit: fn(&[(Token, String)], usize, &Names) -> bool,
 ) -> Vec<(String, String, usize)> {
     let mut counts: Vec<(String, String, usize)> = Vec::new();
-    for (relative, text) in all_sources() {
-        if !relative.starts_with("src/") || skip.contains(&relative.as_str()) {
+    for (relative, text) in production_files() {
+        if skip.contains(&relative.as_str()) {
             continue;
         }
         let tokens = production_tokens(&text);
@@ -1777,9 +3907,6 @@ const LEASE_BOUNDARIES: &[(&str, &str, usize)] = &[
     ("src/kernel/store/roots.rs", "register_root_from_project", 1),
     ("src/kernel/store/roots.rs", "remove_root_entry", 1),
     ("src/kernel/store/roots.rs", "forget_root", 1),
-    // Compiled only under `cfg(test)` (declared so in kernel/mod.rs): a
-    // lease on a scratch directory for tests with no store.
-    ("src/kernel/testutil.rs", "detached_lease", 1),
 ];
 
 /// A call of one of `kernel::fetch`'s verified downloads or cache reads,
@@ -2238,7 +4365,7 @@ const TAILOR_NAMING_DEBT: &[(&str, &str, &str, usize)] = &[];
 #[test]
 fn commands_do_not_name_tailors_by_string() {
     let words = tailor_words();
-    let mut found: Vec<LiteralSite> = all_sources()
+    let mut found: Vec<LiteralSite> = production_files()
         .into_iter()
         .filter(|(relative, _)| relative.starts_with("src/commands/"))
         .flat_map(|(relative, text)| literal_sites(&relative, &text, &words))
@@ -2276,22 +4403,16 @@ fn commands_do_not_name_tailors_by_string() {
 /// `"tar"` given to `with_extension` or `set_extension`, which names a
 /// file, not a program (#524). The scan's limit is the literal: a name
 /// assembled at compile time (`concat!("t", "ar")`) or at run time is
-/// not one, so it is not seen. `#[cfg(test)]`
-/// items are dropped by `production_tokens`, which exempts test-only
-/// extractors and fixture builders; `src/kernel/testutil.rs` is named
-/// below because it is test-only by the `cfg(test)` gate on its `mod`
-/// declaration in `kernel/mod.rs`, which a per-file scan cannot see.
+/// not one, so it is not seen. Test code is exempt (test-only extractors and fixture
+/// builders): a test-only item by `production_tokens`, a test-only module
+/// file (`kernel/testutil.rs`) by the module tree.
 #[test]
 fn tar_runs_only_in_kernel_archive() {
     const OWNER: &str = "src/kernel/archive.rs";
     const HELPER: &str = "tar_command";
-    const TEST_ONLY_BY_MOD_GATE: &[&str] = &["src/kernel/testutil.rs"];
     let mut sites = Vec::new();
-    for (relative, text) in all_sources() {
-        if !relative.starts_with("src/")
-            || relative == OWNER
-            || TEST_ONLY_BY_MOD_GATE.contains(&relative.as_str())
-        {
+    for (relative, text) in production_files() {
+        if relative == OWNER {
             continue;
         }
         for owner in tar_sites(&text) {
@@ -2489,8 +4610,8 @@ fn http_client_sites(text: &str) -> Vec<String> {
 #[test]
 fn http_goes_through_kernel_fetch() {
     let mut violations = Vec::new();
-    for (relative, text) in all_sources() {
-        if !relative.starts_with("src/") || HTTP_CLIENT_FILES.contains(&relative.as_str()) {
+    for (relative, text) in production_files() {
+        if HTTP_CLIENT_FILES.contains(&relative.as_str()) {
             continue;
         }
         for function in http_client_sites(&text) {
@@ -2583,271 +4704,32 @@ const ARCHIVE_GATE_EXEMPT: &[(&str, &str)] = &[(
 /// an archive, or the compressed stream one is carried in.
 const ARCHIVE_CRATES: &[&str] = &["zip", "flate2", "bzip2", "liblzma"];
 
-/// Where a `use` path starts: the crate's root (`crate::`, `super::`,
-/// `self::`, resolved to a path from it), or an extern crate's (the path's
-/// first segment is the crate).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum UseRoot {
-    Crate,
-    Extern,
-}
-
-/// What the `use` declarations among `tokens` bind, each leaf as (local
-/// name, path, root) and a glob as (`*`, its prefix, root). `super` and
-/// `self` resolve against `module` and the inline `mod`s around the
-/// declaration, so `super::super::archive` in `mod inner` of `kernel/foo.rs`
-/// is `kernel::archive`.
-fn use_bindings(
-    tokens: &[(Token, String)],
-    module: &[String],
-) -> Vec<(String, Vec<String>, UseRoot)> {
-    let tokens: Vec<&Token> = tokens.iter().map(|(token, _)| token).collect();
-    let mut out = Vec::new();
-    // Inline modules open: (name, brace depth inside it).
-    let mut inline: Vec<(String, usize)> = Vec::new();
-    let mut pending_mod: Option<String> = None;
-    let mut depth = 0usize;
-    let mut i = 0;
-    while i < tokens.len() {
-        match tokens[i] {
-            Token::Ident(word) if word == "mod" => {
-                if let Some(Token::Ident(name)) = tokens.get(i + 1) {
-                    if is_punct(tokens.get(i + 2).copied(), '{') {
-                        pending_mod = Some(name.clone());
-                    }
-                }
-            }
-            Token::Ident(word) if word == "use" => {
-                let mut here = module.to_vec();
-                here.extend(inline.iter().map(|(name, _)| name.clone()));
-                let mut at = i + 1;
-                use_tree(&tokens, &mut at, Vec::new(), None, &here, &mut out);
-                i = at.max(i + 1);
-                continue;
-            }
-            Token::Punct('{') => {
-                depth += 1;
-                if let Some(name) = pending_mod.take() {
-                    inline.push((name, depth));
-                }
-            }
-            Token::Punct('}') => {
-                if inline.last().is_some_and(|(_, at)| *at == depth) {
-                    inline.pop();
-                }
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    out
-}
-
-/// One use tree from `at`: leaves and globs pushed to `out` behind
-/// `prefix`. `root` is `None` until the tree's first segment decides it.
-fn use_tree(
-    tokens: &[&Token],
-    at: &mut usize,
-    mut prefix: Vec<String>,
-    mut root: Option<UseRoot>,
-    here: &[String],
-    out: &mut Vec<(String, Vec<String>, UseRoot)>,
-) {
-    let path_sep = |at: usize| {
-        is_punct(tokens.get(at).copied(), ':') && is_punct(tokens.get(at + 1).copied(), ':')
-    };
-    if root.is_none() && path_sep(*at) {
-        // `use ::zip`: an extern crate, spelled from the root.
-        *at += 2;
-        root = Some(UseRoot::Extern);
-    }
-    loop {
-        match tokens.get(*at) {
-            Some(Token::Punct('{')) => {
-                *at += 1;
-                loop {
-                    match tokens.get(*at) {
-                        None => return,
-                        Some(Token::Punct('}')) => {
-                            *at += 1;
-                            return;
-                        }
-                        Some(Token::Punct(',')) => *at += 1,
-                        Some(_) => {
-                            let before = *at;
-                            use_tree(tokens, at, prefix.clone(), root, here, out);
-                            if *at == before {
-                                *at += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            Some(Token::Punct('*')) => {
-                *at += 1;
-                if let Some(root) = root {
-                    out.push(("*".to_string(), prefix, root));
-                }
-                return;
-            }
-            Some(Token::Ident(word)) => {
-                *at += 1;
-                let word = word.as_str();
-                match (root, word) {
-                    (None, "crate") => root = Some(UseRoot::Crate),
-                    (None, "self") => {
-                        root = Some(UseRoot::Crate);
-                        prefix = here.to_vec();
-                    }
-                    (None, "super") => {
-                        root = Some(UseRoot::Crate);
-                        prefix = here.to_vec();
-                        prefix.pop();
-                    }
-                    (Some(UseRoot::Crate), "super") if prefix.len() < here.len() + 1 => {
-                        prefix.pop();
-                    }
-                    (None, _) => {
-                        root = Some(UseRoot::Extern);
-                        prefix.push(word.to_string());
-                    }
-                    (Some(_), "self") => {}
-                    (Some(_), _) => prefix.push(word.to_string()),
-                }
-                if path_sep(*at) {
-                    *at += 2;
-                    continue;
-                }
-                let mut local = if word == "self" || word == "super" || word == "crate" {
-                    prefix.last().cloned().unwrap_or_default()
-                } else {
-                    word.to_string()
-                };
-                if is_ident(tokens.get(*at).copied(), "as") {
-                    if let Some(Token::Ident(alias)) = tokens.get(*at + 1) {
-                        local = alias.clone();
-                        *at += 2;
-                    }
-                }
-                if let Some(root) = root {
-                    out.push((local, prefix, root));
-                }
-                return;
-            }
-            _ => return,
-        }
-    }
-}
-
-/// The production sites of `text` (the source of `relative`) that read or
-/// write archive bytes: a path into `kernel::archive` (through `crate::`,
+/// The production sites of `text` (the source of `relative`, under `src/`,
+/// the module `module`) that read or write archive bytes: a path that
+/// resolves into `kernel::archive` (`named_paths`: through `crate::`,
 /// `super::`, `kernel` imported under any name, or a glob import of
-/// `crate::kernel` at any depth of a use tree), a crate in
-/// `ARCHIVE_CRATES` (by path, `::`-rooted, or imported under any name), or
-/// an `unzip` program.
-fn archive_sites(relative: &str, text: &str) -> Vec<String> {
-    let module = module_path(Path::new(relative.trim_start_matches("src/")));
-    let tokens = production_tokens(text);
-    // The production code as text again, so `crate_paths` reads paths
-    // after a test module too (`non_test` stops at the first one).
-    let mut production = String::new();
-    let mut after_ident = false;
-    for (token, _) in &tokens {
-        match token {
-            Token::Ident(name) => {
-                if after_ident {
-                    production.push(' ');
-                }
-                production.push_str(name);
-            }
-            Token::Punct(c) => production.push(*c),
-            Token::Str(_) | Token::Lit => production.push_str(" 0 "),
-        }
-        after_ident = matches!(token, Token::Ident(_));
-    }
-    let mut sites: Vec<String> = crate_paths(&production, &module)
-        .into_iter()
-        .filter(|path| path.len() >= 2 && path[0] == "kernel" && path[1] == "archive")
-        .map(|path| path.join("::"))
+/// `crate::kernel`), a path into a crate in `ARCHIVE_CRATES` (by path,
+/// `::`-rooted, imported under any name, or `extern crate`), or an `unzip`
+/// program.
+fn archive_sites(relative: &str, module: &[String], text: &str) -> Vec<String> {
+    let relative = relative.trim_start_matches("src/");
+    let (named, _) = named_paths(relative, text, module, OPAQUE_MACRO_RULES);
+    let mut sites: Vec<String> = named
+        .iter()
+        .filter_map(|Named { at, root, path, .. }| {
+            let archive = match root {
+                Root::Crate => path.len() >= 2 && path[0] == "kernel" && path[1] == "archive",
+                Root::Other => ARCHIVE_CRATES.contains(&path[0].as_str()),
+            };
+            let prefix = if *root == Root::Crate { "crate::" } else { "" };
+            archive.then(|| format!("line {}: {prefix}{}", at.0, path.join("::")))
+        })
         .collect();
-    let path_at = |index: usize| {
-        is_punct(tokens.get(index + 1).map(|(token, _)| token), ':')
-            && is_punct(tokens.get(index + 2).map(|(token, _)| token), ':')
-    };
-    // A path's first segment: not itself after `::`.
-    let leading = |index: usize| index < 2 || !is_punct(Some(&tokens[index - 1].0), ':');
-    // `use crate::kernel::*` (or `crate::{kernel::{*, ..}}`) makes a bare
-    // `archive::` the kernel's; `use crate::kernel as k` makes `k::archive`
-    // it.
-    let mut glob_kernel = false;
-    let mut kernel_names = vec!["kernel".to_string()];
-    for (local, path, root) in use_bindings(&tokens, &module) {
-        match root {
-            UseRoot::Extern if ARCHIVE_CRATES.contains(&path[0].as_str()) => {
-                sites.push(format!("use {}", path.join("::")));
+    for (token, owner) in production_tokens(text) {
+        if let Token::Str(literal) = token {
+            if literal == "unzip" || literal.ends_with("/unzip") {
+                sites.push(format!("{literal:?} in fn {owner}"));
             }
-            UseRoot::Crate if path.len() >= 2 && path[0] == "kernel" && path[1] == "archive" => {
-                sites.push(path.join("::"));
-            }
-            UseRoot::Crate if path == ["kernel"] && local == "*" => glob_kernel = true,
-            UseRoot::Crate if path == ["kernel"] => kernel_names.push(local),
-            _ => {}
-        }
-    }
-    // `::zip::…`: an extern crate spelled from the root, not a module
-    // named `zip` inside some path.
-    let rooted = |index: usize| {
-        index >= 2
-            && is_punct(Some(&tokens[index - 1].0), ':')
-            && is_punct(Some(&tokens[index - 2].0), ':')
-            && (index < 3 || !matches!(tokens[index - 3].0, Token::Ident(_) | Token::Punct('>')))
-    };
-    let in_fn = |owner: &str| {
-        if owner.is_empty() {
-            String::new()
-        } else {
-            format!(" in fn {owner}")
-        }
-    };
-    for (index, (token, owner)) in tokens.iter().enumerate() {
-        match token {
-            Token::Ident(name)
-                if ARCHIVE_CRATES.contains(&name.as_str())
-                    && path_at(index)
-                    && (leading(index) || rooted(index)) =>
-            {
-                sites.push(format!("{name}::{}", in_fn(owner)));
-            }
-            Token::Ident(name)
-                if name == "crate"
-                    && index >= 1
-                    && is_ident(Some(&tokens[index - 1].0), "extern")
-                    && tokens.get(index + 1).is_some_and(|(next, _)| {
-                        matches!(next, Token::Ident(c) if ARCHIVE_CRATES.contains(&c.as_str()))
-                    }) =>
-            {
-                sites.push("extern crate".to_string());
-            }
-            Token::Ident(name)
-                if kernel_names.contains(name)
-                    && path_at(index)
-                    && leading(index)
-                    && is_ident(tokens.get(index + 3).map(|(token, _)| token), "archive") =>
-            {
-                sites.push(format!("kernel::archive{}", in_fn(owner)));
-            }
-            Token::Ident(name)
-                if glob_kernel && name == "archive" && path_at(index) && leading(index) =>
-            {
-                sites.push(format!(
-                    "archive:: (glob import of crate::kernel) in fn {owner}"
-                ));
-            }
-            Token::Str(literal) if literal == "unzip" || literal.ends_with("/unzip") => {
-                sites.push(format!("{literal:?}{}", in_fn(owner)));
-            }
-            _ => {}
         }
     }
     sites.sort();
@@ -2857,19 +4739,22 @@ fn archive_sites(relative: &str, text: &str) -> Vec<String> {
 
 #[test]
 fn archive_calls_live_where_the_heavy_gate_looks() {
-    let sources: Vec<(String, String)> = all_sources()
-        .into_iter()
-        .filter(|(relative, _)| relative.starts_with("src/"))
-        .collect();
-    let watched = gate_watches(&sources.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>());
+    let sources = production_sources();
+    let watched = gate_watches(
+        &sources
+            .iter()
+            .map(|module| module.relative.clone())
+            .collect::<Vec<_>>(),
+    );
     let mut violations = Vec::new();
-    for (relative, text) in &sources {
+    for module in &sources {
+        let relative = &module.relative;
         if watched.contains(relative)
             || ARCHIVE_GATE_EXEMPT.iter().any(|(path, _)| path == relative)
         {
             continue;
         }
-        for site in archive_sites(relative, text) {
+        for site in archive_sites(relative, &module.path, &module.text) {
             violations.push(format!("{relative}: {site}"));
         }
     }
@@ -2881,13 +4766,12 @@ fn archive_calls_live_where_the_heavy_gate_looks() {
         violations.join("\n  ")
     );
     for (path, _) in ARCHIVE_GATE_EXEMPT {
-        let text = &sources
+        let module = sources
             .iter()
-            .find(|(relative, _)| relative == path)
-            .unwrap_or_else(|| panic!("{path} is exempt but gone"))
-            .1;
+            .find(|module| module.relative == *path)
+            .unwrap_or_else(|| panic!("{path} is exempt but gone"));
         assert!(
-            !archive_sites(path, text).is_empty() && !watched.contains(*path),
+            !archive_sites(path, &module.path, &module.text).is_empty() && !watched.contains(*path),
             "{path} no longer needs its exemption"
         );
     }
@@ -2895,6 +4779,7 @@ fn archive_calls_live_where_the_heavy_gate_looks() {
 
 #[test]
 fn the_archive_scan_sees_every_spelling() {
+    let go = module_path(Path::new("tailors/go/mod.rs"));
     let caught = [
         "fn a() { crate::kernel::archive::list(p, c); }",
         "use crate::kernel::archive::{self, Compression};",
@@ -2920,17 +4805,24 @@ fn the_archive_scan_sees_every_spelling() {
         "use crate::{kernel as k, store};\nfn a() { k::archive::list(p, c); }",
         "use crate::{kernel::*, store};\nfn a() { archive::list(p, c); }",
         "use crate::{kernel::{*, store}};\nfn a() { archive::list(p, c); }",
+        // Macro input that is not code, opening with a `::`-rooted path.
+        "fn a() { opaque! { ::zip::ok() => then } }",
     ];
     for text in caught {
         assert!(
-            !archive_sites("src/tailors/go/mod.rs", text).is_empty(),
+            !archive_sites("src/tailors/go/mod.rs", &go, text).is_empty(),
             "{text}"
         );
     }
     // `super` counts the inline modules around it: in `mod inner` of
     // `kernel/foo.rs`, `super::super` is `kernel`.
     let inline = "mod inner {\n    use super::super::archive;\n}";
-    assert!(!archive_sites("src/kernel/foo.rs", inline).is_empty());
+    assert!(!archive_sites(
+        "src/kernel/foo.rs",
+        &module_path(Path::new("kernel/foo.rs")),
+        inline
+    )
+    .is_empty());
     let missed = [
         "fn a() { crate::kernel::fetch::download(u); }",
         "// see archive::list and zip::ZipArchive",
@@ -2943,7 +4835,7 @@ fn the_archive_scan_sees_every_spelling() {
     ];
     for text in missed {
         assert!(
-            archive_sites("src/tailors/go/mod.rs", text).is_empty(),
+            archive_sites("src/tailors/go/mod.rs", &go, text).is_empty(),
             "{text}"
         );
     }

@@ -841,6 +841,227 @@ pub fn ensure_git_source(
         .map(|(path, _)| path)
 }
 
+struct StageGuard(PathBuf);
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        let _ = crate::kernel::store::remove_tree(&self.0);
+    }
+}
+
+/// Pack a realized checkout into a deterministic `.tar.gz` and insert it into
+/// the artifact cache, returning (sha256, filename).
+///
+/// Everything downstream of this — build-system inspection, isolated build
+/// environments, derivation identity — is the ordinary sdist path, so a git
+/// dependency needs no parallel machinery. The archive is reproducible (sorted
+/// names, fixed mtime/owner/mode), so the same commit always yields the same
+/// hash, and that hash is what the wheel's identity commits to.
+pub fn pack_checkout(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: crate::kernel::platform::Platform,
+    source_root: &Path,
+    name: &str,
+    version: &str,
+) -> io::Result<(String, String)> {
+    if !is_safe_component(name) || !is_safe_component(version) {
+        return Err(err(format!(
+            "refusing to pack {name:?}-{version:?}: names and versions must be [A-Za-z0-9._+-]"
+        )));
+    }
+    let work = store.stage_with_activity(activity)?;
+    let _cleanup = StageGuard(work.clone());
+    let prefix = format!("{name}-{version}");
+    let filename = format!("{prefix}.tar.gz");
+    // Copy under the final prefix directory so the archive needs no name
+    // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
+    // would take a rewrite expression built from these strings.
+    let staged = work.join(&prefix);
+    crate::kernel::store::clone_tree_with_activity(activity, source_root, &staged, platform)?;
+    validate_symlinks(&staged)?;
+    normalize_for_packing(&staged)?;
+
+    // Determinism, portably: an explicit sorted null-delimited list (GNU tar
+    // and bsdtar both accept --null; GNU additionally spells out verbatim
+    // handling), the ustar header format, zeroed mtimes and owners, and gzip
+    // -n so the container
+    // carries no timestamp either. Null + verbatim is required for names
+    // containing newlines, backslashes, or a leading dash.
+    let mut files = Vec::new();
+    collect_paths(&staged, &work, &mut files)?;
+    files.sort_by(|a, b| {
+        use std::os::unix::ffi::OsStrExt;
+        a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes())
+    });
+    let list = work.join(".greyward-filelist");
+    {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = Vec::new();
+        for file in &files {
+            let path = file.as_os_str().as_bytes();
+            let meta = fs::symlink_metadata(work.join(file))?;
+            if !ustar_fits(path, meta.is_dir()) {
+                return Err(err(format!(
+                    "packing {} failed: {} is too long for a ustar header",
+                    source_root.display(),
+                    file.display()
+                )));
+            }
+            if meta.is_symlink() && fs::read_link(work.join(file))?.as_os_str().len() > 100 {
+                return Err(err(format!(
+                    "packing {} failed: symlink target of {} is too long for a ustar header",
+                    source_root.display(),
+                    file.display()
+                )));
+            }
+            bytes.extend_from_slice(path);
+            bytes.push(0);
+        }
+        fs::File::create(&list)?.write_all(&bytes)?;
+    }
+
+    let archive = work.join(&filename);
+    let uncompressed = work.join(format!("{prefix}.tar"));
+    crate::kernel::archive::pack_ustar_with_activity(
+        activity,
+        &uncompressed,
+        &work,
+        &list,
+        platform.is_macos(),
+    )
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("packing {} failed: {e}", source_root.display()),
+        )
+    })?;
+    let mut gzip = Command::new("/usr/bin/gzip");
+    gzip.args(["-n", "-9", "-c"])
+        .arg(&uncompressed)
+        .stdout(fs::File::create(&archive)?);
+    let gzip_status = crate::kernel::supervise::local_status(&mut gzip, activity)?;
+    let _ = fs::remove_file(&uncompressed);
+    if !gzip_status.success() {
+        return Err(err(format!(
+            "packing {} failed (gzip {})",
+            source_root.display(),
+            gzip_status,
+        )));
+    }
+    let (sha256, _) = crate::kernel::fetch::cache_insert(store, activity, &archive)?;
+    Ok((sha256, filename))
+}
+
+/// Give every non-symlink entry a fixed mode and set all tree-entry mtimes to
+/// the epoch without following symlinks.
+fn normalize_for_packing(root: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let epoch = std::time::SystemTime::UNIX_EPOCH;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+                stack.push(path);
+                continue;
+            }
+            let executable = fs::metadata(&path)?.permissions().mode() & 0o111 != 0;
+            fs::set_permissions(
+                &path,
+                fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
+            )?;
+            fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(epoch)?;
+        }
+    }
+    fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
+    let mut entries = Vec::new();
+    collect_paths(root, root, &mut entries)?;
+    for relative in entries {
+        set_mtime_epoch(&root.join(relative))?;
+    }
+    Ok(())
+}
+
+fn set_mtime_epoch(path: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| err(format!("path contains NUL: {}", path.display())))?;
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+    ];
+    // SAFETY: `path` is a NUL-terminated C string that outlives the call and
+    // `times` is a two-element timespec array, which is what utimensat reads.
+    let result = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Can a ustar header hold this path? Name field is 100 bytes, prefix 155,
+/// joined by a `/`, so the split has to land on a separator; directories carry
+/// a trailing `/` that counts against the name field.
+///
+/// We decide this ourselves instead of reading tar's exit code because the two
+/// tars disagree: GNU tar fails the run, while bsdtar prints "Pathname too
+/// long", *skips the entry*, and still exits 0. Trusting the subprocess would
+/// let macOS cache a silently truncated archive under a hash claiming to be
+/// the whole tree.
+fn ustar_fits(path: &[u8], is_dir: bool) -> bool {
+    let len = path.len() + usize::from(is_dir);
+    len <= 100 || (1..path.len().min(156)).any(|i| path[i] == b'/' && len - i - 1 <= 100)
+}
+
+/// Every tree entry under `root`, including directories and symlinks, as a
+/// path relative to `base`.
+fn collect_paths(root: &Path, base: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+    let relative = root
+        .strip_prefix(base)
+        .map_err(|_| err("packed path escaped the staging directory"))?;
+    out.push(relative.to_path_buf());
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_paths(&path, base, out)?;
+        } else if file_type.is_file() || file_type.is_symlink() {
+            let relative = path
+                .strip_prefix(base)
+                .map_err(|_| err("packed path escaped the staging directory"))?;
+            out.push(relative.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,227 +1600,6 @@ mod realization_tests {
         .to_string();
         assert!(error.contains("packing"), "{error}");
     }
-}
-
-struct StageGuard(PathBuf);
-
-impl Drop for StageGuard {
-    fn drop(&mut self) {
-        let _ = crate::kernel::store::remove_tree(&self.0);
-    }
-}
-
-/// Pack a realized checkout into a deterministic `.tar.gz` and insert it into
-/// the artifact cache, returning (sha256, filename).
-///
-/// Everything downstream of this — build-system inspection, isolated build
-/// environments, derivation identity — is the ordinary sdist path, so a git
-/// dependency needs no parallel machinery. The archive is reproducible (sorted
-/// names, fixed mtime/owner/mode), so the same commit always yields the same
-/// hash, and that hash is what the wheel's identity commits to.
-pub fn pack_checkout(
-    store: &Store,
-    activity: &StoreActivity,
-    platform: crate::kernel::platform::Platform,
-    source_root: &Path,
-    name: &str,
-    version: &str,
-) -> io::Result<(String, String)> {
-    if !is_safe_component(name) || !is_safe_component(version) {
-        return Err(err(format!(
-            "refusing to pack {name:?}-{version:?}: names and versions must be [A-Za-z0-9._+-]"
-        )));
-    }
-    let work = store.stage_with_activity(activity)?;
-    let _cleanup = StageGuard(work.clone());
-    let prefix = format!("{name}-{version}");
-    let filename = format!("{prefix}.tar.gz");
-    // Copy under the final prefix directory so the archive needs no name
-    // rewriting: --transform/-s differ between GNU tar and bsdtar, and both
-    // would take a rewrite expression built from these strings.
-    let staged = work.join(&prefix);
-    crate::comforter::clone_tree_with_activity(activity, source_root, &staged, platform)?;
-    validate_symlinks(&staged)?;
-    normalize_for_packing(&staged)?;
-
-    // Determinism, portably: an explicit sorted null-delimited list (GNU tar
-    // and bsdtar both accept --null; GNU additionally spells out verbatim
-    // handling), the ustar header format, zeroed mtimes and owners, and gzip
-    // -n so the container
-    // carries no timestamp either. Null + verbatim is required for names
-    // containing newlines, backslashes, or a leading dash.
-    let mut files = Vec::new();
-    collect_paths(&staged, &work, &mut files)?;
-    files.sort_by(|a, b| {
-        use std::os::unix::ffi::OsStrExt;
-        a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes())
-    });
-    let list = work.join(".greyward-filelist");
-    {
-        use std::io::Write;
-        use std::os::unix::ffi::OsStrExt;
-        let mut bytes = Vec::new();
-        for file in &files {
-            let path = file.as_os_str().as_bytes();
-            let meta = fs::symlink_metadata(work.join(file))?;
-            if !ustar_fits(path, meta.is_dir()) {
-                return Err(err(format!(
-                    "packing {} failed: {} is too long for a ustar header",
-                    source_root.display(),
-                    file.display()
-                )));
-            }
-            if meta.is_symlink() && fs::read_link(work.join(file))?.as_os_str().len() > 100 {
-                return Err(err(format!(
-                    "packing {} failed: symlink target of {} is too long for a ustar header",
-                    source_root.display(),
-                    file.display()
-                )));
-            }
-            bytes.extend_from_slice(path);
-            bytes.push(0);
-        }
-        fs::File::create(&list)?.write_all(&bytes)?;
-    }
-
-    let archive = work.join(&filename);
-    let uncompressed = work.join(format!("{prefix}.tar"));
-    crate::kernel::archive::pack_ustar_with_activity(
-        activity,
-        &uncompressed,
-        &work,
-        &list,
-        platform.is_macos(),
-    )
-    .map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("packing {} failed: {e}", source_root.display()),
-        )
-    })?;
-    let mut gzip = Command::new("/usr/bin/gzip");
-    gzip.args(["-n", "-9", "-c"])
-        .arg(&uncompressed)
-        .stdout(fs::File::create(&archive)?);
-    let gzip_status = crate::kernel::supervise::local_status(&mut gzip, activity)?;
-    let _ = fs::remove_file(&uncompressed);
-    if !gzip_status.success() {
-        return Err(err(format!(
-            "packing {} failed (gzip {})",
-            source_root.display(),
-            gzip_status,
-        )));
-    }
-    let (sha256, _) = crate::kernel::fetch::cache_insert(store, activity, &archive)?;
-    Ok((sha256, filename))
-}
-
-/// Give every non-symlink entry a fixed mode and set all tree-entry mtimes to
-/// the epoch without following symlinks.
-fn normalize_for_packing(root: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let epoch = std::time::SystemTime::UNIX_EPOCH;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-                stack.push(path);
-                continue;
-            }
-            let executable = fs::metadata(&path)?.permissions().mode() & 0o111 != 0;
-            fs::set_permissions(
-                &path,
-                fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 }),
-            )?;
-            fs::File::options()
-                .write(true)
-                .open(&path)?
-                .set_modified(epoch)?;
-        }
-    }
-    fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
-    let mut entries = Vec::new();
-    collect_paths(root, root, &mut entries)?;
-    for relative in entries {
-        set_mtime_epoch(&root.join(relative))?;
-    }
-    Ok(())
-}
-
-fn set_mtime_epoch(path: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| err(format!("path contains NUL: {}", path.display())))?;
-    let times = [
-        libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        },
-        libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        },
-    ];
-    // SAFETY: `path` is a NUL-terminated C string that outlives the call and
-    // `times` is a two-element timespec array, which is what utimensat reads.
-    let result = unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            path.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-/// Can a ustar header hold this path? Name field is 100 bytes, prefix 155,
-/// joined by a `/`, so the split has to land on a separator; directories carry
-/// a trailing `/` that counts against the name field.
-///
-/// We decide this ourselves instead of reading tar's exit code because the two
-/// tars disagree: GNU tar fails the run, while bsdtar prints "Pathname too
-/// long", *skips the entry*, and still exits 0. Trusting the subprocess would
-/// let macOS cache a silently truncated archive under a hash claiming to be
-/// the whole tree.
-fn ustar_fits(path: &[u8], is_dir: bool) -> bool {
-    let len = path.len() + usize::from(is_dir);
-    len <= 100 || (1..path.len().min(156)).any(|i| path[i] == b'/' && len - i - 1 <= 100)
-}
-
-/// Every tree entry under `root`, including directories and symlinks, as a
-/// path relative to `base`.
-fn collect_paths(root: &Path, base: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
-    let relative = root
-        .strip_prefix(base)
-        .map_err(|_| err("packed path escaped the staging directory"))?;
-    out.push(relative.to_path_buf());
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_paths(&path, base, out)?;
-        } else if file_type.is_file() || file_type.is_symlink() {
-            let relative = path
-                .strip_prefix(base)
-                .map_err(|_| err("packed path escaped the staging directory"))?;
-            out.push(relative.to_path_buf());
-        }
-    }
-    Ok(())
 }
 
 /// Offline tests for what git is never handed (#348): a source that is not

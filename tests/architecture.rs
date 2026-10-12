@@ -22,6 +22,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
+
 fn src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
@@ -386,17 +389,29 @@ fn ecosystem_violations(
     names: &[&str],
     allowed_counts: &mut [usize],
 ) -> Vec<String> {
+    let file = parse(text);
+    let tests = test_spans(&file);
+    let mut scan = EcosystemScan {
+        file: Path::new("src").join(relative),
+        names,
+        functions: Vec::new(),
+        allowing: None,
+        sites: Vec::new(),
+    };
+    scan.visit_file(&file);
+    scan.sites.sort();
+    scan.sites.dedup();
     let mut violations = Vec::new();
-    for (number, line) in non_test(text).lines().enumerate() {
-        let Some(name) = ecosystem_arm(line, names) else {
+    for (at, name, allowance) in scan.sites {
+        if tests
+            .iter()
+            .any(|(start, end)| (*start..*end).contains(&at))
+        {
             continue;
-        };
-        let allowed = ECOSYSTEM_COMPARISONS.iter().position(|(path, code, _)| {
-            relative == Path::new(path).strip_prefix("src").unwrap() && line.trim() == *code
-        });
-        match allowed {
+        }
+        match allowance {
             Some(index) => allowed_counts[index] += 1,
-            None => violations.push(format!("{}:{}: \"{name}\"", relative.display(), number + 1)),
+            None => violations.push(format!("{}:{}: \"{name}\"", relative.display(), at.0)),
         }
     }
     violations
@@ -407,104 +422,581 @@ fn ecosystem_allowance_violations(allowed_counts: &[usize]) -> Vec<String> {
         .iter()
         .zip(allowed_counts)
         .filter(|(_, count)| **count != 1)
-        .map(|((path, code, _), count)| format!("{path}: {code} (found {count}, expected 1)"))
+        .map(|((path, function, condition, _), count)| {
+            format!("{path}: fn {function}: if {condition} (found {count}, expected 1)")
+        })
         .collect()
+}
+
+/// The kernel's reviewed comparisons with an ecosystem name: the file, the
+/// function, the whole condition of the `if` it is (compared as parsed, so
+/// however it is spread over lines or commented), and why it is not a
+/// branch an eighth ecosystem would have to edit.
+const ECOSYSTEM_COMPARISONS: &[(&str, &str, &str, &str)] = &[(
+    "src/kernel/provider/cpython.rs",
+    "row",
+    "selected.ecosystem != \"python\"",
+    "the CPython provider refuses a selection from another ecosystem's \
+     section: a guard on its own input, not a branch per ecosystem",
+)];
+
+/// Methods that compare their receiver with their argument.
+const COMPARING_METHODS: &[&str] = &["eq", "ne"];
+
+/// Macros that compare their first two arguments.
+const COMPARING_MACROS: &[&str] = &[
+    "assert_eq",
+    "assert_ne",
+    "debug_assert_eq",
+    "debug_assert_ne",
+];
+
+/// Macros that take an expression, then a pattern with an optional guard.
+const PATTERN_MACROS: &[&str] = &["matches", "assert_matches", "debug_assert_matches"];
+
+/// The ecosystem names one parsed file branches on: a string literal in
+/// any pattern (`match` arms, `if let`, `while let`, `let … else`, a
+/// `matches!`), or an operand of `==`, `!=`, `.eq()`, `.ne()` or
+/// `assert_eq!`. An operand is seen through parentheses, references and
+/// constructor calls (`Some("go") == x`). A guard is an expression, not a
+/// pattern, and a literal anywhere else is data.
+struct EcosystemScan<'a> {
+    /// The file, as `src/…`, for matching `ECOSYSTEM_COMPARISONS`.
+    file: PathBuf,
+    names: &'a [&'a str],
+    /// The functions around the node being visited, innermost last.
+    functions: Vec<String>,
+    /// The `ECOSYSTEM_COMPARISONS` entry the condition being visited is.
+    allowing: Option<usize>,
+    /// (where, name, the entry allowing it).
+    sites: Vec<(Position, &'a str, Option<usize>)>,
+}
+
+impl EcosystemScan<'_> {
+    fn literal(&mut self, lit: &syn::LitStr) {
+        let value = lit.value();
+        if let Some(name) = self.names.iter().copied().find(|name| *name == value) {
+            self.sites
+                .push((position(lit.span().start()), name, self.allowing));
+        }
+    }
+
+    /// The ecosystem literals a comparison operand is, through parentheses,
+    /// references, dereferences, tuples, arrays, a block's final expression
+    /// and constructor calls (a path ending in an upper-case name:
+    /// `Some("go")`, `Kind::Go("go")`).
+    /// A call to anything else, or a method on the literal
+    /// (`"python".len()`), computes a value from it and is not one.
+    fn operand(&mut self, expr: &syn::Expr) {
+        match expr {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(lit),
+                ..
+            }) => self.literal(lit),
+            syn::Expr::Paren(e) => self.operand(&e.expr),
+            syn::Expr::Group(e) => self.operand(&e.expr),
+            syn::Expr::Reference(e) => self.operand(&e.expr),
+            syn::Expr::Unary(e) if matches!(e.op, syn::UnOp::Deref(_)) => self.operand(&e.expr),
+            syn::Expr::Tuple(e) => e.elems.iter().for_each(|elem| self.operand(elem)),
+            syn::Expr::Array(e) => e.elems.iter().for_each(|elem| self.operand(elem)),
+            syn::Expr::Call(e) if constructor(&e.func) => {
+                e.args.iter().for_each(|arg| self.operand(arg))
+            }
+            syn::Expr::Block(e) => self.block_operand(&e.block),
+            syn::Expr::Const(e) => self.block_operand(&e.block),
+            syn::Expr::Unsafe(e) => self.block_operand(&e.block),
+            _ => {}
+        }
+    }
+
+    /// A block as an operand is its final expression (`{ "go" }`).
+    fn block_operand(&mut self, block: &syn::Block) {
+        if let Some(syn::Stmt::Expr(tail, None)) = block.stmts.last() {
+            self.operand(tail);
+        }
+    }
+
+    /// Macro input no parser reads (`MacroInput::Opaque`: `macro_rules!`
+    /// rules, `if_chain!`) is still read as tokens: an ecosystem literal
+    /// right beside `==` or `!=`, past any `&`. The one token heuristic
+    /// left, and only for input that is not code until it is expanded.
+    fn opaque_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        let mut flat = Vec::new();
+        flatten(tokens, &mut flat);
+        let punct = |at: usize| match flat.get(at) {
+            Some(Some(proc_macro2::TokenTree::Punct(p))) => Some(p.as_char()),
+            _ => None,
+        };
+        let operator_at = |first: usize| {
+            COMPARISONS
+                .iter()
+                .any(|[a, b]| punct(first) == Some(*a) && punct(first + 1) == Some(*b))
+        };
+        for (at, tree) in flat.iter().enumerate() {
+            let Some(proc_macro2::TokenTree::Literal(literal)) = tree else {
+                continue;
+            };
+            let syn::Lit::Str(lit) = syn::Lit::new(literal.clone()) else {
+                continue;
+            };
+            let mut before = at;
+            while before > 0 && punct(before - 1) == Some('&') {
+                before -= 1;
+            }
+            if operator_at(at + 1) || (before >= 2 && operator_at(before - 2)) {
+                self.literal(&lit);
+            }
+        }
+    }
+}
+
+/// The comparison operators, as the one-character tokens they are made of.
+const COMPARISONS: &[[char; 2]] = &[['=', '='], ['!', '=']];
+
+/// `tokens` as one flat list, with `None` where a bracket group opens or
+/// closes, so nothing reads as adjacent across a bracket.
+fn flatten(tokens: proc_macro2::TokenStream, out: &mut Vec<Option<proc_macro2::TokenTree>>) {
+    for tree in tokens {
+        if let proc_macro2::TokenTree::Group(group) = tree {
+            out.push(None);
+            flatten(group.stream(), out);
+            out.push(None);
+        } else {
+            out.push(Some(tree));
+        }
+    }
+}
+
+/// A macro's input, parsed as what the macro takes. The test-code search
+/// and the ecosystem scan both read macros through this, so they see the
+/// same code inside them.
+enum MacroInput {
+    /// A pattern macro's expression, pattern, guard and any message.
+    Pattern(Box<(syn::Expr, syn::Pat, Option<syn::Expr>, Vec<syn::Expr>)>),
+    Expressions(Vec<syn::Expr>),
+    Statements(Vec<syn::Stmt>),
+    /// None of these: not code until the macro expands it.
+    Opaque,
+}
+
+fn macro_name(mac: &syn::Macro) -> String {
+    mac.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default()
+}
+
+/// A macro's input as a pattern macro's (`PATTERN_MACROS`), or else as
+/// comma-separated expressions, or else as statements.
+fn macro_input(mac: &syn::Macro) -> MacroInput {
+    if PATTERN_MACROS.contains(&macro_name(mac).as_str()) {
+        if let Ok(parts) = mac.parse_body_with(pattern_macro) {
+            return MacroInput::Pattern(Box::new(parts));
+        }
+    }
+    let expressions = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+    if let Ok(args) = mac.parse_body_with(expressions) {
+        MacroInput::Expressions(args.into_iter().collect())
+    } else if let Ok(statements) = mac.parse_body_with(syn::Block::parse_within) {
+        MacroInput::Statements(statements)
+    } else {
+        MacroInput::Opaque
+    }
+}
+
+/// Walk a macro's parsed input with `visitor`, as the code it is.
+fn walk_macro_input<V: for<'a> Visit<'a>>(visitor: &mut V, input: &MacroInput) {
+    match input {
+        MacroInput::Pattern(parts) => {
+            let (scrutinee, pattern, guard, rest) = &**parts;
+            visitor.visit_expr(scrutinee);
+            visitor.visit_pat(pattern);
+            guard.iter().chain(rest).for_each(|e| visitor.visit_expr(e));
+        }
+        MacroInput::Expressions(args) => args.iter().for_each(|arg| visitor.visit_expr(arg)),
+        MacroInput::Statements(statements) => {
+            statements.iter().for_each(|stmt| visitor.visit_stmt(stmt))
+        }
+        MacroInput::Opaque => {}
+    }
+}
+
+/// `matches!` input: `expression, pattern [if guard] [, message…]`.
+fn pattern_macro(
+    input: syn::parse::ParseStream,
+) -> syn::Result<(syn::Expr, syn::Pat, Option<syn::Expr>, Vec<syn::Expr>)> {
+    let scrutinee = input.parse()?;
+    input.parse::<syn::Token![,]>()?;
+    let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+    let guard = match input.parse::<Option<syn::Token![if]>>()? {
+        Some(_) => Some(input.parse()?),
+        None => None,
+    };
+    let mut rest = Vec::new();
+    if input.parse::<Option<syn::Token![,]>>()?.is_some() {
+        rest.extend(
+            syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated(input)?,
+        );
+    }
+    Ok((scrutinee, pattern, guard, rest))
+}
+
+/// Whether a called path is a tuple struct or enum variant: its last
+/// segment starts upper-case.
+fn constructor(func: &syn::Expr) -> bool {
+    let syn::Expr::Path(path) = func else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident.to_string().starts_with(char::is_uppercase))
+}
+
+impl<'ast> Visit<'ast> for EcosystemScan<'_> {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.functions.push(node.sig.ident.to_string());
+        visit::visit_item_fn(self, node);
+        self.functions.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.functions.push(node.sig.ident.to_string());
+        visit::visit_impl_item_fn(self, node);
+        self.functions.pop();
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.functions.push(node.sig.ident.to_string());
+        visit::visit_trait_item_fn(self, node);
+        self.functions.pop();
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+            self.operand(&node.left);
+            self.operand(&node.right);
+        }
+        visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if COMPARING_METHODS.contains(&node.method.to_string().as_str()) {
+            self.operand(&node.receiver);
+            node.args.iter().for_each(|arg| self.operand(arg));
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        if let syn::Pat::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(lit),
+            ..
+        }) = node
+        {
+            self.literal(lit);
+        }
+        visit::visit_pat(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let input = macro_input(node);
+        match &input {
+            MacroInput::Expressions(args)
+                if COMPARING_MACROS.contains(&macro_name(node).as_str()) =>
+            {
+                args.iter().take(2).for_each(|arg| self.operand(arg));
+            }
+            MacroInput::Opaque => self.opaque_tokens(node.tokens.clone()),
+            _ => {}
+        }
+        walk_macro_input(self, &input);
+    }
+
+    /// The condition of an `if` is allowed when it is, as parsed, one
+    /// `ECOSYSTEM_COMPARISONS` entry in that entry's file and function.
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        let allowance = ECOSYSTEM_COMPARISONS
+            .iter()
+            .position(|(file, function, condition, _)| {
+                self.file == Path::new(file)
+                    && self.functions.last().is_some_and(|name| name == function)
+                    && syn::parse_str::<syn::Expr>(condition).is_ok_and(|c| *node.cond == c)
+            });
+        let outer = std::mem::replace(&mut self.allowing, allowance);
+        self.visit_expr(&node.cond);
+        self.allowing = outer;
+        self.visit_block(&node.then_branch);
+        if let Some((_, otherwise)) = &node.else_branch {
+            self.visit_expr(otherwise);
+        }
+    }
+}
+
+/// A fixture run as a kernel file where no reviewed comparison lives,
+/// inside a function opened on its first line, so its lines are the
+/// fixture's own.
+fn ecosystem_fixture(source: &str) -> Vec<String> {
+    let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+    ecosystem_violations(
+        Path::new("kernel/fixture.rs"),
+        &format!("fn fixture() {{ {source}\n}}\n"),
+        &["go", "python"],
+        &mut counts,
+    )
 }
 
 #[test]
 fn ecosystem_allowances_cover_one_live_site_only() {
     let path = Path::new("kernel/provider/cpython.rs");
-    let guard = "if selected.ecosystem != \"python\" {\n    return Err(refused());\n}\n";
+    let guard = "fn row() {\n    if selected.ecosystem != \"python\" {\n        return Err(refused());\n    }\n}\n";
+    let spread = "fn row() {\n    if selected\n        .ecosystem // the section\n        !=\n        \"python\"\n    {\n    }\n}\n";
+    let in_test = format!("#[cfg(test)]\nmod tests {{\n{guard}}}\n");
     for (source, accepted) in [
         (String::new(), false),
         (guard.into(), true),
+        (spread.into(), true),
+        (in_test.clone(), false),
+        (format!("{guard}{in_test}"), true),
         (guard.repeat(2), false),
+        (format!("{guard}{spread}"), false),
     ] {
         let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
         assert!(ecosystem_violations(path, &source, &["python"], &mut counts).is_empty());
-        assert_eq!(ecosystem_allowance_violations(&counts).is_empty(), accepted);
+        assert_eq!(
+            ecosystem_allowance_violations(&counts).is_empty(),
+            accepted,
+            "{source}"
+        );
     }
-    // Neither another provider nor another comparison in the same provider
-    // inherits the reviewed input guard's permission.
+    // Neither another provider, another function, nor another comparison
+    // in the same function inherits the reviewed input guard's permission.
     for (path, source) in [
         (Path::new("kernel/provider/rust.rs"), guard),
         (
             path,
-            "if selected.ecosystem == \"python\" {\n    choose_runtime();\n}\n",
+            "fn row() {\n    if selected.ecosystem == \"python\" {\n        choose_runtime();\n    }\n}\n",
+        ),
+        (path, "fn row() {\n    if other.ecosystem != \"python\" {}\n}\n"),
+        (
+            path,
+            "fn row() {\n    if selected.ecosystem != \"python\" && x {}\n}\n",
+        ),
+        (
+            path,
+            "fn row() {\n    let foreign = selected.ecosystem != \"python\";\n}\n",
+        ),
+        (
+            path,
+            "fn other() {\n    if selected.ecosystem != \"python\" {}\n}\n",
+        ),
+        (
+            path,
+            "fn row() {\n    if selected.ecosystem != \"python\" {\n        if selected.ecosystem != \"python\" {}\n    }\n}\n",
         ),
     ] {
         let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        let violations = ecosystem_violations(path, source, &["python"], &mut counts);
+        // Every comparison is seen, as a violation or a (spent) allowance.
+        let allowed = counts.iter().sum::<usize>();
         assert_eq!(
-            ecosystem_violations(path, source, &["python"], &mut counts).len(),
-            1
+            violations.len() + allowed,
+            source.matches("\"python\"").count(),
+            "{source}"
         );
-        assert!(!ecosystem_allowance_violations(&counts).is_empty());
+        assert!(!ecosystem_allowance_violations(&counts).is_empty(), "{source}");
     }
 }
 
-/// The kernel's reviewed comparisons with an ecosystem name: the file, the
-/// whole line as it reads trimmed, and why it is not a branch an eighth
-/// ecosystem would have to edit.
-const ECOSYSTEM_COMPARISONS: &[(&str, &str, &str)] = &[(
-    "src/kernel/provider/cpython.rs",
-    "if selected.ecosystem != \"python\" {",
-    "the CPython provider refuses a selection from another ecosystem's \
-     section: a guard on its own input, not a branch per ecosystem",
-)];
-
-/// The ecosystem `line` branches on: a quoted name in a pattern, which is
-/// anything before a `=>` on its line (a plain arm, a guard arm, a tuple
-/// or `Some(..)` pattern), one `|` alternative of a pattern continued over
-/// several lines, or an argument of `matches!`; and a quoted name beside
-/// `==` or `!=`.
-fn ecosystem_arm<'a>(line: &str, names: &[&'a str]) -> Option<&'a str> {
-    let code = line.split("//").next().unwrap_or(line);
-    names.iter().copied().find(|name| {
-        let quoted = format!("\"{name}\"");
-        code.match_indices(&quoted).any(|(at, _)| {
-            let after = code[at + quoted.len()..].trim_start();
-            let before = code[..at].trim_end();
-            let alternative = (after.starts_with('|') && !after.starts_with("||"))
-                || (before.ends_with('|') && !before.ends_with("||"));
-            let pattern = after.contains("=>") || before.contains("matches!(");
-            let compared = ["==", "!="]
-                .iter()
-                .any(|op| after.starts_with(op) || before.ends_with(op));
-            alternative || pattern || compared
-        })
-    })
+/// A comparison split over lines is caught under every kernel directory,
+/// at the line its name is on.
+#[test]
+fn the_ecosystem_scan_covers_every_kernel_directory() {
+    let split = "fn f() {\n    if selected.ecosystem\n        !=\n        \"python\"\n    {\n        choose_runtime();\n    }\n}\n";
+    let root = src();
+    let mut dirs = vec![root.join("kernel")];
+    let mut seen = 0;
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+        let relative = dir.strip_prefix(&root).unwrap().join("fixture.rs");
+        let mut counts = vec![0; ECOSYSTEM_COMPARISONS.len()];
+        assert_eq!(
+            ecosystem_violations(&relative, split, &["python"], &mut counts),
+            [format!("{}:4: \"python\"", relative.display())]
+        );
+        seen += 1;
+    }
+    assert!(seen > 1, "no kernel subdirectories found");
 }
 
 #[test]
-fn the_ecosystem_arm_scan_sees_every_spelling() {
-    let names = ["go", "python"];
-    for line in [
-        "        \"python\" => {",
-        "        \"go\" | \"python\" => true,",
-        "    matches!(name, \"node\" | \"go\")",
-        "    matches!(name, \"go\")",
-        "        \"python\"=> 1,",
-        "        \"go\" if rows.is_empty() => newest(),",
-        "        (\"python\", _) => cpython(),",
-        "        (_, Some(\"go\")) => std_only(),",
-        "        Some(\"go\") => {",
-        "        | \"python\"",
-        "    if selected.ecosystem != \"python\" {",
-        "    name == \"go\" || other",
+fn the_ecosystem_scan_sees_every_spelling() {
+    for (source, expected) in [
+        ("match name {\n    \"python\" => {}\n}", &["2: \"python\""][..]),
+        (
+            "match name {\n    \"go\"\n    | \"node\" => true,\n    _ => false,\n}",
+            &["2: \"go\""],
+        ),
+        ("x = matches!(name, \"node\" | \"go\");", &["1: \"go\""]),
+        (
+            "x = matches!(\n    name,\n    \"node\"\n        | \"go\"\n);",
+            &["4: \"go\""],
+        ),
+        ("x = matches! { name, \"go\" };", &["1: \"go\""]),
+        ("x = matches!(x, Some(n) if n == \"go\");", &["1: \"go\""]),
+        (
+            "x = matches!(get::<A, B>(x), Some(\"go\"));",
+            &["1: \"go\""],
+        ),
+        ("match name {\n    \"python\"=> 1,\n    _ => 2,\n}", &["2: \"python\""]),
+        (
+            "match rows {\n    \"go\" if rows.is_empty() => newest(),\n    _ => old(),\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "match pair {\n    (\n        \"python\",\n        _,\n    ) => cpython(),\n    _ => {}\n}",
+            &["3: \"python\""],
+        ),
+        (
+            "match pair {\n    (_, Some(\"go\")) => std_only(),\n    _ => {}\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "match pair {\n    _ if done => {}\n    Some(\"go\") => {}\n}",
+            &["3: \"go\""],
+        ),
+        // Arm bodies that need no comma before the next arm.
+        (
+            "match a {\n    _ if x => if y { 1 } else { 2 }\n    \"go\" => 3,\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "match x {\n    _ if flag => const { () }\n    \"go\" => {}\n}",
+            &["3: \"go\""],
+        ),
+        // A block as the scrutinee.
+        (
+            "match { name } {\n    \"go\" => (),\n    _ => (),\n}",
+            &["2: \"go\""],
+        ),
+        (
+            "match outer {\n    _ => match inner {\n        \"go\" => 1,\n        _ => 2,\n    },\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "if selected.ecosystem\n    !=\n    \"python\"\n{\n    choose_runtime();\n}",
+            &["3: \"python\""],
+        ),
+        ("let go = name\n    == \"go\" || other;", &["2: \"go\""]),
+        ("if \"go\"\n    == name {}", &["1: \"go\""]),
+        ("if name != &\"go\" {}", &["1: \"go\""]),
+        ("if name == (\"python\") {}", &["1: \"python\""]),
+        ("if Some(\"python\") == x {}", &["1: \"python\""]),
+        ("if (\"go\", 1) == pair {}", &["1: \"go\""]),
+        ("if let Some(\"python\") = x {}", &["1: \"python\""]),
+        ("while let Some(\"go\") = it.next() {}", &["1: \"go\""]),
+        ("let Some(\"go\") = x else {\n    return;\n};", &["1: \"go\""]),
+        ("if x.eq(\"python\") {}", &["1: \"python\""]),
+        ("if \"go\".ne(&x) {}", &["1: \"go\""]),
+        ("assert_eq!(\n    x,\n    \"python\"\n);", &["3: \"python\""]),
+        ("assert!(name == \"go\");", &["1: \"go\""]),
+        ("if name == /* c */ \"go\" {}", &["1: \"go\""]),
+        ("if name == \"pyth\\x6fn\" {}", &["1: \"python\""]),
+        (
+            "if name == r\"go\" ||\n    name == r#\"python\"# {}",
+            &["1: \"go\"", "2: \"python\""],
+        ),
+        // A block's final expression.
+        ("let b = name == { \"python\" };", &["1: \"python\""]),
+        ("let b = name == const { \"go\" };", &["1: \"go\""]),
+        ("let b = unsafe { \"go\" } != name;", &["1: \"go\""]),
+        // Macro input no parser reads is still read for comparisons.
+        (
+            "if_chain! {\n    if name == \"python\";\n    then { choose_runtime(); }\n}",
+            &["2: \"python\""],
+        ),
+        (
+            "macro_rules! m {\n    ($x:expr) => { $x == \"python\" };\n}",
+            &["2: \"python\""],
+        ),
+        // Test code is what cannot compile without `test`, no more.
+        (
+            "#[cfg(any(test, feature = \"x\"))]\nfn h() {\n    if name == \"go\" {}\n}",
+            &["3: \"go\""],
+        ),
+        (
+            "#[cfg(not(test))]\nfn h() {\n    if name == \"go\" {}\n}",
+            &["3: \"go\""],
+        ),
+        // A quote in a char literal opens no string.
+        ("let q = '\"';\nif name == \"go\" {}", &["2: \"go\""]),
+        // Production code after test-only code is still production code.
+        (
+            "#[cfg(test)]\nmod tests {}\nfn late() {\n    if name == \"go\" {}\n}",
+            &["4: \"go\""],
+        ),
+        (
+            "#[cfg(test)]\nconst LESS: bool = 1 < 2;\nif name == \"go\" {}",
+            &["3: \"go\""],
+        ),
     ] {
-        assert!(ecosystem_arm(line, &names).is_some(), "{line}");
+        let expected: Vec<String> = expected
+            .iter()
+            .map(|site| format!("kernel/fixture.rs:{site}"))
+            .collect();
+        assert_eq!(ecosystem_fixture(source), expected, "{source}");
     }
-    for line in [
-        "    let tool = \"go\";",
-        "    run(&[\"go\", \"build\"]);",
-        "    Component::new(\"go\", \"1.27.0\"),",
-        "            (\"python\", \"old\"),",
-        "        _ => Some(\"go\"),",
-        "        Other => format!(\"{}\", \"python\"),",
-        "    // \"python\" => no longer here",
-        "        \"golang\" => {",
+    for source in [
+        "let tool = \"go\";",
+        "run(&[\"go\", \"build\"]);",
+        "let c = vec![Component::new(\"go\", \"1.27.0\")];",
+        "const OLD: &[(&str, &str)] = &[\n    (\"python\", \"old\"),\n];",
+        "match name {\n    _ => Some(\"go\"),\n    Other => format!(\"{}\", \"python\"),\n}",
+        "match name {\n    _ if x => if y { \"go\" } else { \"python\" }\n    _ => {}\n}",
+        "match name {\n    \"golang\" => {}\n    _ => {}\n}",
+        "let longer = name.len() >= \"go\".len();",
+        "let same = count == \"python\".len();",
+        "assert_eq!(x.len(), \"python\".len());",
+        "if x == normalize(\"go\") {}",
+        "macro_rules! m {\n    ($x:expr) => { \"go\" };\n}",
+        // An arm body is not a pattern, however the arms are laid out.
+        "match x {\n    true => if { ready() } { log(\"python\"); }\n    false => {}\n}",
+        // A guard is an expression, not a pattern.
+        "match x {\n    _ if { log(\"python\"); ready() } => {}\n}",
+        // Commas in a turbofish split nothing.
+        "x = matches!(get::<A, B>(\"python\"), Some(_));",
+        "match get::<A, B>(\"python\") {\n    _ => {}\n}",
+        // Comments, every kind.
+        "// if name == \"python\" {}",
+        "/// matches!(name, \"go\")\nfn f() {}",
+        "//! \"go\" => x",
+        "/* name == \"go\" */",
+        "/* outer /* inner */ name\n    == \"go\" */",
+        "/** \"python\" => doc */\nfn f() {}",
+        // String data that spells a comparison.
+        "let s = \"if name == \\\"python\\\" {}\";",
+        "let s = r#\"name == \"go\"\"#;",
+        "let s = r##\"match x {\n    \"go\" => 1,\n}\"##;",
+        "let s = b\"x != \\\"go\\\"\";",
+        // Test-only code.
+        "#[cfg(test)]\nmod tests {\n    fn t() {\n        assert!(name\n            == \"python\");\n    }\n}",
+        "#[cfg(test)]\nfn helper(name: &str) -> bool {\n    matches!(\n        name,\n        \"go\"\n    )\n}",
+        "#[cfg(test)]\nmod fixture_tests {\n    const X: bool = matches!(N, \"go\");\n}",
+        "#[cfg(test)]\nif name == \"go\" {}",
+        "match x {\n    #[cfg(test)]\n    \"go\" => {}\n    _ => {}\n}",
+        "#[cfg(all(test, unix))]\nfn h() {\n    if name == \"go\" {}\n}",
+        "#[cfg(all(test, debug_assertions))]\nfn h() {\n    if name == \"go\" {}\n}",
+        "#[cfg_attr(not(test), cfg(any()))]\nfn h() {\n    if name == \"go\" {}\n}",
+        // Test code inside a macro's input is test code too.
+        "identity! {\n    #[cfg(test)]\n    fn helper() {\n        if name == \"go\" {}\n    }\n}",
     ] {
-        assert_eq!(ecosystem_arm(line, &names), None, "{line}");
+        assert_eq!(ecosystem_fixture(source), Vec::<String>::new(), "{source}");
     }
 }
 
@@ -1477,10 +1969,10 @@ fn is_punct(token: Option<&Token>, c: char) -> bool {
 }
 
 /// Production tokens of a file, each tagged with the innermost named `fn`
-/// around it. Items under `#[cfg(test)]` (test modules and test-only
-/// helpers) are dropped whole.
+/// around it. Test-only code (`test_spans`: test modules, test-only
+/// helpers, fields, arms and statements) is blanked out first.
 fn production_tokens(text: &str) -> Vec<(Token, String)> {
-    let tokens = tokenize(text);
+    let tokens = tokenize(&production_text(text));
     let mut out = Vec::new();
     // (fn name, brace depth its body opened at)
     let mut functions: Vec<(String, usize)> = Vec::new();
@@ -1488,48 +1980,6 @@ fn production_tokens(text: &str) -> Vec<(Token, String)> {
     let mut depth = 0usize;
     let mut i = 0;
     while i < tokens.len() {
-        // `# [ cfg ( test ) ]` drops the next item: through its matching
-        // brace, or through the `;` or `,` that ends an item, field or
-        // expression without a body. A `}` that closes the enclosing block
-        // ends it too and is kept.
-        if is_punct(tokens.get(i), '#')
-            && is_punct(tokens.get(i + 1), '[')
-            && is_ident(tokens.get(i + 2), "cfg")
-            && is_punct(tokens.get(i + 3), '(')
-            && is_ident(tokens.get(i + 4), "test")
-            && is_punct(tokens.get(i + 5), ')')
-            && is_punct(tokens.get(i + 6), ']')
-        {
-            let mut j = i + 7;
-            let mut braces = 0usize;
-            let mut groups = 0usize;
-            let mut consumed_close = true;
-            while j < tokens.len() {
-                let arrow = j > 0 && tokens[j - 1] == Token::Punct('-');
-                match &tokens[j] {
-                    Token::Punct('{') => braces += 1,
-                    Token::Punct('}') if braces == 0 => {
-                        consumed_close = false;
-                        break;
-                    }
-                    Token::Punct('}') => {
-                        braces -= 1;
-                        if braces == 0 && groups == 0 {
-                            break;
-                        }
-                    }
-                    Token::Punct('(' | '[') if braces == 0 => groups += 1,
-                    Token::Punct(')' | ']') if braces == 0 => groups = groups.saturating_sub(1),
-                    Token::Punct('<') if braces == 0 => groups += 1,
-                    Token::Punct('>') if braces == 0 && !arrow => groups = groups.saturating_sub(1),
-                    Token::Punct(';' | ',') if braces == 0 && groups == 0 => break,
-                    _ => {}
-                }
-                j += 1;
-            }
-            i = if consumed_close { j + 1 } else { j };
-            continue;
-        }
         let token = tokens[i].clone();
         match &token {
             Token::Ident(word) if word == "fn" => {
@@ -1565,6 +2015,345 @@ fn production_tokens(text: &str) -> Vec<(Token, String)> {
         i += 1;
     }
     out
+}
+
+/// A place in a source file: 1-based line, 0-based column in characters.
+type Position = (usize, usize);
+
+fn position(at: proc_macro2::LineColumn) -> Position {
+    (at.line, at.column)
+}
+
+/// Where `node` starts and ends, outer attributes included.
+fn span_of(node: &impl Spanned) -> (Position, Position) {
+    let span = node.span();
+    (position(span.start()), position(span.end()))
+}
+
+/// `text` parsed as a Rust file. Every file the scans read is one, and so
+/// is every fixture.
+fn parse(text: &str) -> syn::File {
+    syn::parse_file(text).unwrap_or_else(|error| {
+        let (line, column) = position(error.span().start());
+        panic!(
+            "not Rust at line {line}, column {}: {error}\n{text}",
+            column + 1
+        )
+    })
+}
+
+/// `text` with its test-only code (`test_spans`) blanked to spaces, so
+/// what is left keeps its lines and columns.
+fn production_text(text: &str) -> String {
+    let mut chars: Vec<char> = text.chars().collect();
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(
+            chars
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == '\n')
+                .map(|(i, _)| i + 1),
+        )
+        .collect();
+    let len = chars.len();
+    let offset = |(line, column): Position| (line_starts[line - 1] + column).min(len);
+    for (start, end) in test_spans(&parse(text)) {
+        let (start, end) = (offset(start), offset(end));
+        for c in &mut chars[start..end] {
+            if *c != '\n' {
+                *c = ' ';
+            }
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// Whether `attrs` mark test-only code: code that cannot be compiled when
+/// `test` is off. `#[test]` is, and so is a `cfg` that cannot hold without
+/// `test` (`cfg(test)`, `cfg(all(test, unix))`) or a `cfg_attr` that
+/// applies such a `cfg` (`cfg_attr(not(test), cfg(any()))`).
+fn marks_test_code(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| compiled_without_test(&attr.meta) == Some(false))
+}
+
+/// Whether code under the attribute `meta` is compiled with `test` off:
+/// `Some` when that is known whatever every other cfg option is, `None`
+/// when it depends on them.
+fn compiled_without_test(meta: &syn::Meta) -> Option<bool> {
+    if meta.path().is_ident("test") {
+        return Some(false);
+    }
+    let syn::Meta::List(list) = meta else {
+        return Some(true);
+    };
+    let Ok(args) = list.parse_args_with(
+        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+    ) else {
+        return None;
+    };
+    let mut args = args.iter();
+    if list.path.is_ident("cfg") {
+        args.next().and_then(cfg_without_test)
+    } else if list.path.is_ident("cfg_attr") {
+        // Compiled when the condition fails, or when it holds and every
+        // attribute it applies lets the code compile.
+        let condition = args.next().and_then(cfg_without_test);
+        let applied = all_of(args.map(compiled_without_test));
+        any_of([condition.map(|holds| !holds), all_of([condition, applied])])
+    } else {
+        Some(true)
+    }
+}
+
+/// The value of a cfg predicate with `test` off and every other option
+/// unknown (`None`): `all`, `any` and `not` over three values.
+fn cfg_without_test(predicate: &syn::Meta) -> Option<bool> {
+    let syn::Meta::List(list) = predicate else {
+        // A bare option: `test` is off, any other is unknown.
+        return predicate.path().is_ident("test").then_some(false);
+    };
+    let args = list
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .ok()?;
+    let values = args.iter().map(cfg_without_test);
+    if list.path.is_ident("all") {
+        all_of(values)
+    } else if list.path.is_ident("any") {
+        any_of(values)
+    } else if list.path.is_ident("not") {
+        all_of(values).map(|value| !value)
+    } else {
+        None
+    }
+}
+
+/// Three-valued `and`: false if any is, true if all are, else unknown.
+fn all_of(values: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let values: Vec<Option<bool>> = values.into_iter().collect();
+    if values.contains(&Some(false)) {
+        Some(false)
+    } else if values.iter().all(|value| *value == Some(true)) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Three-valued `or`: true if any is, false if all are, else unknown.
+fn any_of(values: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    all_of(values.into_iter().map(|value| value.map(|v| !v))).map(|value| !value)
+}
+
+#[test]
+fn test_only_cfgs_are_evaluated_without_test() {
+    let marks = |attr: &str| {
+        let item: syn::ItemFn = syn::parse_str(&format!("{attr}\nfn f() {{}}")).unwrap();
+        marks_test_code(&item.attrs)
+    };
+    for attr in [
+        "#[test]",
+        "#[cfg(test)]",
+        "#[cfg(all(test, unix))]",
+        "#[cfg(all(test, debug_assertions))]",
+        "#[cfg(all(unix, any(test, any())))]",
+        "#[cfg(not(not(test)))]",
+        "#[cfg(any())]",
+        "#[cfg_attr(not(test), cfg(any()))]",
+        "#[cfg_attr(all(), cfg(test))]",
+    ] {
+        assert!(marks(attr), "{attr}");
+    }
+    for attr in [
+        "#[inline]",
+        "#[cfg(unix)]",
+        "#[cfg(not(test))]",
+        "#[cfg(any(test, feature = \"x\"))]",
+        "#[cfg(any(test, unix))]",
+        "#[cfg(all())]",
+        "#[cfg_attr(test, cfg(any()))]",
+        "#[cfg_attr(unix, cfg(test))]",
+        "#[cfg_attr(test, allow(dead_code))]",
+    ] {
+        assert!(!marks(attr), "{attr}");
+    }
+}
+
+/// The spans of a file's test-only code: each item, impl or trait member,
+/// statement, expression, field, variant, match arm and field value marked
+/// `#[cfg(test)]` or `#[test]`, and the whole file if it is marked so
+/// inside. Found by attribute in the parsed file, so nothing inside a
+/// test-only item (a `<` in `1 < 2`, say) can make it end early or late.
+fn test_spans(file: &syn::File) -> Vec<(Position, Position)> {
+    let mut spans = TestSpans(Vec::new());
+    if marks_test_code(&file.attrs) {
+        spans.0.push(span_of(file));
+    } else {
+        spans.visit_file(file);
+    }
+    spans.0
+}
+
+struct TestSpans(Vec<(Position, Position)>);
+
+/// A syntax node's outer attributes.
+trait Attrs {
+    fn attrs(&self) -> &[syn::Attribute];
+}
+
+/// `Attrs` for node structs, which hold their attributes in `attrs`.
+macro_rules! struct_attrs {
+    ($($ty:ident),*) => {$(
+        impl Attrs for syn::$ty {
+            fn attrs(&self) -> &[syn::Attribute] {
+                &self.attrs
+            }
+        }
+    )*};
+}
+
+/// `Attrs` for node enums, whose variants each hold a struct with `attrs`
+/// (a `Verbatim` variant has none).
+macro_rules! enum_attrs {
+    ($($ty:ident { $($variant:ident),* })*) => {$(
+        impl Attrs for syn::$ty {
+            fn attrs(&self) -> &[syn::Attribute] {
+                match self {
+                    $(syn::$ty::$variant(node) => &node.attrs,)*
+                    _ => &[],
+                }
+            }
+        }
+    )*};
+}
+
+struct_attrs!(Local, Field, Variant, Arm, FieldValue, FieldPat, StmtMacro);
+enum_attrs! {
+    Item {
+        Const, Enum, ExternCrate, Fn, ForeignMod, Impl, Macro, Mod, Static, Struct, Trait,
+        TraitAlias, Type, Union, Use
+    }
+    ImplItem { Const, Fn, Type, Macro }
+    TraitItem { Const, Fn, Type, Macro }
+    ForeignItem { Fn, Static, Type, Macro }
+    Expr {
+        Array, Assign, Async, Await, Binary, Block, Break, Call, Cast, Closure, Const, Continue,
+        Field, ForLoop, Group, If, Index, Infer, Let, Lit, Loop, Macro, Match, MethodCall,
+        Paren, Path, Range, RawAddr, Reference, Repeat, Return, Struct, Try, TryBlock, Tuple,
+        Unary, Unsafe, While, Yield
+    }
+}
+
+/// `TestSpans` methods for nodes that carry attributes: record a test-only
+/// node's span and do not look inside it, walk into any other.
+macro_rules! skip_test_only {
+    ($($method:ident($ty:ident);)*) => {$(
+        fn $method(&mut self, node: &'ast syn::$ty) {
+            if marks_test_code(node.attrs()) {
+                self.0.push(span_of(node));
+            } else {
+                visit::$method(self, node);
+            }
+        }
+    )*};
+}
+
+impl<'ast> Visit<'ast> for TestSpans {
+    skip_test_only! {
+        visit_item(Item);
+        visit_impl_item(ImplItem);
+        visit_trait_item(TraitItem);
+        visit_foreign_item(ForeignItem);
+        visit_expr(Expr);
+        visit_local(Local);
+        visit_field(Field);
+        visit_variant(Variant);
+        visit_arm(Arm);
+        visit_field_value(FieldValue);
+        visit_field_pat(FieldPat);
+        visit_stmt_macro(StmtMacro);
+    }
+
+    /// An attribute on an expression statement belongs to the whole
+    /// statement, but the parser hangs it on the leftmost operand
+    /// (`#[cfg(test)] a = b;` marks `a`).
+    fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+        if let syn::Stmt::Expr(expr, _) = node {
+            let mut leftmost = expr;
+            loop {
+                leftmost = match leftmost {
+                    syn::Expr::Assign(e) => &e.left,
+                    syn::Expr::Binary(e) => &e.left,
+                    syn::Expr::Cast(e) => &e.expr,
+                    _ => break,
+                };
+            }
+            if marks_test_code(leftmost.attrs()) {
+                self.0.push(span_of(node));
+                return;
+            }
+        }
+        visit::visit_stmt(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        walk_macro_input(self, &macro_input(node));
+    }
+}
+
+#[test]
+fn test_code_is_found_by_attribute() {
+    let owners = |text: &str| {
+        let mut owners: Vec<String> = production_tokens(text)
+            .into_iter()
+            .map(|(_, owner)| owner)
+            .filter(|owner| !owner.is_empty())
+            .collect();
+        owners.dedup();
+        owners
+    };
+    // A `<` in a test-only item is no generic opener.
+    assert_eq!(
+        owners("#[cfg(test)]\nconst LESS: bool = 1 < 2;\nfn kept() { c.spawn(); }"),
+        ["kept"]
+    );
+    let source = "#[cfg(test)]\nfn generic<A, B>() -> Map<A, B> { a() }\n\
+             #[cfg(test)]\nmod tests { fn t() {} }\n\
+             #[test]\nfn unit() {}\n\
+             enum E { #[cfg(test)]\nTest(Vec<u8>), Kept }\n\
+             fn kept(x: u8) {\n    #[cfg(test)]\n    let a = 1 < 2;\n    #[cfg(test)]\n    \
+             hook = x > 1;\n    #[cfg(test)]\n    {\n        inner();\n    }\n    \
+             match x {\n        #[cfg(test)]\n        0 => test_arm(),\n        _ => kept_arm(),\n    }\n}";
+    assert_eq!(owners(source), ["kept"]);
+    let idents: Vec<String> = production_tokens(source)
+        .into_iter()
+        .filter_map(|(token, _)| match token {
+            Token::Ident(word) => Some(word),
+            _ => None,
+        })
+        .collect();
+    for gone in [
+        "generic", "Map", "tests", "unit", "Test", "a", "hook", "inner", "test_arm",
+    ] {
+        assert!(
+            !idents.iter().any(|word| word == gone),
+            "{gone} is test code"
+        );
+    }
+    for kept in ["E", "Kept", "kept", "x", "match", "kept_arm"] {
+        assert!(
+            idents.iter().any(|word| word == kept),
+            "{kept} is production code"
+        );
+    }
+    let text = production_text("fn a() {\n    #[cfg(test)]\n    hook = x > 1;\n    b();\n}");
+    assert!(!text.contains("hook") && text.contains("b();"), "{text}");
+    assert_eq!(text.lines().count(), 5);
+    assert_eq!(
+        owners("#![cfg(test)]\nfn t() { c.spawn(); }"),
+        Vec::<String>::new()
+    );
 }
 
 /// The names a file uses for `ty`: `ty` itself plus every `ty as Alias`

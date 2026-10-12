@@ -60,6 +60,15 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # itself, without following symlinks; only `glob::Pattern` is used.
 glob = "0.3"
 
+[dev-dependencies]
+# tests/architecture.rs parses the source it enforces rules on: a Rust
+# parser sees a comparison or a pattern however it is spread over lines,
+# and finds test-only code by its attributes. Both are already in the graph
+# at these versions (syn 2 through the ICU derive crates); `span-locations`
+# gives the line a finding is on. Dev-dependencies only: the binary does not link them.
+syn = { version = "2.0.119", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+
 [lints.rust]
 # `--cfg ward_dead_code` makes the internal modules private, so rustc's
 # dead-code lint sees what no command reaches (#247). CI's "No dead code"

@@ -590,7 +590,7 @@ fn closure_relative(ecosystem: &str) -> PathBuf {
 /// The body of a closure envelope read from `path`, checked: it parses,
 /// was projected on this host, and is a `closure/1` of `ecosystem`.
 fn closure_body(path: &Path, text: &str, ecosystem: &str) -> io::Result<serde_json::Value> {
-    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| {
+    let v: serde_json::Value = records::parse_envelope(text.as_bytes()).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("parse {}: {e}; run `ward` first", path.display()),

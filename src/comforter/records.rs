@@ -86,7 +86,7 @@ fn closure_stem(name: &str) -> Option<&str> {
 
 fn closure_file(name: &str, path: PathBuf, bytes: &[u8]) -> io::Result<ClosureFile> {
     let stem = closure_stem(name).expect("caller filtered closure names");
-    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+    let value: Value = parse_envelope(bytes).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{:?}: {error}; run 'ward'", path.to_string_lossy()),
@@ -101,6 +101,91 @@ fn closure_file(name: &str, path: PathBuf, bytes: &[u8]) -> io::Result<ClosureFi
         path,
         record_sha256: hex::encode(Sha256::digest(bytes)),
     })
+}
+
+/// A closure or resolution-record envelope parsed as JSON that names every
+/// object key once. `serde_json` keeps the last of two equal keys, so a
+/// record with an extra `"exceptions": []` ahead of the real list still
+/// verifies (the signature covers the parsed value) while a person reading
+/// the file, or a parser that keeps the first key, sees an empty list. What
+/// ward judges must be what everyone reads, so a repeated key is refused.
+pub(crate) fn parse_envelope(bytes: &[u8]) -> serde_json::Result<Value> {
+    use serde::Deserialize;
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let UniqueKeys(value) = UniqueKeys::deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+/// A JSON value whose objects, at every depth, have no repeated key.
+struct UniqueKeys(Value);
+
+impl<'de> serde::Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer
+            .deserialize_any(UniqueKeysVisitor)
+            .map(UniqueKeys)
+    }
+}
+
+struct UniqueKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UniqueKeysVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_string()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(UniqueKeys(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let UniqueKeys(value) = map.next_value()?;
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "the key {key:?} appears twice in one object"
+                )));
+            }
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
 }
 
 /// The recorded exceptions, or `None` when the closure carries no exception
@@ -207,4 +292,36 @@ pub fn exceptions(closure: &ClosureFile) -> io::Result<ExceptionList> {
         recorded: recorded.is_some(),
         exceptions,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A closure with a second `exceptions` key ahead of the real one is
+    /// refused rather than read as whichever key a parser keeps.
+    #[test]
+    fn a_repeated_key_in_an_envelope_is_refused() {
+        let doubled = br#"{"schema":"closure/1","body":{"exceptions":[],"n":1,
+            "exceptions":[{"kind":"git-dependency","subject":"x","detail":""}]}}"#;
+        let error = closure_file("node.json", PathBuf::from("node.json"), doubled).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("\"exceptions\" appears twice"),
+            "{error}"
+        );
+        // At any depth, in an array too, and at the top level.
+        for text in [r#"{"a":1,"a":1}"#, r#"{"body":[{"k":{"x":1,"x":2}}]}"#] {
+            assert!(parse_envelope(text.as_bytes()).is_err(), "{text}");
+        }
+        // The same key in two different objects is no repeat, and every
+        // JSON type reads back as serde_json reads it.
+        let text = r#"{"a":{"k":1},"b":{"k":-2},"c":[1.5,true,null,"s",18446744073709551615]}"#;
+        assert_eq!(
+            parse_envelope(text.as_bytes()).unwrap(),
+            serde_json::from_str::<Value>(text).unwrap()
+        );
+        // Trailing text after the document is refused as serde_json does.
+        assert!(parse_envelope(b"{} {}").is_err());
+    }
 }

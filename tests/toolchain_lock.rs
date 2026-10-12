@@ -747,7 +747,6 @@ fn update_toolchain_takes_an_ecosystem_and_nothing_else() {
     for argv in [
         vec!["update", "--toolchain", "serde"],
         vec!["update", "serde", "--toolchain"],
-        vec!["update", "--toolchain", "python", "node"],
     ] {
         let out = fixture.ward(&argv);
         assert_eq!(out.status.code(), Some(2), "{argv:?}");
@@ -758,6 +757,15 @@ fn update_toolchain_takes_an_ecosystem_and_nothing_else() {
         );
         assert!(message.contains("python, node, rust"), "{message}");
     }
+    // Two ecosystems are one too many, and the error says that rather
+    // than calling a real ecosystem a package.
+    let out = fixture.ward(&["update", "--toolchain", "python", "node"]);
+    assert_eq!(out.status.code(), Some(2));
+    let message = text(&out.stderr);
+    assert!(
+        message.contains("takes one ecosystem, not several ('python', 'node')"),
+        "{message}"
+    );
 
     // `cargo` is the name every other verb uses for the ecosystem the lock
     // calls `rust`, so it is accepted as a spelling of it; naming an

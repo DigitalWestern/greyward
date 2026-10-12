@@ -140,8 +140,8 @@ fn read_supplied_file(path: &Path) -> io::Result<SuppliedRecord> {
         )));
     }
     let bytes = fs::read(path).map_err(|error| refuse(format!("{error}")))?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|error| refuse(format!("not JSON: {error}")))?;
+    let value: Value = super::records::parse_envelope(&bytes)
+        .map_err(|error| refuse(format!("not JSON: {error}")))?;
     let ecosystem = value
         .get("ecosystem")
         .and_then(Value::as_str)

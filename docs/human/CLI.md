@@ -989,7 +989,7 @@ a later step can `ward run` the tests under the same policy. Its inputs:
 | `version` | `latest` | release to install, as a tag (`v0.1.0`) |
 | `token` | the job's token | reads the release; the job's own token is enough, since Greyward's repository is public |
 | `working-directory` | `.` | the project to set up |
-| `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file in the workspace |
+| `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file. On a `pull_request` event the workspace is the pull request's checkout, so a file in it is the pull request's to edit (it could drop a denial or trust its own key): the action refuses one there. Name a file outside the workspace instead, for example the base branch's copy written under `$RUNNER_TEMP` by an earlier step |
 | `frozen` | `true` | `false` runs a plain `ward`, which may write the locks |
 | `strict` | `false` | `true` adds `--strict` |
 | `audit` | `true` | `signed` runs `ward audit --signed`; `false` skips the audit |
@@ -1001,7 +1001,10 @@ a later step can `ward run` the tests under the same policy. Its inputs:
 
 The outputs are `version` (what `ward --version` prints) and `sbom` (the
 SBOM's path). The gate with trusted keys is `policy: ci/greyward-policy.toml`,
-`audit: signed` and `signing-key: ${{ secrets.GREYWARD_SIGNING_KEY }}`.
+`audit: signed` and `signing-key: ${{ secrets.GREYWARD_SIGNING_KEY }}`, in a
+workflow that runs on a protected ref (`on: push`), never on `pull_request`:
+there `ci/greyward-policy.toml` is the pull request's own copy, which it can
+edit to remove a denial or add a trusted key, so the action refuses it.
 
 **The store cache.** Without it every run downloads the toolchains and
 packages again. `cache: true` restores the store an earlier run saved

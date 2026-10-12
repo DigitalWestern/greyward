@@ -90,7 +90,7 @@ pub(super) fn recover_locked(
                 finish_committed(store, activity, root, lock, &journal)?;
             }
             JournalState::Publishing => {
-                notes.extend(undo(store, root, &journal, None)?);
+                notes.extend(undo(store, root, &journal)?);
                 finish(store, activity, root, lock, &journal)?;
             }
         }
@@ -391,18 +391,16 @@ pub(super) fn release(
 
 /// Undo every target of an unfinished journal, last first, then remove the
 /// directories it created if they are empty. Decides by content alone,
-/// except for `foreign`: the target whose no-replace create found the name
+/// except for a `taken` target: its no-replace create found the name
 /// taken, so whatever is there is another writer's, whatever its bytes.
 pub(super) fn undo(
     store: &Store,
     root: &ProjectRoot,
     journal: &Journal,
-    foreign: Option<&str>,
 ) -> io::Result<Vec<Restored>> {
     let mut notes = Vec::new();
     for target in journal.targets.iter().rev() {
-        let foreign = foreign == Some(target.target.as_str());
-        notes.push(undo_target(store, root, journal, target, foreign)?);
+        notes.push(undo_target(store, root, journal, target)?);
     }
     Ok(notes)
 }
@@ -412,8 +410,8 @@ fn undo_target(
     root: &ProjectRoot,
     journal: &Journal,
     target: &JournalTarget,
-    foreign: bool,
 ) -> io::Result<Restored> {
+    let foreign = target.state == TargetState::Taken;
     check_journal_target(journal, target).map_err(|detail| journal_error(journal, &detail))?;
     let relative = PathBuf::from(&target.target);
     let shown = root.path().join(&relative);
@@ -538,6 +536,7 @@ fn exchange_back(target: &JournalTarget, temp: Current, original: Current) -> bo
     match target.state {
         TargetState::Swapped => temp == original,
         TargetState::Pending => matches!(temp, Current::File(_)),
+        TargetState::Taken => false,
     }
 }
 

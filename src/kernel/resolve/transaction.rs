@@ -1990,6 +1990,39 @@ mod tests {
         }
     }
 
+    /// The unopenable folder belongs to the target undo reaches last (the
+    /// journal is reordered so the receipt comes first): recovery still
+    /// refuses before it touches any target, so the lock and the manifest
+    /// stay published rather than half undone.
+    #[test]
+    fn recovery_opens_every_folder_before_it_undoes_any_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("recover-parent-last", true);
+        let _ = run_door(&fx, |_| {}, crash_at(FaultPoint::Marked(2)));
+        edit_journal(&fx, |journal| {
+            let targets = journal["targets"].as_array_mut().unwrap();
+            let receipt = targets.pop().unwrap();
+            assert_eq!(receipt["target"], ".greyward/resolution/npm.json");
+            targets.insert(0, receipt);
+        });
+        let resolution = fx.project.join(RESOLUTION_DIR);
+        fs::set_permissions(&resolution, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&resolution).is_ok() {
+            // Running as root: permissions do not bind, nothing to prove.
+            fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let error = recover_err(&fx);
+        fs::set_permissions(&resolution, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert!(has_pending_journal(&fx.project));
+        assert_eq!(rooted_originals(&fx).len(), 1);
+        recover(&fx);
+        assert_original(&fx, Some(OLD_RECEIPT));
+    }
+
     /// After a crash the user edits a swapped target: recovery leaves it,
     /// reports it, and still undoes the rest.
     #[test]

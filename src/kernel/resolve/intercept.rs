@@ -145,7 +145,8 @@ pub(super) fn serve_tunnel<S: Stream>(
         origin: Endpoint::intercepted(tunnel.host, tunnel.port).origin(),
     };
     let mut first = true;
-    while let Some(request) = next_request(&mut tls, context, first, |head| body_cap(&target, head))
+    while let Some((request, _held)) =
+        next_request(&mut tls, context, first, |head| body_cap(&target, head))
     {
         first = false;
         tls.get_mut().start_response();
@@ -394,6 +395,7 @@ fn exchange<'a>(
     Exchange {
         state: &context.state,
         client: &context.shared.client,
+        budget: &context.shared.budget,
         route,
         address: &context.address,
         method: &request.method,
@@ -882,6 +884,45 @@ mod tests {
                 "git's first CONNECT carries no credentials"
             );
         }
+    }
+
+    /// A git negotiation body is read under the process's in-flight byte
+    /// budget, taken before a byte of it is read: a body that would pass
+    /// the budget is answered 503 with `Retry-After` and never reaches
+    /// upstream, and a served body gives its share back (two bodies that
+    /// each fit alone are both served, one after the other).
+    #[test]
+    fn a_git_post_past_the_in_flight_budget_is_a_503_and_the_budget_is_released() {
+        let harness = Harness::with(
+            "intercept-git-budget",
+            Reach {
+                buffer_budget: 1 << 20,
+                ..Reach::loopback()
+            },
+        );
+        let (_session, address) = intercepting(&harness, Policy::default());
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let pack = "/a/repo.git/git-upload-pack";
+        harness
+            .upstream
+            .set(pack, Behavior::Reply(Reply::new(200, b"0000")));
+        let roots = harness.proxy.authority().roots();
+        let fits = vec![b'0'; 700 << 10];
+        for _ in 0..2 {
+            let mut tunnel =
+                open_tunnel(&address, &authority, "third.test", roots.clone(), &[]).unwrap();
+            let answer = tunnel_request(&mut tunnel, &post(&authority, pack, &fits, false), &fits);
+            assert_eq!(answer.status, 200, "{}", answer.text());
+        }
+        assert_eq!(harness.upstream.hits(pack), 2);
+        // Declared past the budget: refused from the head alone, so the
+        // body is never sent.
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let head = post(&authority, pack, &vec![0; 2 << 20], false);
+        let answer = tunnel_request(&mut tunnel, &head, b"");
+        assert_eq!(answer.status, 503, "{}", answer.text());
+        assert_eq!(answer.headers.get("retry-after"), Some("1"));
+        assert_eq!(harness.upstream.hits(pack), 2);
     }
 
     /// A git `POST` inside a tunnel to `third.test` (no route serves it).

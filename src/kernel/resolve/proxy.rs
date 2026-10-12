@@ -78,6 +78,9 @@ pub struct ProxyConfig {
     /// has passed (bytes per second), so a tool reading one byte a minute
     /// cannot hold a worker forever.
     pub min_response_rate: u64,
+    /// How many body bytes all connections together may hold in memory
+    /// ([`http::BUFFER_BUDGET`]).
+    pub buffer_budget: u64,
     /// Tests only: see [`ValidatingResolver`].
     #[cfg(test)]
     pub(crate) allow_loopback: bool,
@@ -97,6 +100,7 @@ impl ProxyConfig {
             idle_timeout: Duration::from_secs(60),
             request_timeout: Duration::from_secs(30),
             min_response_rate: 16 * 1024,
+            buffer_budget: http::BUFFER_BUDGET,
             #[cfg(test)]
             allow_loopback: false,
             #[cfg(test)]
@@ -115,6 +119,8 @@ pub(super) struct Shared {
     /// The process's certificate authority, which signs the leaf of every
     /// intercepted tunnel.
     pub(super) authority: Authority,
+    /// The in-flight byte budget every buffered body is read under.
+    pub(super) budget: http::Budget,
     pool: Arc<Pool>,
     idle_timeout: Duration,
     pub(super) request_timeout: Duration,
@@ -165,6 +171,7 @@ impl Proxy {
             shared: Arc::new(Shared {
                 client,
                 authority: Authority::new()?,
+                budget: http::Budget::new(config.buffer_budget),
                 pool: Arc::new(Pool::new(config.workers)),
                 idle_timeout: config.idle_timeout,
                 request_timeout: config.request_timeout,
@@ -668,19 +675,22 @@ fn next_request_starts<T: Transport>(
 /// only once the head is admitted, and only up to what `cap` allows for
 /// that head: an unauthenticated request cannot make the proxy buffer
 /// anything. A client that asked to be told to go on (`Expect:
-/// 100-continue`) is, when a body will be read at all.
-pub(super) fn next_request<T: Transport>(
+/// 100-continue`) is, when a body will be read at all. The body is held
+/// under the process's in-flight byte budget for as long as the returned
+/// reservation lives, which the caller keeps while it serves the request.
+pub(super) fn next_request<'a, T: Transport>(
     reader: &mut BufReader<T>,
-    context: &Context,
+    context: &'a Context,
     first: bool,
     cap: impl Fn(&http::Head) -> u64,
-) -> Option<Request> {
+) -> Option<(Request, http::Reservation<'a>)> {
     if !next_request_starts(reader, context, first) {
         return None;
     }
     reader
         .get_mut()
         .set_deadline(Instant::now() + context.shared.request_timeout);
+    let mut held = context.shared.budget.reservation();
     let read = http::read_head(reader).and_then(|head| {
         let cap = cap(&head);
         let expects = head
@@ -693,21 +703,25 @@ pub(super) fn next_request<T: Transport>(
                 .and_then(|()| out.flush())
                 .map_err(ParseError::Io)?;
         }
-        head.read_body(reader, cap)
+        head.read_body(reader, cap, &mut held)
     });
     let error = match read {
-        Ok(request) => return Some(request),
+        Ok(request) => return Some((request, held)),
         Err(ParseError::Closed | ParseError::Io(_)) => return None,
         Err(error) => error,
     };
     let status = match error {
         ParseError::TooLarge { head: true } => 431,
         ParseError::TooLarge { head: false } => 413,
+        ParseError::Busy => 503,
         _ => 400,
     };
     context.state.note_refusal(error.to_string());
     let mut headers = Headers::new();
     headers.set("Content-Type", "text/plain; charset=utf-8");
+    if status == 503 {
+        headers.set("Retry-After", http::RETRY_AFTER_SECONDS);
+    }
     let body = format!("ward: {}\n", context.state.clean(&error.to_string()));
     let _ = http::write_response(
         reader.get_mut(),
@@ -732,7 +746,7 @@ fn serve_connection<S: Stream>(stream: S, context: &Context) {
         min_rate: context.shared.min_response_rate,
     });
     let mut first = true;
-    while let Some(request) =
+    while let Some((request, _held)) =
         next_request(&mut reader, context, first, |head| body_cap(context, head))
     {
         first = false;
@@ -1007,6 +1021,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
     let exchange = Exchange {
         state,
         client: &context.shared.client,
+        budget: &context.shared.budget,
         route,
         address: &context.address,
         method: &request.method,

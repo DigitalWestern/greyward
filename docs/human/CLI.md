@@ -406,7 +406,7 @@ argument. A release is compared by version only, because a release does not
 name the commit it was built from: a local build of the same crate version
 is "at the latest release's version" and stays. The asset names and the
 checksum rule are `install.sh`'s, so the two read a release the same way. Releases are built for Linux x86_64
-only for now (macOS waits on #66); a 404 from the anonymous request is
+only for now (macOS waits on the macOS gate in FOLLOW-UPS.md); a 404 from the anonymous request is
 reported as no published release. `GREYWARD_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 

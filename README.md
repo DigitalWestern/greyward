@@ -72,7 +72,7 @@ is on, `ward doctor` names it.
 
 Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
-tag, for Linux x86_64 only (macOS arm64 waits on #66). On Linux x86_64
+tag, for Linux x86_64 only (macOS arm64 waits on the macOS gate in FOLLOW-UPS.md). On Linux x86_64
 this is one line. It downloads the release binary for your machine, checks
 its sha256, puts it in `~/.local/bin`, adds that directory to PATH if it is
 not already there, and installs bash, zsh, and fish completions:

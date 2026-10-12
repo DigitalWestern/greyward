@@ -1,7 +1,9 @@
 //! Host platform detection (kernel layer): the only place that knows what
 //! machine ward is running on. Everything else takes an explicit `Platform`.
+//! Also the host's PATH as a child of ward inherits it ([`child_path`]).
 
 use std::env::consts::{ARCH, OS};
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -201,9 +203,86 @@ pub fn install_hint(platform: Platform, packages: HostPackages) -> String {
     }
 }
 
+/// The PATH a child of ward runs with: `prefix` (an environment's bin
+/// directories), then the host's PATH as ward inherited it, byte for byte.
+pub fn child_path<P: AsRef<OsStr>>(prefix: &[P]) -> io::Result<OsString> {
+    join_search_path(prefix, std::env::var_os("PATH").as_deref())
+}
+
+/// [`child_path`] over a given host PATH. A missing or empty host PATH adds
+/// nothing: joined as text it would leave a trailing `:`, an empty entry
+/// that every shell and `execvp` read as the current directory, so a
+/// program in the project would run in place of the host's. An entry of
+/// `prefix` that holds `:` cannot be one PATH entry, and is refused rather
+/// than split into two that name other directories.
+fn join_search_path<P: AsRef<OsStr>>(prefix: &[P], host: Option<&OsStr>) -> io::Result<OsString> {
+    for entry in prefix {
+        refuse_path_separator("the directory", Path::new(entry.as_ref()))?;
+    }
+    let mut path = std::env::join_paths(prefix.iter().map(AsRef::as_ref))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    if let Some(host) = host.filter(|host| !host.is_empty()) {
+        if !path.is_empty() {
+            path.push(":");
+        }
+        path.push(host);
+    }
+    Ok(path)
+}
+
+/// Refuse a directory whose path holds `:`, PATH's separator: `what` is how
+/// the message names it (`the project`, `the store`). A bin directory under
+/// it could never be put on a child's PATH as one entry.
+pub fn refuse_path_separator(what: &str, path: &Path) -> io::Result<()> {
+    if !path.as_os_str().as_encoded_bytes().contains(&b':') {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "{what} {} has ':' in its path, and ':' separates PATH entries, so no program \
+             could be found in it; move it to a path without ':'",
+            path.display()
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The child's PATH never gains an empty (current-directory) entry from
+    /// a missing host PATH, keeps a host PATH that is not UTF-8 whole, and
+    /// refuses a prefix entry that `:` would split.
+    #[test]
+    fn child_path_adds_no_current_directory_and_splits_nothing() {
+        use std::os::unix::ffi::OsStrExt;
+        let prefix = ["/p/node_modules/.bin", "/store/bin"];
+        for host in [None, Some(OsStr::new(""))] {
+            assert_eq!(
+                join_search_path(&prefix, host).unwrap(),
+                "/p/node_modules/.bin:/store/bin"
+            );
+        }
+        let odd = OsStr::from_bytes(b"/usr/bin:/opt/\xff/bin");
+        let mut expected = OsString::from("/p/node_modules/.bin:/store/bin:");
+        expected.push(odd);
+        assert_eq!(join_search_path(&prefix, Some(odd)).unwrap(), expected);
+        assert_eq!(
+            join_search_path::<&str>(&[], Some(OsStr::new("/usr/bin"))).unwrap(),
+            "/usr/bin"
+        );
+        let error = join_search_path(&["/home/u/co:lon/node_modules/.bin"], None).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("co:lon"), "{error}");
+        assert!(error.to_string().contains("move it"), "{error}");
+        assert!(refuse_path_separator("the store", Path::new("/a/b")).is_ok());
+        let error = refuse_path_separator("the store", Path::new("/a:b")).unwrap_err();
+        assert!(
+            error.to_string().starts_with("the store /a:b has ':'"),
+            "{error}"
+        );
+    }
 
     /// Every distro ward claims to run on gets its own command, and a host
     /// whose package manager ward does not recognize gets all of them rather

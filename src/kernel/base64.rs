@@ -32,7 +32,12 @@ pub(crate) fn encode(bytes: &[u8]) -> String {
 }
 
 /// RFC 4648 base64 (standard alphabet) with padding optional: registries
-/// publish SRI values in both forms.
+/// publish SRI values in both forms. Only the canonical spelling of each
+/// byte string decodes: padding, when present, is exactly what `encode`
+/// writes (one `=` or two, to a multiple of four), and the bits a short
+/// final group leaves over are zero. So two different texts never decode to
+/// the same bytes ("Zh" is refused where "Zg" is `f`), and a caller may
+/// compare encoded text as safely as decoded bytes.
 pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
     let val = |c: u8| -> Option<u32> {
         match c {
@@ -44,7 +49,12 @@ pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     };
-    let s = s.trim_end_matches('=').as_bytes();
+    let body = s.trim_end_matches('=');
+    let padding = s.len() - body.len();
+    if padding > 0 && (padding > 2 || !s.len().is_multiple_of(4)) {
+        return None;
+    }
+    let s = body.as_bytes();
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     for chunk in s.chunks(4) {
         let mut acc: u32 = 0;
@@ -52,6 +62,17 @@ pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
             acc |= val(c)? << (18 - 6 * i);
         }
         let n = chunk.len();
+        // The bits below the last whole byte must be zero: two characters
+        // carry one byte and four spare bits, three carry two and two.
+        let spare = match n {
+            1 => return None,
+            2 => acc & 0xffff,
+            3 => acc & 0xff,
+            _ => 0,
+        };
+        if spare != 0 {
+            return None;
+        }
         if n >= 2 {
             out.push((acc >> 16) as u8);
         }
@@ -60,9 +81,6 @@ pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
         }
         if n == 4 {
             out.push(acc as u8);
-        }
-        if n == 1 {
-            return None;
         }
     }
     Some(out)
@@ -110,5 +128,22 @@ mod tests {
             assert_eq!(decode_padded(bad), None, "{bad}");
         }
         assert_eq!(decode("Z"), None);
+    }
+
+    /// One byte string has one spelling: leftover bits must be zero and
+    /// padding must be exactly what `encode` writes.
+    #[test]
+    fn only_the_canonical_spelling_decodes() {
+        // "Zh" and "Zm9" carry the same bytes as "Zg" and "Zm8" plus
+        // nonzero leftover bits.
+        for bad in [
+            "Zh", "Zh==", "Zm9=", "Zm9", "Zg===", "Zm8==", "Zg=", "Zm9v=", "Zm9v==",
+        ] {
+            assert_eq!(decode(bad), None, "{bad}");
+            assert_eq!(decode_padded(bad), None, "{bad}");
+        }
+        for good in ["Zg", "Zg==", "Zm8", "Zm8=", "Zm9v", "//4A"] {
+            assert!(decode(good).is_some(), "{good}");
+        }
     }
 }

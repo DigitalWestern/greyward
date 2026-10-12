@@ -44,7 +44,7 @@ pub struct Request {
     pub from: Option<String>,
     /// `tool` or `tool@version`.
     pub tool: String,
-    pub args: Vec<String>,
+    pub args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,11 +530,21 @@ fn cached_projection(
             "x: cached environment object is missing or outside the active store; run the command again",
         ));
     }
-    let env_path = path.canonicalize().map_err(|_| {
-        other(
+    // A missing object is rebuilt by running again; any other failure to
+    // resolve it (EACCES, EIO) is reported with its cause, since running
+    // again would meet it again.
+    let env_path = path.canonicalize().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => other(
             "x: cached environment object is unavailable; \
              run the command again to rebuild it",
-        )
+        ),
+        _ => io::Error::new(
+            error.kind(),
+            format!(
+                "x: cannot resolve the cached environment object {}: {error}",
+                path.display()
+            ),
+        ),
     })?;
     check_projection_target(store, root, ecosystem, &closure, &env_path)?;
     Ok((closure, id))
@@ -663,7 +673,10 @@ fn x_request_is_ready(
 /// checks. The dispatcher recorded `--strict` before this runs, so a
 /// strict `x` judges the tool under the policy a strict sync would apply.
 pub fn run(ctx: &Context, request: Request) -> io::Result<i32> {
-    let cwd = ctx.project_dir();
+    // `x` needs no project: with the working directory removed it runs as
+    // it does outside one, judged from `/`, where no project or project
+    // policy is. The tool still starts in the directory the shell is in.
+    let cwd = ctx.project_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let _policy = policy::init(&cwd)?;
     launch(ctx.platform, &cwd, request, &ctx.activity)
 }
@@ -755,14 +768,9 @@ pub fn launch(
         )));
     }
     let launch_env = tool.launch_env(&store, activity, platform, &root, &toolchain)?;
-    let mut path: Vec<String> = launch_env
-        .path
-        .iter()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect();
-    path.push(std::env::var("PATH").unwrap_or_default());
+    let path = crate::kernel::platform::child_path(&launch_env.path)?;
     let mut command = Command::new(&executable);
-    command.args(&request.args).env("PATH", path.join(":"));
+    command.args(&request.args).env("PATH", path);
     for (key, value) in launch_env.vars {
         command.env(key, value);
     }
@@ -782,7 +790,7 @@ fn run_installed_tool(
     command: &mut Command,
     activity: &StoreActivity,
 ) -> io::Result<std::process::ExitStatus> {
-    crate::kernel::supervise::status(command, activity)
+    crate::kernel::ui::with_users_stderr(|| crate::kernel::supervise::status(command, activity))
 }
 
 /// Realize `package@version` from `ecosystem`'s registry tool for another

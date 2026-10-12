@@ -242,7 +242,7 @@ impl Tailor for Elixir {
         _extension: &str,
     ) -> io::Result<Option<LoneFile>> {
         let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        let scratch = ctx.store.run_home(&ctx.project_dir(), "elixir")?;
+        let scratch = ctx.store.run_home(&ctx.project_dir()?, "elixir")?;
         elixir::prepare_run_home(&scratch)?;
         let (remove_prefixes, remove, env) = elixir::lone_env(&beam, &scratch);
         Ok(Some(LoneFile {

@@ -53,8 +53,10 @@ use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{ArtifactSpec, Catalog, Selected};
 use crate::kernel::types::Identity;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -89,8 +91,8 @@ pub fn package_scripts(package_json: &str) -> io::Result<BTreeMap<String, String
 pub fn script_commands_from_package(
     package_json: &str,
     name: &str,
-    args: &[String],
-) -> io::Result<Option<Vec<(String, String)>>> {
+    args: &[OsString],
+) -> io::Result<Option<Vec<(String, OsString)>>> {
     let package: serde_json::Value = serde_json::from_str(package_json)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("package.json: {e}")))?;
     let Some(scripts) = package["scripts"].as_object() else {
@@ -117,30 +119,32 @@ pub fn script_commands_from_package(
 
 /// Build npm's pre/name/post script order, appending quoted arguments only
 /// to the requested script. Returns None when the requested name is absent.
+/// The quoting is over bytes, so an argument that is not UTF-8 reaches the
+/// script as typed.
 pub fn script_commands(
     scripts: &BTreeMap<String, String>,
     name: &str,
-    args: &[String],
-) -> Option<Vec<(String, String)>> {
+    args: &[OsString],
+) -> Option<Vec<(String, OsString)>> {
     let script = scripts.get(name)?;
     let mut commands = Vec::new();
     if let Some(command) = scripts.get(&format!("pre{name}")) {
-        commands.push((format!("pre{name}"), command.clone()));
+        commands.push((format!("pre{name}"), command.into()));
     }
-    let mut command = script.clone();
-    if !args.is_empty() {
-        command.push(' ');
-        command.push_str(
-            &args
-                .iter()
-                .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
+    let mut command = script.as_bytes().to_vec();
+    for arg in args {
+        command.extend_from_slice(b" '");
+        for &byte in arg.as_bytes() {
+            match byte {
+                b'\'' => command.extend_from_slice(b"'\\''"),
+                byte => command.push(byte),
+            }
+        }
+        command.push(b'\'');
     }
-    commands.push((name.to_string(), command));
+    commands.push((name.to_string(), OsString::from_vec(command)));
     if let Some(command) = scripts.get(&format!("post{name}")) {
-        commands.push((format!("post{name}"), command.clone()));
+        commands.push((format!("post{name}"), command.into()));
     }
     Some(commands)
 }
@@ -3560,6 +3564,16 @@ mod tests {
             script_commands_from_package(r#"{"scripts":{"test":1}}"#, "test", &[]).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("test"));
+    }
+
+    /// An argument that is not UTF-8 is quoted byte for byte: the shell
+    /// hands the script exactly what was typed.
+    #[test]
+    fn a_script_argument_keeps_its_bytes() {
+        let scripts = package_scripts(r#"{"scripts":{"test":"echo test"}}"#).unwrap();
+        let args = [OsString::from_vec(b"caf\xe9 'x'".to_vec())];
+        let steps = script_commands(&scripts, "test", &args).unwrap();
+        assert_eq!(steps[0].1.as_bytes(), b"echo test 'caf\xe9 '\\''x'\\'''");
     }
 
     #[test]

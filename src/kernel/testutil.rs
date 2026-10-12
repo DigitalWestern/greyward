@@ -83,6 +83,74 @@ pub(crate) fn bind_socket(path: &std::path::Path) -> std::os::unix::net::UnixLis
     }
 }
 
+/// A private (0700) directory for a test's Unix sockets, on a path short
+/// enough to bind them by name, removed on drop. A socket address holds
+/// about 108 bytes, which a long `TMPDIR` exceeds, so the directory is
+/// placed like the resolution door's session directory: under
+/// `$XDG_RUNTIME_DIR`, else the temp dir, else `/tmp`, whichever is first
+/// to fit. Use it for a socket a test binds through an API that takes a
+/// path (`Session::listen_unix`, `ProxySocket::hold`), and keep the store
+/// itself in a `TempDir` under the caller's `TMPDIR`.
+pub(crate) struct SocketDir(PathBuf);
+
+/// The longest socket name `SocketDir::socket` accepts.
+const SOCKET_NAME_MAX: usize = 16;
+
+impl SocketDir {
+    pub(crate) fn new() -> Self {
+        let mut bases = Vec::new();
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+            if runtime.is_absolute() && runtime.is_dir() {
+                bases.push(runtime);
+            }
+        }
+        bases.push(std::env::temp_dir());
+        bases.push(PathBuf::from("/tmp"));
+        Self::under(bases)
+    }
+
+    /// A socket directory in the first of `bases` whose path leaves room
+    /// for the longest socket name.
+    fn under(bases: impl IntoIterator<Item = PathBuf>) -> Self {
+        let name = format!(
+            "greyward-sock-{}",
+            hex::encode(crate::kernel::fsroot::urandom_bytes(8).unwrap())
+        );
+        for base in bases {
+            let dir = base.join(&name);
+            // The directory, a separator, and the longest name, under the
+            // 107 bytes `sun_path` holds before its NUL.
+            if dir.as_os_str().len() + 1 + SOCKET_NAME_MAX > 107 {
+                continue;
+            }
+            // `create`, not `create_dir_all`: the name is fresh, so an
+            // existing entry is not ours, and drop must not remove it.
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+            return Self(dir);
+        }
+        panic!("no directory for a test socket has a path short enough; set XDG_RUNTIME_DIR");
+    }
+
+    /// The path of the socket `name` in this directory.
+    pub(crate) fn socket(&self, name: &str) -> PathBuf {
+        assert!(
+            name.len() <= SOCKET_NAME_MAX && !name.contains('/'),
+            "socket name {name:?}"
+        );
+        self.0.join(name)
+    }
+}
+
+impl Drop for SocketDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A scratch directory named `greyward-<label>-<pid>-<nanos>-<seq>`, gone on
 /// drop even when a store inside it has made its objects read-only: a plain
 /// `remove_dir_all` fails on those and leaves the tree behind, and enough
@@ -242,5 +310,40 @@ mod socket_tests {
         let _listener = bind_socket(&path);
         let stat = std::fs::symlink_metadata(&path).unwrap();
         assert!(stat.file_type().is_socket());
+    }
+
+    /// A socket directory is private, its socket paths bind by name even
+    /// under a long `TMPDIR`, and dropping it removes it and nothing else.
+    #[test]
+    fn socket_dir_is_short_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let sockets = SocketDir::new();
+        let dir = sockets.0.clone();
+        let parent = dir.parent().unwrap().to_path_buf();
+        let sibling = TempDir::named("socket-dir-sibling");
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let path = sockets.socket("sixteen-bytes.ok");
+        assert!(path.as_os_str().len() <= 107, "{}", path.display());
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        drop(sockets);
+        assert!(!dir.exists(), "the socket directory is removed");
+        assert!(parent.is_dir(), "its parent stays");
+        assert!(sibling.0.is_dir(), "other scratch directories stay");
+    }
+
+    /// A base too long for a socket path is passed over for the next one,
+    /// and nothing is created in it: the case a long `TMPDIR` hits.
+    #[test]
+    fn socket_dir_skips_a_base_too_long_for_a_socket() {
+        let long = TempDir::named("socket-dir-long");
+        let deep = long.0.join("d".repeat(60)).join("e".repeat(60));
+        std::fs::create_dir_all(&deep).unwrap();
+        let short = PathBuf::from("/tmp");
+        let sockets = SocketDir::under([deep.clone(), short.clone()]);
+        assert_eq!(sockets.0.parent(), Some(short.as_path()));
+        assert_eq!(std::fs::read_dir(&deep).unwrap().count(), 0);
+        let path = sockets.socket("sixteen-bytes.ok");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
     }
 }

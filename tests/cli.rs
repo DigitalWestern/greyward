@@ -2302,6 +2302,51 @@ fn gc_reset_dry_run_lists_what_it_would_remove_and_writes_nothing() {
     assert!(text(&out.stderr).contains("has no format marker"));
 }
 
+/// `GREYWARD_STORE` pointed at an ordinary directory that happens to have a
+/// `tmp/` and a `records/` (#676): no command calls it an old store or
+/// offers a reset, `gc --reset` refuses it, and every file is still there.
+#[test]
+fn a_directory_that_is_no_store_is_refused_and_never_reset() {
+    let home = TempDir::boundary("cli-not-a-store");
+    let dir = home.0.join("notastore");
+    for (path, bytes) in [
+        ("tmp/draft.txt", "draft"),
+        ("records/2026.csv", "a,b\n"),
+        ("docs/a.txt", "a"),
+    ] {
+        std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(path), bytes).unwrap();
+    }
+    for args in [
+        &["store", "roots"][..],
+        &["gc"],
+        &["gc", "--reset", "--dry-run"],
+        &["gc", "--reset"],
+    ] {
+        let out = ward_at(&home.0, &home.0, &dir, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains("is not a ward store"), "{args:?}: {stderr}");
+        // No fix line: a reset is the one command not to run here.
+        assert!(!stderr.contains("fix:"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("older ward"), "{args:?}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tmp/draft.txt")).unwrap(),
+        "draft"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("records/2026.csv")).unwrap(),
+        "a,b\n"
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["docs", "records", "tmp"], "ward wrote into it");
+}
+
 /// `gc --reset` takes no other option: a reset that also swept, registered
 /// or forgot would be two commands' worth of deletion under one name.
 #[test]

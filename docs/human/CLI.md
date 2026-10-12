@@ -1166,7 +1166,12 @@ concurrent sync cannot lose one. Sharp edges:
   record, root and forest, and keeps the download cache, `backups/` and the
   run homes, so the next sync in each project rebuilds from the cache
   rather than the network where it can. It never reads the marker, so it
-  works on any store, readable or not. It refuses while another Greyward job is
+  works on any store, readable or not. Under `tmp/` it removes only the
+  temporaries ward names there. It refuses a directory that is not a store
+  at all: one with no marker and nothing a ward stores (no lease file, no
+  object, no object record), such as a `GREYWARD_STORE` pointed at a home or
+  a project by mistake. Every other command refuses that directory as well,
+  without a `fix:` line, and creates nothing in it. It refuses while another Greyward job is
   using the store, takes `--dry-run` (which lists what it would remove and
   writes nothing) and no other option. A reset that is interrupted leaves
   a store with no marker, which is still refused: run it again.

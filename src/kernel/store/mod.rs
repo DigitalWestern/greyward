@@ -32,6 +32,7 @@ use env::home;
 #[cfg(test)]
 pub(crate) use env::STORE_ENV_LOCK;
 pub(crate) use format::lock_root;
+pub(crate) use format::not_a_store;
 pub(crate) use format::RESET_REMOVES;
 pub use format::{refusal_fix, StoreFormat, FORMAT_FILE};
 pub use fsops::*;
@@ -172,8 +173,13 @@ impl Store {
         };
         real_directory(&root, false)?;
         // The format rule is `open`'s too: a store it refuses is refused
-        // here with the same words, never read.
-        format::probe(&root)?.refuse(&root)?;
+        // here with the same words, never read. A directory with no store
+        // in it has nothing to read, whatever directories it holds.
+        let format = format::probe(&root)?;
+        format.refuse(&root)?;
+        if format == StoreFormat::Uninitialized {
+            return Ok(None);
+        }
         if !real_directory(&root.join("objects"), true)? {
             return Ok(None);
         }
@@ -325,6 +331,12 @@ impl Store {
             StoreFormat::Current => {}
             // The marker goes in before the first namespace, so neither a
             // crash nor a second ward can find namespaces without it.
+            // Only where nothing would be mixed in with it: a store
+            // created in someone's directory, beside their files, is one a
+            // later reset or sweep could take for its own (#676).
+            StoreFormat::Uninitialized if !format::vacant(&root)? => {
+                return Err(not_a_store(&root, "ward does not create a store in it"))
+            }
             StoreFormat::Uninitialized => format::write_marker(&root)
                 .map_err(|error| open_error(&root.join(FORMAT_FILE), from_env, error))?,
             refused => refused.refuse(&root)?,
@@ -366,6 +378,30 @@ impl Store {
                 ),
             )),
             refused => refused.refuse(&self.root),
+        }
+    }
+
+    /// Whether the directory at `root` holds nothing but empty store
+    /// namespaces, if anything: where `open` may create a store.
+    pub fn vacant(root: &Path) -> io::Result<bool> {
+        format::vacant(root)
+    }
+
+    /// Refuse, before any lease file is created, a root with no store in
+    /// it. A lease file is part of what makes a directory a store
+    /// (`format::probe`), so taking one in a user's directory would make the
+    /// next probe call that directory an old store and offer to reset it.
+    fn refuse_unless_store(&self) -> io::Result<()> {
+        match Self::probe_at(&self.root)? {
+            Some((_, StoreFormat::Uninitialized)) | None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "there is no ward store at {}: the directory has no format marker and \
+                     nothing stored in it",
+                    self.root.display()
+                ),
+            )),
+            Some(_) => Ok(()),
         }
     }
 
@@ -470,6 +506,7 @@ impl Store {
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
     pub fn activity(&self, mode: ActivityMode) -> io::Result<StoreActivity> {
+        self.refuse_unless_store()?;
         let activity = StoreActivity::acquire(&self.root, mode)?;
         self.check_format()?;
         Ok(activity)
@@ -494,6 +531,7 @@ impl Store {
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
     pub fn try_activity_shared(&self) -> io::Result<Option<StoreActivity>> {
+        self.refuse_unless_store()?;
         let Some(activity) = StoreActivity::try_shared(&self.root)? else {
             return Ok(None);
         };
@@ -503,10 +541,12 @@ impl Store {
 
     /// `try_activity_exclusive` without the format check, for the one
     /// operation that exists to work on a store this ward refuses:
-    /// `gc --reset`, which reads no record.
+    /// `gc --reset`, which reads no record. A directory that is no store at
+    /// all is still refused.
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
     pub(crate) fn try_activity_exclusive_unchecked(&self) -> io::Result<Option<StoreActivity>> {
+        self.refuse_unless_store()?;
         StoreActivity::try_exclusive(&self.root)
     }
 
@@ -1925,6 +1965,7 @@ mod tests {
         // A store `open` refuses is refused here too, in the same words.
         let old_store = temp.0.join("old");
         fs::create_dir_all(old_store.join("objects")).unwrap();
+        fs::write(old_store.join("activity.lock"), b"").unwrap();
         let pre_epoch = check(&old_store);
         match old {
             Some(value) => std::env::set_var("GREYWARD_STORE", value),
@@ -2065,6 +2106,7 @@ mod tests {
         for sub in ["objects", "meta", "roots"] {
             fs::create_dir_all(old.join(sub)).unwrap();
         }
+        fs::write(old.join("gc.lock"), b"").unwrap();
         let error = Store::open_at(&old).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let text = error.to_string();

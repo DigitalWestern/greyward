@@ -138,6 +138,20 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
         writeln!(narrate, "ward: gc --reset: there is no store to empty yet")?;
         return Ok(());
     };
+    // A directory with no store in it is not emptied: an empty one is
+    // already what a reset leaves, and one that holds anything is someone
+    // else's (#676). This is decided before the lease, whose own file
+    // would otherwise be the first thing here a ward wrote.
+    if let Some((_, store::StoreFormat::Uninitialized)) = store::Store::probe_at(&root)? {
+        if !store::Store::vacant(&root)? {
+            return Err(store::not_a_store(&root, "gc --reset does not empty it"));
+        }
+        if !args.dry_run {
+            store::Store::open()?;
+        }
+        writeln!(narrate, "ward: gc --reset: there is no store to empty yet")?;
+        return Ok(());
+    }
     // A handle on the root alone. The store may be one `open` refuses.
     let store = store::Store::handle(root);
     // A reset is a requested mutation: it fails loudly rather than skipping

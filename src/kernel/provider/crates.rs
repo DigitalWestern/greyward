@@ -51,6 +51,19 @@ pub struct CargoGitSource {
     pub inner: crate::kernel::gitsrc::GitSource,
 }
 
+impl CargoGitSource {
+    /// The repository URL as the lock spells it: `source` without its
+    /// `git+` prefix, `?` query and `#` commit. Cargo matches a replacement
+    /// stanza against the lock's source by this URL, userinfo included, so
+    /// the stanza names it, not the normalized URL the object identity uses
+    /// (which drops an https userinfo).
+    pub fn locked_url(&self) -> &str {
+        let url = self.source.strip_prefix("git+").unwrap_or(&self.source);
+        let url = url.split_once('#').map_or(url, |(before, _)| before);
+        url.split_once('?').map_or(url, |(before, _)| before)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CargoGitReference {
     Branch(String),
@@ -298,8 +311,13 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
         if depth > 3 {
             continue;
         }
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
+        // In name order, so a repository holding the same crate twice gives
+        // the same answer on every filesystem, not the first `read_dir`
+        // happens to list.
+        let mut entries = fs::read_dir(&dir)?.collect::<io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut below = Vec::new();
+        for entry in entries {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
@@ -320,8 +338,10 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
                 }
                 continue;
             }
-            stack.push((path, depth + 1));
+            below.push((path, depth + 1));
         }
+        // Popped first-name first: depth first, in name order.
+        stack.extend(below.into_iter().rev());
     }
     let versions = mismatches
         .iter()
@@ -722,7 +742,7 @@ pub fn ward_config_text_for(
             continue;
         }
         let key = serde_json::to_string(&git.source)?;
-        let url = serde_json::to_string(&git.inner.url)?;
+        let url = serde_json::to_string(git.locked_url())?;
         let reference = match &git.reference {
             CargoGitReference::Branch(branch) => {
                 format!("branch = {}\n", serde_json::to_string(branch)?)
@@ -830,6 +850,33 @@ mod tests {
         let tag_text = ward_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
         assert!(tag_text.contains("tag = \"v1\""), "{tag_text}");
         assert!(text.trim_end().ends_with("offline = true"), "{text}");
+
+        // An https userinfo is part of the URL cargo matches the stanza by,
+        // though the object identity drops it.
+        let userinfo = format!("git+https://user:tok@github.com/o/r?rev={commit}#{commit}");
+        let git = parse_cargo_git_source(&userinfo).unwrap();
+        assert_eq!(git.inner.url, "https://github.com/o/r");
+        let text = ward_config_text_for(Path::new("/store/vendor"), &[git]).unwrap();
+        assert!(
+            text.contains("git = \"https://user:tok@github.com/o/r\""),
+            "{text}"
+        );
+    }
+
+    /// A repository holding the same crate at the same version twice
+    /// yields the first in name order, whatever order the filesystem lists.
+    #[test]
+    fn a_duplicated_git_crate_is_found_in_name_order() {
+        let temp = TempDir::named("cargo-git-duplicate");
+        let manifest = "[package]\nname = \"dup\"\nversion = \"1.0.0\"\n";
+        for dir in ["z/dup", "m/dup", "a/dup", "b/dup"] {
+            fs::create_dir_all(temp.0.join(dir)).unwrap();
+            fs::write(temp.0.join(dir).join("Cargo.toml"), manifest).unwrap();
+        }
+        assert_eq!(
+            crate_dir_in_repo(&temp.0, "dup", "1.0.0").unwrap(),
+            temp.0.join("a/dup")
+        );
     }
 
     /// `cargo-vendor/2` golden, from fixed inputs. A vendor identity has no

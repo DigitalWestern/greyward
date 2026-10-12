@@ -187,7 +187,9 @@ pub fn run(ctx: &Context, cmd: &[OsString], frozen: bool) -> io::Result<i32> {
             for (key, value) in &script.env {
                 step.env(key, value);
             }
-            let status = match supervise::local_status(&mut step, activity) {
+            let status = match crate::kernel::ui::with_users_stderr(|| {
+                supervise::local_status(&mut step, activity)
+            }) {
                 Ok(status) => status,
                 // An interrupt ends the chain: the step's own exit code
                 // when it failed, the signal's when it survived.

@@ -312,9 +312,16 @@ const FORCED: &[ForcedRow] = &[
             // (`[marker, "cargo:token"]`, a marker run with an argument),
             // but a string replaces a string, and a string against a
             // file's array is a merge error that stops cargo before any
-            // provider runs. With every registry's own provider forced, the
-            // global list is never consulted; it is forced as a list (the
-            // type cargo requires) all the same. Proved by
+            // provider runs. The global list is forced as a list (the type
+            // cargo requires), so it cannot replace a project's list, only
+            // join it, and cargo does consult it: for a source reached
+            // through `[source.<name>] replace-with`, which has no
+            // `[registries]` row. So these flags are not what keeps a
+            // project's provider from running: the door refuses a project
+            // configuration that sets any provider, the global list
+            // included, before cargo starts
+            // (`cargo_door::refuse_unneutralized_settings`). These flags are
+            // the layer beneath that, proved by
             // `cargo_forced_settings_never_run_project_wrappers_or_credential_providers`.
             "--config",
             "registry.global-credential-providers=[\"cargo:token\"]",

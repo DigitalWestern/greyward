@@ -51,9 +51,11 @@ None open.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml` (at that tag, change `@main` in `action.yml`'s header and in
   CLI.md to it). The opt-in store cache shipped.
-- **A shared system store at `/opt/greyward/store`: review, then build (#69).**
-  The design is DESIGNS.md §7 (2026-10-05). Next: an independent review
-  round, then its four implementation PRs in order.
+- **A shared system store at `/opt/greyward/store`: build (#69).**
+  The design is DESIGNS.md §7 (2026-10-05, revised 2026-10-12 after its
+  review round). Next: its four implementation PRs in order, starting with
+  PR 1 (disabled abstractions and test seams). The broker (PR 4) gets its
+  own review round first.
 
 - **Quality review of 2026-09-24 (#264).** A whole-codebase review after
   the 09-20 to 09-24 run. #264 (closed) holds the overall verdict. What

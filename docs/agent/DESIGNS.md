@@ -4141,9 +4141,10 @@ Owner decisions, 2026-09-23, choosing the flexible option each time:
 ## 7. A shared system store at `/opt/greyward/store` (#69)
 
 Decided 2026-09-23 (owner, #69): a full design round, not a deferral. This
-is that design, written 2026-10-05 and not yet independently reviewed. No
-code lands until a review round accepts it (record it in a "Review round"
-subsection here, as §6 does).
+is that design, written 2026-10-05 and revised 2026-10-12 after two
+independent review rounds (see "Review round 1" and "Review round 2" at the
+end of this section). The implementation follows the PR plan below, in
+order.
 
 ### In plain words
 
@@ -4163,9 +4164,13 @@ first, then in the system store, and builds into its own store on a miss.
 The users trust the service account the way they already trust root for
 `/usr/bin/python3`.
 
+Everything here is optional. With no `/etc/greyward/store.toml`, no root
+and no service account, Greyward behaves exactly as it does today, and any
+failure of the system layer falls back to the per-user store.
+
 ### Rejected shapes
 
-- **A group-writable store** (every user in a `ward` group writes it). It
+- **A group-writable store** (every user in a `greyward` group writes it). It
   turns the existing "same-user replacement is undetected" limit into
   "any-group-member replacement is undetected": cross-user code execution
   for the price of one compromised account. Refused outright.
@@ -4176,223 +4181,950 @@ The users trust the service account the way they already trust root for
   object is still worth having (backlog row "Store-object content
   verification on use"), and this design is compatible with it. It is not
   the trust boundary here.
+- **A world-readable `activity.lock` in the system store** (the first
+  draft). On Linux a read-only descriptor can take `LOCK_EX`, so any local
+  user could hold it and block every other user. Replaced by per-uid lease
+  directories (see "The lease across uids").
+- **Claim files in one sticky `1777` directory** (the first draft). Any user
+  can create another uid's file name first, and the sticky bit then keeps
+  the victim out. Replaced by per-uid directories root provisions.
+- **Copying or migrating objects into the system store.** Objects embed
+  their store's path, so a copied object is wrong in its new place.
+  Migration is re-realizing: the service account syncs the projects, and
+  `ward store init-system` refuses a non-empty root.
 
-### Layout and configuration
+### Configuration
 
-- **Where.** A new admin-owned file names the system store, nothing else
-  does: `[store] system = "/opt/greyward/store"` and `owner = "greyward"` in
-  `/etc/greyward/store.toml`. This file does not exist today and is part of
-  PR 1. It cannot be the "machine" policy file `policy::load` reads now:
-  that is `$GREYWARD_POLICY` or `$HOME/.greyward/policy.toml`, both chosen and
-  writable by the user, so naming the store there would let any user (or
-  anything that can write their HOME) point their Greyward at a directory they
-  control. Greyward reads `/etc/greyward/store.toml` only at that fixed path (no
-  variable overrides it), and only if it and every ancestor are owned by
-  root and not group- or other-writable. A project file, an environment
-  variable or a flag cannot name the store either: a repository must not
-  be able to point every user's Greyward at a directory of its choosing.
-  `GREYWARD_STORE` keeps naming the per-user store.
-- **Who owns it.** A dedicated account (`ward` on Linux, `_ward` on macOS).
-  The root directory and everything under `objects/`, `meta/`, `records/`
-  and `cache/` are owned by that account and are not group- or
-  other-writable. The marker file gains a second line, `shared <uid>`. The
-  trusted uid comes from `/etc/greyward/store.toml`'s `owner`, never from the
-  store: a directory an attacker owns can carry a marker naming the
-  attacker's uid and pass a marker-versus-`st_uid` comparison. The marker
-  line must agree with the configured owner and the directory's `st_uid`;
-  it catches a misconfigured path, not a hostile one.
-- **What it holds.** The read-only namespaces: `objects/`, `meta/`,
-  `records/`, `cache/`. Never `forests/`, `run-homes/`, `roots/`,
-  `root-locks/` or project transaction locks: those are per-user state and
-  stay in each user's store, which is a normal format-1 store as today.
-- **Format.** Still `greyward-store 1`. A per-user store does not change at all.
-  A Greyward that predates this design and is pointed at a system store through
-  `GREYWARD_STORE` finds `shared <uid>` on the marker's second line and refuses
-  it as an unknown marker, which is the safe outcome.
+- **One admin-owned file.** `/etc/greyward/store.toml` is the only thing that
+  names the system store. Greyward reads it only at that fixed path: no
+  variable, flag, project file or policy file overrides it, and no test
+  hook exists in the shipped binary (tests inject a parsed value, see the
+  PR plan). It is trusted only if it is a regular file, and it and every
+  ancestor are owned by root and not group- or other-writable. It cannot be
+  the "machine" policy file `policy::load` reads now (`$GREYWARD_POLICY` or
+  `$HOME/.greyward/policy.toml`): both are chosen and writable by the user.
+
+      [store]
+      system = "/opt/greyward/store"          # absolute, no symlink in any component
+      owner = "greyward"                      # the service account, by name
+      group = "greyward"                      # the service group: the service account only
+      readers = "world"                       # or "group:<name>"
+      claims = "/opt/greyward/store/claims"   # default: <system>/claims
+      lease_wait_seconds = 30                 # default 30, 0 to 600
+      host_link_prefixes = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
+
+      [broker]                                # read only by `ward store serve` (PR 4)
+      accept = []                             # realization kinds the broker builds
+      stage = "tmpfs"                         # or "project-quota"; workers come from greyward-isolate
+      deadline_seconds = 7200
+      disk_bytes = 21474836480
+      per_uid_requests = 1
+
+  The account is named `greyward` (`_greyward` on macOS) in every example
+  and command in this design. The name is data: `owner` resolves it with
+  `getpwnam` at load time, and that uid is the trusted uid. The store never
+  supplies it: a directory an attacker owns can carry a marker naming the
+  attacker's uid.
+- **Invalid configuration.** A file that fails the ownership check, does not
+  parse, carries an unknown key, names a relative or symlinked path, names
+  an account, service group or reader group that does not exist, or names
+  one group as both the service group and the reader group is invalid. For
+  every uid except the configured owner, an invalid file means one
+  `ui::warning` per process naming the file and the reason, and the
+  per-user store alone: never a failed command. For the owner uid it is an
+  error (exit 2, the reason, the file): that account exists to write the
+  system store, and silently writing into its home store instead would hide
+  a broken setup from a timer nobody watches. A missing file is not
+  invalid: it means no system layer, silently.
+- **Writer selection.** When the process's effective uid is the configured
+  owner's uid and `GREYWARD_STORE` is unset, its store is the configured
+  `system` root, and that store has no lower layer. `sudo -u greyward ward
+  sync -C <dir>` therefore writes `/opt/greyward/store` with no further
+  flag. Every other uid's default store stays `~/.greyward/store`.
+- **`GREYWARD_STORE` stays the per-user override**, for every uid. It names
+  the upper (user) layer and never the system store: if it resolves to the
+  same `(st_dev, st_ino)` as the configured system root and the uid is not
+  the owner, the command refuses, naming both paths. If the uid is the
+  owner, the two layers are one store: one layer, one lease, no lookup into
+  itself.
+- **User policy cannot widen this trust.** A user's or project's policy can
+  turn the system layer off (`[store] system-layer = false`), and its
+  exception rules apply to system objects (below). It can never name a
+  store, an owner or a reader group.
+
+### Layout, ownership and modes
+
+The system store is a format-1 store whose marker has a second line:
+`greyward-store 1`, then `shared <uid> <checks>`, where `<checks>` is the
+publication-check level (below). A Greyward that predates this design reads
+that marker as unknown and refuses the store (`format::parse` accepts one
+line only), which is the safe outcome. The `shared` uid must equal the uid
+`owner` resolves to and the root's `st_uid`. That comparison catches a
+misconfigured path, not a hostile one: the configuration is the authority.
+
+Readers open exactly `format`, `store-id`, `objects/`, `meta/` and their
+own `claims/<uid>/`. No other uid reads anything else under the root, so
+everything else is service-private. That is also why the service account's
+ordinary `ward sync` may create its `roots/`, `forests/`, `run-homes/` and
+the rest there: they are its own state, the system GC's roots, and
+invisible to readers. Readers never use system `cache/` or `records/`
+entries: they fetch into, and record facts in, their own store.
+
+Every mode is applied with `fchmod` and `fchown` on the held descriptor
+after creation, never derived from the umask, and the service account's
+Greyward also sets `umask(022)` at start. "R" below is the reader class:
+`world` gives readers access through "other" (the group is the service
+group); `group:<name>` gives it through that group, sets every
+reader-visible entry's group to it explicitly with `fchown`, and denies
+"other". Admin init refuses the group model unless the service account is
+a member of that group, since it must `fchown` to it.
+
+"svc" below is the service account and the **service group** (`group` in
+the configuration). The service group must contain the service account
+and no one else, as primary or supplementary member, and must differ from
+the reader group: any member of it could open every user's
+`claims/<uid>/` and take that user's lease. `init-system` checks this
+(every passwd entry's primary group and the group's member list) and
+refuses otherwise, and every system GC checks it again before it sweeps.
+Where account enumeration is unavailable or partial (a directory service
+that does not enumerate), the check cannot be made, so `init-system` and
+the GC refuse and name that reason.
+Keeping it so is an ongoing duty of the admin, written in the CLI.md
+admin flow.
+
+**The world model exposes contents.** With `readers = "world"` every local
+account, admitted or not, can read every system object and its metadata:
+file contents, identities, and the package names and versions they were
+built from. That is right for public packages. An admin prewarming a
+private project's dependencies (an internal registry's packages, a
+private source repository) should use the group model, with a reader group
+of exactly the people who may see them. The CLI.md admin flow says so.
+
+| Path | Owner:group | Mode (world) | Mode (group) |
+|---|---|---|---|
+| root, `objects/`, `meta/` | svc:R | `0755` | `0750` |
+| `format`, `store-id` | svc:R | `0644` | `0640` |
+| object directories, at every depth | svc:R | `0555` | `0550` |
+| object files whose owner execute bit was set in the stage | svc:R | `0555` | `0550` |
+| other object files | svc:R | `0444` | `0440` |
+| `meta/<id>.json` | svc:R | `0444` | `0440` |
+| every other namespace (`tmp/`, `cache/`, `records/`, `resolve/`, `roots/`, `forests/`, `backups/`, `root-locks/`, `run-homes/`) | svc:svc | `0700` | `0700` |
+| `activity.lock` (the service account's own lease) | svc:svc | `0600` | `0600` |
+| `claims/` (or the configured path) | svc:svc | `0711` | `0711` |
+| `claims/<uid>/` (also the uid's lease) | uid:svc | `02750` | `02750` |
+| `claims/<uid>/<key>.claim` | uid:svc | `0640` | `0640` |
+
+- **Special bits.** Setuid, setgid and sticky are cleared on every object
+  entry at publication. The one deliberate setgid is on `claims/<uid>/`:
+  claim files a user creates there take the service group without the user
+  being a member of it, so the service account can read them, while the
+  directory's mode keeps every other user out of it and off its lock.
+- **ACLs.** Admin init refuses a root, namespace or claims directory that
+  carries a `system.posix_acl_access` or `system.posix_acl_default` extended
+  attribute, so nothing created below inherits entries the mode bits do not
+  show. Publication refuses a staged entry that carries an access ACL.
+  Readers do not read ACLs on objects: the publication check stands for
+  them, under the trust model below.
 
 ### Who writes it
 
 Two writers, built in this order.
 
-1. **The service account runs Greyward itself.** `sudo -u ward ward sync -C <dir>`
-   (or a systemd timer over a list of directories) realizes into the system
-   store exactly as a user's Greyward realizes into its own: the service account's
-   per-user store *is* the system store. Nothing new in the write path. This
-   is enough for a build box that pre-warms a known set of projects.
-2. **A broker for user-initiated writes** (`ward store serve`, a socket under
-   `/run/ward/`, running as the service account). A user's Greyward that misses
-   in both layers may ask the broker to realize the object instead of
-   building it locally. The request carries only the *plan*: what the
-   project's lock asks for. The broker re-derives the identity, fetches and
-   verifies every artifact itself, builds in its own sandbox, and commits
-   into the system store. It never accepts bytes or a finished tree from the
-   client. A plan it cannot re-derive (an unlocked manifest, a delegated
-   door) is refused, and the user builds into their own store instead, so
-   the broker is never on the critical path. This is the Nix daemon model
-   with Greyward's existing realization code on the server side.
+1. **The service account runs Greyward itself.** `sudo -u greyward ward sync
+   -C <dir>` (or a systemd timer over a list of directories) realizes into
+   the system store, as writer selection above describes. The write path is
+   today's commit with the publication checks below added.
+2. **A broker for user-initiated writes** (`ward store serve`, PR 4). See
+   "The broker" below. It has its own review round before it lands.
 
 Exceptions: an object whose realization records an object exception
 (`object_exceptions()`: install-script-failed, git-dependency, ...) still
-records it in `meta/<id>.json` as today. A user's Greyward checks a system
-object's recorded exceptions against *that user's* policy chain through
-`check_cached_with_activity`, the same check a cached object gets now, so a
-shared object never smuggles a waived exception past a stricter user.
+records it in `meta/<id>.json` as today. A user's Greyward checks the
+recorded exceptions of every system object in a selected closure against
+that user's policy chain, so a shared object never carries a waived
+exception past a stricter user.
 
-### Reading it: the trust check
+### Publication checks (the writer's side)
 
-Before a user's Greyward uses anything from the system store, it proves, through
-descriptors (`fsroot`-style, `O_NOFOLLOW` from the held root):
+When the store being committed to has a `shared` marker line, commit runs
+these over the staged tree through held descriptors (`openat` with
+`O_NOFOLLOW` from the stage root), after `bin_links::check_bin_links` and
+before the rename:
 
-1. The root is owned by the uid `/etc/greyward/store.toml` names (and the
-   marker's `shared` line agrees), and neither the root nor any ancestor up
-   to `/` is writable by anyone but root or that uid. This ancestor walk is
-   new code: the walk `policy::load` does over project policy files checks
-   names (`check_still_named`), not ownership or writability.
-2. Each object directory, its `meta/<id>.json`, and the cache entries it
-   names are owned by that uid and not group- or other-writable. Objects
-   are already committed read-only, and the check reads the modes Greyward
-   already sets.
+1. **Types.** Only directories, regular files and symlinks. A FIFO, socket
+   or device node refuses publication.
+2. **Ownership.** Every entry is owned by the service uid.
+3. **Hard links.** A regular file with `st_nlink > 1` must have all its
+   links inside the staged tree: the walk counts the names it finds for each
+   `(st_dev, st_ino)` and refuses one whose count is below `st_nlink`. A
+   link to a file outside the object would let that file's other name
+   change it.
+4. **Symlinks, every one, at any depth** (`lib/`, `libexec/` and the rest,
+   not only the PATH directories `bin_links` covers today). Each target,
+   resolved lexically from the link's own directory with at most 40 hops
+   (the `bin_links` resolver, generalized), must land: inside the object;
+   inside an object the record declares as a dependency; under one of
+   `host_link_prefixes`, where every existing component from `/` down,
+   checked through held descriptors, is owned by root and not group- or
+   other-writable; or on nothing inside the object (a dangling link runs
+   nothing). Anything else, a user's home or `/tmp` for instance, refuses
+   publication.
+5. **Modes and bits** are then set by the table above, not by clearing
+   write bits from what the build left. Today's `make_read_only` only
+   clears write bits, so a stage built under `umask 077` would stay
+   unreadable to every other uid.
 
-A store that fails either check is not used, and the user's Greyward says why
-once (`ui::warning`, with the fix: the path and mode to correct) and works
-from its own store alone. A failed trust check never fails a sync: the
-per-user layer is always a complete fallback.
+The record gains `"shared_checks": <n>`, the check level this Greyward
+applied (1 for this list). A later Greyward that adds a check writes a
+higher level, and readers require at least the marker's `<checks>` value.
+A system object without the field, or with a lower level, is not admitted:
+it was published before these checks or under fewer of them. `ward store
+recheck` (service account only) runs the current checks over every
+existing object under the publication lock, rewrites the record of each
+that passes with the new level (the tmp-and-rename completion write commit
+uses), and lists each that fails with the `ward gc --drop-object` fix. The
+admin raises the marker's level with `ward store init-system
+--raise-checks` once the recheck is clean.
 
-What this buys: the system layer is stronger than the per-user store, not
-weaker. A user cannot replace a system object, and the service account is a
-single, auditable writer. The LIMITATIONS row "Store objects are trusted
-from permissions + metadata" gets a second sentence: system-store objects
-are trusted from the service account's ownership, and replacement by that
-account (or root) is undetected.
+### Reading it: the trust check and the lookup
 
-### Paths inside objects
+A user's Greyward reads the system store without any lock, mtime touch or
+repair. `has_with_activity` cannot be reused: it takes the private
+publication lock, touches the object and removes incomplete publications,
+none of which another uid may do. The read-only lookup builds on
+`published_identity`, which already reads without a lease, lock or touch
+and treats a publication in flight as a miss.
+
+**Once per process,** through descriptors:
+
+1. Open `/` and walk down to the root with `openat(O_DIRECTORY|O_NOFOLLOW)`,
+   `fstat`ing each component: owned by root or the service uid, not group-
+   or other-writable. This ancestor walk is new code (the walk
+   `policy::load` does checks names, not ownership).
+2. The root: owned by the service uid, mode exactly as the table says for
+   the configured reader model.
+3. `format`, `store-id`, `objects/` and `meta/`, each opened from the held
+   root with `O_NOFOLLOW` and `fstat`ed for owner and mode. The marker's
+   `shared` line must name the configured uid.
+4. The configured claims path, when it is outside the root, gets the same
+   ancestor walk as step 1, and `claims/` itself must be owned by the
+   service uid with mode `0711`. The user's own `claims/<uid>/` must be
+   owned by that uid, group the service group, mode `02750`.
+
+**Per object id X** (the completion-record protocol):
+
+1. `fstatat(objects_fd, X, AT_SYMLINK_NOFOLLOW)` finds nothing: a miss.
+2. Open X with `O_DIRECTORY|O_NOFOLLOW` and `fstat` the held descriptor: a
+   directory owned by the service uid with the table's mode. Writable by
+   its owner means a publication in flight: a miss.
+3. Open `meta/X.json` from the held `meta/` descriptor with
+   `O_NOFOLLOW|O_NONBLOCK`. Absent means in flight: a miss. Not a regular
+   file, or the wrong owner or mode, is a trust failure. Read at most
+   `META_CAP` bytes and parse with `objmeta::read_record_value`: the
+   identity must hash to X, and `shared_checks` must meet the marker's
+   level.
+4. `fstatat` X by name again and compare `(st_dev, st_ino)` with the held
+   descriptor. A mismatch means the service account replaced a leftover in
+   between: retry once, then a miss.
+5. **The closure.** Repeat 1 to 4 for every dependency in X's record,
+   transitively. Every dependency of a system object is a system object:
+   the service account's store has no lower layer, so its records are plain
+   `object-meta/2` and every id in them names the system store. Any miss in
+   the closure is a miss for X. Then run the user's policy chain
+   (`check_cached_with_activity`'s exception check, given the layer) over
+   every object in the closure.
+
+A trust failure (not a miss) disables the system layer for the rest of the
+process, with one warning naming the path and the expected owner and mode.
+A failed trust check never fails a sync: the per-user layer is always a
+complete fallback. Only the service account repairs leftovers: its own
+`has_with_activity` and its GC clear crashed publications as today.
+
+**What this does not claim.** The reader trusts the publication checks: it
+does not walk descendants on every use. The service account or root can
+replace any object, file or record undetected, as root can replace
+`/usr/bin/python3`. And identity validation proves which inputs an object
+was built from, not its bytes. The LIMITATIONS row "Store objects are
+trusted from permissions + metadata" gains that sentence when PR 3 ships.
+
+### Paths inside objects, and which store a reference means
 
 Most object ids do not include the store root, but many objects embed it
 (venv shebangs, `pyvenv.cfg`, RPATHs; `native-libs/libset/3` already puts
 the root in its identity). So the same id in the system store and in a
 user's store are two realizations of one identity, each correct for its own
-location. Never copy an object between the layers. A user object that
-depends on a system object embeds the system path, which is stable
-because the system store is configured machine-wide. Lookup order is fixed
-(user store, then system store) so a project resolves an id the same way
-on every run. `meta/<id>.json` dependency ids are resolved through the same
-two-layer lookup, and a system object may depend only on system objects (a
-system object can never point into one user's home).
+location. Never copy an object between the layers.
 
-### GC across users
+Lookup order for a new realization is fixed: user store, then system store.
+A user object built on a system object embeds the system path, so it is a
+different realization from one built on a local copy, and it gets a
+different id:
 
-The system store cannot see users' roots: those live in each user's store.
-So users publish **claims**.
+- **The layer is an identity input.** When any dependency of a realization
+  resolves from the system layer, the identity gains one input,
+  `"system_store": "<system store-id>:<system root>"`. It must be in the
+  identity before the producer's own cache lookup (`has` on the id), not
+  added at commit, or the id would change after the cache check. So the
+  layered dependency lookup returns a typed reference carrying its layer,
+  and identity construction takes those references through one kernel
+  helper, which adds the input; no tailor adds it by hand. The grammar
+  check (`check_identity_grammar`) admits it for every kind, and commit
+  only checks consistency: it refuses,
+  in release builds too, an identity that carries it while
+  `ObjectDeps::system_objects` is empty, or lacks it while that set is
+  not. A local variant and a system-dependent variant of the same package
+  therefore have two ids and can both sit in one user store. Nothing is
+  ever replaced in place: a rebuild after the system layer goes away
+  (lease refused, store relocated, layer turned off) resolves its
+  dependencies locally, gets the local id, and publishes beside the old
+  object, which the user GC removes once nothing references it. A system
+  object never carries the input: the system store has no lower layer.
+- **`ObjectDeps`** gains `system_objects: BTreeSet<String>` beside
+  `objects`. `validate_object_deps` checks `objects` locally as today and
+  `system_objects` through the read-only lookup above, never through
+  `validate_object_complete`, which assumes a local object.
+- **`object-meta/3`** is written for an object with at least one system
+  dependency: today's fields plus `"system_dependencies": [ids]`. The user
+  GC's walk (`gc::validate`) never enqueues `system_dependencies`: they
+  feed the claim set instead.
+- **`root/3`** is written for a root whose closure reaches the system store:
+  `root/2`'s fields plus `system_objects`.
+- **Projections and roots are always the user store's.** The operation's
+  user store, whose lease it holds, is passed down explicitly to every
+  projection and root publication. Nothing infers it from an object path:
+  today Python's `project_env_inner` derives its store from `env_obj` with
+  `comforter::store_from_object_path`, which would name the system store
+  for an environment that came from there. That call becomes the passed
+  user store, and `ClosureRefs` records each reference as (layer, id). A
+  projection stays a user-store reference (`forests/`, `backups/`): its
+  links into system objects are covered by the root's `system_objects`,
+  since a projection links only into its closure.
+- **`bin_links` and the publication checks** accept a link into
+  `<system>/objects/<id>` only when `id` is in `system_objects`.
+- **A missing system dependency.** A user object whose system dependency
+  fails the read-only lookup is unusable for that run (as if absent), and
+  the realization resolves its dependencies again. If the system object
+  comes back (the service account re-realizes the same identity at the
+  same path), the user object is valid again unchanged.
 
-- `<system>/claims/` is a sticky, world-writable directory (mode `1777`,
-  like `/tmp`). Each user's Greyward keeps one file there, `claims/<uid>`, owned
-  by that uid, listing every system object id that user's registered roots
-  reach (directly or through user objects that depend on system objects).
-  It is rewritten atomically (temp file in the same directory, rename),
-  whenever the user's Greyward registers a root that reaches the system store
-  and at the end of every user GC.
-- The system GC (run by the service account) adds every claimed id to its
-  retained set. A claim file whose owner does not match its name, that is
-  writable by others, or that does not parse blocks the sweep. The sweep
-  refuses with every blocked reason at once, as `meta/` records do today
-  (`gc::validate`). `ward gc --forget-claims <uid>` (service account only)
-  drops one, for a user who left the machine.
-- What a hostile user can do with a claim: keep system objects alive (disk
-  use), block the system sweep with a malformed file until the admin
-  forgets it, or squat another user's claim name. In a sticky `1777`
-  directory a hostile user can create `claims/<victim-uid>` first; the
-  sticky bit then stops the victim renaming over it, and
-  `fs.protected_regular` (on by default on Ubuntu and Debian) refuses even
-  an `O_CREAT` open of it. The victim's claims then never land, and the
-  system GC may delete objects the victim uses. None of these reaches
-  another user's code, but the squat breaks the GC protocol, so the flat
-  `1777` layout, and what a user's Greyward does when its claim rename fails,
-  are open questions below. `ward store claims` (any
-  user) lists the claim files with their size and age, so the admin sees
-  who holds what.
+**Older binaries: a store-level marker.** Refusing per record is not
+enough: an older Greyward's `comforter::closure_object` checks an object
+with `has_with_activity`, whose completeness check accepts any record that
+is a whole JSON object without reading its schema, so an existing
+projection could be used without parsing `object-meta/3`. The store format
+marker is checked under every lease: `Store::activity`,
+`try_activity_exclusive` and `try_activity_shared` all call `check_format`,
+which refuses a well-formed marker naming a later format (`Newer`) with an
+"upgrade" message. So a user store moves from `greyward-store 1` to
+`greyward-store 2` before it can hold anything system-dependent. Format 2
+means "format 1, and records may be `object-meta/3` or `root/3`". The
+switch needs the user store's exclusive activity lease, and an operation
+cannot upgrade a shared lease it holds (`activity::local_lease` refuses
+that), so it happens at operation start: after the per-uid system lease
+and before the shared user lease, when the layer is configured and the
+store is still format 1, the operation tries `try_activity_exclusive`
+without waiting, writes the new marker durably (tmp, fsync, rename, fsync
+of the root), releases it, and then takes the shared lease as usual. If the
+exclusive attempt fails (another operation holds the store), this operation
+does not use the system layer and the next one tries again. Under that
+lease no older process is mid-operation, and any later one refuses the
+store at its first lease, for `run`, `build`, `sync` and `gc` alike. A new Greyward reads
+formats 1 and 2 and creates stores at 1, so a store that never uses the
+system layer stays readable by older binaries. An older `ward gc --reset`
+still empties a format-2 store (it runs without the format check), which
+is an explicit choice by the user. The system store itself stays at format
+1 with its `shared` line, which older binaries already refuse.
 
-### The activity lease across uids
+**Store identity.** Each store gets `<root>/store-id`: 32 random bytes as 64
+lowercase hex characters and a newline, mode `0644` in a user store and per
+the table in the system store. The first `Store::open` that finds it
+missing writes it (tmp, fsync, rename, fsync of the directory) while
+holding `format::lock_root`, the lock that already serializes creating and
+emptying a store, so two first opens cannot write two ids. It is not in
+`RESET_REMOVES`, so a reset keeps it, and older Greyward ignore the file.
 
-The race to close: user A's Greyward decides to use system object X, the system
-GC deletes X, and A's claim naming X is written too late.
+### Claims: telling the system GC what users need
 
-- The system store's `activity.lock` is created by the service account with
-  mode `0644`, not `0600` as `activity::open_lock` creates it now. A user's
-  Greyward opens it read-only and takes `LOCK_SH`. `flock` works on a read-only
-  descriptor, and a lock taken by one uid is honored by every other.
-- Lock order gains one step, first in the existing chain: system activity
-  (shared), then user activity, then the rest as today. A user operation
-  holds the system lease from its first system-store lookup until its claim
-  file is renamed into place.
-- The system GC takes `LOCK_EX` without waiting, as the user GC does today.
-  If any user holds the shared lease, it skips and says so. A user who holds
-  the lease forever can starve system GC. That is a disk-use problem, and the
-  skip message plus `ward store claims` show it.
-- `ward gc --reset` of the system store is the service account's alone (it
-  needs the root lock and write permission). A user's reset never touches
-  the system store, only the user layer.
+The system store cannot see users' roots: they live in each user's store.
+So users publish **claims**: files listing every system object id their
+store depends on.
 
-### Concurrency with the broker
+**Provisioning (root, at admin init).** `ward store init-system`, run as
+root, creates `claims/` owned by the service account, mode `0711`, and a
+`claims/<uid>/` directory for each admitted user, owned by that uid, group
+the service group, mode `02750`. The service account cannot create these
+itself (it cannot `chown` to another uid), and a per-uid directory the
+service account owned would be one the user cannot write. So the parent is
+service-owned and not writable by users, and each user owns exactly their
+own directory. `ward store admit <user|@group>` (root) adds users later and
+`ward store forget-uid <uid>` (root) removes one, both under the admin lock
+(see "The lease across uids"). A user whose directory is missing does not
+use the system layer: one `note` naming the admin command, and the
+per-user store.
 
-The broker is one more writer in the service account's store, under the
-existing publication lock (`tmp/.publish.lock`) and the service account's
-own activity lease. Nothing changes for it.
+**The claim key.** `sha256(uid, canonical user-store root, store-id)` in
+hex, each part length-prefixed. The canonical root is in the key, so two
+copies of one store directory have two keys and can never write one claim
+file under two different claim locks. There is no copied-store detection.
+A store that is moved gets a new key, and its old claim stays (see
+"Dropping a claim").
+
+**What a claim holds.** `claims/<uid>/<key>.claim`, JSON: `{"schema":
+"claim/1", "uid", "store_id", "store_root"` (diagnostic), `"objects":
+[system ids]}`. The set is every `system_dependencies` id of every object
+present in that user store, plus every `system_objects` id of every root
+record. That includes objects kept only by temporary retention: it is a
+superset of what any surviving reference needs.
+
+**Committed claims and temporaries are told apart by name.** A committed
+claim is exactly `<64 hex>.claim`. A temporary is
+`.tmp-<64 hex>-<pid>-<counter>`. The system GC parses only committed names,
+counts temporaries toward the entry cap, and refuses on any other name. A
+temporary is removed only by its own uid (the directory is the user's):
+the user GC asks for its per-uid lease as `LOCK_EX|LOCK_NB` rather than
+shared, and when it gets it (no other operation of that uid and no system
+GC is running) it removes every temporary. When it does not, it takes the
+shared lease as usual and leaves them for next time. A crashed write therefore costs one entry until the next user GC,
+never the valid claims beside it.
+
+**Writing a claim (adds).** A user's Greyward adds to its claim before it
+publishes anything that depends on the system store:
+
+1. Take the user store's claim lock (`<user store>/claims.lock`, `0600`).
+2. Check that `claims/<uid>` still names the directory the lease is held
+   on (`fstatat` from the held `claims/` descriptor, compare
+   `(st_dev, st_ino)`). A mismatch means the uid was revoked: the add
+   fails.
+3. Read the current claim file, if any, and union in the new ids.
+4. Write a temporary in `claims/<uid>/`, `fsync` it, rename it over the
+   claim, `fsync` the directory.
+5. Release the lock. Only then commit the user object (whose record names
+   the ids), register the root (`root/3`), or build its projection.
+
+The add sits inside the layered commit and root registration, before
+`publish_lock` is taken. Adds only ever grow the file, and one claim file
+belongs to one store and so to one claim lock, so two syncs of different
+projects cannot overwrite each other's additions with a stale snapshot.
+
+**Shrinking a claim (user GC only).** The user GC holds the user store's
+exclusive activity lease, so no sync runs. The rule it keeps: **whichever
+claim version survives a crash, old or new, covers every reference that
+survives it.** The old version covers everything that existed before the
+sweep. The new one covers what is left after it, so it may only become
+durable after the removals it drops are durable. Today `gc::sweep::execute`
+unlinks without syncing the directories it removed from. So the user GC,
+when the store has the system layer, does this in order:
+
+1. Sweep as today, then `fsync` every directory it removed an entry from
+   (`objects/`, `meta/`, `roots/`, `forests/` and the rest).
+2. If any of those fails, stop: the larger claim stays, and the report
+   says the claim was not shrunk and why.
+3. Recompute the set from what survived (every remaining record and root)
+   and replace the claim through steps 1 to 5 of the add.
+
+A rename replaces the name before the directory `fsync` returns, so after a
+power loss either version may be the one on disk: the rule above is what
+makes both safe. The recompute reads every `object-meta/3` and `root/3`, so
+it also repairs a claim file deleted by hand.
+
+**Failure.** If a claim add fails (directory missing or revoked, a write
+error, a full disk), that operation drops the system layer before
+publishing anything: it realizes into the user store instead, under the
+local ids, and says so in one note. Because the add precedes publication,
+no user object, root or projection that embeds a system path exists
+without a durable claim. A failed shrink leaves the old claim, which is
+safe.
+
+**Recovery order.** Claim, then object, then root, then projection, each
+durable before the next starts. After a crash, a claim with nothing
+published behind it is an over-claim the next user GC trims, and anything
+published has its claim.
+
+**Reading claims (system GC).** The service account's GC, under the admin
+lock and the leases below, reads every `claims/<uid>/` directory with a
+streaming `getdents` reader that stops at the 65th entry (a new `fsops`
+reader: today's `read_dir_names_at` collects every name before it returns,
+so checking its length afterwards would not bound memory). At most 64
+entries per directory; each committed claim opened
+`O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`; `fstat` must show a regular
+file owned by the directory's uid; at most 4 MiB read (a cap-plus-one
+read, as `read_meta_json` does); it must parse as `claim/1`. Every claimed
+id joins the retained set. A committed claim that breaks any of these, an
+unknown name, too many entries, or a directory the GC cannot open blocks
+the sweep, listed with every other reason at once, naming the uid and the
+fix. Missing evidence is never an empty claim, as with `meta/` records
+today.
+
+**System GC retention.** The system store's liveness is the service
+account's own roots, its own mtime-based retention (`retained_by_policy`,
+fed only by the service account's own use and commits), and claims.
+Readers never touch system objects, so a user's use refreshes nothing:
+claims are the only user input.
+
+**Dropping a claim.** A claim whose store was moved or deleted stays, which
+keeps its objects (the safe side). `ward store claims` lists a user's own
+claims with their `store_root` and whether that root still holds a store
+with that `store-id`. `ward store drop-claim <key>` (that uid) removes one,
+refusing the key of the store it is run against.
+
+**`ward store new-id`** gives a store a fresh `store-id`, and so a new claim
+key. It holds the store's exclusive activity lease and the per-uid lease,
+computes the full retained claim set, publishes it durably under the new
+key (steps 1 to 5 of the add), and only then writes the new `store-id`
+durably (tmp, fsync, rename, fsync of the directory). The old claim stays
+until the user drops it. A crash in between leaves two claims, never none.
+
+**uid reuse.** A claim directory belongs to a uid, not a person. When an
+account is removed, its directory stays and is still honored (keeping
+objects is the safe failure), and `ward store claims` lists it as "no
+account". The admin runs `ward store forget-uid <uid>` as part of removing
+the account. A uid reassigned before that inherits the old directory: its
+claims keep the old person's objects retained, and the new person can read
+the old claims' `store_root` paths and object ids, which say where that
+person kept stores and which packages they used. `admit` refuses a uid
+whose directory already exists until `forget-uid` has run, so the admin
+decides.
+
+### The lease across uids
+
+The race to close: user A's Greyward decides to use system object X, the
+system GC deletes X, and A's claim naming X is written too late.
+
+- **The per-uid directory is the lease.** Each user's Greyward opens its
+  own `claims/<uid>/` (`O_RDONLY|O_DIRECTORY|O_NOFOLLOW`) and holds
+  `LOCK_SH` on that descriptor. Root creates the directory at `admit`, and
+  the user cannot remove or replace it (the parent is the service
+  account's, mode `0711`), so its inode is stable from `admit` to
+  `forget-uid`: there is no "not created yet" state for the GC to miss.
+  Only the uid and the service group can open it (mode `02750`), and the
+  service group holds no one but the service account (see "Layout"), so
+  no user can block another user's lease. After `flock` returns, the user's
+  Greyward `fstatat`s `claims/<uid>` again from the held `claims/`
+  descriptor and compares `(st_dev, st_ino)` with the locked descriptor:
+  a mismatch (revoked or re-admitted meanwhile) means no system layer for
+  this operation.
+- **Bounded acquisition.** `LOCK_SH|LOCK_NB`, retried every 100 ms for up to
+  `lease_wait_seconds`. If it is still refused (the system GC holds it), the
+  operation runs without the system layer and says so in one note. A sync
+  never waits indefinitely on the system store.
+- **Lifetime.** The lease is taken at the start of a store-consuming
+  operation, after the configuration check and before the user activity
+  lease, and it lives exactly as long as that operation's user
+  `StoreActivity` (cloned into the same token). So it covers every awaited
+  child, not only the claim write. The user's lock order becomes: system
+  lease (`claims/<uid>/`), then (once per store, only for the move to
+  format 2, released before going on) user activity exclusive, then user
+  activity shared, x-root, toolchain input, project transaction, cache,
+  user claim lock, publication. The service account's order is: admin
+  lock, its own exclusive activity, the per-uid leases in uid order, then
+  today's GC and publication locks. PR 2 adds a lock-order test for both
+  chains to `tests/architecture.rs` (none exists today).
+- **The admin lock.** `<system>/admin.lock` (service account, `0600`;
+  root opens it too) serializes membership changes against the GC.
+  The system GC, `ward gc --reset` of the system store, `admit` and
+  `forget-uid` each take it `LOCK_EX`. The GC and reset hold it from
+  listing `claims/` through the end of the sweep, so no uid is admitted
+  (with an unlocked new directory) or removed (with a locked inode) while
+  a sweep runs. `admit` and `forget-uid` wait for it, bounded by
+  `lease_wait_seconds`, then refuse naming the holder. Users never take it.
+- **What `claims/` may hold.** Only decimal uid names and
+  `.revoked-<uid>-<n>`. The GC skips `.revoked-*` entries: a `forget-uid`
+  that crashed mid-removal leaves one, and only root can empty a uid-owned
+  directory, so root re-runs `forget-uid`, which removes leftovers first.
+  Any other name blocks the sweep.
+- **System GC.** Under the admin lock, it lists `claims/`, opens every
+  `claims/<uid>/` (group read and search are enough), and takes
+  `LOCK_EX|LOCK_NB` on each in uid order. Then it reads the claims, sweeps,
+  and releases them all. If any lease is held it releases what it took and
+  skips, naming the uids. A directory it cannot open counts as held. A
+  directory whose owner, group or mode differs from the table (its owner
+  can `chmod` it) blocks the sweep like a broken claim.
+- **Forgetting a uid.** `forget-uid <uid>` takes the admin lock, then
+  `LOCK_EX|LOCK_NB` on that uid's directory. If the lease is held it
+  refuses, naming the holders. `forget-uid --force <uid>` proceeds anyway
+  and says what that means: that uid's running operations lose their
+  protection, so the next system GC may delete objects they are using, and
+  their claim adds fail at the inode check (so they publish nothing new on
+  the system layer). Removal renames the directory to
+  `claims/.revoked-<uid>-<n>` and then deletes it, so the name is free
+  again at once.
+- **Availability boundary.** Any admitted user can stall the system GC, by
+  holding their own lease (disk use grows), or by breaking their own claim
+  file or directory mode (the sweep refuses), and can keep any number of
+  system objects alive through their claims; quotas on the claims
+  filesystem bound the claim files, not the objects they retain. A user
+  can fill the filesystem that holds `claims/` through their own directory,
+  as they can fill `/tmp`: the claims path is configurable so the admin can
+  put it on a filesystem with per-user quotas. No user can block another
+  user's lease, lookup or claim, and none of this reaches another user's
+  code. The admin's recovery: `ward store lease-holders` (service account
+  or root) lists the pid and uid holding each lease, matching each
+  directory's inode in `/proc/locks`, and `ward store forget-uid [--force]
+  <uid>` removes a stuck directory.
+- **Reset.** `ward gc --reset` of the system store is the service account's
+  alone. It needs the admin lock, the service account's own exclusive
+  activity lease, and `LOCK_EX|LOCK_NB` on every per-uid lease, and
+  refuses, naming the holders, if any is held. Where a user reset removes
+  the marker first, a shared reset renames `format` to `format.reset` and
+  `fsync`s the root, so readers see no marker (absent) while the shared
+  line survives on disk. It removes the namespaces in `RESET_REMOVES`,
+  then `reinitialize` writes `format.reset`'s content back as `format`,
+  reapplies the table's modes, and removes `format.reset`. It keeps
+  `store-id`, `claims/` and every per-uid directory. Users' objects built
+  on the old system objects become unusable (their system dependencies are
+  gone) and are rebuilt under their local ids on the next `ward`. A user's
+  reset never touches the system store.
+- **A crashed shared reset.** Recovery uses only persistent authority: the
+  trusted configuration, the preserved `store-id`, and `format.reset`. A
+  store at the configured root with `format.reset` and no `format` is a
+  reset in progress: readers treat it as absent, and every command of the
+  owner uid except `ward gc --reset` refuses it with that fix. That reset
+  checks that `format.reset` is a shared marker naming the configured
+  uid and that `store-id` exists, then repeats the removals (each already
+  tolerates a missing entry) and the rewrite above. If the configuration
+  is invalid or missing, the owner gets the configuration error and
+  nothing is touched. If `format.reset` names a check level higher than
+  this Greyward implements, it refuses with "upgrade Greyward". If
+  `store-id` or `format.reset` is missing or wrong, it refuses and names
+  `ward store init-system` on an emptied root as the fix, since the store's
+  shared identity cannot be proven any more.
+
+### The broker (PR 4, its own review round first)
+
+Realizing a package runs that package's build code, and the sandbox is
+cooperative hermeticity, not hostile-code containment (LIMITATIONS). So the
+broker never runs build code as the publishing account, and it does not
+invent a second uid lifecycle: **PR 4 depends on `greyward-isolate`**, the
+privileged helper §6 designs for isolated resolution, being implemented
+and reviewed first. The broker reuses it with these settings, and refuses
+to start (fail closed) when the helper, cgroup v2, or the stage quota
+below is unavailable:
+
+- **Mapping authority.** Worker uids come from the helper's own reserved
+  range in `/etc/greyward/isolate.toml`, outside every `/etc/subuid` range
+  and the login range, allocated with the helper's per-uid lock and never
+  reused while a process or file of that uid remains. Only root (the
+  helper) switches to them. The service account asks the helper for a
+  run, it never maps uids itself.
+- **Groups.** The helper drops every supplementary group (`setgroups([])`)
+  in the world reader model. In the group model it sets exactly one, the
+  reader group, so the worker can read its system dependencies and nothing
+  else that group does not already let every reader read. Never the
+  service group.
+- **Mounts.** A private mount namespace with `/` read-only, fresh tmpfs on
+  `/tmp`, `/var/tmp` and `/dev/shm`, no home directories, the dependency
+  objects bind-mounted read-only, the network through the broker's proxy
+  only, and one writable stage owned by the worker uid, mode `0700`.
+- **Disk budget.** The stage is the only writable place, and it is
+  enforced, not counted: either a per-run tmpfs with `size=<disk_bytes>`,
+  or a directory under an XFS or ext4 project quota of `disk_bytes`
+  (`[broker] stage = "tmpfs" | "project-quota"`). A build that fills it
+  fails.
+- **Quiescence before copying.** When the build ends (or hits
+  `deadline_seconds`), the helper writes `1` to the run's `cgroup.kill`
+  and waits for `cgroup.events` to report `populated 0`. Only then does
+  the broker copy the stage into its own `tmp/` through held descriptors
+  (regular files and directories by content, symlinks as links, a
+  hard-linked file refused, nothing else), so no surviving worker process
+  can change a file mid-copy. Then it runs the publication checks and the
+  normal commit. A timeout fails the request and leaves the uid allocated
+  for the helper's `--reap`.
+- **Crash reaping.** On start the broker runs the helper's reap for every
+  run it had allocated, and removes their stages. A broker crash never
+  leaves a stage it later publishes.
+- **What a compromised build can do.** Produce a bad object of its own
+  identity, which is what a user building that package locally would get.
+  It cannot write any other object, another run's stage, or the system
+  store.
+- **Admin allowlist.** The broker builds only kinds listed in `[broker]
+  accept`, matched against the identity's kind and schema. The list is
+  empty by default: the broker refuses everything until the admin lists
+  kinds.
+- **Peer authentication and limits.** The socket is
+  `/run/greyward/broker.sock`, mode `0660` with the reader group (group
+  model) or `0666` (world model). The broker reads the peer's uid from
+  `SO_PEERCRED`, admits only uids with a `claims/<uid>/` directory, and
+  holds at most `per_uid_requests` per uid. Requests are capped at 1 MiB,
+  and a request is cancelled when its client disconnects unless another
+  client waits on the same object.
+- **Server-controlled inputs.** The request carries only the plan: the
+  locked package set. The broker re-derives every identity, and fetches and
+  verifies every artifact with its own policy and registry configuration
+  from `/etc/greyward/`. It never uses the client's environment,
+  credentials, paths or policy. A plan it cannot re-derive alone (an
+  unlocked manifest, a path or local git source, a delegated door, a
+  private registry that needs the client's credentials) is refused, and the
+  user builds into their own store. The broker is never on the critical
+  path.
+- **Granularity.** One request per closure, realized and committed object
+  by object in dependency order, so a cancelled request keeps the objects it
+  finished.
 
 ### Failure modes (each fails closed or falls back to the user layer)
 
 | What goes wrong | What happens |
 |---|---|
-| The configured path does not exist, or is not a format-1 store with a `shared` line | Warning once, per-user store only. |
-| Ownership or mode check fails | Warning naming the path and mode, per-user store only. |
-| The system store is mid-reset (no marker) | Treated as absent for that run. |
-| The broker is down or refuses a plan | Build in the user store, no warning beyond one `note`. |
-| A system object referenced by a user object is gone (GC ran with a stale claim) | The user's project reads as `projection-missing` / stale, and the next `ward` rebuilds. The claim protocol makes this a bug, not a mode. |
-| A malformed claim file | System GC refuses and names the file and the `--forget-claims` fix. |
+| No `/etc/greyward/store.toml` | No system layer, silently. |
+| The file is invalid (owner, mode, parse, unknown key, missing account or group) | Owner uid: error, exit 2. Others: warning once, per-user store only. |
+| The root, an ancestor, a namespace or the marker fails the trust check | Warning naming the path and the expected owner and mode, per-user store only. |
+| The system store is mid-reset (no `format`), or X is mid-publication | A miss for that run, or for X. |
+| The user's lease is not granted within `lease_wait_seconds`, or its directory was replaced | One note, per-user store only for that operation. |
+| The user store is busy when it must move to format 2 | That operation does not use the system layer; the next one tries again. |
+| No `claims/<uid>/`, or a claim add fails | One note naming `ward store admit`; the object is built in the user store under its local id. |
+| A system dependency of a user object is gone | That object is unusable for the run, and the realization resolves again (locally if need be, under a different id). |
+| A malformed, oversized, unknown-named, non-regular or unreadable claim, or a wrong directory mode | System GC refuses, naming the uid and the fix. |
+| The service group has a member other than the service account | `init-system` refuses; the system GC refuses to sweep, naming the member. |
+| The broker is down or refuses a plan | Build in the user store, one `note`. |
 
 ### Implementation plan (PRs, in order)
 
-1. **Read-only layer.** The root-owned `/etc/greyward/store.toml` and its
-   ownership check, the marker's `shared` line, the ownership/ancestor check, two-layer `has()` and object
-   lookup, `check_cached_with_activity` on system objects, and the warning
-   fallback. Tests: a fixture system store owned by the test uid with a
-   different-uid marker is refused, a group-writable one is refused, and a
-   sound one is used.
-2. **Cross-uid lease and claims.** `0644` lock creation for a shared store,
-   the extra lock-order step (with a new `tests/architecture.rs`
-   lock-order test; none exists today),
-   claim writing on root registration and user GC, the system GC reading
-   claims, `--forget-claims`, and `ward store claims`.
-3. **Admin path.** `ward store init-system <path>` (creates the root, marker
-   with `shared <uid>`, `claims/` with `1777`), documented as the
-   `sudo -u ward` flow in `docs/human/CLI.md`, plus LIMITATIONS and
-   ARCHITECTURE "Store format" updates.
-4. **The broker** (`ward store serve`): the plan-only request protocol, the
-   identity re-derivation on the server side, and the client fallback.
-   Its own review round first: it is the one new trusted process.
+Each PR ships on its own, is tested on Linux, and leaves the CLI working
+with no root and no shared store. Rootless tests are in-crate unit tests
+that inject a parsed configuration value and an ownership oracle (which uid
+counts as the service account and which as root) through `pub(crate)`
+constructors. The CLI builds the configuration only from the fixed `/etc`
+path, so no environment variable, flag or feature turns the seam on in a
+shipped binary.
 
-Cross-user tests need two uids. The offline suite runs as one uid and keeps
-to what that allows: refusals by mode and owner using fixtures with a
-foreign-uid marker line. The two-uid path is an `#[ignore]` suite that
-needs `sudo` (heavy CI has it).
+**Privileged tests** live in a new top-level `tests/system_store.rs`, every
+test `#[ignore]`, and need real root to create accounts, groups and
+`/etc/greyward/store.toml`. They run one at a time (`--test-threads=1`),
+and each test restores `/etc/greyward/` and removes the accounts it made.
+PR 2 adds a `system-store` job to heavy.yml: an `ubuntu:24.04` container
+whose steps run as root, with `acl`, `passwd`, `util-linux`,
+`build-essential` and `jq` installed and rustup as the Elixir job does. It
+builds as root and runs each step as the right account with `runuser`.
+The gate routes it like a shard: it runs on the weekly and by-hand runs,
+and on a pull request when the gate fires or when the PR changes
+`tests/system_store.rs`, `src/kernel/store/`, `src/kernel/gc/` or
+`src/kernel/activity.rs`. The `changed` job and the `other` shard exclude
+`system_store`, since they run as an ordinary user. Changing heavy.yml
+wakes the whole heavy suite for PR 2, so that PR runs the e2e suites
+locally before its first push. Locally the suite runs in a rootful
+throwaway container from the repository root:
 
-### Open questions for the review round
+    sudo podman run --rm -v "$PWD":/src:Z -w /src docker.io/library/ubuntu:24.04 \
+      bash -c 'apt-get update && apt-get install -y acl passwd util-linux build-essential curl jq \
+        && curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none \
+        && . "$HOME/.cargo/env" \
+        && cargo test --locked --test system_store -- --ignored --test-threads=1'
 
-- Should `claims/` hold one file per uid or one per (uid, user-store root)?
-  One user with two `GREYWARD_STORE`s would overwrite their own claim. Current
-  pick: per (uid, sha1 of the user store root), named `<uid>-<hash>`.
-- How are claims kept from being squatted (see "GC across users")?
-  Options: (a) per-uid subdirectories `claims/<uid>/`, created by the
-  service account, chowned to that uid, mode `0755`, so only that uid
-  writes inside; (b) claims sent through the broker, which writes them as
-  the service account; (c) keep `1777` and treat a foreign-owned
-  `claims/<uid>` as a blocked sweep the admin resolves. Current pick: (a),
-  since it needs no daemon and a squatted name cannot exist.
-- When a user's claim rename fails, does the sync fail or go on with the
-  system objects unclaimed? Current pick: that run drops the system layer
-  and realizes into the user's own store, so an unwritable claim never
-  leaves a root that the system GC can break.
-- Is the broker's plan protocol per object or per closure? Per object is
-  simpler to re-derive. Per closure saves round trips.
+1. **Disabled abstractions and test seams.** The configuration parser and
+   its ownership and group checks; the marker's `shared` line and format 2
+   parsed (both still refused by `Store::open` for now); `store-id` under
+   `lock_root`; `ObjectDeps::system_objects` and the `system_store`
+   identity input with its commit consistency check; the `object-meta/3`
+   and `root/3` readers and writers; the user store passed explicitly to
+   projection and root publication (Python's `store_from_object_path` use
+   replaced); the user GC keeping `system_dependencies` out of its walk and
+   computing the claim set; the read-only lookup and closure check; the
+   publication checks and the mode table, behind a store-is-shared flag no
+   production path sets. No user-visible behavior changes. Tests
+   (rootless): configuration refusals (owner, mode, ancestor, unknown key,
+   missing account or group, relative path); marker parsing for both new
+   forms; one `store-id` from two concurrent first opens; an identity with
+   the input and no system dependency (and the reverse) is refused at
+   commit; `object-meta/3` and `root/3` round trips; a user GC over a
+   store with system dependencies keeps them out of the local walk; lookup
+   misses for each in-flight state (writable root, missing record, inode
+   swapped between steps 2 and 4, through failpoints like
+   `published_identity`'s); a closure with one missing dependency is a
+   miss; each publication check refuses its case (a FIFO, a foreign hard
+   link, a symlink into a writable directory or an undeclared object, a
+   setuid bit) and passes a Python env linking into its interpreter; modes
+   under `umask 077` come out as the table says.
+2. **Admin init, leases and claims.** `ward store init-system` (root: the
+   root, marker, `store-id`, namespaces with the table's modes, `claims/`,
+   the per-uid directories, the admin lock; refuses ACLs, a non-empty root,
+   a shared service group, or a service group equal to the reader group),
+   `admit`, `forget-uid [--force]`, `claims`, `drop-claim`,
+   `lease-holders`, `recheck`, `new-id`; writer selection for the owner uid,
+   so the service account writes the system store with the publication
+   checks on; the system GC under the admin lock, taking every per-uid
+   lease and reading claims with the streaming reader; the shared reset
+   and its crash recovery; claim adds, durable shrinks and temporary
+   cleanup (exercised through the seam, since no user consumes yet); the
+   `system-store` heavy.yml job and its routing; the lock-order test.
+   Tests (rootless): claim read limits (size, a 65-entry directory, FIFO,
+   symlink, wrong owner, unknown name) with the injected oracle; a partial
+   temporary does not block the GC and the user GC removes it; a failed
+   temporary write leaves the claim intact; a claim add is durable before
+   publication (a failpoint after the add and before the commit); two
+   concurrent adds under the claim lock keep both; two copies of a store
+   get two keys; `new-id` publishes the new claim before the new id (a
+   failpoint between them leaves both claims); shrink ordering (a
+   failpoint log shows every directory `fsync` before the claim rename)
+   and a failed directory `fsync` keeps the larger claim; the system GC
+   skips on a held lease and refuses on a broken claim; reset keeps the
+   `shared` line, `store-id` and `claims/`, and a fresh reset after a crash
+   following the marker rename, and after one during namespace removal,
+   restores the shared marker and modes. Privileged: init as root, then a
+   second account takes its lease and writes its claim, and a third cannot
+   open its directory; init refuses a service group with another member;
+   `admit` during a running system GC waits until the sweep ends;
+   `forget-uid` refuses while a reader waits on the lease, `--force`
+   revokes it, and the revoked reader's next claim add fails at the inode
+   check; re-admission after a forget gives a new inode the old holder's
+   check rejects; real modes and groups for both reader models; ACL
+   refusal; a claimed object survives a system GC across uids; reset as
+   the service account.
+3. **Enable layered consumption.** `Store::open` accepts the system layer
+   from the real `/etc` file and format 2; the per-uid lease at operation
+   start; two-layer lookup in every realization path; the move to format 2
+   before the first system-dependent publication; claim adds before
+   system-dependent commits and root registration; the fallbacks and
+   messages in the failure table; the admin flow in `docs/human/CLI.md`,
+   and LIMITATIONS and ARCHITECTURE ("Store format", "GC root safety",
+   "Store concurrency") updated. Tests (rootless): a user without the file
+   is unchanged; the owner uid with an invalid file exits 2; identical
+   roots collapse to one lease; `GREYWARD_STORE` at the system root refuses
+   for a non-owner; a busy store is not moved to format 2. Privileged: a
+   user syncs a project the service account pre-warmed and builds nothing;
+   a user's sync while a system GC holds the lease falls back within the
+   wait and builds under local ids beside any system-dependent objects; a
+   group-model store is invisible to a non-member, who builds locally;
+   relocating the store in the configuration gives the user's next sync
+   new ids; crash recovery by killing a consuming sync between its claim
+   and its commit. **Older binaries:** the previous release tag, built with
+   `cargo build --locked` from a `git worktree` of that tag, is run against
+   a store this PR adopted (format 2, with existing projections and
+   transitive system dependencies): `ward run`, `ward build`, `ward sync`
+   and `ward gc` each refuse it with the upgrade message, and against a
+   never-adopted store each still works.
+4. **The broker** (`ward store serve`), after `greyward-isolate` has landed
+   and after the broker's own review round on the design above. Tests, all
+   privileged: a build cannot write the system store or another worker's
+   stage; a process left running by a build is killed before the copy and
+   cannot change the stage; a full stage fails the build; the broker
+   refuses to start without the helper, cgroup v2 or the stage quota; a
+   broker killed mid-build reaps its runs on restart; the allowlist
+   refuses an unlisted kind; `SO_PEERCRED` refuses an unadmitted uid; the
+   deadline and per-uid limits hold; a disconnect cancels; a plan with a
+   path dependency is refused and the client builds locally.
+
+### Review round 1
+
+Codex (Sol), 2026-10-12, verdict "ready after listed edits", ten findings.
+Each was resolved with a decided rule, none deferred. Round 2 found gaps in
+the resolutions of 1, 5, 6, 7, 8 and 9, and the text above carries its
+corrections; the list below is the round-1 resolution as first written.
+
+1. *Dependency ids lose their store.* `system_objects` in `ObjectDeps`, and
+   `object-meta/3` and `root/3` with a `system_store` stamp, written only
+   when a system reference exists; older binaries refuse those records.
+2. *Reading does not cover descendants or symlinks.* Publication checks
+   every descendant, hard link and symlink target; a check level in each
+   record and the marker; `ward store recheck`. The service-account/root
+   limitation and input-addressing are stated.
+3. *The existing lookup is not usable across uids.* A lock-free
+   completion-record lookup built on `published_identity`, with an inode
+   recheck and a closure walk; only the service account repairs.
+4. *Permissions underspecified.* The mode table, applied with `fchmod`
+   regardless of umask; world or group readers chosen in configuration;
+   setgid only on per-uid claim directories; ACLs refused; the
+   reader-visible namespaces listed, the rest service-private.
+5. *Claims are not durable.* A per-user-store claim lock, add-only writes
+   made durable before publication, shrinks only under the user GC's
+   exclusive lease, the old claim kept until the new one is durable, and
+   the system lease held as long as the user activity lease.
+6. *Claims lack provisioning and failure rules.* Root-provisioned per-uid
+   directories under a service-owned parent, claim files keyed by uid and
+   `store-id`, every present object counted, the system layer dropped
+   before publication on failure, uid reuse and copied stores handled.
+7. *Readable locks allow denial of service.* No shared readable lock:
+   per-uid lease directories nobody else can open, bounded acquisition with
+   fallback, capped non-blocking claim reads, the availability boundary
+   stated, `lease-holders` and `forget-uid` for recovery.
+8. *The broker exposes the writer account.* Builds run as isolated
+   subordinate uids with no publication authority, an admin allowlist of
+   kinds, `SO_PEERCRED`, limits, and server-only inputs; still its own PR
+   and review round.
+9. *Configuration and reset conflict.* One account name, writer selection
+   by uid, identical roots collapsed, `GREYWARD_STORE` kept as the user
+   override, invalid-file behavior per uid, reset keeping the `shared` line
+   and `store-id`, migration by re-realizing.
+10. *The PR plan enables consumption before safety.* Re-scoped: disabled
+    abstractions and seams, then admin init with leases and claims, then
+    consumption, then the broker, each with its rootless and privileged
+    Linux tests.
+
+### Review round 2
+
+Codex (Sol), 2026-10-12, verdict "not ready": every round-1 topic was
+addressed, but ten rules needed correcting (six P1, four P2). Each is
+fixed above with a decided rule:
+
+1. *P1. Admission could step around a running GC's leases.* The admin lock
+   (`<system>/admin.lock`) serializes `admit`, `forget-uid`, the system GC
+   and the shared reset, held from listing `claims/` to the end of the
+   sweep. `forget-uid` refuses an active lease; `--force` says it
+   surrenders that uid's protection. A user re-checks after `flock` that
+   `claims/<uid>` still names the locked inode, and each claim add checks
+   again. Privileged tests cover admission during a GC and forgetting and
+   re-admitting around a waiting reader.
+2. *P1. `/3` records did not make older binaries refuse every use* (an
+   older `closure_object` uses `has_with_activity`, which never reads the
+   schema). A user store moves to `greyward-store 2` before it can hold
+   anything system-dependent, at operation start under a non-waiting
+   exclusive lease taken before the shared one (a held shared lease cannot
+   be upgraded). Every older lease
+   runs `check_format`, which refuses a later format, so `run`, `build`,
+   `sync` and `gc` all refuse. PR 3 tests the previous release tag's binary
+   against an adopted store.
+3. *P1. "Stale and rebuild" had no safe publication rule for one id.* The
+   layer is an identity input (`system_store`, the system store's id and
+   root), added in one kernel place and checked at commit, so local and
+   system-dependent variants have distinct ids and nothing is replaced in
+   place. Projection and root publication take the operation's user store
+   explicitly; Python's inference from `env_obj` is replaced.
+4. *P1. Copied stores collided on one claim key.* The key now includes the
+   canonical user-store root, and copied-store discovery is gone. The
+   first `store-id` is written under `format::lock_root`. `new-id` holds
+   the store's exclusive lease and the per-uid lease, publishes the
+   retained claim under the new key, then changes the id, and keeps the old
+   claim.
+5. *P1. Shrinking assumed durable deletions.* The user GC `fsync`s every
+   directory it removed from before shrinking, and keeps the larger claim
+   if any of those fails. The stated invariant: whichever claim version
+   survives covers every reference that survives. PR 2 adds ordering and
+   `fsync`-failure tests.
+6. *P1 (PR 4 only). Fresh subordinate uids did not isolate the broker.*
+   PR 4 now depends on §6's `greyward-isolate` landing first: its own uid
+   range outside `/etc/subuid`, cleared groups (the reader group alone in
+   the group model), private mounts, a tmpfs or project-quota stage that
+   enforces `disk_bytes`, `cgroup.kill` and `populated 0` before the copy,
+   reaping on restart, and no uid reuse while anything of it remains. The
+   broker refuses to start without them.
+7. *P2. Claim temporaries could block the GC.* Committed claims and
+   temporaries have distinct names; the GC never parses a temporary, and
+   the user GC removes temporaries under its exclusive per-uid lease.
+   Enumeration streams and stops at the 65th entry. Tests cover partial
+   temporaries, failed writes and oversized directories.
+8. *P2. A crashed shared reset lost its marker.* A shared reset renames the
+   marker to `format.reset` instead of deleting it; recovery uses that,
+   the trusted configuration and the preserved `store-id`, and refuses
+   with a named fix when any is missing or the configuration is invalid.
+   PR 2 adds crash tests at both points.
+9. *P2. Privileged tests were routed wrongly.* PR 2 adds a root
+   `system-store` container job to heavy.yml, routed on full runs and on
+   store, GC and activity changes, and excluded from `changed` and the
+   `other` shard; tests run one at a time and restore `/etc`; the packages
+   and the local `sudo podman` command are named. The consuming-sync crash
+   test moved to PR 3.
+10. *P2. Lease isolation assumed a private service group.* The
+    configuration names a dedicated service group that must hold only the
+    service account and differ from the reader group; `init-system` and
+    every system GC check it, and the CLI.md admin flow states it as an
+    ongoing duty.
+
+The reviewer's notes are taken too: the world reader model is stated to
+expose object contents and metadata to every local user, with the group
+model named for private prewarming, and the uid-reuse rule now says the
+new owner of a uid inherits the old claims' retention, paths and object
+ids, not only disk use. Its suggested simplifications are adopted: the root
+in the claim key instead of copied-store detection, a store marker instead
+of per-record refusal, and §6's isolation helper instead of a second uid
+lifecycle.
 
 ---
 

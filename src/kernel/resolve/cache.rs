@@ -275,10 +275,28 @@ pub fn sweep(store: &Store, max_age: Duration, dry_run: bool) -> io::Result<Swep
 }
 
 /// Read at most `cap` bytes of `reader`; more is an `InvalidData` error,
-/// never a truncation. Any other error is the transport's.
-pub fn read_capped(reader: &mut dyn Read, cap: u64) -> io::Result<Vec<u8>> {
+/// never a truncation. Every piece is taken from `held` before it is
+/// read: past the process's budget the error is
+/// [`OverBudget`](super::http::OverBudget). Any other error is the
+/// transport's.
+pub fn read_capped(
+    reader: &mut dyn Read,
+    cap: u64,
+    held: &mut super::http::Reservation<'_>,
+) -> io::Result<Vec<u8>> {
+    /// What one read may add before it is reserved.
+    const PIECE: u64 = 1 << 20;
     let mut body = Vec::new();
-    reader.take(cap + 1).read_to_end(&mut body)?;
+    let mut reader = reader.take(cap + 1);
+    loop {
+        let piece = PIECE.min(reader.limit());
+        held.grow(piece).map_err(super::http::OverBudget::into_io)?;
+        let before = body.len();
+        (&mut reader).take(piece).read_to_end(&mut body)?;
+        if ((body.len() - before) as u64) < piece || reader.limit() == 0 {
+            break;
+        }
+    }
     if body.len() as u64 > cap {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

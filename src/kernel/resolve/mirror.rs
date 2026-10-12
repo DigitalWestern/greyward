@@ -270,6 +270,9 @@ impl Read for Hashing {
 pub(crate) struct Exchange<'a> {
     pub state: &'a State,
     pub client: &'a PinnedClient,
+    /// The process's in-flight byte budget, which every buffered response
+    /// body is read under.
+    pub budget: &'a http::Budget,
     pub route: &'a Route,
     pub address: &'a ProxyAddress,
     pub method: &'a str,
@@ -341,6 +344,20 @@ impl Exchange<'_> {
         headers.set("Content-Type", TEXT);
         let body = format!("ward: {}\n", self.state.clean(&reason));
         self.reply(out, status, &headers, body.as_bytes())
+    }
+
+    /// The process's in-flight byte budget is spent: 503, with
+    /// `Retry-After` so the tool tries again shortly.
+    fn busy(&self, out: &mut dyn Write, mut record: Record, reason: String) -> io::Result<()> {
+        record.status = 503;
+        record.disposition = "failed";
+        record.detail = Some(reason.clone());
+        record.commit(self.state);
+        let mut headers = Headers::new();
+        headers.set("Content-Type", TEXT);
+        headers.set("Retry-After", http::RETRY_AFTER_SECONDS);
+        let body = format!("ward: {}\n", self.state.clean(&reason));
+        self.reply(out, 503, &headers, body.as_bytes())
     }
 
     fn refuse(
@@ -616,8 +633,12 @@ impl Exchange<'_> {
                 out,
             );
         }
-        let body = match cache::read_capped(&mut response.body, http::MAX_BODY) {
+        let mut held = self.budget.reservation();
+        let body = match cache::read_capped(&mut response.body, http::MAX_BODY, &mut held) {
             Ok(body) => body,
+            Err(error) if http::OverBudget::is(&error) => {
+                return self.busy(out, record, error.to_string());
+            }
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 return self.fail(out, record, 502, error.to_string());
             }
@@ -910,8 +931,12 @@ impl Exchange<'_> {
         if status >= 500 || (200..300).contains(&status) {
             return self.fail(out, record, 504, format!("upstream answered {status}"));
         }
-        let body = match cache::read_capped(&mut response.body, http::MAX_BODY) {
+        let mut held = self.budget.reservation();
+        let body = match cache::read_capped(&mut response.body, http::MAX_BODY, &mut held) {
             Ok(body) => body,
+            Err(error) if http::OverBudget::is(&error) => {
+                return self.busy(out, record, error.to_string());
+            }
             Err(error) => return self.fail(out, record, 502, error.to_string()),
         };
         record.status = status;
@@ -1071,6 +1096,43 @@ mod tests {
 
     fn fetch(address: &ProxyAddress, path: &str) -> Response {
         get(address, &mirror(address, path), "")
+    }
+
+    /// A metadata response is buffered under the process's in-flight byte
+    /// budget: past it the tool gets 503 with `Retry-After`, and what a
+    /// served response held is given back (two responses that each fit
+    /// alone are both served, one after the other).
+    #[test]
+    fn metadata_past_the_in_flight_budget_is_a_503_and_the_budget_is_released() {
+        use crate::kernel::resolve::testing::Reach;
+        let harness = Harness::with(
+            "mirror-budget",
+            Reach {
+                buffer_budget: 1 << 20,
+                ..Reach::loopback()
+            },
+        );
+        let fits = vec![b' '; 700 << 10];
+        for path in ["/meta/a.json", "/meta/b.json"] {
+            harness
+                .upstream
+                .set(path, Behavior::Reply(Reply::new(200, &fits)));
+        }
+        harness.upstream.set(
+            "/meta/big.json",
+            Behavior::Reply(Reply::new(200, &vec![b' '; 3 << 20])),
+        );
+        let (session, address) = harness.session();
+        let big = fetch(&address, "/meta/big.json");
+        assert_eq!(big.status, 503, "{}", big.text());
+        assert_eq!(big.headers.get("retry-after"), Some("1"));
+        assert!(big.text().contains("in-flight"), "{}", big.text());
+        for path in ["/meta/a.json", "/meta/b.json"] {
+            let answer = fetch(&address, path);
+            assert_eq!(answer.status, 200, "{path}: {}", answer.text());
+            assert_eq!(answer.body.len(), fits.len());
+        }
+        session.finish();
     }
 
     fn entries_for(report: &SessionReport, url: &str) -> Vec<Entry> {

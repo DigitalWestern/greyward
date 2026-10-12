@@ -266,7 +266,6 @@ fn writes_closures(command: &cli::Command) -> bool {
             | Add { .. }
             | Remove { .. }
             | Update { .. }
-            | Adopt { .. }
             | X { .. }
     )
 }
@@ -308,6 +307,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         Doctor { json, isolation } => return doctor::run(json, isolation),
         Keygen { ref path } => return keygen::run(path),
         attest @ Attest { .. } => return attest::run(attest),
+        adopt @ Adopt { .. } => return adopt::run(adopt),
         Ls {
             ref ecosystem,
             json,
@@ -360,7 +360,6 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         // Like `run`, `env` needs the store open: a recorded runtime is a
         // store object, whose bin directory is on the PATH `env` prints.
         Env { shell } => env::run(&ctx, shell, sync.frozen),
-        Adopt { ecosystem, no_sync } => adopt::run(&ctx, ecosystem.as_deref(), no_sync).map(|_| 0),
         Add {
             specs,
             dev,
@@ -427,8 +426,7 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         | Attest { .. }
         | Ls { .. }
         | Audit { .. }
-        | SelfUpdate => {
-            unreachable!("handled above")
-        }
+        | Adopt { .. }
+        | SelfUpdate => unreachable!("handled above"),
     }
 }

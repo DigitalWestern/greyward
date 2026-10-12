@@ -35,6 +35,7 @@ mod attest;
 mod completions;
 mod parse;
 mod spec;
+mod update;
 mod x;
 
 pub use self::completions::completions;
@@ -147,10 +148,14 @@ pub enum Command {
     /// compiles through the resolution door, with its signed record, keeping
     /// the original as the source. Its own variant like `SelfUpdate`: it
     /// names an ecosystem, never a package. `ecosystem` is a tailor id;
-    /// `None` adopts in every ecosystem found here.
+    /// `None` adopts in every adoptable ecosystem found here.
+    /// `accept_changes` (`--accept-changes`) publishes a compile that moves
+    /// a pinned version or loses an original hash; without it such a
+    /// compile is printed and withheld.
     Adopt {
         ecosystem: Option<String>,
         no_sync: bool,
+        accept_changes: bool,
     },
     /// `x [--py|--npm] [--from <package>] <tool>[@<version>] [<args>...]`.
     X {

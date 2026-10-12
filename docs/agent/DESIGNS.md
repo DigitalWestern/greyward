@@ -1753,6 +1753,16 @@ project, and each fails (or, for npm and Bundler, which exit 0 either way,
 rewrites the lock, so the byte diff is the check) when the manifest has
 drifted. Go needs both commands: after an edit that removes a module,
 `go mod tidy -diff` is what catches the stale `go.sum` lines.
+A hand-hashed lock no resolver wrote is not attested: `ward update --adopt
+[<eco>]` first has the resolver compile it, through an ecosystem's
+`Tailor::adopter()`. Python keeps the original as `requirements.in` by
+*staging* it (`kernel/resolve/staging.rs`): the door's snapshot hands it to
+uv, and the resolution transaction publishes it as one more absent target,
+with the lock and the receipt, under the same journal, so a failed or
+interrupted adoption restores its absence. The staged review compares the
+compiled pins with the original ones before the first project write and
+withholds a compile that moves a pin or loses a hash unless
+`--accept-changes` is given.
 A tailor offers a lock check through `Tailor::attester()`; one without an
 attester, or without declared resolution outputs, cannot be attested. Named,
 it is refused with the reason before preflight and before the store opens.
@@ -2188,6 +2198,12 @@ fn edit_manifest(
 /// it has none. Target selection requires one, so an unsupported tailor is
 /// refused (named) or skipped (unnamed) before any toolchain or store work.
 fn attester(&self) -> Option<&dyn Attester> { None }
+
+/// `ward update --adopt`: how this ecosystem turns a lock no resolver wrote
+/// into one its resolver compiles, or `None` when its locks are always its
+/// resolver's own. Selection mirrors `attester`: refused named, skipped
+/// unnamed, before the signing key or the store is touched.
+fn adopter(&self) -> Option<&dyn Adopter> { None }
 
 // trait Attester:
 /// Run the lock-consistency check through `door` and return the record the

@@ -44,6 +44,7 @@ pub mod seccomp;
 pub mod session;
 pub mod snapshot;
 pub mod ssrf;
+pub mod staging;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod transaction;

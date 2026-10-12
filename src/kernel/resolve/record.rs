@@ -808,6 +808,10 @@ impl ResolutionRecord {
         };
         let (listed_outputs, _) = spec.files.keys()?;
         let mut changed = BTreeMap::new();
+        // A lock check asks whether the bytes are what the tool accepts. A
+        // tool that rewrites an output byte for byte (a fresh file, so the
+        // umask's mode rather than the project's) left it unchanged.
+        let mut rewritten = Vec::new();
         for file in facts.outputs {
             let key =
                 record_path(&file.relative).ok_or_else(|| not_a_record_path(&file.relative))?;
@@ -818,10 +822,13 @@ impl ResolutionRecord {
                     facts.ecosystem
                 )));
             }
+            if facts.input_digest(&file.relative) != Some(file.sha256) {
+                rewritten.push(key.clone());
+            }
             changed.insert(key, hex::encode(file.sha256));
         }
-        if spec.require_unchanged && !changed.is_empty() {
-            let names: Vec<&str> = changed.keys().map(String::as_str).collect();
+        if spec.require_unchanged && !rewritten.is_empty() {
+            let names = rewritten;
             return Err(io::Error::other(format!(
                 "{}'s lock check would change {}; the committed files are not what {} accepts, \
                  so nothing is attested (run `ward` to bring them up to date)",

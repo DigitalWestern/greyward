@@ -292,35 +292,44 @@ choice. For a plain requirements file ward deletes the line itself.",
         name: "update",
         group: Group::Everyday,
         summary: "update dependencies, --toolchain, --adopt, or --self (ward)",
-        usage: "ward update [<package>...] [--no-sync]\n  ward update --toolchain [<ecosystem>] [--no-sync]\n  ward update --adopt [<ecosystem>] [--no-sync]\n  ward update --self",
+        usage: "ward update [<package>...] [--no-sync]\n  ward update --toolchain [<ecosystem>] [--no-sync]\n  ward update --adopt [<ecosystem>] [--accept-changes] [--no-sync]\n  ward update --self",
         description: "\
-Re-locks everything (or only the named packages) to the newest versions the
-manifest allows: uv lock --upgrade, npm update, cargo update, go get -u,
-bundle lock --update, mix deps.update, and pnpm update --lockfile-only.
-Poetry, PDM, Yarn classic, and .NET projects are told which command to run
-with their own tool.
+update has four modes, and one run is exactly one of them: the dependency
+update (the default), --toolchain, --adopt, and --self. Each mode's flag
+refuses the others.
 
---toolchain is the other update, and the two never mix: it re-reads the
-project's declarative toolchain sources, selects the newest compatible
-release for every ecosystem the project has, or only <ecosystem> — python,
-node, rust (spelled cargo too), go, ruby, elixir, dotnet — rewrites
-greyward-toolchain.toml, and syncs. It takes no package name and leaves every
-dependency lock alone. It is also how an ecosystem the project just gained
-gets its section, and the next step every stale-lock refusal names.
---no-sync stops after the lock is written, so the diff can be reviewed
-before anything is realized.
+The dependency update re-locks everything (or only the named packages) to
+the newest versions the manifest allows: uv lock --upgrade, npm update,
+cargo update, go get -u, bundle lock --update, mix deps.update, and pnpm
+update --lockfile-only. Poetry, PDM, Yarn classic, and .NET projects are
+told which command to run with their own tool.
+
+--toolchain re-reads the project's declarative toolchain sources, selects
+the newest compatible release for every ecosystem the project has, or only
+<ecosystem> — python, node, rust (spelled cargo too), go, ruby, elixir,
+dotnet — rewrites greyward-toolchain.toml, and syncs. It takes no package
+name and leaves every dependency lock alone. It is also how an ecosystem
+the project just gained gets its section, and the next step every
+stale-lock refusal names.
 
 --adopt gives a lock no resolver wrote (a hand-hashed requirements.txt)
 the provenance 'ward attest' and --strict require, without upgrading
-anything. The original is kept as requirements.in, byte for byte (an
-existing, different requirements.in is refused), and the store uv
-compiles requirements.txt from it through the confined resolution door,
-which writes the signed record .greyward/resolution/<ecosystem>.json. The
+anything. The original becomes requirements.in, byte for byte and with
+its permission bits (an existing, different requirements.in is refused),
+and the store uv compiles requirements.txt from it through the confined
+resolution door. The source, the compiled lock, and the signed record
+.greyward/resolution/<ecosystem>.json are published together or not at
+all: a failed or interrupted adoption leaves the project as it was. The
 original pins and the compiled ones are printed for review, with every
-original hash the compiled lock dropped. A pip-compile pair another tool
-generated is recompiled from its requirements.in the same way. An
-ecosystem whose lock already comes from its resolver says there is
-nothing to adopt.
+original hash the compiled lock dropped. A compile that changes a pinned
+version, drops a pin, or loses an original hash is withheld, the diff
+printed and nothing written, unless --accept-changes is given. A
+pip-compile pair another tool generated is recompiled from its
+requirements.in the same way. With no ecosystem named, every ecosystem
+here that adopts locks is adopted; naming one that does not is refused.
+
+--no-sync stops the dependency update, --toolchain, and --adopt after the
+lock is written, so the diff can be reviewed before anything is realized.
 
 --self updates ward itself and touches no project: it asks GitHub for the
 newest release, stops when this build is already that version, and
@@ -343,6 +352,10 @@ says when a newer release exists; nothing checks in the background.",
             (
                 "--adopt [<ecosystem>]",
                 "have the resolver compile a lock it did not write, keeping the original as its source, and sign its record",
+            ),
+            (
+                "--accept-changes",
+                "with --adopt: publish a compile that moves a pinned version or loses an original hash",
             ),
             (
                 "--self",

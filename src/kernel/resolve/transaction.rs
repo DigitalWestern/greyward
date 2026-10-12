@@ -37,6 +37,13 @@
 //!    recovery releases again. A held journal (nothing was published) goes
 //!    the same way without being rewritten.
 //!
+//! A file staged for the project (`staging`) is one more absent target:
+//! the hold requires it to be a declared output the project does not have,
+//! the publication requires the tool to have left it byte for byte as
+//! staged, creates it with its staged mode, and runs the staged review over
+//! every output before step 2. So it appears with the lock and the receipt
+//! or not at all, and undoing restores its absence.
+//!
 //! Any failure during step 3 undoes every target in reverse, then
 //! finishes, and recovery after a crash does the same from the journal.
 //! Recovery trusts a journal only in the directory it was asked about
@@ -60,6 +67,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::outputs::{Outputs, MAX_OUTPUT_BYTES};
 use crate::kernel::resolve::snapshot;
+use crate::kernel::resolve::staging;
 use crate::kernel::store::{self, ObjectDeps, Store};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
@@ -135,6 +143,9 @@ struct Held {
     relative: PathBuf,
     original: Option<Original>,
     receipt: bool,
+    /// A file staged for this target (`staging`): its sha256 and mode. The
+    /// target was absent, and is published only with exactly these bytes.
+    staged: Option<([u8; 32], u32)>,
 }
 
 /// A held target set, from `hold` to `publish` or `abandon`. Dropping it
@@ -238,8 +249,43 @@ impl<'a> Transaction<'a> {
             finished: true,
         };
         let copies = transaction.read_originals(relatives)?;
+        transaction.mark_staged()?;
         transaction.commit_originals(copies)?;
         Ok(transaction)
+    }
+
+    /// Mark each file staged for this root (`staging`) on its target: a
+    /// declared output the project does not have. Anything else is refused
+    /// before the originals are committed, so nothing is held.
+    fn mark_staged(&mut self) -> io::Result<()> {
+        for file in staging::files_at(self.root.as_raw_fd())? {
+            let shown = self.root.path().join(&file.relative);
+            let Some(held) = self
+                .targets
+                .iter_mut()
+                .find(|held| !held.receipt && held.relative == file.relative)
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} is staged for a resolution that does not declare it as an output",
+                        shown.display()
+                    ),
+                ));
+            };
+            if held.original.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} already exists, so the file staged for it was not used; nothing \
+                         was changed",
+                        shown.display()
+                    ),
+                ));
+            }
+            held.staged = Some((Sha256::digest(&file.bytes).into(), file.mode & 0o777));
+        }
+        Ok(())
     }
 
     /// The lock root this transaction holds.
@@ -282,6 +328,7 @@ impl<'a> Transaction<'a> {
                 relative,
                 original,
                 receipt,
+                staged: None,
             });
         }
         Ok(copies)
@@ -384,6 +431,7 @@ impl<'a> Transaction<'a> {
     /// finishes the cleanup.
     pub fn publish(mut self, outputs: &Outputs, receipt: Option<&[u8]>) -> io::Result<Published> {
         let plan = self.plan(outputs, receipt)?;
+        self.review(&plan)?;
         let mut created = self.created_at_hold.clone();
         for dir in self.prepare_dirs(&plan)? {
             created.push(path_text(&dir)?.to_string());
@@ -510,13 +558,15 @@ impl<'a> Transaction<'a> {
                     None => continue,
                 }
             };
-            // A replaced file keeps its own mode; a created one gets the
-            // ordinary file mode under this process's umask, never whatever
-            // bits the tool left on its copy.
-            let mode = held
-                .original
-                .as_ref()
-                .map_or_else(new_file_mode, |original| original.mode);
+            // A replaced file keeps its own mode; a staged one gets the mode
+            // it was staged with; any other created one gets the ordinary
+            // file mode under this process's umask, never whatever bits the
+            // tool left on its copy.
+            let mode = match (&held.original, held.staged) {
+                (Some(original), _) => original.mode,
+                (None, Some((_, mode))) => mode,
+                (None, None) => new_file_mode(),
+            };
             let temp = temp_beside(&held.relative)?;
             plan.push(Planned {
                 target: index,
@@ -537,6 +587,18 @@ impl<'a> Transaction<'a> {
             let last = plan.last_mut().expect("just pushed");
             last.journal.new = hex::encode(Sha256::digest(&last.bytes));
         }
+        for held in &self.targets {
+            let Some((sha256, _)) = held.staged else {
+                continue;
+            };
+            if outputs.get(&held.relative).map(|file| file.sha256) != Some(sha256) {
+                return Err(io::Error::other(format!(
+                    "the resolution tool changed or removed {}, which ward staged for it, so \
+                     nothing was published",
+                    self.root.path().join(&held.relative).display()
+                )));
+            }
+        }
         if receipt.is_some() && !self.targets.iter().any(|held| held.receipt) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -544,6 +606,26 @@ impl<'a> Transaction<'a> {
             ));
         }
         Ok(plan)
+    }
+
+    /// The review staged for this root (`staging`), over every held output
+    /// as `plan` would leave it, before the first project write.
+    fn review(&self, plan: &[Planned]) -> io::Result<()> {
+        let candidates: Vec<staging::Candidate<'_>> = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| !held.receipt)
+            .map(|(index, held)| staging::Candidate {
+                relative: &held.relative,
+                before: held.original.as_ref().map(|original| original.sha256),
+                after: plan
+                    .iter()
+                    .find(|entry| entry.target == index)
+                    .map(|entry| entry.bytes.as_slice()),
+            })
+            .collect();
+        staging::review_at(self.root.as_raw_fd(), &candidates)
     }
 
     /// Create every missing parent of a planned target (`.greyward/resolution`
@@ -2455,5 +2537,280 @@ mod tests {
             & 0o777;
         assert_eq!(mode, new_file_mode());
         assert_eq!(mode & 0o111, 0);
+    }
+
+    const SOURCE: &str = "source.in";
+    const SOURCE_BYTES: &[u8] = b"a==1 --hash=sha256:aa\n";
+
+    /// How a staged run goes: the staged file's mode, the review, what the
+    /// tool does to the staged copy, what happens in the project between
+    /// the run and the publication, the fault hook, and whether the tool
+    /// fails (the door then abandons the transaction).
+    struct StagedRun {
+        mode: u32,
+        review: Option<staging::Review>,
+        tool_edits_source: bool,
+        between: Box<dyn FnOnce(&Path)>,
+        hook: Box<dyn FnMut(FaultPoint) -> Fault>,
+        tool_fails: bool,
+    }
+
+    impl Default for StagedRun {
+        fn default() -> Self {
+            StagedRun {
+                mode: 0o600,
+                review: None,
+                tool_edits_source: false,
+                between: Box::new(|_| {}),
+                hook: Box::new(|_| Fault::Continue),
+                tool_fails: false,
+            }
+        }
+    }
+
+    /// `run_door` with `source.in` staged for the project: the tool reads
+    /// it from the stage and rewrites package.json; the source is a
+    /// declared output the project does not have.
+    fn run_staged(fx: &Fixture, run: StagedRun) -> io::Result<Published> {
+        let activity = fx.store.activity(ActivityMode::Shared).unwrap();
+        let root = ProjectRoot::open(&fx.project).unwrap();
+        let _staged = staging::stage(
+            &root,
+            staging::Staging {
+                files: vec![staging::StagedFile {
+                    relative: PathBuf::from(SOURCE),
+                    bytes: SOURCE_BYTES.to_vec(),
+                    mode: run.mode,
+                }],
+                review: run.review,
+            },
+        )?;
+        let mut declared = declared();
+        declared.push(PathBuf::from(SOURCE));
+        let transaction = Transaction::hold(
+            &fx.store,
+            &activity,
+            root,
+            &HoldSpec {
+                ecosystem: "npm",
+                outputs: &declared,
+                receipt: true,
+            },
+        )?;
+        let snapshot = Snapshot::build(
+            &fx.store,
+            &activity,
+            &SnapshotSpec {
+                lock_root: &ProjectRoot::open(&fx.project).unwrap(),
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )?;
+        let staged = snapshot.lock_root().staged.clone();
+        // The tool sees the staged source; the project does not have it.
+        assert_eq!(fs::read(staged.join(SOURCE))?, SOURCE_BYTES);
+        assert!(!fx.project.join(SOURCE).exists());
+        fs::write(staged.join("package.json"), NEW_MANIFEST)?;
+        if run.tool_edits_source {
+            fs::write(staged.join(SOURCE), USER_EDIT)?;
+        }
+        let changes = snapshot.diff()?;
+        let classified = snapshot.classify(&changes, &declared, &[])?;
+        let outputs = Outputs::copy(&fx.store, &activity, &snapshot, &classified.outputs, &[])?;
+        (run.between)(&fx.project);
+        if run.tool_fails {
+            transaction.abandon()?;
+            return Err(io::Error::other("the tool failed"));
+        }
+        set_hook(run.hook);
+        let result = transaction.publish(&outputs, Some(NEW_RECEIPT));
+        clear_hook();
+        result
+    }
+
+    fn mode_of(fx: &Fixture, relative: &str) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(fx.project.join(relative))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// The staged source is published with the outputs and the receipt,
+    /// byte for byte and with the mode it was staged with, never the
+    /// ordinary one.
+    #[test]
+    fn a_staged_file_is_published_with_the_outputs_and_its_own_mode() {
+        let fx = fixture("staged-publish", false);
+        run_staged(&fx, StagedRun::default()).unwrap();
+        assert_eq!(read(&fx, SOURCE).as_deref(), Some(SOURCE_BYTES));
+        assert_eq!(mode_of(&fx, SOURCE), 0o600);
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(NEW_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
+    fn assert_unstaged(fx: &Fixture) {
+        assert_eq!(read(fx, SOURCE), None);
+        assert_eq!(read(fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(read(fx, ".greyward/resolution/npm.json"), None);
+        assert_clean(fx);
+    }
+
+    /// Writing the staged file's temporary fails: everything is undone and
+    /// the source never appears.
+    #[test]
+    fn a_failed_write_of_the_staged_file_publishes_nothing() {
+        let fx = fixture("staged-write-fails", false);
+        let error = run_staged(
+            &fx,
+            StagedRun {
+                hook: Box::new(|point| match point {
+                    FaultPoint::TempWritten(1) => Fault::Fail,
+                    _ => Fault::Continue,
+                }),
+                ..StagedRun::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected failure"), "{error}");
+        assert_unstaged(&fx);
+    }
+
+    /// A process killed after the staged file was created leaves a journal;
+    /// recovery restores its absence along with the original outputs.
+    #[test]
+    fn an_interrupted_publication_is_recovered_to_the_original_absence() {
+        for at in [
+            FaultPoint::Marked(1),
+            FaultPoint::Marked(2),
+            FaultPoint::Verified,
+        ] {
+            let fx = fixture("staged-crash", false);
+            let error = run_staged(
+                &fx,
+                StagedRun {
+                    hook: Box::new(crash_at(at)),
+                    ..StagedRun::default()
+                },
+            )
+            .unwrap_err();
+            assert!(is_crash(&error), "{at:?}: {error}");
+            assert_eq!(read(&fx, SOURCE).as_deref(), Some(SOURCE_BYTES), "{at:?}");
+            assert!(has_pending_journal(&fx.project));
+            recover(&fx);
+            assert_unstaged(&fx);
+        }
+    }
+
+    /// A file the project already has is never replaced by a staged one:
+    /// the hold refuses before anything is held.
+    #[test]
+    fn a_staged_file_the_project_already_has_is_refused_at_hold() {
+        let fx = fixture("staged-exists", false);
+        fs::write(fx.project.join(SOURCE), USER_EDIT).unwrap();
+        let error = run_staged(&fx, StagedRun::default()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+        assert_eq!(read(&fx, SOURCE).as_deref(), Some(USER_EDIT));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_clean(&fx);
+    }
+
+    /// Somebody creates the source while the tool runs, then edits it in
+    /// place. Whether the tool then fails or succeeds, their file is left
+    /// exactly as they wrote it: nothing removes a staged file by name, and
+    /// the publication's no-replace create refuses it.
+    #[test]
+    fn a_source_created_and_edited_during_the_run_is_never_touched() {
+        use std::io::Write as _;
+        let theirs = [USER_EDIT, b"more\n"].concat();
+        for tool_fails in [true, false] {
+            let fx = fixture("staged-user-file", false);
+            let error = run_staged(
+                &fx,
+                StagedRun {
+                    between: Box::new(|project: &Path| {
+                        fs::write(project.join(SOURCE), USER_EDIT).unwrap();
+                        let mut file = fs::OpenOptions::new()
+                            .append(true)
+                            .open(project.join(SOURCE))
+                            .unwrap();
+                        file.write_all(b"more\n").unwrap();
+                    }),
+                    tool_fails,
+                    ..StagedRun::default()
+                },
+            )
+            .unwrap_err();
+            if !tool_fails {
+                assert!(error.to_string().contains("appeared"), "{error}");
+            }
+            assert_eq!(read(&fx, SOURCE), Some(theirs.clone()), "{tool_fails}");
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            assert_eq!(read(&fx, ".greyward/resolution/npm.json"), None);
+            assert_clean(&fx);
+        }
+    }
+
+    /// A tool that rewrites the staged source publishes nothing.
+    #[test]
+    fn a_staged_file_the_tool_changed_is_not_published() {
+        let fx = fixture("staged-tool-edit", false);
+        let error = run_staged(
+            &fx,
+            StagedRun {
+                tool_edits_source: true,
+                ..StagedRun::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed or removed"), "{error}");
+        assert_unstaged(&fx);
+    }
+
+    /// The staged review sees every output as the publication would leave
+    /// it, before the first write; its refusal publishes nothing.
+    #[test]
+    fn the_staged_review_runs_before_any_write_and_can_refuse() {
+        type Seen = Vec<(PathBuf, bool, Option<Vec<u8>>)>;
+        let fx = fixture("staged-review", false);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::new()));
+        let record = seen.clone();
+        let error = run_staged(
+            &fx,
+            StagedRun {
+                review: Some(Box::new(move |candidates: &[staging::Candidate<'_>]| {
+                    for candidate in candidates {
+                        record.lock().unwrap().push((
+                            candidate.relative.to_path_buf(),
+                            candidate.before.is_some(),
+                            candidate.after.map(<[u8]>::to_vec),
+                        ));
+                    }
+                    Err(io::Error::other("the review refused"))
+                })),
+                ..StagedRun::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "the review refused");
+        assert_unstaged(&fx);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                (
+                    PathBuf::from("package.json"),
+                    true,
+                    Some(NEW_MANIFEST.to_vec())
+                ),
+                (PathBuf::from("package-lock.json"), false, None),
+                (PathBuf::from(SOURCE), false, Some(SOURCE_BYTES.to_vec())),
+            ]
+        );
     }
 }

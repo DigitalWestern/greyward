@@ -246,7 +246,53 @@ impl Snapshot {
             walk.copy_root(&real, held, &staged)?;
             snapshot.roots.push(Root { real, staged });
         }
+        snapshot.add_staged(spec.lock_root)?;
         Ok(snapshot)
+    }
+
+    /// Write the files staged for the lock root (`staging`) into the stage,
+    /// with their modes, and leave them out of the baseline: the tool reads
+    /// them, and the diff reports each as a new file, which the transaction
+    /// publishes only if it is still byte for byte as staged. One the
+    /// project already has is refused: a staged file is always a new one.
+    fn add_staged(&mut self, lock_root: &ProjectRoot) -> io::Result<()> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        for file in super::staging::files_at(lock_root.as_raw_fd())? {
+            check_relative(&file.relative)?;
+            let root = self.lock_root().clone();
+            let real = root.real.join(&file.relative);
+            if self.baseline.contains_key(&real) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} already exists, so the file staged for it was not used; nothing \
+                         was changed",
+                        real.display()
+                    ),
+                ));
+            }
+            let parent = real.parent().unwrap_or(&root.real);
+            if !matches!(self.baseline.get(parent), Some(EntryState::Dir { .. })) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "{} is not a directory in the project, so {} cannot be staged in it",
+                        parent.display(),
+                        file.relative.display()
+                    ),
+                ));
+            }
+            let mut staged = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .mode(file.mode & 0o777)
+                .open(root.staged.join(&file.relative))?;
+            staged.write_all(&file.bytes)?;
+            // The umask may have narrowed the requested mode.
+            staged.set_permissions(fs::Permissions::from_mode(file.mode & 0o777))?;
+        }
+        Ok(())
     }
 
     /// The stage directory (greyward-owned, 0700).

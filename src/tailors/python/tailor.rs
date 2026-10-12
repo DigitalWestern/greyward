@@ -57,15 +57,6 @@ impl Tailor for Python {
         super::edit::edit_manifest(edit, door)
     }
 
-    fn adopt_lock(
-        &self,
-        _ctx: &crate::kernel::context::Context,
-        adoption: &crate::tailors::LockAdoption<'_>,
-        door: &mut crate::kernel::resolve::ResolutionDoor<'_>,
-    ) -> io::Result<crate::tailors::Adoption> {
-        super::adopt::adopt_lock(adoption, door)
-    }
-
     fn edit_root(&self, project: &Path) -> io::Result<std::path::PathBuf> {
         super::edit::edit_root(project)
     }
@@ -79,6 +70,10 @@ impl Tailor for Python {
     }
 
     fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
+    }
+
+    fn adopter(&self) -> Option<&dyn crate::tailors::Adopter> {
         Some(self)
     }
 

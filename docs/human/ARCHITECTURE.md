@@ -1088,6 +1088,7 @@ every tailor and the kernel):
     audit.rs        ward audit: closure records judged against a policy, signatures checked under [signing]
     keygen.rs       ward keygen: a closure-signing key and its policy table
     deps.rs         add / remove / update, delegated to each ecosystem's tool
+    adopt.rs        update --adopt: an ecosystem's Adopter compiles a lock no resolver wrote
     sbom.rs         CycloneDX 1.5 JSON from the closure envelopes
     selfupdate.rs   ward update --self, and doctor's version row (release lookup)
     x/              ward x: run a registry tool without adding it to a project

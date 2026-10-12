@@ -370,8 +370,8 @@ stops after the edit so the diff can be reviewed; `--dev` (`-D`) selects
 development dependencies (`remove --dev` only for uv and Cargo). The global
 `--strict` governs the edit's policy checks and the sync after it (`ward
 --strict add requests`); `--frozen` is a usage error ahead of all three
-verbs, including `update --toolchain` and `update --self`, because they
-exist to write the lock `--frozen` only checks. Refusals —
+verbs, including `update --toolchain`, `update --adopt` and `update --self`,
+because they exist to write the lock `--frozen` only checks. Refusals —
 Poetry, PDM, Yarn classic and Berry, setup.py, Elixir `mix add`, .NET —
 print the exact line and file to run yourself, exit 5 (unsupported), no writes
 when the edit reaches that unsupported project shape. Earlier input, lock or
@@ -392,6 +392,11 @@ refused with both roots named. Ecosystem choice, cheapest rung first:
 
 Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
 
+`update` has four modes, and one run is exactly one of them: the
+dependency update above (the default), `--toolchain`, `--adopt`, and
+`--self`, each described below. Each mode's flag refuses the others, and
+`--accept-changes` belongs to `--adopt` alone.
+
 **update --self** updates Greyward itself and touches no project, store, or key.
 It reads GitHub's latest release (one request), stops with "nothing to do"
 when this build already is that version or newer, and otherwise downloads
@@ -410,8 +415,8 @@ only for now (macOS waits on #66); a 404 from the anonymous request is
 reported as no published release. `GREYWARD_RELEASE_MANIFEST` names another
 manifest URL (the tests use `file://`); nothing checks in the background.
 
-**update --toolchain** `[<ecosystem>]` is the other update, and the two never
-mix. It re-reads the declarative toolchain sources, selects the shipped
+**update --toolchain** `[<ecosystem>]` moves runtimes, never dependencies.
+It re-reads the declarative toolchain sources, selects the shipped
 default release when the sources admit it (else the newest compatible one)
 for every ecosystem the project has — as discovery finds
 them, which is how a newly added ecosystem gains its section — or only the
@@ -421,30 +426,48 @@ package name, never touches a dependency lock, and is the only thing that
 moves a locked runtime. `--no-sync` stops after the lock is written, so the
 diff can be reviewed before anything is realized.
 
-**update --adopt** `[<ecosystem>]` gives a lock no resolver wrote the
-provenance `ward attest` and `--strict` require. Hashes alone prove package
-bytes, not how the dependency set was resolved, so `attest` never signs a
-hand-hashed `requirements.txt`; adoption is the explicit step that has the
-resolver write it instead. `ward update --adopt python` keeps the original
-as `requirements.in`, byte for byte, and refuses when a different
-`requirements.in` is already there. It then runs the same `uv pip compile`
-an edit and `attest` run (`--generate-hashes`, Greyward's header, no
-upgrade flag, so the original's `==` pins decide every version) through the
-confined resolution door, which writes `requirements.txt` and its signed
-record `.greyward/resolution/python.json` together. On stdout it prints the
-original pins against the compiled ones: `=` kept (with how many of the
-original hashes the compiled lock still accepts), `~` a version changed,
-`+` a package the resolver added, `-` one it dropped, and a `!` line for
-every original hash missing from the compiled lock. A failed compile
-removes the `requirements.in` it wrote. A pip-compile pair whose
-`requirements.txt` another tool generated is recompiled from its own
-`requirements.in` the same way. With no ecosystem named, every ecosystem
-found here is offered adoption; one whose lock already comes from its
-resolver (a `uv.lock`, a compiled pair, `package-lock.json`, `Cargo.lock`,
-...) reports that there is nothing to adopt and names `ward attest`.
-`--no-sync` stops after the compile so the diff can be reviewed; commit
-the pair and the record, then `ward attest python` checks it without
-changing it.
+**update --adopt** `[<ecosystem>] [--accept-changes]` gives a lock no
+resolver wrote the provenance `ward attest` and `--strict` require. Hashes
+alone prove package bytes, not how the dependency set was resolved, so
+`attest` never signs a hand-hashed `requirements.txt`; adoption is the
+explicit step that has the resolver write it instead. `ward update --adopt
+python` keeps the original as `requirements.in`, byte for byte and with the
+original's permission bits (a `0600` lock gives a `0600` source), and
+refuses when a different `requirements.in` is already there. It then runs
+the same `uv pip compile` an edit and `attest` run (`--generate-hashes`,
+Greyward's header, no upgrade flag, so the original's `==` pins decide
+every version) through the confined resolution door. `requirements.in` is
+never written ahead of the compile: the door hands it to uv in its
+snapshot, and the resolution transaction publishes `requirements.in`,
+`requirements.txt` and the signed record `.greyward/resolution/python.json`
+together, or none of them. A failed compile, a refused review, or a killed
+process leaves the project as it was (an interrupted publication is undone
+by the next Greyward command there), and a `requirements.in` somebody else
+creates meanwhile is never touched. On stdout it prints the original pins
+against the compiled ones: `=` kept (with how many of the original hashes
+the compiled lock still accepts), `~` a version changed, `+` a package the
+resolver added, `-` one it dropped, and a `!` line for every original hash
+missing from the compiled lock, a dropped package's included. Before
+anything is published the compiled pins are reviewed against the original
+ones: a compile that changes a pinned version, drops a pin, or loses an
+original hash is withheld, its diff printed and nothing written, and the
+command fails naming each change, unless `--accept-changes` is given. A
+package the resolver only adds is shown but is no change to an original
+pin. A file that declares one package twice for the same environment
+marker is read as one pin when both declarations agree on the version
+(their hashes merged) and refused when they do not. A pip-compile pair
+whose `requirements.txt` another tool generated is recompiled from its own
+`requirements.in` the same way, reviewed against that `requirements.txt`
+(a `requirements.in` asking for `six>=1.17` beside a lock pinning
+`six==1.16.0` is withheld until accepted). With no ecosystem named, every
+ecosystem here that adopts locks (Python) is adopted, and a project with
+none is refused; naming one that does not adopt locks (`node`, `rust`, ...,
+whose locks their own resolvers write) is refused with `ward attest
+<ecosystem>` as the step it needs instead, before the store is opened. A
+Python project whose lock already comes from its resolver (a `uv.lock`, a
+compiled pair) reports that there is nothing to adopt. `--no-sync` stops
+after the compile so the diff can be reviewed; commit the pair and the
+record, then `ward attest python` checks it without changing it.
 
 **fmt** runs the pinned rustfmt for a Rust workspace, discovered with the
 store Cargo and `--no-deps`, so a project that has never been synced needs
@@ -1303,10 +1326,12 @@ claiming publisher-signature verification.
 
 Hashes alone prove package bytes, not how the dependency set was resolved.
 To adopt a hand-hashed `requirements.txt`, run `ward update --adopt python`
-(see `update --adopt`). Under the hood it copies the file to
+(see `update --adopt`). Under the hood it stages the file as
 `requirements.in` and compiles the pair through the resolution door without
-upgrading, which writes the compiled lock and its signed resolution receipt,
-and prints the original pins against the compiled ones for review.
+upgrading, which publishes the source, the compiled lock, and its signed
+resolution receipt together, and prints the original pins against the
+compiled ones for review; a compile that moves a pin or loses a hash is
+withheld until `--accept-changes`.
 
 - `--record-out <path>` writes the record outside the checkout instead: to
   `<path>` itself when one ecosystem is named, else `<path>/<ecosystem>.json`.

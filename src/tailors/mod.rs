@@ -8,6 +8,7 @@
 //! (for example `by_id`). Adding an ecosystem
 //! is a folder plus one line in `REGISTRY` (docs/human/ADDING-A-TAILOR.md).
 
+pub mod adopt;
 pub mod cargo;
 pub mod dotnet;
 pub mod edit;
@@ -30,9 +31,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub use adopt::{Adopted, Adopter, Adoption, LockAdoption};
 pub use edit::{
-    Adopted, Adoption, CachedTool, DepSpec, EditHost, EditOutcome, EditVerb, LockAdoption,
-    ManifestEdit, PackageRegistry, Pin, Pins,
+    CachedTool, DepSpec, EditHost, EditOutcome, EditVerb, ManifestEdit, PackageRegistry,
 };
 
 /// One row of `ward ls`.
@@ -558,26 +559,6 @@ pub trait Tailor: Sync {
         Err(unsupported(self.id(), "add, remove, and update"))
     }
 
-    /// `ward update --adopt`: turn a lock no resolver wrote into one this
-    /// ecosystem's resolver compiles through `door` (an edit door), so the
-    /// door publishes it with its signed resolution record. The original
-    /// stays as the resolver's source and its pins are the resolver's
-    /// preferences, never upgraded. A project whose lock already comes from
-    /// a resolver has nothing to adopt; the default says so, since every
-    /// other ecosystem's lock is written by its own tool.
-    fn adopt_lock(
-        &self,
-        _ctx: &Context,
-        _adoption: &LockAdoption<'_>,
-        _door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<Adoption> {
-        Ok(Adoption::Nothing(format!(
-            "its lock is written by its own resolver, so there is nothing to adopt; \
-             `ward attest {}` signs a resolution record for it",
-            self.id()
-        )))
-    }
-
     /// `ward x`: how this ecosystem runs a tool straight from its public
     /// registry, when it can.
     fn registry_tool(&self) -> io::Result<&'static dyn RegistryTool> {
@@ -621,6 +602,14 @@ pub trait Tailor: Sync {
     /// is refused (or, unnamed, skipped) when targets are chosen, before
     /// any preflight or store work.
     fn attester(&self) -> Option<&dyn Attester> {
+        None
+    }
+
+    /// `ward update --adopt`: how this ecosystem turns a lock no resolver
+    /// wrote into one its resolver compiles, when it has such locks. `None`
+    /// is refused (or, unnamed, skipped) when targets are chosen, before
+    /// any store work.
+    fn adopter(&self) -> Option<&dyn Adopter> {
         None
     }
 }

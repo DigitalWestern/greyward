@@ -3,13 +3,10 @@
 use std::path::PathBuf;
 
 use super::spec::{
-    canonical_name, fmt_words, help, inputs, listed, spec, toolchain_aliases, toolchain_section,
-    usage, BUILD_WORDS, ECOSYSTEM_IDS, HELP_TOPICS, LS_WORDS, SHELL_WORDS, TOOLCHAIN_WORDS,
+    canonical_name, fmt_words, help, inputs, listed, spec, usage, BUILD_WORDS, HELP_TOPICS,
+    LS_WORDS, SHELL_WORDS,
 };
-use super::{
-    Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, SyncFlags, ToolchainUpdate,
-    UsageError,
-};
+use super::{Command, GcArgs, Invocation, Options, Parsed, Shell, Spec, SyncFlags, UsageError};
 
 const VERSION_WORDS: [&str; 3] = ["-V", "--version", "version"];
 const HELP_WORDS: [&str; 3] = ["-h", "--help", "help"];
@@ -736,6 +733,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
     let mut no_sync = false;
     let mut toolchain = false;
     let mut adopt = false;
+    let mut accept_changes = false;
     let mut self_update = false;
     let mut positional = Vec::new();
     let mut passthrough = false;
@@ -751,6 +749,7 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             "--no-sync" => no_sync = true,
             "--toolchain" if name == "update" => toolchain = true,
             "--adopt" if name == "update" => adopt = true,
+            "--accept-changes" if name == "update" => accept_changes = true,
             "--self" if name == "update" => self_update = true,
             "--dev" | "-D" if matches!(name, "add" | "remove") => dev = true,
             other if other.starts_with('-') && other.len() > 1 => return Err(reject(name, other)),
@@ -767,41 +766,14 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             }
         }
     }
-    if self_update {
-        // `--self` updates ward itself and nothing in the project, so a
-        // package, `--toolchain`, `--adopt`, or `--no-sync` beside it has
-        // no meaning.
-        let stray = if toolchain {
-            Some("--toolchain".to_string())
-        } else if adopt {
-            Some("--adopt".to_string())
-        } else if no_sync {
-            Some("--no-sync".to_string())
-        } else {
-            positional.first().map(|word| format!("'{word}'"))
-        };
-        if let Some(stray) = stray {
-            return Err(UsageError::new(
-                format!(
-                    "update --self replaces the ward binary and takes nothing else; drop {stray}"
-                ),
-                Some("update"),
-            ));
-        }
-        return Ok(Some(Command::SelfUpdate));
-    }
-    if toolchain && adopt {
-        return Err(UsageError::new(
-            "update --toolchain re-selects a toolchain and update --adopt adopts a lock; run them \
-             one at a time",
-            Some("update"),
-        ));
-    }
-    if toolchain {
-        return parse_update_toolchain(&positional, no_sync).map(Some);
-    }
-    if adopt {
-        return parse_update_adopt(&positional, no_sync).map(Some);
+    let modes = super::update::Modes {
+        toolchain,
+        adopt,
+        accept_changes,
+        self_update,
+    };
+    if let Some(command) = super::update::parse_mode(&modes, &positional, no_sync)? {
+        return Ok(Some(command));
     }
 
     match name {
@@ -828,67 +800,6 @@ fn parse_deps(args: &[String], name: &str) -> Result<Option<Command>, UsageError
             toolchain: None,
         })),
     }
-}
-
-/// `update --toolchain [<ecosystem>]`. It is a different verb wearing the
-/// same word: it re-selects a toolchain and never edits a dependency lock,
-/// so the one positional it takes is an ecosystem and a package name is
-/// refused by name rather than delegated to a tool that would not know what
-/// to do with it.
-fn parse_update_toolchain(positional: &[String], no_sync: bool) -> Result<Command, UsageError> {
-    let ecosystem = match positional {
-        [] => None,
-        [word] => match toolchain_section(word) {
-            Some(section) => Some(section.to_string()),
-            None => return Err(not_an_ecosystem(word)),
-        },
-        [_, word, ..] => return Err(not_an_ecosystem(word)),
-    };
-    Ok(Command::Update {
-        names: Vec::new(),
-        no_sync,
-        toolchain: Some(ToolchainUpdate { ecosystem }),
-    })
-}
-
-/// `update --adopt [<ecosystem>]`. Like `--toolchain`, the one positional
-/// is an ecosystem (a tailor id, the words `attest` takes), never a
-/// package: adoption keeps every pin the original lock states.
-fn parse_update_adopt(positional: &[String], no_sync: bool) -> Result<Command, UsageError> {
-    let ecosystem = match positional {
-        [] => None,
-        [word] if ECOSYSTEM_IDS.contains(&word.as_str()) => Some(word.clone()),
-        [word] | [_, word, ..] => {
-            return Err(UsageError::new(
-                with_suggestion(
-                    format!(
-                        "update --adopt takes one ecosystem name, not a package; '{word}' is not \
-                         one of {}",
-                        ECOSYSTEM_IDS.join(", ")
-                    ),
-                    word,
-                    ECOSYSTEM_IDS.iter().copied(),
-                ),
-                Some("update"),
-            ))
-        }
-    };
-    Ok(Command::Adopt { ecosystem, no_sync })
-}
-
-fn not_an_ecosystem(word: &str) -> UsageError {
-    UsageError::new(
-        with_suggestion(
-            format!(
-                "update --toolchain takes an ecosystem name, not a package; '{word}' is not one \
-                 of {}",
-                TOOLCHAIN_WORDS.join(", ")
-            ),
-            word,
-            TOOLCHAIN_WORDS.iter().copied().chain(toolchain_aliases()),
-        ),
-        Some("update"),
-    )
 }
 
 fn validate_dependency_arg(name: &'static str, arg: &str) -> Result<(), UsageError> {
@@ -1488,7 +1399,8 @@ fn parse_relay(args: &[String]) -> Result<super::RelayInvocation, UsageError> {
 #[cfg(test)]
 mod tests {
     use super::super::render_usage_error;
-    use super::super::spec::{COMMANDS, X_REGISTRIES};
+    use super::super::spec::{toolchain_aliases, toolchain_section, COMMANDS, X_REGISTRIES};
+    use super::super::ToolchainUpdate;
     use super::*;
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -2317,15 +2229,31 @@ mod tests {
             command(&["update", "--adopt"]),
             Command::Adopt {
                 ecosystem: None,
-                no_sync: false
+                no_sync: false,
+                accept_changes: false
             }
         );
         assert_eq!(
             command(&["update", "--no-sync", "--adopt", "python"]),
             Command::Adopt {
                 ecosystem: Some("python".into()),
-                no_sync: true
+                no_sync: true,
+                accept_changes: false
             }
+        );
+        assert_eq!(
+            command(&["update", "--accept-changes", "--adopt", "python"]),
+            Command::Adopt {
+                ecosystem: Some("python".into()),
+                no_sync: false,
+                accept_changes: true
+            }
+        );
+        assert!(message(&["update", "--accept-changes"]).contains("applies only to update --adopt"));
+        assert!(message(&["update", "--toolchain", "--accept-changes"])
+            .contains("applies only to update --adopt"));
+        assert!(
+            message(&["update", "--self", "--accept-changes"]).contains("drop --accept-changes")
         );
         let refused = message(&["update", "--adopt", "pyhton"]);
         assert!(
@@ -2337,10 +2265,12 @@ mod tests {
         assert!(message(&["update", "--adopt", "--toolchain"]).contains("one at a time"));
         assert!(message(&["update", "--self", "--adopt"]).contains("drop --adopt"));
         for name in ["add", "remove"] {
-            assert_eq!(
-                message(&[name, "--adopt"]),
-                format!("{name}: unknown option '--adopt'")
-            );
+            for option in ["--adopt", "--accept-changes"] {
+                assert_eq!(
+                    message(&[name, option]),
+                    format!("{name}: unknown option '{option}'")
+                );
+            }
         }
         // It syncs after the compile, so it takes `--strict` and, like
         // every lock-writing update, refuses `--frozen`.
@@ -2350,7 +2280,8 @@ mod tests {
             (
                 Command::Adopt {
                     ecosystem: None,
-                    no_sync: false
+                    no_sync: false,
+                    accept_changes: false
                 },
                 sync_flags(false, true)
             )

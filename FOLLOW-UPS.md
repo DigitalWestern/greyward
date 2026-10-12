@@ -36,12 +36,9 @@ None open.
 ## Open work, each its own pull request
 
 - **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
-- **#656: harness HOME containment.** Add alternate-spelling coverage and define physical containment with the existing offline exceptions in the next shared-harness change.
-- **#657: native_libs probe target directory.** Give the Rust probe build an explicit `--target-dir` so an inherited `CARGO_TARGET_DIR` cannot hide its output, and list `GREYWARD_STORE` in the local e2e recipe.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
-- **#636: long TMPDIR proxy tests.** Give the Unix-listener test a short, separately owned socket directory while keeping large stores under the caller's TMPDIR.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
   - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc. The issue is closed; its closing comment keeps these three open under their original conditions.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
@@ -141,7 +138,6 @@ None open.
 - #640: Define independent .NET lock semantic verification for executable MSBuild projects.
 - #641: Design policy-owned NuGet feeds, credentials, signatures and cache boundaries.
 - #642: Design declared MSBuild resolution inputs with conservative fallback.
-- #643: Cover unsupported future-tailor attest guards with focused unit tests.
 
 - #645: Design Docker relay descriptor transport and the privileged helper installation boundary.
 - #646: Design policy-owned Podman runtime and storage configuration with tenant boundaries.
@@ -158,5 +154,3 @@ None open.
 - **#652: finish typed resolution failures and retained error categories.** Separate policy refusal, byte-validation and offline failures in resolution Facts, then migrate remaining wrappers with real CLI coverage.
 
 - #653: detect ecosystem comparisons across Rust line boundaries with a bounded token scan and adversarial fixtures.
-
-- #662: recapture `docs/human/GETTING-STARTED.md` with v0.2.0. Its blocks still say they are 0.1.0 output, but the rename changed the names in them.

@@ -18,7 +18,7 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::ruby;
 use crate::tailors::{
-    ClosureListing, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
+    Attester, ClosureListing, FileRunner, LoneFile, PackageRow, SourceFile, SyncRequest, Tailor,
 };
 use serde_json::Value;
 use std::io;
@@ -26,6 +26,20 @@ use std::path::Path;
 use std::process::Command;
 
 pub struct Ruby;
+
+impl Attester for Ruby {
+    fn attest_lock(
+        &self,
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &crate::kernel::toolchain::Selected,
+        _host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        let ruby_obj = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        ruby::attest_project(door, project, &ruby_obj, toolchain)
+    }
+}
 
 impl Tailor for Ruby {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
@@ -59,16 +73,8 @@ impl Tailor for Ruby {
         super::resolve::resolution_inputs(project)
     }
 
-    fn attest_lock(
-        &self,
-        ctx: &Context,
-        project: &ProjectRoot,
-        toolchain: &crate::kernel::toolchain::Selected,
-        _host: &dyn crate::tailors::EditHost,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        let ruby_obj = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        ruby::attest_project(door, project, &ruby_obj, toolchain)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn detect(&self, project: &ProjectRoot) -> io::Result<bool> {

@@ -596,32 +596,33 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
-    /// `ward attest`: run this ecosystem's lock check through `door` (an
-    /// attest door) in `project`. A check that leaves the lock and manifest
-    /// byte-unchanged yields the signed record and its bytes; a check that
-    /// fails or would change the lock is an error. Either way the check
-    /// publishes nothing: `ward attest` publishes every ecosystem's record
-    /// together (`record::publish_receipts`) only after all checks passed.
-    /// `host` lends what an edit borrows from its command (the `ward x`
-    /// cache a pinned package manager lives in), asked only once a tool
-    /// will run.
+    /// `ward attest`: this ecosystem's lock check, when it has one. `None`
+    /// is refused (or, unnamed, skipped) when targets are chosen, before
+    /// any preflight or store work.
+    fn attester(&self) -> Option<&dyn Attester> {
+        None
+    }
+}
+
+/// An ecosystem's `ward attest` lock check, reached through
+/// `Tailor::attester`: having one is what makes the ecosystem attestable.
+pub trait Attester: Sync {
+    /// Run this ecosystem's lock check through `door` (an attest door) in
+    /// `project`. A check that leaves the lock and manifest byte-unchanged
+    /// yields the signed record and its bytes; a check that fails or would
+    /// change the lock is an error. Either way the check publishes nothing:
+    /// `ward attest` publishes every ecosystem's record together
+    /// (`record::publish_receipts`) only after all checks passed. `host`
+    /// lends what an edit borrows from its command (the `ward x` cache a
+    /// pinned package manager lives in), asked only once a tool will run.
     fn attest_lock(
         &self,
-        _ctx: &Context,
-        _project: &ProjectRoot,
-        _toolchain: &Selected,
-        _host: &dyn EditHost,
-        _door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "ward attest does not support {}: it has no lock check that runs through a \
-                 resolution door",
-                self.id()
-            ),
-        ))
-    }
+        ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        host: &dyn EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)>;
 }
 
 /// The resolution files `tailor` names in `project`, or `None` when it
@@ -936,6 +937,16 @@ mod tests {
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    /// Every shipped ecosystem has a resolution door, so `ward attest` can
+    /// check each one's lock: a tailor that loses its attester stops being
+    /// attestable, and this says so.
+    #[test]
+    fn every_registered_tailor_has_an_attester() {
+        for tailor in registry() {
+            assert!(tailor.attester().is_some(), "{}", tailor.id());
+        }
+    }
 
     /// A project with its manifest but no lock is refused by name and
     /// nothing is written: the lock is `prepare`'s to generate, and a

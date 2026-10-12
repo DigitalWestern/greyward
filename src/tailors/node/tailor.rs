@@ -18,8 +18,8 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::ui;
 use crate::tailors::node::{self as node, inputs};
 use crate::tailors::{
-    ClosureListing, FileRunner, LoneFile, PackageRow, RegistryTool, ScriptRun, SourceFile,
-    SyncRequest, Tailor,
+    Attester, ClosureListing, FileRunner, LoneFile, PackageRow, RegistryTool, ScriptRun,
+    SourceFile, SyncRequest, Tailor,
 };
 use serde_json::{json, Value};
 use std::io;
@@ -112,6 +112,22 @@ fn projected_node_modules_in(project: &ProjectRoot, cwd: &Path) -> io::Result<(b
     Ok((node_projected, nm))
 }
 
+impl Attester for Node {
+    /// npm's lock-only install with the lock unchanged, or pnpm's frozen
+    /// lock-only install, at the lock root, on the Node the selection
+    /// names.
+    fn attest_lock(
+        &self,
+        _ctx: &Context,
+        project: &ProjectRoot,
+        toolchain: &Selected,
+        host: &dyn crate::tailors::EditHost,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
+        super::resolve::attest_project(door, project, host, toolchain)
+    }
+}
+
 impl Tailor for Node {
     fn package_registry(&self) -> Option<crate::tailors::PackageRegistry> {
         Some(super::edit::REGISTRY)
@@ -146,18 +162,8 @@ impl Tailor for Node {
         super::resolve::resolution_inputs(project)
     }
 
-    /// npm's lock-only install with the lock unchanged, or pnpm's frozen
-    /// lock-only install, at the lock root, on the Node the selection
-    /// names.
-    fn attest_lock(
-        &self,
-        _ctx: &Context,
-        project: &ProjectRoot,
-        toolchain: &Selected,
-        host: &dyn crate::tailors::EditHost,
-        door: &mut ResolutionDoor<'_>,
-    ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)> {
-        super::resolve::attest_project(door, project, host, toolchain)
+    fn attester(&self) -> Option<&dyn Attester> {
+        Some(self)
     }
 
     fn id(&self) -> &'static str {

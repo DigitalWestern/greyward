@@ -1172,6 +1172,7 @@ mod tests {
     use crate::kernel::resolve::testing::{
         get, mirror, proxy_authorization, send, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
+    use crate::kernel::testutil::SocketDir;
 
     fn deny(kinds: &[&str]) -> Policy {
         Policy {
@@ -1676,7 +1677,10 @@ mod tests {
             .proxy
             .open_session(harness.config(Policy::default(), Mode::Online))
             .unwrap();
-        let path = harness.store.root.join("tmp/proxy.sock");
+        // The store stays under TMPDIR; the socket gets a short private
+        // directory, since a long TMPDIR overflows a socket address.
+        let sockets = SocketDir::new();
+        let path = sockets.socket("proxy.sock");
         let advertised: SocketAddr = "127.0.0.1:8119".parse().unwrap();
         let address = session.listen_unix(&path, advertised).unwrap();
         assert_eq!(address.address, advertised);

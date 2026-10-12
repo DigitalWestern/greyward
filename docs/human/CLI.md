@@ -73,9 +73,11 @@ ENVIRONMENT:
   GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
 
-Exit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass
-the program's status through. Which files ward reads per ecosystem:
-'ward help inputs'. Full reference: docs/human/CLI.md.
+Exit status: 0 success, 1 failure, 2 usage error, 3 refused by rule, 4 stale
+lock, 5 unsupported here, 6 network, 128+n stopped by signal n; 'run', 'x' and
+'fmt' pass the program's status through ('run' exits 127 when it cannot find
+the program). Which files ward reads per ecosystem: 'ward help inputs'. Full
+reference: docs/human/CLI.md.
 ```
 
 ## Conventions
@@ -113,7 +115,8 @@ the program's status through. Which files ward reads per ecosystem:
   still writes the JSON object rather than prose. Only an argv error is exempt — it is prose at
   exit 2, because argv was wrong before the command that promised JSON
   ever started. `status`, `ls`, `audit`, `doctor` and `plan` take
-  `--json`; `plan` prints JSON either way.
+  `--json`; `plan` prints JSON either way, and under `--json` it prints
+  one array of the plans, one document however many ecosystems there are.
 - **Errors have three parts**: what failed, why, what to type next. Unknown
   options get an edit-distance or prefix suggestion
   (`unknown option '--fersh'; did you mean '--fresh'?`) and exit 2.
@@ -133,6 +136,7 @@ the program's status through. Which files ward reads per ecosystem:
   | 4 | stale: a committed lock no longer matches its inputs, or is missing where `--frozen` or a strict policy never writes one | update the lock and commit it |
   | 5 | unsupported here: a pin no catalog has, a runtime too old for the file, no isolation on this machine | change the pin or the machine |
   | 6 | network: offline, DNS, a refused or reset connection, a timeout, a download that broke off, or a server status a retry can change (408, 429, 5xx) | run it again; HTTP 403/404, invalid request or proxy settings, and TLS certificate/protocol failures exit 1 |
+  | 127 | `ward run` could not find the program it was asked to run (a shell's status for it) | check the name, or `ward run` a path |
   | 128 + n | stopped by signal n (130 for Ctrl-C) | |
 
   Under `--json` the failure object carries the same class as a key:
@@ -185,6 +189,12 @@ the program's status through. Which files ward reads per ecosystem:
   global options while they still precede the tool's first non-option word:
   `ward x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
   a tool argument is spelled like one of those (`ward fmt -- -v`).
+  Unchanged means byte for byte: an argument that is not UTF-8 (a Linux
+  file name can be any bytes) reaches the program of `run`, `x`, a
+  package.json script or `ward <file>` as typed, and so does the `-C`
+  directory. Every word Greyward reads itself, and every argument of `build` and `fmt`, whose
+  sandboxed tool takes its command line as UTF-8, must be UTF-8: anything
+  else there is a usage error (exit 2).
 - **An option's single value follows one rule.** An option that takes one
   value refuses an empty one, and refuses a separate word that starts with
   `-`: `ward sbom -o --json` is a mistyped flag, not a request to write a
@@ -211,8 +221,12 @@ the program's status through. Which files ward reads per ecosystem:
 
 `ward completions bash|zsh|fish` prints a script generated from the same
 command table as the help: commands, per-command options, `store path|roots`,
-`build <ecosystem>`. package.json script names complete under `run` and as
-the first word when a package.json is present.
+`build <ecosystem>`, and the values of options that take one (`--shell`,
+`--policy <file>`). package.json script names complete under `run` and as
+the first word when a package.json is present: the script asks `ward
+__scripts`, a hidden command that reads the project's package.json as JSON
+and prints its script names one per line, so a minified file or a name like
+`test:unit` completes as written.
 
 ## Everyday verbs
 
@@ -538,7 +552,8 @@ real directory written over the projection, and the next sync moves it
 aside — saying where it went — and re-projects.
 
 **env** prints that same environment on stdout as lines a shell can eval:
-one `export PATH=...` with the projected prefixes ahead of `"$PATH"`, then
+one `export PATH=...` with the projected prefixes ahead of `"${PATH:+:$PATH}"`
+(the inherited PATH, with no empty entry when it is unset), then
 one line per ecosystem variable (`VIRTUAL_ENV`, `PYTHONDONTWRITEBYTECODE`,
 `CARGO_HOME`, the Go and Ruby variables, …). A variable the projection
 *removes* — `RUSTUP_TOOLCHAIN`, for one — is printed as `unset NAME`. Every
@@ -905,7 +920,9 @@ GREYWARD_STRICT`), or the file that set `strict = true`.
 toolchain per package, `-v` adds artifact and store object (and works in
 either position); the filter word is one of
 `python`, `node`, `cargo`, `go`, `ruby`, `elixir`, `dotnet`.
-**plan** prints what a sync would realize, one JSON document per ecosystem.
+**plan** prints what a sync would realize, one JSON document per ecosystem,
+or with `--json` one array of them. A tool planning runs (npm generating a
+missing lock) prints to stderr, never into the plan.
 **sbom** emits CycloneDX 1.5 to stdout or `-o <file>`. **doctor** checks
 this build against the newest release (the first row, `warn` with `run 'ward
 update --self'` when one is newer, `ok` with `no build for this machine`
@@ -998,7 +1015,7 @@ a later step can `ward run` the tests under the same policy. Its inputs:
 | `version` | `latest` | release to install, as a tag (`v0.1.0`) |
 | `token` | the job's token | reads the release; the job's own token is enough, since Greyward's repository is public |
 | `working-directory` | `.` | the project to set up |
-| `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file in the workspace |
+| `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file. On a `pull_request` event the workspace is the pull request's checkout, so a file in it is the pull request's to edit (it could drop a denial or trust its own key): the action refuses one there. Name a file outside the workspace instead, for example the base branch's copy written under `$RUNNER_TEMP` by an earlier step |
 | `frozen` | `true` | `false` runs a plain `ward`, which may write the locks |
 | `strict` | `false` | `true` adds `--strict` |
 | `audit` | `true` | `signed` runs `ward audit --signed`; `false` skips the audit |
@@ -1010,7 +1027,10 @@ a later step can `ward run` the tests under the same policy. Its inputs:
 
 The outputs are `version` (what `ward --version` prints) and `sbom` (the
 SBOM's path). The gate with trusted keys is `policy: ci/greyward-policy.toml`,
-`audit: signed` and `signing-key: ${{ secrets.GREYWARD_SIGNING_KEY }}`.
+`audit: signed` and `signing-key: ${{ secrets.GREYWARD_SIGNING_KEY }}`, in a
+workflow that runs on a protected ref (`on: push`), never on `pull_request`:
+there `ci/greyward-policy.toml` is the pull request's own copy, which it can
+edit to remove a denial or add a trusted key, so the action refuses it.
 
 **The store cache.** Without it every run downloads the toolchains and
 packages again. `cache: true` restores the store an earlier run saved

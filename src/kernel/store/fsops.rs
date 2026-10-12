@@ -21,19 +21,6 @@ pub(super) fn errno_location() -> *mut libc::c_int {
     }
 }
 
-pub(super) fn fd_set_cloexec(fd: RawFd) -> io::Result<()> {
-    // SAFETY: fcntl operates on the caller-owned descriptor.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fcntl operates on the caller-owned descriptor.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 pub(crate) fn fd_stat(fd: RawFd) -> io::Result<libc::stat> {
     // SAFETY: stat is initialized by fstat before it is read.
     let mut stat = unsafe { std::mem::zeroed() };
@@ -444,15 +431,13 @@ pub(super) fn is_symlink(stat: &libc::stat) -> bool {
 pub(super) fn entry_names_at(dirfd: RawFd) -> io::Result<Vec<OsString>> {
     // fdopendir takes ownership of its descriptor, so duplicate the borrowed
     // directory fd before handing it to libc.
+    // The copy is close-on-exec from the start: the proxy and relay threads
+    // spawn children, and a fork between a plain dup and a later fcntl
+    // would hand them the directory.
     // SAFETY: fcntl duplicates the borrowed descriptor.
-    let duplicate = unsafe { libc::fcntl(dirfd, libc::F_DUPFD, 0) };
+    let duplicate = unsafe { libc::fcntl(dirfd, libc::F_DUPFD_CLOEXEC, 0) };
     if duplicate < 0 {
         return Err(io::Error::last_os_error());
-    }
-    if let Err(error) = fd_set_cloexec(duplicate) {
-        // SAFETY: duplicate is owned here because fdopendir has not taken it.
-        unsafe { libc::close(duplicate) };
-        return Err(error);
     }
     // SAFETY: duplicate is a valid directory descriptor and ownership moves
     // to the DIR until closedir.

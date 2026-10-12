@@ -1047,7 +1047,7 @@ pub fn run(command: cli::Command) -> io::Result<i32> {
     };
     let policy = policy.as_deref();
     let platform = Platform::host()?;
-    let dir = project_dir();
+    let dir = project_dir()?;
     // A --policy file that cannot be read or parsed is an operator
     // mistake (exit 2), so CI can tell it from a denied build (exit 1).
     let extra = match policy {

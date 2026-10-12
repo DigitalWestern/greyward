@@ -326,6 +326,9 @@ impl Store {
         let root = root
             .canonicalize()
             .map_err(|error| open_error(root, from_env, error))?;
+        // Every runtime's bin directory is under the store and goes on a
+        // child's PATH, which cannot hold a ':' inside one entry.
+        crate::kernel::platform::refuse_path_separator("the store", &root)?;
         // Held while the marker is read and whatever is missing is
         // created: a reset holds the same lock while it empties the store,
         // and a second ward creating this store waits for the first.

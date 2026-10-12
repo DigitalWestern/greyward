@@ -50,7 +50,7 @@ pub fn run(command: Command) -> io::Result<i32> {
         unreachable!("dispatch hands attest only its own command");
     };
     let platform = Platform::host()?;
-    let project = ProjectRoot::open(&context::project_dir())?;
+    let project = ProjectRoot::open(&context::project_dir()?)?;
     let _policy = policy::init_in(&project)?;
     match ledger {
         Some(LedgerTransfer::Export { ecosystem, file }) => {

@@ -617,6 +617,7 @@ fn extract_tarball_packages(
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
+        check_tarball_identity(p, &dest)?;
         if let Some(patch) = &p.patch {
             let snapshot = snapshot_verified_patch(store, activity, &p.path, patch)?;
             apply_verified_patch(activity, &p.path, &snapshot, &dest)?;
@@ -640,6 +641,64 @@ fn extract_tarball_packages(
         }
     }
     Ok(())
+}
+
+/// A version as npm compares it: surrounding space, a leading `=` or `v`,
+/// and build metadata dropped (`semver.clean`), so `v1.0.0+sha.1` in a
+/// tarball's package.json is the `1.0.0` the registry and the lock name.
+fn clean_version(version: &str) -> &str {
+    let version = version.trim();
+    let version = version.strip_prefix('=').unwrap_or(version).trim_start();
+    let version = version.strip_prefix('v').unwrap_or(version);
+    version.split_once('+').map_or(version, |(core, _)| core)
+}
+
+/// The bytes the integrity verified must be the package the lock entry
+/// names: the tarball's own package.json carries the same name and version
+/// (#688). The integrity proves the bytes are the ones the lock recorded,
+/// not which package they are, so a lock edited to pair `left-pad@1.3.0`
+/// with another package's tarball and hash would otherwise install that
+/// package while the closure, the SBOM and name-keyed provisioning all
+/// believe `left-pad`. An npm alias (`"x": "npm:@t/real@2"`) is placed under
+/// its alias but its lock entry's `name` is the real package's, and so is
+/// the tarball's. A `file:` directory package is packed from the project
+/// itself: its identity is its directory, not a registry name, so it is
+/// not checked.
+fn check_tarball_identity(p: &NpmPackage, dest: &Path) -> io::Result<()> {
+    if super::local_package::source_dir(p).is_some() {
+        return Ok(());
+    }
+    let text = match fs::read_to_string(dest.join("package.json")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(err(format!(
+                "{}: the tarball has no package.json, so nothing in it says it is {}@{}; refusing",
+                p.path, p.name, p.version
+            )))
+        }
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("{}: read package.json: {e}", p.path),
+            ))
+        }
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
+            .map_err(|e| err(format!("{}: tarball package.json: {e}", p.path)))?;
+    let name = manifest["name"].as_str().unwrap_or_default();
+    let version = manifest["version"].as_str().unwrap_or_default();
+    if name == p.name && clean_version(version) == clean_version(&p.version) {
+        return Ok(());
+    }
+    Err(err(format!(
+        "{}: the lock names {}@{} but the tarball it verified is {}@{}; refusing, since every record would name a package that is not installed (an npm alias's lock entry names the real package in its \"name\")",
+        p.path,
+        p.name,
+        p.version,
+        if name.is_empty() { "<no name>" } else { name },
+        if version.is_empty() { "<no version>" } else { version },
+    )))
 }
 
 /// Git packages: the realized commit IS the package content. npm would run
@@ -1586,5 +1645,80 @@ mod tests {
             .map(|package| package.path.as_str())
             .collect();
         assert_eq!(paths, ["node_modules/a/node_modules/b", "node_modules/a"]);
+    }
+
+    /// The tarball's package.json must name the package its lock entry
+    /// names (#688). An alias is placed under its alias and names the real
+    /// package; a `v` prefix or build metadata is the same version to npm;
+    /// another name or version, or no package.json at all, is refused; a
+    /// `file:` directory package is the project's own and is not checked.
+    #[test]
+    fn a_tarball_must_be_the_package_its_lock_entry_names() {
+        let temp = crate::kernel::testutil::TempDir::named("npm-tarball-identity");
+        let package = |path: &str, name: &str, version: &str, url: &str| NpmPackage {
+            path: path.into(),
+            name: name.into(),
+            version: version.into(),
+            url: url.into(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            foreign_platform: false,
+            needs_workspace: false,
+            patch: None,
+            git: None,
+        };
+        let check = |manifest: Option<&str>, p: &NpmPackage| {
+            let dest = temp.0.join("dest");
+            let _ = fs::remove_dir_all(&dest);
+            fs::create_dir_all(&dest).unwrap();
+            if let Some(manifest) = manifest {
+                fs::write(dest.join("package.json"), manifest).unwrap();
+            }
+            check_tarball_identity(p, &dest).map_err(|e| e.to_string())
+        };
+        let registry = "https://registry.npmjs.org/x.tgz";
+        let left_pad = package("node_modules/left-pad", "left-pad", "1.3.0", registry);
+        let alias = package("node_modules/@s/alias", "@t/real", "2.0.0", registry);
+
+        check(Some(r#"{"name":"left-pad","version":"1.3.0"}"#), &left_pad).unwrap();
+        check(Some(r#"{"name":"@t/real","version":"2.0.0"}"#), &alias).unwrap();
+        check(
+            Some(r#"{"name":"left-pad","version":"v1.3.0+build.7"}"#),
+            &left_pad,
+        )
+        .unwrap();
+        // npm reads past a byte-order mark, and a Windows-authored package
+        // may ship one.
+        check(
+            Some("\u{feff}{\"name\":\"left-pad\",\"version\":\"1.3.0\"}"),
+            &left_pad,
+        )
+        .unwrap();
+
+        let other = check(
+            Some(r#"{"name":"totally-other","version":"9.9.0"}"#),
+            &left_pad,
+        )
+        .unwrap_err();
+        assert!(
+            other.contains(
+                "the lock names left-pad@1.3.0 but the tarball it verified is totally-other@9.9.0"
+            ),
+            "{other}"
+        );
+        let older = check(Some(r#"{"name":"left-pad","version":"1.2.0"}"#), &left_pad).unwrap_err();
+        assert!(older.contains("is left-pad@1.2.0"), "{older}");
+        let unnamed = check(Some(r#"{"version":"1.3.0"}"#), &left_pad).unwrap_err();
+        assert!(unnamed.contains("is <no name>@1.3.0"), "{unnamed}");
+        let empty = check(None, &left_pad).unwrap_err();
+        assert!(empty.contains("the tarball has no package.json"), "{empty}");
+
+        let local = package(
+            "node_modules/scripted",
+            "scripted",
+            "0.0.0",
+            &super::super::local_package::url_for("scripted"),
+        );
+        check(Some(r#"{"name":"renamed"}"#), &local).unwrap();
     }
 }

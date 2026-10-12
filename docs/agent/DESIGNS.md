@@ -2456,7 +2456,15 @@ used. A target whose current
 digest is the journal's new digest is restored from its original copy
 (or removed if it was absent). A target at its pre-run digest is left
 alone. A target at a third digest was edited after the crash, so it is
-left alone and reported. Then the journal is marked `finished`, the
+left alone and reported. Every target's folder is opened before any
+target is touched, so a folder that cannot be opened refuses the whole
+rollback and the project stays as the crash left it. A target whose
+no-replace create found its name taken is marked `taken` in the journal
+before the rollback, and no rollback touches it. A temporary is deleted
+only while it holds bytes Greyward can account for (the new bytes, or
+the pre-run bytes the originals hold): anything else there may be a
+save the rollback moved aside before a crash, so it is kept and
+reported. Then the journal is marked `finished`, the
 originals are released, and the journal is deleted. A crash therefore
 never leaves a new lock that the next sync accepts silently: after
 recovery the project is back at its originals, and the receipt that was

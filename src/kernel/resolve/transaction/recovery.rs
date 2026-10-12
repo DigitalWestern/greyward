@@ -266,12 +266,14 @@ fn untrusted_journal(shown: &Path, detail: &str) -> io::Error {
 pub(super) fn narrate(project: &Path, notes: &[Restored], verb: &str) {
     let mut restored = Vec::new();
     let mut edited = Vec::new();
+    let mut kept = Vec::new();
     for note in notes {
         match note {
             Restored::Restored(path) | Restored::Removed(path) => {
                 restored.push(path.display().to_string())
             }
             Restored::LeftEdited(path) => edited.push(path.display().to_string()),
+            Restored::Kept(path) => kept.push(path.display().to_string()),
             Restored::Unchanged(_) => {}
         }
     }
@@ -291,6 +293,18 @@ pub(super) fn narrate(project: &Path, notes: &[Restored], verb: &str) {
                 snapshot::listing(&edited)
             ),
             "check those files, then run the command again",
+        );
+    }
+    if !kept.is_empty() {
+        ui::warning(
+            &format!(
+                "an unfinished resolution publication in {} found files it did not write \
+                 where its temporaries were, and kept them: {}",
+                project.display(),
+                snapshot::listing(&kept)
+            ),
+            "they may hold a save made while it was undone; inspect them, keep what is \
+             yours, and delete the rest",
         );
     }
 }
@@ -419,14 +433,26 @@ pub(super) fn undo(
     let mut notes = Vec::new();
     for (target, dir) in opened {
         let shown = root.path().join(&target.target);
-        notes.push(match dir {
-            Some((dir, name)) => undo_target(store, journal, target, &dir, name, shown)?,
-            None => Restored::Unchanged(shown),
-        });
+        match dir {
+            Some((dir, name)) => {
+                undo_target(store, journal, target, &dir, name, shown, &mut notes)?
+            }
+            None => notes.push(Restored::Unchanged(shown)),
+        }
     }
     Ok(notes)
 }
 
+/// Undo one target, pushing what happened to it onto `notes`, and a
+/// [`Restored::Kept`] for each file left at a temporary that ward cannot
+/// account for.
+///
+/// A temporary is deleted only while it holds bytes ward can account for:
+/// the new bytes, or (for a target of ours) the pre-run bytes, which the
+/// originals object holds. Anything else there may be the only copy of a
+/// save that landed while undo was moving files (moved there by an
+/// exchange, then a crash before the compare, or a second save before the
+/// exchange back), so it is kept and reported, never deleted.
 fn undo_target(
     store: &Store,
     journal: &Journal,
@@ -434,7 +460,8 @@ fn undo_target(
     dir: &ProjectRoot,
     name: OsString,
     shown: PathBuf,
-) -> io::Result<Restored> {
+    notes: &mut Vec<Restored>,
+) -> io::Result<()> {
     let foreign = target.state == TargetState::Taken;
     let temp_path = PathBuf::from(&target.temp);
     let temp = file_name(&temp_path);
@@ -444,19 +471,29 @@ fn undo_target(
         ABSENT => Current::Absent,
         digest => Current::File(parse_digest(digest).ok_or_else(malformed)?),
     };
+    let accounted = |current: Current| {
+        current == new || (!foreign && current == original) || current == Current::Absent
+    };
     let now = current_at(dir.as_raw_fd(), &name)?;
     let at_temp = current_at(dir.as_raw_fd(), temp)?;
     // A pending target whose temporary still holds the new bytes was never
     // swapped (an exchange leaves the displaced file there, a create leaves
     // nothing): like a foreign one, the file at the target is not ours.
     let ours = !foreign && !(target.state == TargetState::Pending && at_temp == new);
+    // Where undo moves files when it needs a free name: the temporary,
+    // unless it holds something ward cannot account for, which stays put.
+    let scratch = if accounted(at_temp) {
+        temp.to_os_string()
+    } else {
+        file_name(&temp_beside(Path::new(&target.target))?).to_os_string()
+    };
     fault(FaultPoint::Undoing)?;
     let note = if ours && now == new {
         // Each action below moves the target aside and then compares what
         // moved: a save that landed after the check above is put back, and
         // the target is reported edited rather than overwritten.
         match original {
-            Current::Absent => remove_created(dir.as_raw_fd(), temp, &name, new, shown)?,
+            Current::Absent => remove_created(dir.as_raw_fd(), &scratch, &name, new, shown)?,
             _ if exchange_back(target, at_temp, original) => {
                 put_back(dir.as_raw_fd(), temp, &name, new, shown)?
             }
@@ -467,9 +504,9 @@ fn undo_target(
                 // journal is kept.
                 let bytes = original_bytes(store, journal, target)?;
                 let mode = target_mode(dir.as_raw_fd(), &name)?;
-                unlink_at(dir.as_raw_fd(), temp)?;
-                write_temp(dir.as_raw_fd(), temp, &bytes, mode)?;
-                put_back(dir.as_raw_fd(), temp, &name, new, shown)?
+                unlink_at(dir.as_raw_fd(), &scratch)?;
+                write_temp(dir.as_raw_fd(), &scratch, &bytes, mode)?;
+                put_back(dir.as_raw_fd(), &scratch, &name, new, shown)?
             }
         }
     } else if now == original {
@@ -480,21 +517,27 @@ fn undo_target(
     } else {
         Restored::LeftEdited(shown)
     };
-    // Whatever is left at the temporary is never the only copy of anything
-    // the user wrote: after the branch above it holds the new bytes, the
-    // pre-run bytes, an unswapped temporary, or a save the user replaced
-    // with a later one. A foreign target's temporary is not ours unless it
-    // holds the new bytes.
-    if !foreign || at_temp == new {
-        unlink_at(dir.as_raw_fd(), temp)?;
+    notes.push(note);
+    let mut slots = vec![temp.to_os_string()];
+    if scratch != temp {
+        slots.push(scratch);
+    }
+    for slot in slots {
+        if accounted(current_at(dir.as_raw_fd(), &slot)?) {
+            unlink_at(dir.as_raw_fd(), &slot)?;
+        } else {
+            notes.push(Restored::Kept(dir.path().join(&slot)));
+        }
     }
     store::fsync_directory(dir.as_raw_fd())?;
-    Ok(note)
+    Ok(())
 }
 
 /// Exchange `temp` (the bytes to restore) into `name`, which held the new
 /// bytes when undo looked. If what came out is not the new bytes, a save
-/// landed in between: exchange it back and report the target edited.
+/// landed in between: exchange it back and report the target edited. A
+/// second save that lands before that exchange back ends up at `temp`,
+/// where the caller keeps it.
 fn put_back(
     dirfd: RawFd,
     temp: &OsStr,
@@ -503,9 +546,11 @@ fn put_back(
     shown: PathBuf,
 ) -> io::Result<Restored> {
     exchange(dirfd, temp, name)?;
+    fault(FaultPoint::UndoMoved)?;
     if current_at(dirfd, temp)? == new {
         return Ok(Restored::Restored(shown));
     }
+    fault(FaultPoint::UndoMismatched)?;
     exchange(dirfd, temp, name)?;
     Ok(Restored::LeftEdited(shown))
 }
@@ -514,7 +559,8 @@ fn put_back(
 /// undo looked: move it aside to `temp` (never replacing anything), and
 /// delete it only if what moved is still the new bytes. A save that landed
 /// in between is moved back; if the name was taken again meanwhile, the
-/// later file stays and the target is reported edited.
+/// later file stays at the target, the earlier one at `temp`, where the
+/// caller keeps it, and the target is reported edited.
 fn remove_created(
     dirfd: RawFd,
     temp: &OsStr,
@@ -524,9 +570,11 @@ fn remove_created(
 ) -> io::Result<Restored> {
     unlink_at(dirfd, temp)?;
     create_noreplace(dirfd, name, temp)?;
+    fault(FaultPoint::UndoMoved)?;
     if current_at(dirfd, temp)? == new {
         return Ok(Restored::Removed(shown));
     }
+    fault(FaultPoint::UndoMismatched)?;
     match create_noreplace(dirfd, temp, name) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}

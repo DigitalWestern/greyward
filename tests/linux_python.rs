@@ -12,7 +12,7 @@ use greyward::tailors::python;
 
 mod common;
 
-use common::{assert_ok, copy_tree, fixture, ward_at, warm_store, TempDir};
+use common::{assert_ok, copy_tree, fixture, text, ward_at, warm_store, TempDir};
 
 #[test]
 #[ignore]
@@ -31,7 +31,35 @@ fn linux_python_sync_run_and_uv_round_trip() {
     copy_tree(&fixture("proj-a"), &project);
     let store_path = warm_store(&temp);
 
-    assert_ok(ward_at(&project, &temp.0, &store_path, &["sync"]), "sync");
+    let sync = ward_at(&project, &temp.0, &store_path, &["sync"]);
+    let stderr = text(&sync.stderr);
+    assert_ok(sync, "sync");
+    // proj-a commits no resolution record, so the sync records
+    // `unrecorded-resolution`. The python tailor joins its resolution twice
+    // (an early check before it touches .venv, then the closure writer),
+    // and the exception is still said once, as the closure records it once.
+    assert_eq!(
+        stderr
+            .matches("ward: exception unrecorded-resolution:")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("1 policy exception(s) recorded"),
+        "{stderr}"
+    );
+    let closure: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.join(".greyward/closures/python.json")).unwrap(),
+    )
+    .unwrap();
+    let recorded = closure["body"]["exceptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|exception| exception["kind"] == "unrecorded-resolution")
+        .count();
+    assert_eq!(recorded, 1, "{closure}");
 
     let imports = Command::new(project.join(".venv/bin/python"))
         .args([

@@ -920,16 +920,29 @@ pub fn record_with_fix(
                 message,
             ));
         }
-        let kind = canonical_kind(kind);
+        let exception = Exception {
+            kind: canonical_kind(kind).into(),
+            subject: subject.into(),
+            detail: detail.into(),
+        };
+        // The same fact can reach a frame twice: a tailor records a lock
+        // fact during sync and an attested resolution record carrying it is
+        // joined into the same frame, or a tailor joins its resolution early
+        // to refuse before it mutates anything and the closure writer joins
+        // it again. An exact duplicate says nothing new, so the frame keeps
+        // the first, and it is said once: each exception in a closure is
+        // narrated once, when the frame first holds it.
+        if frame.exceptions.contains(&exception) {
+            return Ok(());
+        }
         // The record itself is progress: what to do about it depends on
         // whether a policy gate exists, which the end-of-sync summary
         // (`commands::sync::exception_summary`) knows and this frame does not.
-        ui::note(&format!("exception {kind}: {subject}: {detail}"));
-        frame.exceptions.push(Exception {
-            kind: kind.into(),
-            subject: subject.into(),
-            detail: detail.into(),
-        });
+        ui::note(&format!(
+            "exception {}: {}: {}",
+            exception.kind, exception.subject, exception.detail
+        ));
+        frame.exceptions.push(exception);
         Ok(())
     })
 }
@@ -1160,17 +1173,9 @@ impl Attribution {
                 )));
             }
             frame.claimed = true;
-            // The same fact can reach a frame twice: a tailor records a
-            // lock fact during sync, and an attested resolution record that
-            // carries it is joined into the same frame. An exact duplicate
-            // says nothing new, so the closure keeps the first.
-            let mut claimed: Vec<Exception> = Vec::new();
-            for exception in std::mem::take(&mut frame.exceptions) {
-                if !claimed.contains(&exception) {
-                    claimed.push(exception);
-                }
-            }
-            Ok(claimed)
+            // `record_with_fix` keeps each exact exception once, so the
+            // frame already holds what the closure records.
+            Ok(std::mem::take(&mut frame.exceptions))
         })
     }
 
@@ -1585,16 +1590,19 @@ deny = ["git-dependency"]"#,
     }
 
     #[test]
-    fn attribution_claim_removes_exact_duplicates() {
+    fn attribution_keeps_each_exact_exception_once() {
         let _guard = attribution_test_lock();
         let mut attribution = Attribution::open("go").unwrap();
         let open = Policy::default();
         // The sync and the joined record both report the same fact; a
-        // different detail is a different finding and stays.
+        // different detail is a different finding and stays. The frame
+        // never holds the repeat, so it is narrated once, not only claimed
+        // once.
         record_with(&open, GIT_DEPENDENCY, "left-pad", "from git").unwrap();
         record_with(&open, UNCONFINED_RESOLUTION, "go", "host").unwrap();
         record_with(&open, GIT_DEPENDENCY, "left-pad", "from git").unwrap();
         record_with(&open, GIT_DEPENDENCY, "left-pad", "another detail").unwrap();
+        assert_eq!(pending().len(), 3, "{:?}", pending());
         let claimed = attribution.claim("go").unwrap();
         let spelled: Vec<(&str, &str)> = claimed
             .iter()
@@ -1610,6 +1618,51 @@ deny = ["git-dependency"]"#,
         );
         attribution.mark_published().unwrap();
         attribution.finish(true).unwrap();
+    }
+
+    /// A repeat is skipped only after the policy check: a deny or strict
+    /// policy refuses the repeat of a finding an open policy recorded, and
+    /// the recorded entry stays as it was.
+    #[test]
+    fn a_repeated_exception_is_still_refused_by_deny_and_strict() {
+        let _guard = attribution_test_lock();
+        let mut attribution = Attribution::open("go").unwrap();
+        record_with(&Policy::default(), GIT_DEPENDENCY, "left-pad", "from git").unwrap();
+        let deny = Policy {
+            deny: BTreeSet::from([GIT_DEPENDENCY.to_string()]),
+            ..Policy::default()
+        };
+        let strict = Policy {
+            strict: true,
+            ..Policy::default()
+        };
+        for policy in [&deny, &strict] {
+            let error = record_with(policy, GIT_DEPENDENCY, "left-pad", "from git").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        }
+        let claimed = attribution.claim("go").unwrap();
+        assert_eq!(claimed.len(), 1, "{claimed:?}");
+        assert_eq!(claimed[0].detail, "from git");
+        attribution.mark_published().unwrap();
+        attribution.finish(true).unwrap();
+    }
+
+    /// The same finding in a parent and a nested frame is two findings: each
+    /// frame is its own closure, so each keeps its copy.
+    #[test]
+    fn an_identical_exception_in_parent_and_child_frames_stays_in_both() {
+        let _guard = attribution_test_lock();
+        let open = Policy::default();
+        let mut parent = Attribution::open("cargo").unwrap();
+        record_with(&open, GIT_DEPENDENCY, "left-pad", "from git").unwrap();
+        let mut child = parent.nested("node").unwrap();
+        record_with(&open, GIT_DEPENDENCY, "left-pad", "from git").unwrap();
+        assert_eq!(child.claim("node").unwrap().len(), 1);
+        child.mark_published().unwrap();
+        child.finish(true).unwrap();
+        assert_eq!(parent.claim("cargo").unwrap().len(), 1);
+        parent.mark_published().unwrap();
+        parent.finish(true).unwrap();
     }
 
     #[test]

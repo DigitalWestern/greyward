@@ -2210,6 +2210,13 @@ mod tests {
         // review): the directory is no store, and is refused as one.
         let error = Store::open_at(&unknown).unwrap_err();
         assert!(error.to_string().contains("is not a ward store"), "{error}");
+        // It has a marker, just none this ward recognizes (#676 review).
+        assert!(
+            error
+                .to_string()
+                .contains("no recognized format marker and no store evidence"),
+            "{error}"
+        );
         assert_eq!(refusal_fix(&error), None);
         fs::write(unknown.join("activity.lock"), b"").unwrap();
         let error = Store::open_at(&unknown).unwrap_err();

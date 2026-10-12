@@ -544,8 +544,8 @@ pub(crate) fn not_a_store(root: &Path, verb: &str) -> io::Error {
     crate::kernel::error::refused(
         io::ErrorKind::InvalidData,
         format!(
-            "{} is not a ward store and is not empty: it has no format marker and nothing a \
-             ward stores, so {verb}. Point GREYWARD_STORE at a new or empty directory, \
+            "{} is not a ward store and is not empty: it has no recognized format marker and \
+             no store evidence (no empty lease file, no object record that parses), so {verb}. Point GREYWARD_STORE at a new or empty directory, \
              or move what is there aside",
             root.display()
         ),

@@ -390,6 +390,13 @@ impl Store {
         format::vacant(root)
     }
 
+    /// Whether `root` holds what only a ward writes into a store (a lease
+    /// file, an object record), whatever its marker says. `ward gc --reset`
+    /// empties only a root with a current marker or this evidence.
+    pub fn has_store_evidence(root: &Path) -> io::Result<bool> {
+        format::has_store_evidence(root)
+    }
+
     /// Refuse, before any lease file is created, a root with no store in
     /// it. A lease file is part of what makes a directory a store
     /// (`format::probe`), so taking one in a user's directory would make the
@@ -2189,6 +2196,12 @@ mod tests {
         let unknown = temp.0.join("unknown");
         fs::create_dir(&unknown).unwrap();
         fs::write(unknown.join(FORMAT_FILE), b"hello\n").unwrap();
+        // Alone, a marker this ward cannot read is anyone's file (#676
+        // review): the directory is no store, and is refused as one.
+        let error = Store::open_at(&unknown).unwrap_err();
+        assert!(error.to_string().contains("is not a ward store"), "{error}");
+        assert_eq!(refusal_fix(&error), None);
+        fs::write(unknown.join("activity.lock"), b"").unwrap();
         let error = Store::open_at(&unknown).unwrap_err();
         assert!(refusal_fix(&error).unwrap().ends_with(" ward gc --reset"));
         let text = error.to_string();

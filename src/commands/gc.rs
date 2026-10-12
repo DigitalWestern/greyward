@@ -149,15 +149,26 @@ fn reset(args: &cli::GcArgs) -> io::Result<()> {
     // already what a reset leaves, and one that holds anything is someone
     // else's (#676). This is decided before the lease, whose own file
     // would otherwise be the first thing here a ward wrote.
-    if let Some((_, store::StoreFormat::Uninitialized)) = store::Store::probe_at(&root)? {
-        if !store::Store::vacant(&root)? {
+    // A marker alone is not enough either, unless it is this ward's own: an
+    // unrelated `format` file, directory or link reads as a marker ward
+    // cannot read, so anything but a current marker needs store evidence
+    // beside it (#676 review).
+    match store::Store::probe_at(&root)? {
+        Some((_, store::StoreFormat::Uninitialized)) => {
+            if !store::Store::vacant(&root)? {
+                return Err(store::not_a_store(&root, "gc --reset does not empty it"));
+            }
+            if !args.dry_run {
+                store::Store::open()?;
+            }
+            writeln!(narrate, "ward: gc --reset: there is no store to empty yet")?;
+            return Ok(());
+        }
+        Some((_, store::StoreFormat::Current)) | None => {}
+        Some(_) if !store::Store::has_store_evidence(&root)? => {
             return Err(store::not_a_store(&root, "gc --reset does not empty it"));
         }
-        if !args.dry_run {
-            store::Store::open()?;
-        }
-        writeln!(narrate, "ward: gc --reset: there is no store to empty yet")?;
-        return Ok(());
+        Some(_) => {}
     }
     // A handle on the root alone. The store may be one `open` refuses.
     let store = store::Store::handle(root);

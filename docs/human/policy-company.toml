@@ -154,6 +154,17 @@ deny = [
 #                                    still verified. A team that must never
 #                                    resolve against old metadata may add
 #                                    this kind to the list above.
+#   host-git-transport               a git source was fetched over ssh://
+#                                    (offering this machine's ssh agent keys
+#                                    under its ssh configuration) or read
+#                                    from a file:// path on this machine.
+#                                    The content is still pinned by commit;
+#                                    the lock chose which host or path the
+#                                    sync reaches. Every such source is also
+#                                    a git-dependency, which the list above
+#                                    denies already. A team that allows git
+#                                    dependencies over https only may add
+#                                    this kind to the list above.
 
 # Closure signing. With a [signing] table in the machine policy, `ward audit`
 # accepts only records signed by a key it lists; a project or --policy copy

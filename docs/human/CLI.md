@@ -885,6 +885,13 @@ kind names use one separator, the hyphen (`weak-integrity`,
 spellings are still read from policy files and from closures written by
 earlier versions, and are judged and printed as the hyphenated name.
 
+`host-git-transport` is recorded, under the repository URL, for a git
+dependency fetched over `ssh://` (or `git@host:repo`), which offers this
+machine's ssh agent keys under its ssh configuration, or read from a
+`file://` path on this machine. It is recorded before the fetch, so a
+policy that denies it stops the sync before the host or path is reached.
+An `https://` or `git://` source does not record it.
+
 A refusal names the knob that refused and the edit that lifts it, not just
 the kind: `policy denies weak-integrity: left-pad: sha1 integrity;
 'weak-integrity' is in the deny list in /etc/greyward/policy.toml; remove that

@@ -121,6 +121,29 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
     Ok(())
 }
 
+/// Record `host-git-transport` for a source fetched over ssh or read from
+/// a local path, before anything is fetched: a policy that denies the kind
+/// stops the sync before git contacts the host. `git@host:repo` is already
+/// `ssh://` once normalized. https and `git://` offer no credential of
+/// this machine's and reach no local path, so they record nothing here.
+/// Called by each realizer beside its `git-dependency` record, inside the
+/// sync's attribution.
+pub fn record_transport(source: &GitSource) -> io::Result<()> {
+    let detail = if source.url.starts_with("ssh://") {
+        "fetched over ssh from this machine, offering its ssh agent's keys under its ssh \
+         configuration"
+    } else if source.url.starts_with("file://") {
+        "read from a repository path on this machine"
+    } else {
+        return Ok(());
+    };
+    crate::kernel::policy::record(
+        crate::kernel::policy::HOST_GIT_TRANSPORT,
+        &source.url,
+        detail,
+    )
+}
+
 pub fn is_full_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -894,6 +917,56 @@ mod tests {
         assert_eq!(
             normalize_url("file:///tmp/repo.git"),
             "file:///tmp/repo.git"
+        );
+    }
+
+    /// ssh and file sources record `host-git-transport` under their URL,
+    /// https and git:// record nothing, and a policy denying the kind
+    /// refuses before anything is fetched.
+    #[test]
+    fn ssh_and_file_sources_record_their_transport() {
+        use crate::kernel::policy::{self, Attribution, PolicyScope, HOST_GIT_TRANSPORT};
+        let _serial = policy::attribution_test_lock();
+        let source = |url: &str| GitSource {
+            url: normalize_url(url),
+            commit: "a".repeat(40),
+            subdirectory: None,
+        };
+        let attribution = Attribution::open("test").unwrap();
+        for url in [
+            "git@github.com:o/r.git",
+            "file:///srv/repo.git",
+            "https://github.com/o/r",
+            "git://github.com/o/r",
+        ] {
+            record_transport(&source(url)).unwrap();
+        }
+        let recorded: Vec<(String, String)> = attribution
+            .recorded()
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject))
+            .collect();
+        attribution.discard();
+        assert_eq!(
+            recorded,
+            [
+                (HOST_GIT_TRANSPORT, "ssh://git@github.com/o/r.git"),
+                (HOST_GIT_TRANSPORT, "file:///srv/repo.git"),
+            ]
+            .map(|(kind, subject)| (kind.to_string(), subject.to_string()))
+        );
+
+        let mut deny = policy::Policy::default();
+        deny.deny.insert(HOST_GIT_TRANSPORT.to_string());
+        let _scope = PolicyScope::install(deny);
+        let attribution = Attribution::open("test").unwrap();
+        let error = record_transport(&source("ssh://git@intranet.test/r.git"))
+            .unwrap_err()
+            .to_string();
+        attribution.discard();
+        assert!(
+            error.contains("policy denies host-git-transport"),
+            "{error}"
         );
     }
 

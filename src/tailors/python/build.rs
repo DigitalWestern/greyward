@@ -1021,6 +1021,7 @@ pub(crate) fn git_sdist_package(
             format!("{}: not a git dependency", pkg.name),
         )
     })?;
+    crate::kernel::gitsrc::record_transport(source)?;
     let object = crate::kernel::gitsrc::ensure_git_source(store, activity, source)?;
     let root = match &source.subdirectory {
         Some(subdir) => {

@@ -1473,8 +1473,10 @@ mod tests {
         );
         let report = session.finish();
         assert_eq!(report.diagnostics.requests.len(), 10);
+        // Every request is evidence; the refused paths the grammar did not
+        // accept are named by file name only, so some share one entry.
         assert_eq!(
-            report.ledger.len(),
+            report.ledger.len() + report.diagnostics.duplicates as usize,
             10,
             "{:#?}",
             report.ledger.entries().collect::<Vec<_>>()
@@ -1937,6 +1939,80 @@ mod tests {
         receiver.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
+    /// Record one request on `state` straight, as a connection would.
+    fn record_one(state: &State, url: &str, status: u16, failed: bool, resolved: bool) {
+        let entry = Entry {
+            class: "metadata".into(),
+            method: "GET".into(),
+            url: url.into(),
+            status,
+            sha256: (!failed).then(|| "a".repeat(64)),
+            claimed: None,
+            verified: false,
+            freshness: (!failed).then_some(crate::kernel::resolve::ledger::Freshness::Live),
+            redirected_to: None,
+        };
+        let diag = crate::kernel::resolve::ledger::DiagRequest {
+            seq: 0,
+            class: "metadata".into(),
+            method: "GET".into(),
+            url: url.into(),
+            status,
+            served_status: status,
+            disposition: if failed { "failed" } else { "miss" }.into(),
+            bytes: 0,
+            hops: Vec::new(),
+            detail: None,
+        };
+        state.record(entry, diag, &[], resolved);
+    }
+
+    fn ledger_urls(state: State) -> Vec<String> {
+        let report = state.take_report();
+        let mut urls: Vec<String> = report.ledger.entries().map(|e| e.url.clone()).collect();
+        urls.sort();
+        urls
+    }
+
+    /// A path keeps its whole form in the portable ledger only when a
+    /// session route accepts it: a URL the route resolved, or one whose
+    /// path the route maps back to it exactly. A path the route's grammar
+    /// refuses, on the route's own host or as a mirror path, is named by
+    /// origin and file name, so a token in it never reaches the ledger.
+    #[test]
+    fn a_path_a_route_refuses_is_reduced_even_on_its_host() {
+        let harness = Harness::new("proxy-route-grammar");
+        let origin = harness.upstream_url("");
+        let state = State::new(harness.config(Policy::default(), Mode::Online)).unwrap();
+        let refused = [
+            format!("{origin}/forbidden/SECRET/account/pkg.json"),
+            "/REDACTED/fixture/forbidden/SECRET/pkg.json".to_string(),
+            "/REDACTED/no-such-route/SECRET/pkg.json".to_string(),
+        ];
+        for url in &refused {
+            record_one(&state, url, 403, false, false);
+        }
+        let accepted = [
+            format!("{origin}/meta/resolved.json"),
+            format!("{origin}/meta/mapped-back.json"),
+            "/REDACTED/fixture/meta/mirror.json".to_string(),
+        ];
+        record_one(&state, &accepted[0], 200, false, true);
+        record_one(&state, &accepted[1], 200, false, false);
+        record_one(&state, &accepted[2], 403, false, false);
+        let urls = ledger_urls(state);
+        assert!(urls.iter().all(|url| !url.contains("SECRET")), "{urls:?}");
+        let mut expected = vec![
+            format!("{origin}/.../pkg.json"),
+            "/.../pkg.json".to_string(),
+            "/.../pkg.json".to_string(),
+        ];
+        expected.extend(accepted.iter().cloned());
+        expected.sort();
+        expected.dedup();
+        assert_eq!(urls, expected);
+    }
+
     #[test]
     fn nothing_is_recorded_after_a_session_finishes() {
         let harness = Harness::new("proxy-closed");
@@ -1967,6 +2043,7 @@ mod tests {
                 detail: None,
             },
             &[],
+            false,
         );
         assert!(state
             .check(policy::UNATTESTED_INDEX, "late", "late")

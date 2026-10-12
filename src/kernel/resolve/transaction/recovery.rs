@@ -393,39 +393,49 @@ pub(super) fn release(
 /// directories it created if they are empty. Decides by content alone,
 /// except for a `taken` target: its no-replace create found the name
 /// taken, so whatever is there is another writer's, whatever its bytes.
+///
+/// Every target's folder is opened before any target is touched: one that
+/// cannot be opened (no permission, a symlink) refuses the whole undo, so
+/// the project is left exactly as the crash left it, the journal and the
+/// originals stay, and the next recovery tries again.
 pub(super) fn undo(
     store: &Store,
     root: &ProjectRoot,
     journal: &Journal,
 ) -> io::Result<Vec<Restored>> {
-    let mut notes = Vec::new();
+    let mut opened = Vec::new();
     for target in journal.targets.iter().rev() {
-        notes.push(undo_target(store, root, journal, target)?);
+        check_journal_target(journal, target).map_err(|detail| journal_error(journal, &detail))?;
+        let dir = match parent_of(root, Path::new(&target.target)) {
+            Ok(found) => Some(found),
+            // Its directory is gone: nothing of ours can be in it.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            // Unopenable, a symlink, or any other failure: the directory
+            // may still hold our files.
+            Err(error) => return Err(error),
+        };
+        opened.push((target, dir));
+    }
+    let mut notes = Vec::new();
+    for (target, dir) in opened {
+        let shown = root.path().join(&target.target);
+        notes.push(match dir {
+            Some((dir, name)) => undo_target(store, journal, target, &dir, name, shown)?,
+            None => Restored::Unchanged(shown),
+        });
     }
     Ok(notes)
 }
 
 fn undo_target(
     store: &Store,
-    root: &ProjectRoot,
     journal: &Journal,
     target: &JournalTarget,
+    dir: &ProjectRoot,
+    name: OsString,
+    shown: PathBuf,
 ) -> io::Result<Restored> {
     let foreign = target.state == TargetState::Taken;
-    check_journal_target(journal, target).map_err(|detail| journal_error(journal, &detail))?;
-    let relative = PathBuf::from(&target.target);
-    let shown = root.path().join(&relative);
-    let (dir, name) = match parent_of(root, &relative) {
-        Ok(found) => found,
-        // Its directory is gone: nothing of ours can be in it.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(Restored::Unchanged(shown))
-        }
-        // Unopenable, a symlink, or any other failure: the directory may
-        // still hold our files, so the journal and the originals stay and
-        // the next recovery tries again.
-        Err(error) => return Err(error),
-    };
     let temp_path = PathBuf::from(&target.temp);
     let temp = file_name(&temp_path);
     let malformed = || journal_error(journal, "a digest is malformed");

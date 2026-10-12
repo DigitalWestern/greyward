@@ -2475,7 +2475,13 @@ mod tests {
             !environ.contains("GREYWARD_TEST_PID_ONE_CANARY"),
             "{environ}"
         );
-        assert_eq!(environ.trim(), "", "pid 1 inherited: {environ}");
+        // Older bubblewrap applies --setenv in its own process before the
+        // fork, so pid 1 may hold the sandbox's own variables, never more.
+        let own = ["PATH", "HOME", "TMPDIR", "LANG", "SOURCE_DATE_EPOCH", "PWD"];
+        for line in environ.lines().filter(|line| !line.is_empty()) {
+            let key = line.split('=').next().unwrap();
+            assert!(own.contains(&key), "pid 1 inherited {line:?}: {environ}");
+        }
     }
 
     #[test]

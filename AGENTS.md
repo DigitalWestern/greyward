@@ -104,7 +104,9 @@
     --test-threads=2`, or only the failing suite with `--test <name>`,
     then `bash tests/acceptance.sh`. Point `TMPDIR` at a directory under
     `$HOME` first: these tests leave large stores behind and fill the
-    `/tmp` quota.
+    `/tmp` quota. Set `GREYWARD_STORE` to a throwaway store under the same
+    directory, as heavy.yml does: with `GREYWARD_SANDBOX_TESTS=required`,
+    suites that open the store in-process (`native_libs`) panic without it.
   Clean up after yourself. Give each run its own fresh scratch directory,
   for example `TMPDIR=$HOME/greyward-tmp/<branch-name>`. Once the checks pass,
   delete that directory (`rm -rf "$HOME/greyward-tmp/<branch-name>"`), and

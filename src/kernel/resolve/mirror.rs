@@ -86,6 +86,9 @@ pub(crate) struct Record {
     /// The route's content query keys: their values survive into the
     /// ledger, every other query value is recorded as `REDACTED`.
     pub keep: &'static [&'static str],
+    /// `url` is what a route's `resolve` produced from the request's
+    /// path, so it passed that route's grammar.
+    pub resolved: bool,
 }
 
 impl Record {
@@ -105,6 +108,7 @@ impl Record {
             hops: Vec::new(),
             detail: None,
             keep: &[],
+            resolved: false,
         }
     }
 
@@ -114,10 +118,16 @@ impl Record {
         self
     }
 
+    /// Mark `url` as one a route resolved (see [`Record::resolved`]).
+    pub(crate) fn resolved(mut self) -> Record {
+        self.resolved = true;
+        self
+    }
+
     pub(crate) fn commit(self, state: &State) {
-        let keep = self.keep;
+        let (keep, resolved) = (self.keep, self.resolved);
         let (entry, diag) = self.into_parts();
-        state.record(entry, diag, keep);
+        state.record(entry, diag, keep, resolved);
     }
 
     fn into_parts(self) -> (Entry, DiagRequest) {
@@ -380,8 +390,9 @@ impl Exchange<'_> {
 
     /// Answer a request the protocol answers itself.
     pub(crate) fn local(&self, answer: LocalAnswer, out: &mut dyn Write) -> io::Result<()> {
-        let mut record =
-            Record::new("local", self.method, self.redacted(&answer.url)).keeping(self.keys());
+        let mut record = Record::new("local", self.method, self.redacted(&answer.url))
+            .keeping(self.keys())
+            .resolved();
         record.status = answer.status;
         record.sha256 = Some(hex::encode(Sha256::digest(&answer.body)));
         record.freshness = Some(Freshness::Live);
@@ -401,8 +412,9 @@ impl Exchange<'_> {
             .iter()
             .find(|name| self.request.count(name) > 1)
         {
-            let record =
-                Record::new("refused", self.method, self.redacted(url)).keeping(self.keys());
+            let record = Record::new("refused", self.method, self.redacted(url))
+                .keeping(self.keys())
+                .resolved();
             let reason = format!("the request repeats {name}, which is forwarded only once");
             return refuse(
                 self.state,
@@ -420,8 +432,9 @@ impl Exchange<'_> {
             FORWARDED_REQUEST_HEADERS.contains(&name.to_ascii_lowercase().as_str())
                 && !http::is_field_value(value)
         }) {
-            let record =
-                Record::new("refused", self.method, self.redacted(url)).keeping(self.keys());
+            let record = Record::new("refused", self.method, self.redacted(url))
+                .keeping(self.keys())
+                .resolved();
             let reason = format!("{name} holds bytes outside visible ASCII");
             return refuse(
                 self.state,
@@ -548,8 +561,9 @@ impl Exchange<'_> {
     }
 
     fn metadata(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
-        let mut record =
-            Record::new(class.as_str(), self.method, self.redacted(url)).keeping(self.keys());
+        let mut record = Record::new(class.as_str(), self.method, self.redacted(url))
+            .keeping(self.keys())
+            .resolved();
         let forwarded: Vec<(&str, &str)> = self
             .request
             .iter()
@@ -806,8 +820,9 @@ impl Exchange<'_> {
     }
 
     fn artifact(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
-        let record =
-            Record::new(class.as_str(), self.method, self.redacted(url)).keeping(self.keys());
+        let record = Record::new(class.as_str(), self.method, self.redacted(url))
+            .keeping(self.keys())
+            .resolved();
         match self.state.claimed(url) {
             Claimed::Conflict(why) => {
                 self.state.hard_failure(why.clone());

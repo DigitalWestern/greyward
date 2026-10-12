@@ -15,7 +15,7 @@
 use super::cache::MetaCache;
 use super::ledger::{DiagRequest, Diagnostics, Entry, PortableLedger};
 use super::redact;
-use super::routes::{Claim, Permitted, Route};
+use super::routes::{Claim, Permitted, Route, Upstream};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
@@ -323,14 +323,23 @@ impl State {
     /// detail) keeps none.
     ///
     /// The portable entry names an off-route URL by origin and file name
-    /// only (see [`Self::portable_url`]); the retry and supersession
+    /// only (see [`Self::portable_url`]; `resolved` says a route resolved
+    /// `entry.url` from the request's path); the retry and supersession
     /// bookkeeping, and the diagnostics row, use the whole redacted URL.
-    pub(crate) fn record(&self, mut entry: Entry, mut diag: DiagRequest, keep: &[&str]) {
+    pub(crate) fn record(
+        &self,
+        mut entry: Entry,
+        mut diag: DiagRequest,
+        keep: &[&str],
+        resolved: bool,
+    ) {
         let url =
             |text: &str| redact::text_keeping(text, keep).replace(&self.token, redact::REDACTED);
         let full = url(&entry.url);
-        entry.url = self.portable_url(&full);
-        entry.redirected_to = entry.redirected_to.map(|hop| self.portable_url(&url(&hop)));
+        entry.url = self.portable_url(&full, resolved);
+        entry.redirected_to = entry
+            .redirected_to
+            .map(|hop| self.portable_url(&url(&hop), false));
         diag.url = url(&diag.url);
         diag.detail = diag.detail.map(|detail| self.clean(&detail));
         diag.hops = diag.hops.iter().map(|hop| url(hop)).collect();
@@ -385,26 +394,40 @@ impl State {
 
     /// How the portable ledger names `redacted`, a URL already redacted.
     ///
-    /// A URL one of the session's routes serves is on a compiled-in public
-    /// registry, whose paths name packages and never an account (route
-    /// credentials travel in headers, which are never recorded): it is
-    /// kept whole, since it is the evidence of which document was fetched.
-    /// Any other URL (an intercepted git host or unattested registry, a
-    /// refused request) is a host ward knows nothing about, whose path may
-    /// carry an account token (Gemfury's `/<token>/<account>/`), and the
-    /// ledger leaves the machine (`--ledger-export`, a CI artifact): it is
-    /// named by its origin and file name, with its query as redaction left
-    /// it (only content keys keep a value, such as git's `service`). So is
-    /// a mirror path to a route this session does not have. A CONNECT
-    /// target has no path and is kept.
-    fn portable_url(&self, redacted: &str) -> String {
+    /// A URL one of the session's routes serves, from a path that route's
+    /// grammar accepted (`resolved`, or, for a URL nothing resolved such as
+    /// a redirect hop, its path resolves back to exactly this URL), is on a
+    /// compiled-in public registry and names a package document, never an
+    /// account (route credentials travel in headers, which are never
+    /// recorded): it is kept whole, since it is the evidence of which
+    /// document was fetched. Any other URL (an intercepted git host or
+    /// unattested registry, a path a route refuses, even on a route's
+    /// host, a redirect hop no route maps) may carry an account token in
+    /// its path (Gemfury's `/<token>/<account>/`), and the ledger leaves
+    /// the machine (`--ledger-export`, a CI artifact): it is named by its
+    /// origin and file name, with its query as redaction left it (only
+    /// content keys keep a value, such as git's `service`). A mirror path
+    /// is kept only when its route is this session's and accepts the rest
+    /// of the path; otherwise it is reduced the same way. A CONNECT target
+    /// has no path and is kept.
+    fn portable_url(&self, redacted: &str, resolved: bool) -> String {
         match Url::parse(redacted) {
             Ok(url) if url.host_str().is_some() => {
-                let routed = self
-                    .config
-                    .routes
-                    .iter()
-                    .any(|route| route.endpoint_for(&url).is_some());
+                let mut bare = url.clone();
+                bare.set_fragment(None);
+                let target = match url.query() {
+                    Some(query) => format!("{}?{query}", url.path()),
+                    None => url.path().to_string(),
+                };
+                let routed = self.config.routes.iter().any(|route| {
+                    route.endpoint_for(&url).is_some()
+                        && (resolved
+                            || match route.resolve(&target) {
+                                Ok(Upstream::Fetch(mapped)) => mapped == bare,
+                                Ok(Upstream::Local(answer)) => answer.url == bare,
+                                Err(_) => false,
+                            })
+                });
                 if routed {
                     return redacted.to_string();
                 }
@@ -418,9 +441,13 @@ impl State {
                 // `/<token>/<route>/<path>`, the token already redacted.
                 Some(rest) => {
                     let path = rest.split(['?', '#']).next().unwrap_or_default();
-                    let mut segments = path.split('/');
-                    let _token = segments.next();
-                    let routed = segments.next().is_some_and(|id| self.route(id).is_some());
+                    let routed = rest
+                        .split_once('/')
+                        .and_then(|(_token, rest)| rest.split_once('/'))
+                        .is_some_and(|(id, tail)| {
+                            self.route(id)
+                                .is_some_and(|route| route.resolve(&format!("/{tail}")).is_ok())
+                        });
                     if routed {
                         return redacted.to_string();
                     }

@@ -93,21 +93,15 @@ fn install_panic_hook() {
 
 fn silence_stderr() -> io::Result<()> {
     let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
-    // SAFETY: plain fd duplication on fds this process owns; the saved copy
-    // is marked close-on-exec so children never inherit the real stderr.
-    unsafe {
-        let saved = libc::dup(io::stderr().as_raw_fd());
-        if saved < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if libc::fcntl(saved, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if libc::dup2(null.as_raw_fd(), io::stderr().as_raw_fd()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let _ = ERROR_FD.set(saved);
+    // The saved copy is close-on-exec so no child inherits the real stderr.
+    let saved = dup_cloexec(io::stderr().as_raw_fd())?;
+    // SAFETY: plain fd duplication on fds this process owns.
+    if unsafe { libc::dup2(null.as_raw_fd(), io::stderr().as_raw_fd()) } < 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(saved) };
+        return Err(error);
     }
+    let _ = ERROR_FD.set(saved);
     Ok(())
 }
 
@@ -132,30 +126,69 @@ fn with_fd_pointed_at<T>(
     job: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
     io::stdout().flush()?;
-    // SAFETY: plain duplication of descriptors this process owns. The
-    // saved copy is close-on-exec so no child inherits the real stdout,
-    // and it is closed here on every path.
-    let saved = unsafe { libc::dup(fd) };
-    if saved < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let swapped = unsafe {
-        libc::fcntl(saved, libc::F_SETFD, libc::FD_CLOEXEC) >= 0 && libc::dup2(target, fd) >= 0
-    };
-    if !swapped {
+    let saved = dup_cloexec(fd)?;
+    // SAFETY: plain duplication of descriptors this process owns.
+    if unsafe { libc::dup2(target, fd) } < 0 {
         let error = io::Error::last_os_error();
         unsafe { libc::close(saved) };
         return Err(error);
     }
+    // From here the guard puts `fd` back and closes the saved copy on every
+    // path: a job that fails, a flush that fails, and a job that panics.
+    let guard = Restore { fd, saved };
     let result = job();
-    io::stdout().flush()?;
-    let restored = unsafe { libc::dup2(saved, fd) } >= 0;
-    let restore_error = io::Error::last_os_error();
-    unsafe { libc::close(saved) };
-    match (result, restored) {
-        (Ok(_), false) => Err(restore_error),
-        (result, _) => result,
+    let flushed = io::stdout().flush();
+    let restored = guard.restore();
+    let result = result?;
+    flushed?;
+    restored?;
+    Ok(result)
+}
+
+/// The descriptor [`with_fd_pointed_at`] swapped, and the copy of what it
+/// named before. Dropped without [`Restore::restore`] (a panic), it still
+/// puts the descriptor back.
+struct Restore {
+    fd: i32,
+    saved: i32,
+}
+
+impl Restore {
+    fn restore(self) -> io::Result<()> {
+        let this = ManuallyDrop::new(self);
+        this.put_back()
     }
+
+    fn put_back(&self) -> io::Result<()> {
+        // SAFETY: `saved` is a descriptor this guard owns and closes once.
+        let restored = unsafe { libc::dup2(self.saved, self.fd) } >= 0;
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(self.saved) };
+        if restored {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let _ = io::stdout().flush();
+        let _ = self.put_back();
+    }
+}
+
+/// A close-on-exec copy of `fd`, made in one call: the proxy and relay
+/// threads spawn children, and a fork between a plain `dup` and a later
+/// `fcntl(FD_CLOEXEC)` would hand a child the copy.
+fn dup_cloexec(fd: i32) -> io::Result<i32> {
+    // SAFETY: fcntl duplicates a descriptor this process owns.
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(copy)
 }
 
 pub fn verbose() -> bool {
@@ -561,6 +594,52 @@ mod tests {
             2,
             "{captured}"
         );
+    }
+
+    /// A job that panics still gets its descriptor put back, and the saved
+    /// copy closed: the guard runs while the panic unwinds. Exercised on a
+    /// descriptor of the test's own, so fd 1 of the harness is untouched.
+    #[test]
+    fn a_panicking_job_still_restores_the_descriptor() {
+        let identity = |fd: i32| {
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: fstat writes a full `stat` into the buffer on success.
+            assert_eq!(unsafe { libc::fstat(fd, stat.as_mut_ptr()) }, 0);
+            // SAFETY: initialized by the successful fstat above.
+            let stat = unsafe { stat.assume_init() };
+            (stat.st_dev, stat.st_ino)
+        };
+        let swapped = File::open("/dev/null").unwrap();
+        let fd = swapped.as_raw_fd();
+        let before = identity(fd);
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_end, write_end) = (fds[0], fds[1]);
+        let seen = std::panic::catch_unwind(|| {
+            with_fd_pointed_at(fd, write_end, || -> io::Result<()> {
+                assert_ne!(identity(fd), before, "the job ran unswapped");
+                panic!("job panicked");
+            })
+        });
+        assert!(seen.is_err());
+        assert_eq!(identity(fd), before, "the descriptor was not restored");
+        unsafe {
+            libc::close(read_end);
+            libc::close(write_end);
+        }
+    }
+
+    /// Every copy the module makes is close-on-exec from the moment it
+    /// exists: no window in which a child forked by another thread could
+    /// inherit it.
+    #[test]
+    fn descriptor_copies_are_close_on_exec() {
+        let file = File::open("/dev/null").unwrap();
+        let copy = dup_cloexec(file.as_raw_fd()).unwrap();
+        // SAFETY: fcntl reads the flags of a descriptor this test owns.
+        let flags = unsafe { libc::fcntl(copy, libc::F_GETFD) };
+        unsafe { libc::close(copy) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "{flags}");
     }
 
     #[test]

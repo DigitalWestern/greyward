@@ -405,6 +405,7 @@ impl<'a> Transaction<'a> {
                 swapping = None;
                 journal.targets[index].state = TargetState::Swapped;
                 write_journal(&journals, &journal)?;
+                self.unlink_created(entry)?;
                 fault(FaultPoint::Marked(index))?;
             }
             self.verify_unpublished(&plan)?;
@@ -438,7 +439,27 @@ impl<'a> Transaction<'a> {
                     swapping.filter(|_| error.kind() == io::ErrorKind::AlreadyExists)
                 {
                     journal.targets[index].state = TargetState::Taken;
-                    let _ = write_journal(&journals, &journal);
+                    if let Err(write_error) = write_journal(&journals, &journal) {
+                        // Nothing is undone on a journal that may not say
+                        // so: the next recovery undoes it from the journal
+                        // on disk, where the target is pending with no
+                        // proof ward published it, and so is left alone.
+                        self.finished = true;
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "{error}; recording that in the journal also failed \
+                                 ({write_error}), so nothing was undone yet: the journal {} \
+                                 was kept and the next ward command in this project will \
+                                 undo the partial publication",
+                                self.root
+                                    .path()
+                                    .join(JOURNAL_DIR)
+                                    .join(journal_name(&self.ecosystem))
+                                    .display()
+                            ),
+                        ));
+                    }
                 }
                 let undone = undo(self.store, &self.root, &journal);
                 match undone {
@@ -586,20 +607,25 @@ impl<'a> Transaction<'a> {
         fault(FaultPoint::TempWritten(index))?;
         let shown = self.root.path().join(&held.relative);
         match &held.original {
-            None => create_noreplace(dir.as_raw_fd(), temp, &name).map_err(|error| {
-                let _ = unlink_at(dir.as_raw_fd(), temp);
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!(
-                            "{} appeared while the resolution ran; nothing was published",
-                            shown.display()
-                        ),
-                    )
-                } else {
-                    error
-                }
-            })?,
+            // A hard link, so the temporary stays the same file as the
+            // target until the journal says swapped: that is the proof, to
+            // a recovery after a crash in between, that ward created it.
+            None => link_noreplace(dir.as_raw_fd(), temp, &name)
+                .map_err(|error| {
+                    let _ = unlink_at(dir.as_raw_fd(), temp);
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "{} appeared while the resolution ran; nothing was published",
+                                shown.display()
+                            ),
+                        )
+                    } else {
+                        error
+                    }
+                })
+                .and_then(|()| fault(FaultPoint::Swapped(index)))?,
             Some(original) => {
                 exchange(dir.as_raw_fd(), temp, &name)?;
                 fault(FaultPoint::Swapped(index))?;
@@ -613,6 +639,18 @@ impl<'a> Transaction<'a> {
                 }
             }
         }
+        store::fsync_directory(dir.as_raw_fd())
+    }
+
+    /// A created target is swapped once the journal says so: its
+    /// temporary, the hard link that proved ward made it, goes.
+    fn unlink_created(&self, entry: &Planned) -> io::Result<()> {
+        let held = &self.targets[entry.target];
+        if held.original.is_some() {
+            return Ok(());
+        }
+        let (dir, _) = parent_of(&self.root, &held.relative)?;
+        unlink_at(dir.as_raw_fd(), file_name(Path::new(&entry.journal.temp)))?;
         store::fsync_directory(dir.as_raw_fd())
     }
 
@@ -1170,6 +1208,50 @@ fn create_noreplace(dirfd: RawFd, temp: &OsStr, target: &OsStr) -> io::Result<()
     }
 }
 
+/// Give `temp`'s file the name `target` too, only if `target` does not
+/// exist (a hard link never replaces).
+fn link_noreplace(dirfd: RawFd, temp: &OsStr, target: &OsStr) -> io::Result<()> {
+    let (old, new) = (cstring(temp)?, cstring(target)?);
+    // SAFETY: as in rename_at; flags 0 never follows a symlink.
+    if unsafe { libc::linkat(dirfd, old.as_ptr(), dirfd, new.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` name the same file (neither followed if a
+/// symlink). A missing name is never the same.
+fn same_file(dirfd: RawFd, a: &OsStr, b: &OsStr) -> io::Result<bool> {
+    let stat = |name: &OsStr| -> io::Result<Option<(libc::dev_t, libc::ino_t)>> {
+        let name = cstring(name)?;
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a held directory, a NUL-terminated relative name, and a
+        // stat buffer the call fills on success.
+        if unsafe {
+            libc::fstatat(
+                dirfd,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            return match error.kind() {
+                io::ErrorKind::NotFound => Ok(None),
+                _ => Err(error),
+            };
+        }
+        // SAFETY: fstatat succeeded, so the buffer is initialized.
+        let st = unsafe { st.assume_init() };
+        Ok(Some((st.st_dev, st.st_ino)))
+    };
+    Ok(match (stat(a)?, stat(b)?) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    })
+}
+
 fn rename_replace(dirfd: RawFd, old: &OsStr, new: &OsStr) -> io::Result<()> {
     rename_at(dirfd, old, new, Rename::Replace)
 }
@@ -1663,6 +1745,100 @@ mod tests {
         assert_clean(&fx);
     }
 
+    /// Another process creates the lock with the very bytes the tool
+    /// produced, and publication fails (or crashes) on the manifest before
+    /// it reaches the lock: the journal holds the lock as pending with no
+    /// mark of a swap, so undo leaves the file and reports it, rather than
+    /// deleting another writer's file.
+    #[test]
+    fn a_pending_created_target_ward_never_created_is_kept() {
+        for fault in [Fault::Fail, Fault::Crash] {
+            let fx = fixture("pending-not-ours", true);
+            let project = fx.project.clone();
+            let _ = run_door(
+                &fx,
+                |_| {},
+                move |point| match point {
+                    FaultPoint::TempWritten(0) => {
+                        fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                        Fault::Continue
+                    }
+                    FaultPoint::Marked(0) => fault,
+                    _ => Fault::Continue,
+                },
+            )
+            .unwrap_err();
+            if fault == Fault::Crash {
+                let notes = recover(&fx);
+                assert!(
+                    notes.contains(&Restored::LeftEdited(fx.project.join("package-lock.json"))),
+                    "{notes:?}"
+                );
+            }
+            assert_eq!(
+                read(&fx, "package-lock.json").as_deref(),
+                Some(NEW_LOCK),
+                "{fault:?}"
+            );
+            assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+            assert_eq!(
+                read(&fx, ".greyward/resolution/npm.json").as_deref(),
+                Some(OLD_RECEIPT)
+            );
+            assert_clean(&fx);
+        }
+    }
+
+    /// The create finds the lock taken, and the journal cannot record it:
+    /// nothing is undone on a journal that does not say so. The next
+    /// recovery undoes the rest and leaves the other process's lock.
+    #[test]
+    fn a_taken_target_the_journal_cannot_record_stops_the_undo() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture("taken-unrecorded", true);
+        let project = fx.project.clone();
+        let journals = fx.project.join(JOURNAL_DIR);
+        let locked = journals.clone();
+        let error = run_door(
+            &fx,
+            |_| {},
+            move |point| {
+                if point == FaultPoint::TempWritten(1) {
+                    fs::write(project.join("package-lock.json"), NEW_LOCK).unwrap();
+                    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+                }
+                Fault::Continue
+            },
+        )
+        .unwrap_err();
+        let probe = journals.join("probe");
+        let writable = fs::write(&probe, b"").is_ok();
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&journals, fs::Permissions::from_mode(0o755)).unwrap();
+        if writable {
+            // Running as root: permissions do not bind, nothing to prove.
+            return;
+        }
+        assert!(
+            error.to_string().contains("nothing was undone yet"),
+            "{error}"
+        );
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(NEW_MANIFEST));
+        assert!(has_pending_journal(&fx.project));
+        let notes = recover(&fx);
+        assert!(
+            notes.contains(&Restored::LeftEdited(fx.project.join("package-lock.json"))),
+            "{notes:?}"
+        );
+        assert_eq!(read(&fx, "package-lock.json").as_deref(), Some(NEW_LOCK));
+        assert_eq!(read(&fx, "package.json").as_deref(), Some(OLD_MANIFEST));
+        assert_eq!(
+            read(&fx, ".greyward/resolution/npm.json").as_deref(),
+            Some(OLD_RECEIPT)
+        );
+        assert_clean(&fx);
+    }
+
     /// The temporary of `relative` named by the journal.
     fn journal_temp(fx: &Fixture, relative: &str) -> PathBuf {
         let journal: serde_json::Value =
@@ -1927,6 +2103,7 @@ mod tests {
             FaultPoint::Swapped(0),
             FaultPoint::Marked(0),
             FaultPoint::TempWritten(1),
+            FaultPoint::Swapped(1),
             FaultPoint::Marked(1),
             FaultPoint::TempWritten(2),
             FaultPoint::Swapped(2),
@@ -2025,6 +2202,7 @@ mod tests {
             (FaultPoint::Swapped(0), false),
             (FaultPoint::Marked(0), false),
             (FaultPoint::TempWritten(1), false),
+            (FaultPoint::Swapped(1), false),
             (FaultPoint::Marked(1), false),
             (FaultPoint::TempWritten(2), false),
             (FaultPoint::Swapped(2), false),

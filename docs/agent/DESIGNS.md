@@ -2405,9 +2405,11 @@ Contract 1 needs enforcement, not review alone:
    which restores their bytes exactly, and fail. No edit can be read into
    a backup and then overwritten, because the compare runs on the
    displaced bytes after an atomic swap. A target that did not exist is
-   created with `renameat2(RENAME_NOREPLACE)` (`renameatx_np(RENAME_EXCL)`
-   on macOS), which fails if something appeared in the meantime. After
-   each target, mark it `swapped` in the journal and `fsync`. The
+   created as a hard link to its temporary (`linkat`), which fails if
+   something appeared in the meantime. After each target, mark it
+   `swapped` in the journal and `fsync`; a created target's temporary
+   (the link) is removed only then, so until the journal says `swapped`
+   the link is the proof that Greyward created the file. The
    receipt is the last target and gets the same swap-then-compare as
    every output. A receipt edited or replaced during the run (another
    `ward attest`, a `git checkout`, a hand edit) is detected, swapped
@@ -2468,7 +2470,13 @@ left alone and reported. Every target's folder is opened before any
 target is touched, so a folder that cannot be opened refuses the whole
 rollback and the project stays as the crash left it. A target whose
 no-replace create found its name taken is marked `taken` in the journal
-before the rollback, and no rollback touches it. A temporary is deleted
+before the rollback, and no rollback touches it; if that journal write
+fails, nothing is undone until the next recovery. A `pending` target is
+Greyward's only with the mark its swap leaves: a displaced file at the
+temporary for an exchange, the temporary still a hard link to the
+target for a create. Without one (another process wrote the target, or
+a journal from a release that renamed instead of linking) it is left
+alone and reported, whatever its bytes. A temporary is deleted
 only while it holds bytes Greyward can account for (the new bytes, or
 the pre-run bytes the originals hold): anything else there may be a
 save the rollback moved aside before a crash, so it is kept and

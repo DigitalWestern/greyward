@@ -78,6 +78,11 @@ pub const FOREIGN_PLATFORM_PACKAGE: &str = "foreign-platform-package";
 /// what the lock chose is which host or path the sync reaches, and with
 /// which credentials. The subject is the URL.
 pub const HOST_GIT_TRANSPORT: &str = "host-git-transport";
+/// The lock pinned no digest for a package (a `Gemfile.lock` without a
+/// `CHECKSUMS` section), so its bytes were verified against the digest the
+/// registry's API served on first use, or ward's store record of that
+/// answer. The subject is the package.
+pub const UNPINNED_DIGEST: &str = "unpinned-digest";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -100,6 +105,7 @@ pub const KINDS: &[&str] = &[
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
     HOST_GIT_TRANSPORT,
+    UNPINNED_DIGEST,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on

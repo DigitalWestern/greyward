@@ -550,7 +550,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
   contract, and its builds trail ruby-lang: the newest 3.4 build (3.4.6, the default) lacks
   the 3.4.10 security fixes in bundled gems, and Ruby 4.0 has no build at all. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
-  drifts**; new bundler formats need code updates.
+  drifts**; new bundler formats need code updates. A lock without a CHECKSUMS section is
+  verified against rubygems.org's API digests on first use and records `unpinned-digest` per
+  gem, so `--strict`, or a policy that denies the kind, needs `bundle lock --add-checksums`.
 
 ## Elixir
 

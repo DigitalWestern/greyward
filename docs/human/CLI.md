@@ -892,6 +892,13 @@ machine's ssh agent keys under its ssh configuration, or read from a
 policy that denies it stops the sync before the host or path is reached.
 An `https://` or `git://` source does not record it.
 
+`unpinned-digest` is recorded, per gem, when a `Gemfile.lock` has no
+`CHECKSUMS` entry for it: the gem's bytes are then verified against the
+sha256 rubygems.org's API served on first use (which the store keeps), not
+one the lock pins. It is recorded before any gem is fetched. A policy that
+denies it, or `--strict`, refuses such a lock; `bundle lock
+--add-checksums` writes the section.
+
 A refusal names the knob that refused and the edit that lifts it, not just
 the kind: `policy denies weak-integrity: left-pad: sha1 integrity;
 'weak-integrity' is in the deny list in /etc/greyward/policy.toml; remove that

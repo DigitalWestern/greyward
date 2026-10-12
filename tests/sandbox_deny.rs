@@ -554,6 +554,18 @@ mod door {
 
     const PROXY_REPLY: &str = "PROXY-OK";
 
+    /// Bind inside the test's scratch tree even when TMPDIR makes the full
+    /// name too long for a Unix socket address. The directory descriptor
+    /// supplies a short alias without moving sockets out of roots the
+    /// confinement tests need to scan.
+    fn bind_socket(path: &Path) -> UnixListener {
+        use std::os::fd::AsRawFd as _;
+        let directory = std::fs::File::open(path.parent().unwrap()).unwrap();
+        let alias = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+            .join(path.file_name().unwrap());
+        UnixListener::bind(alias).unwrap()
+    }
+
     struct Door {
         temp: TempDir,
         store: Store,
@@ -604,7 +616,7 @@ mod door {
         std::fs::write(project.join("package.json"), b"{\"dependencies\":{}}\n").unwrap();
         std::fs::write(project.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
         let proxy = temp.path().join("p.sock");
-        let listener = UnixListener::bind(&proxy).unwrap();
+        let listener = bind_socket(&proxy);
         let connections = Arc::new(AtomicUsize::new(0));
         let counter = connections.clone();
         std::thread::spawn(move || {
@@ -874,7 +886,7 @@ mod door {
             return;
         };
         let socket = door.tools.join("agent.sock");
-        let _listener = UnixListener::bind(&socket).unwrap();
+        let _listener = bind_socket(&socket);
         let snapshot = door.snapshot();
         let argv = door.probe_argv(&["unix", socket.to_str().unwrap()]);
         let refused = door.run(&snapshot, &argv, SocketScan::Full).unwrap_err();
@@ -906,7 +918,7 @@ mod door {
             while !started.exists() {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let listener = UnixListener::bind(&host_side).unwrap();
+            let listener = bind_socket(&host_side);
             std::thread::sleep(Duration::from_secs(3));
             drop(listener);
         });

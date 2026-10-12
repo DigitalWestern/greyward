@@ -719,8 +719,9 @@ impl ProjectRoot {
     /// symlink the project itself contains is followed, as a pathname read
     /// inside the project would follow it: that is the user's own layout,
     /// not a race. The strict no-follow walk (`read_file`) stays for ward's
-    /// own state under `.greyward` and for toolchain inputs. `relative` may climb
-    /// with `..` (a requirements include beside the project); it may not be
+    /// own state under `.greyward` and for toolchain inputs. `relative` may
+    /// not climb above the project with `..` (a file beside the project, a
+    /// requirements include, is `read_external`'s), and it may not be
     /// absolute, since an absolute path would ignore the descriptor.
     pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
         let Some(mut file) = self.open_input(relative)? else {
@@ -1013,6 +1014,74 @@ impl ProjectRoot {
         ))
     }
 
+    /// Whether the project input `relative` (plain components only, or `.`
+    /// for the root itself), symlinks followed from the held descriptor,
+    /// stays inside this root. A name that does not exist yet is judged by
+    /// its deepest existing ancestor: the rest is plain names, so whatever
+    /// is created there stays beneath it. A dangling symlink on the way
+    /// could lead anywhere once its target appears, so it is an error.
+    pub(crate) fn input_stays_inside(&self, relative: &Path) -> io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        const FOLLOWING: libc::c_int = libc::O_PATH | libc::O_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        const FOLLOWING: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("project-relative path {relative:?} is not a plain path"),
+            )
+        };
+        if relative.as_os_str().is_empty() {
+            return Err(invalid());
+        }
+        let mut names = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(name) => names.push(name),
+                std::path::Component::CurDir if names.is_empty() => {}
+                _ => return Err(invalid()),
+            }
+        }
+        let root = fd_stat(self.dir.as_raw_fd())?;
+        while !names.is_empty() {
+            let name = names
+                .iter()
+                .map(|name| name.as_bytes())
+                .collect::<Vec<_>>()
+                .join(&b'/');
+            match open_file_at(self.dir.as_raw_fd(), &name, FOLLOWING, 0) {
+                Ok(file) => {
+                    return Ok(same_inode(&fd_stat(file.as_raw_fd())?, &root)
+                        || self.contains_open_file(&file)?)
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ENOTDIR) =>
+                {
+                    if stat_at(self.dir.as_raw_fd(), &name)
+                        .is_ok_and(|stat| stat.st_mode & libc::S_IFMT == libc::S_IFLNK)
+                    {
+                        return Err(refusal(format!(
+                            "{} is a dangling symlink; ward cannot tell whether it stays in the project",
+                            self.path.join(OsStr::from_bytes(&name)).display()
+                        )));
+                    }
+                    names.pop();
+                }
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "open {}: {error}",
+                            self.path.join(OsStr::from_bytes(&name)).display()
+                        ),
+                    ))
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
         self.open_input_with_missing(relative, true)
     }
@@ -1169,9 +1238,14 @@ fn split_relative(relative: &Path) -> io::Result<(Vec<&OsStr>, &OsStr)> {
 }
 
 /// A project-input name for `openat` from the held descriptor: not empty,
-/// not absolute, no NUL. Unlike `split_relative` it may climb or repeat a
-/// separator, since it is resolved by the kernel the way a pathname
-/// relative to the project would be.
+/// not absolute, no NUL. Unlike `split_relative` it may repeat a separator
+/// or step back down with `..` (`.cargo/../shared.toml`, a cargo config
+/// include), since it is resolved by the kernel the way a pathname
+/// relative to the project would be. It may not climb above the project:
+/// a file beside it is read by its path (`read_external`), so a name taken
+/// from a lockfile (a workspace key `../outside`) cannot name a file
+/// outside the held directory by spelling alone. A symlink the project
+/// contains is still followed, as `read_input` says.
 fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
     let bytes = relative.as_os_str().as_bytes();
     let invalid = |reason: &str| {
@@ -1188,6 +1262,18 @@ fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
     }
     if bytes[0] == b'/' {
         return Err(invalid("is absolute"));
+    }
+    let mut depth = 0usize;
+    for segment in bytes.split(|byte| *byte == b'/') {
+        match segment {
+            b"" | b"." => {}
+            b".." => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| invalid("climbs out of the project with `..`"))?;
+            }
+            _ => depth += 1,
+        }
     }
     Ok(bytes.to_vec())
 }
@@ -2605,10 +2691,69 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let error = root.read_input(Path::new("/etc/hostname")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        // A project input never climbs out of the held directory, however
+        // the climb is spelled.
+        fs::write(temp.0.join("outside.json"), b"outside").unwrap();
+        for climbing in [
+            "../outside.json",
+            "dir/../../outside.json",
+            "./../outside.json",
+        ] {
+            let error = root.read_input(Path::new(climbing)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{climbing}");
+            assert!(error.to_string().contains("climbs out"), "{error}");
+        }
+        // Stepping back down inside it is a name in the project.
+        assert_eq!(
+            root.read_input(Path::new("dir/../package-lock.json"))
+                .unwrap()
+                .unwrap(),
+            b"shared"
+        );
         fs::write(dir.join("bad.txt"), [0xff, 0xfe]).unwrap();
         let error = root.read_input_string(Path::new("bad.txt")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
+    /// A name inside the project stays inside; one a symlink carries out
+    /// does not, wherever the symlink sits on the way; one that does not
+    /// exist yet is judged by its deepest existing ancestor; and one that
+    /// passes through a dangling symlink is refused.
+    #[test]
+    fn input_stays_inside_follows_symlinks_from_the_held_directory() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(outside.join("lib")).unwrap();
+        fs::create_dir_all(dir.join("packages/a")).unwrap();
+        symlink(&outside, dir.join("vendor")).unwrap();
+        symlink("packages", dir.join("alias")).unwrap();
+        symlink(temp.0.join("missing"), dir.join("dangling")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        for inside in [
+            ".",
+            "packages",
+            "packages/a",
+            "alias/a",
+            "packages/new/deeper",
+        ] {
+            assert!(
+                root.input_stays_inside(Path::new(inside)).unwrap(),
+                "{inside}"
+            );
+        }
+        for out in ["vendor", "vendor/lib", "vendor/not-yet"] {
+            assert!(!root.input_stays_inside(Path::new(out)).unwrap(), "{out}");
+        }
+        let error = root
+            .input_stays_inside(Path::new("dangling/x"))
+            .unwrap_err();
+        assert!(error.to_string().contains("dangling symlink"), "{error}");
+        for bad in ["../outside", "packages/../..", "/etc", ""] {
+            let error = root.input_stays_inside(Path::new(bad)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
+    }
+
     #[test]
     fn projection_writes_go_through_the_held_directory() {
         use std::os::unix::fs::PermissionsExt as _;

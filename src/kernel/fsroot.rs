@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 mod held;
 mod observed;
 mod publish;
-use publish::remove_stale_temps;
+use publish::{hold_link_temp, release_link_temp, remove_stale_temps};
 mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
@@ -291,14 +291,27 @@ impl ProjectRoot {
         let mut made = None;
         for _ in 0..TEMP_ATTEMPTS {
             let candidate = random_temp_name(name.as_bytes(), 0)?;
+            // A link cannot be locked, so its owner's lock is on a companion
+            // file, taken before the link exists (`publish::hold_link_temp`).
+            let owner = match hold_link_temp(parent_fd, &candidate) {
+                Ok(owner) => owner,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("create temporary link for {label}: {error}"),
+                    ))
+                }
+            };
             let temp = CString::new(candidate.clone()).expect("hex names hold no NUL");
             // SAFETY: parent_fd is an open directory and both strings are
             // valid NUL-terminated strings that outlive the call.
             if unsafe { libc::symlinkat(target.as_ptr(), parent_fd, temp.as_ptr()) } == 0 {
-                made = Some(candidate);
+                made = Some((candidate, owner));
                 break;
             }
             let error = io::Error::last_os_error();
+            release_link_temp(parent_fd, &candidate, owner);
             if error.kind() != io::ErrorKind::AlreadyExists {
                 return Err(io::Error::new(
                     error.kind(),
@@ -306,7 +319,7 @@ impl ProjectRoot {
                 ));
             }
         }
-        let temp = made.ok_or_else(|| {
+        let (temp, owner) = made.ok_or_else(|| {
             refusal(format!(
                 "every temporary name for {label} {} is occupied; remove stale .greyward-tmp \
                  entries and retry",
@@ -345,7 +358,9 @@ impl ProjectRoot {
             if let Ok(stat) = stat_at(parent_fd, &temp) {
                 let _ = unlink_if_same(parent_fd, &temp, &stat, 0);
             }
-        } else {
+        }
+        release_link_temp(parent_fd, &temp, owner);
+        if result.is_ok() {
             remove_stale_temps(parent_fd);
         }
         result
@@ -1452,14 +1467,16 @@ pub fn random_suffix() -> io::Result<String> {
     Ok(hex::encode(urandom_bytes(16)?))
 }
 
-/// `.greyward-tmp.<32 hex>`: a fresh random name per attempt, so an occupied
+/// `.greyward-tmp.lk-<32 hex>`: a fresh random name per attempt, so an occupied
 /// name (a crash leftover, or an entry planted at a guessable name) is
 /// stepped around, never unlinked and never written through. The name
 /// carries no process identity, so two runs in containers that reuse small
 /// pids never pick the same fixed point. The destination name is not part
-/// of it, so a destination of any valid length publishes.
+/// of it, so a destination of any valid length publishes. `lk-` says its
+/// writer holds a lock for as long as it lives (`publish::remove_stale_temps`),
+/// which a temporary from a ward before the lock does not.
 fn random_temp_name(_name: &[u8], _attempt: usize) -> io::Result<Vec<u8>> {
-    Ok(format!(".greyward-tmp.{}", random_suffix()?).into_bytes())
+    Ok(format!("{}{}", publish::TEMP_PREFIX, random_suffix()?).into_bytes())
 }
 
 #[cfg(test)]
@@ -1476,13 +1493,15 @@ mod tests {
 
     /// A publication removes the temporaries of ours a killed ward left
     /// in the same directory, and only those (#678): a file or link named
-    /// exactly as ours, older than the window. A fresh one (another ward
-    /// publishing now), a directory, or a name of another shape stays.
+    /// exactly as ours, older than the window, whose writer is provably
+    /// gone because its lock can be taken. A paused writer's temporary (its
+    /// lock held), a fresh one, a link with no owner file, a directory, a
+    /// name from a ward before the lock, or a name of another shape stays.
     #[test]
     fn a_publication_removes_stale_temporaries_of_its_own_shape() {
         let temp = TempDir::new();
         let dir = project(&temp);
-        let ours = |n: u8| format!(".greyward-tmp.{}", format!("{n:x}").repeat(32));
+        let ours = |n: u8| format!("{}{}", publish::TEMP_PREFIX, format!("{n:x}").repeat(32));
         let age = |path: &Path| {
             let old = libc::timespec {
                 tv_sec: (SystemTimeNow::secs() - 3600) as libc::time_t,
@@ -1507,6 +1526,30 @@ mod tests {
         let stale_link = dir.join(ours(2));
         symlink("/nowhere", &stale_link).unwrap();
         age(&stale_link);
+        let stale_owner = dir.join(format!("{}.lock", ours(2)));
+        fs::write(&stale_owner, b"").unwrap();
+        age(&stale_owner);
+        let orphan_owner = dir.join(format!("{}.lock", ours(6)));
+        fs::write(&orphan_owner, b"").unwrap();
+        age(&orphan_owner);
+        // A writer paused for an hour still holds its lock.
+        let paused = dir.join(ours(7));
+        let paused_writer = fs::File::create(&paused).unwrap();
+        paused_writer.try_lock().unwrap();
+        age(&paused);
+        let paused_link = dir.join(ours(8));
+        symlink("/nowhere", &paused_link).unwrap();
+        age(&paused_link);
+        let paused_owner = dir.join(format!("{}.lock", ours(8)));
+        let paused_link_writer = fs::File::create(&paused_owner).unwrap();
+        paused_link_writer.try_lock().unwrap();
+        age(&paused_owner);
+        let ownerless_link = dir.join(ours(9));
+        symlink("/nowhere", &ownerless_link).unwrap();
+        age(&ownerless_link);
+        let before_the_lock = dir.join(format!(".greyward-tmp.{}", "a".repeat(32)));
+        fs::write(&before_the_lock, b"x").unwrap();
+        age(&before_the_lock);
         let fresh = dir.join(ours(3));
         fs::write(&fresh, b"x").unwrap();
         let directory = dir.join(ours(4));
@@ -1529,7 +1572,20 @@ mod tests {
             fs::symlink_metadata(&stale_link).is_err(),
             "stale link kept"
         );
-        for kept in [&fresh, &directory, &other_shape, &users] {
+        for gone in [&stale_owner, &orphan_owner] {
+            assert!(fs::symlink_metadata(gone).is_err(), "{}", gone.display());
+        }
+        for kept in [
+            &fresh,
+            &directory,
+            &other_shape,
+            &users,
+            &paused,
+            &paused_link,
+            &paused_owner,
+            &ownerless_link,
+            &before_the_lock,
+        ] {
             assert!(fs::symlink_metadata(kept).is_ok(), "{}", kept.display());
         }
 
@@ -1540,6 +1596,18 @@ mod tests {
         root.replace_symlink(Path::new(".venv"), Path::new("/store/env"), "venv")
             .unwrap();
         assert!(fs::symlink_metadata(&again).is_err(), "stale file kept");
+        assert!(
+            fs::symlink_metadata(&paused).is_ok(),
+            "paused writer's file taken"
+        );
+        // A link publication leaves no owner file of its own behind.
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.ends_with(".lock") && !name.contains(&"8".repeat(32)))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        drop((paused_writer, paused_link_writer));
     }
 
     struct SystemTimeNow;

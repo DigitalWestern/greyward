@@ -7,6 +7,7 @@ use crate::kernel::store::{
     fd_stat, fsync_directory, open_file_at, rename_at, same_inode, stat_at, unlink_if_same,
 };
 use std::ffi::OsStr;
+use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -100,6 +101,7 @@ impl ProjectRoot {
                 }
             }
         };
+        lock_for_writer(&file);
         let created = fd_stat(file.as_raw_fd())?;
         let mut renamed = false;
         // `file` stays open through the identity checks below so the inode
@@ -140,23 +142,85 @@ impl ProjectRoot {
     }
 }
 
+/// The start of every name `random_temp_name` makes.
+pub(super) const TEMP_PREFIX: &str = ".greyward-tmp.lk-";
+
+/// The suffix of the file whose lock stands for a temporary link's owner.
+const OWNER_SUFFIX: &[u8] = b".lock";
+
 /// How old a temporary of ours must be before a publication in the same
-/// directory removes it: far past any write, so one another ward is
-/// publishing right now is never taken.
+/// directory may remove it. Its lock decides; the age only covers the moment
+/// between a temporary's creation and its lock.
 const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Whether `name` is exactly a name `random_temp_name` makes.
 fn is_own_temp_name(name: &[u8]) -> bool {
-    name.strip_prefix(b".greyward-tmp.")
+    name.strip_prefix(TEMP_PREFIX.as_bytes())
         .is_some_and(|hex| hex.len() == 32 && hex.iter().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+fn owner_name(temp: &[u8]) -> Vec<u8> {
+    [temp, OWNER_SUFFIX].concat()
+}
+
+/// Lock `file` for its writer: best effort, since a filesystem without
+/// `flock` only means its temporaries are never judged dead.
+fn lock_for_writer(file: &fs::File) {
+    let _ = file.try_lock();
+}
+
+/// The owner of a temporary link: `<temp>.lock`, created exclusively and
+/// locked before the link exists, held until the link is renamed or
+/// removed. A link cannot carry a lock itself.
+pub(super) fn hold_link_temp(dirfd: RawFd, temp: &[u8]) -> io::Result<fs::File> {
+    let owner = open_file_at(
+        dirfd,
+        &owner_name(temp),
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0o600,
+    )?;
+    lock_for_writer(&owner);
+    Ok(owner)
+}
+
+/// Remove the owner file `hold_link_temp` made, then let its lock go.
+pub(super) fn release_link_temp(dirfd: RawFd, temp: &[u8], owner: fs::File) {
+    if let Ok(created) = fd_stat(owner.as_raw_fd()) {
+        let _ = unlink_if_same(dirfd, &owner_name(temp), &created, 0);
+    }
+    drop(owner);
+}
+
+/// The entry `name` in `dirfd`, opened without following it, while it is
+/// still `stat` and its writer's lock can be taken: proof the ward that
+/// made it has exited, since a live writer holds the lock from creation to
+/// rename. The returned descriptor keeps the lock until the entry is gone.
+fn dead_writer(dirfd: RawFd, name: &[u8], stat: &libc::stat) -> Option<fs::File> {
+    let file = open_file_at(
+        dirfd,
+        name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .ok()?;
+    if !same_inode(&fd_stat(file.as_raw_fd()).ok()?, stat)
+        || stat.st_mode & libc::S_IFMT != libc::S_IFREG
+    {
+        return None;
+    }
+    file.try_lock().ok()?;
+    Some(file)
+}
+
 /// Remove the temporaries of ours a killed ward left in the held directory
-/// `dirfd` (#678): a file or link named exactly as `random_temp_name` names
-/// one, older than `STALE_TEMP_AGE`. Left alone, they pile up in the project
-/// beside `.venv` and the closures, where they can be committed. Only names
-/// of that exact shape are touched, each through the held descriptor and
-/// only while it is still the entry that was judged. Best effort: a
+/// `dirfd` (#678). Left alone, they pile up in the project beside `.venv`
+/// and the closures, where they can be committed. Only names of exactly
+/// the `random_temp_name` shape are touched, older than `STALE_TEMP_AGE`,
+/// each through the held descriptor and only while it is still the entry
+/// that was judged, and only when its writer is provably gone: a file
+/// whose own lock can be taken, a link whose `<name>.lock` owner's lock can
+/// be taken (and an owner file whose link is gone, the same way). A paused
+/// writer still holds its lock and keeps its temporary. Best effort: a
 /// publication never fails because a leftover could not be removed.
 pub(super) fn remove_stale_temps(dirfd: RawFd) {
     // A fresh descriptor of the same directory to list: a listing reads
@@ -174,18 +238,46 @@ pub(super) fn remove_stale_temps(dirfd: RawFd) {
     let Some(cutoff) = cutoff else {
         return;
     };
+    let stale = |name: &[u8]| {
+        stat_at(dirfd, name)
+            .ok()
+            .filter(|stat| u64::try_from(stat.st_mtime).is_ok_and(|t| t < cutoff.as_secs()))
+    };
     for name in names {
         let name = name.as_bytes();
-        if !is_own_temp_name(name) {
+        let temp = name.strip_suffix(OWNER_SUFFIX).unwrap_or(name);
+        if !is_own_temp_name(temp) {
             continue;
         }
-        let Ok(stat) = stat_at(dirfd, name) else {
+        let Some(stat) = stale(name) else {
             continue;
         };
-        let kind = stat.st_mode & libc::S_IFMT;
-        let stale = u64::try_from(stat.st_mtime).is_ok_and(|mtime| mtime < cutoff.as_secs());
-        if stale && (kind == libc::S_IFREG || kind == libc::S_IFLNK) {
-            let _ = unlink_if_same(dirfd, name, &stat, 0);
+        if temp.len() != name.len() {
+            // An owner file. Its link, if any, is judged by its own name.
+            if stat_at(dirfd, temp).is_err() {
+                if let Some(_lock) = dead_writer(dirfd, name, &stat) {
+                    let _ = unlink_if_same(dirfd, name, &stat, 0);
+                }
+            }
+            continue;
+        }
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFREG => {
+                if let Some(_lock) = dead_writer(dirfd, name, &stat) {
+                    let _ = unlink_if_same(dirfd, name, &stat, 0);
+                }
+            }
+            libc::S_IFLNK => {
+                let owner = owner_name(name);
+                let Ok(owner_stat) = stat_at(dirfd, &owner) else {
+                    continue;
+                };
+                if let Some(_lock) = dead_writer(dirfd, &owner, &owner_stat) {
+                    let _ = unlink_if_same(dirfd, name, &stat, 0);
+                    let _ = unlink_if_same(dirfd, &owner, &owner_stat, 0);
+                }
+            }
+            _ => {}
         }
     }
 }

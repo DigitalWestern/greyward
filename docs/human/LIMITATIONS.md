@@ -385,7 +385,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   Branch/tag/bare URLs and ambient Git config fail closed. npm runs a git dep's `prepare`
   script; Greyward does not. Python and Cargo git deps work the same way, but Cargo's are not
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
-  cargo, not Greyward.
+  cargo, not Greyward. Git sources are fetched on the host, not through the sandbox: an
+  `ssh://` source offers the user's ssh agent keys to the host the lock names, and a `file://`
+  source reads a path on the machine. Both record `host-git-transport` before the fetch, which
+  a policy can deny. A submodule's own URL is not checked: an `https://` source whose
+  submodule names an `ssh://` host fetches it over ssh without recording the kind.
 - **A required package for another platform is installed only from a pnpm lock.** pnpm
   installs a non-optional package whose `os`/`cpu`/`libc` excludes the host (with a warning);
   npm refuses the same lock with `EBADPLATFORM`, and Greyward follows whichever tool wrote the

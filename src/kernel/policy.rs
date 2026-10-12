@@ -72,6 +72,12 @@ pub const RESOLUTION_BUILD: &str = "resolution-build";
 /// files are verified like any other package's; its install scripts are not
 /// run.
 pub const FOREIGN_PLATFORM_PACKAGE: &str = "foreign-platform-package";
+/// A git source the lock names was fetched over `ssh://` (offering this
+/// machine's ssh agent keys, under its ssh configuration) or read from a
+/// `file://` path on this machine. The content is still pinned by commit;
+/// what the lock chose is which host or path the sync reaches, and with
+/// which credentials. The subject is the URL.
+pub const HOST_GIT_TRANSPORT: &str = "host-git-transport";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -93,6 +99,7 @@ pub const KINDS: &[&str] = &[
     UNRECORDED_RESOLUTION,
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
+    HOST_GIT_TRANSPORT,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on

@@ -187,6 +187,12 @@ reference: docs/human/CLI.md.
   global options while they still precede the tool's first non-option word:
   `ward x -q ruff -q` runs ruff quietly with `-q` of its own. Use `--` when
   a tool argument is spelled like one of those (`ward fmt -- -v`).
+  Unchanged means byte for byte: an argument that is not UTF-8 (a Linux
+  file name can be any bytes) reaches the program of `run`, `x`, a
+  package.json script or `ward <file>` as typed, and so does the `-C`
+  directory. Every word Greyward reads itself, and every argument of `build` and `fmt`, whose
+  sandboxed tool takes its command line as UTF-8, must be UTF-8: anything
+  else there is a usage error (exit 2).
 - **An option's single value follows one rule.** An option that takes one
   value refuses an empty one, and refuses a separate word that starts with
   `-`: `ward sbom -o --json` is a mistyped flag, not a request to write a

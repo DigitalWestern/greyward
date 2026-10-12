@@ -10,8 +10,10 @@ fn main() {
     // Before parsing: resolving a first word (`ward app.ts`) can already
     // read a project's toolchain sources.
     greyward::tailors::install_kernel_tables();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let (options, pending) = match cli::parse(&args) {
+    // As bytes: a file name need not be UTF-8, and a program's arguments
+    // reach it as typed (`cli::parse_os`).
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let (options, pending) = match cli::parse_os(&args) {
         Ok(cli::Parsed::Run(invocation)) => (
             invocation.options,
             commands::Pending::Command(invocation.command),

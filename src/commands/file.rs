@@ -59,7 +59,11 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
 /// scrubbed before ward's variables are set, so the host's interpreter
 /// configuration (RUBYOPT, GEM_HOME, ERL_LIBS, ...) never reaches the
 /// program. `None`: `lone` names no program.
-fn command_for(lone: &LoneFile, file: &str, args: &[String]) -> io::Result<Option<Command>> {
+fn command_for(
+    lone: &LoneFile,
+    file: &str,
+    args: &[std::ffi::OsString],
+) -> io::Result<Option<Command>> {
     let Some((program, leading)) = lone.program.split_first() else {
         return Ok(None);
     };
@@ -117,7 +121,7 @@ mod tests {
         }
         let runtime = Path::new("/store/objects/x-runtime");
         let scratch = Path::new("/store/run-homes/k/eco");
-        let args = vec!["--port".to_string(), "3".to_string()];
+        let args = vec!["--port".into(), "3".into()];
 
         let (remove_prefixes, remove, env) = crate::tailors::ruby::lone_env(&scratch.join("gems"));
         let ruby = LoneFile {

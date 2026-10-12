@@ -1282,6 +1282,46 @@ fn a_removed_working_directory_is_an_error_not_a_panic() {
     assert!(checks.iter().any(|row| row["name"] == "store"), "{report}");
 }
 
+/// A Linux file name can be any bytes. A program's argument that is not
+/// UTF-8 reaches the program as typed, so does `-C`'s directory, and a
+/// word ward reads itself is a usage error (exit 2), never a panic.
+#[test]
+fn an_argument_that_is_not_utf8_is_passed_on_or_refused() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let home = TempDir::boundary("cli-bytes-home");
+    let project = TempDir::boundary("cli-bytes-project");
+    python_env_fixture(&project.0);
+    let name = OsString::from_vec(b"caf\xe9".to_vec());
+    let ward_os = |cwd: &Path, args: &[&std::ffi::OsStr]| {
+        command(cwd, &home.0, &common::home_store(cwd, &home.0))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let out = ward_os(
+        &project.0,
+        &["run".as_ref(), "printf".as_ref(), "%s".as_ref(), &name],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(out.stdout, b"caf\xe9");
+
+    let out = ward_os(&project.0, &["status".as_ref(), &name]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        !text(&out.stderr).contains("internal error"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    let elsewhere = home.0.join(&name);
+    std::fs::create_dir(&elsewhere).unwrap();
+    let out = ward_os(&home.0, &["-C".as_ref(), &name, "status".as_ref()]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("no project in"), "{stderr}");
+}
+
 #[test]
 fn store_path_honors_the_store_variable() {
     let home = TempDir::boundary("cli-store");

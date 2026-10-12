@@ -235,8 +235,10 @@ that comments describe code rather than cite plans.
 
 A sync writes a `.greyward/` directory next to your lockfiles. Two things in it
 are records that a reviewer and CI need, and the rest is a machine-local
-cache. `ward audit`, the CI admission gate, reads only the first two, so a
-repository that ignores all of `.greyward/` can never make `ward audit` pass.
+cache. `ward audit`, the CI admission gate, reads only the first two from
+disk, so a repository that ignores all of `.greyward/` never gets them to
+another checkout or to CI, and `ward audit` there has nothing current to
+read.
 
 | path | commit? | what it is |
 |---|---|---|
@@ -247,6 +249,7 @@ repository that ignores all of `.greyward/` can never make `ward audit` pass.
 | `.greyward/plan.json`, `.greyward/go-plan.json` | no | plan cache, keyed by input hash |
 | `.greyward/manifest-*.txt`, `.greyward/lock-source.hash`, `.greyward/egg-info.json` | no | Python manifest snapshots and stamps |
 | `.greyward/cargo-home/` | no | the Cargo config and shim a sandboxed build runs with |
+| `.greyward/toolchain-input.lock` | no | an empty file a sync locks so that two syncs do not write `greyward-toolchain.toml` at once |
 
 The matching `.gitignore` stanza — ignore the cache, keep the records. The
 `**/` is not decoration: a monorepo gets one `.greyward/` per subproject, and a

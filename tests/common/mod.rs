@@ -152,21 +152,88 @@ fn scrubbed(mut command: Command, home: &Path) -> Command {
     command
 }
 
+/// Whether the harness refuses `home` as the `HOME` of a run in `cwd`: a
+/// project directory with HOME below it (temp/ as the project, with
+/// temp/home inside) passes only until its ecosystem's resolution runs
+/// confined (#560).
+///
+/// Containment is physical (#656): both sides go through [`physical`], so
+/// a relative path, `.` and `..`, a trailing separator or a symlink alias
+/// cannot hide a nested HOME, nor invent one. Two layouts are allowed on
+/// purpose. HOME as the directory itself is a command run outside any
+/// project, which the offline cases use. A run in `/` is a command outside
+/// any project too, and every HOME is below `/`.
+pub fn home_inside_cwd(cwd: &Path, home: &Path) -> bool {
+    let home = physical(&child_home(cwd, home));
+    let cwd = physical(cwd);
+    cwd != Path::new("/") && home != cwd && home.starts_with(&cwd)
+}
+
+/// The `HOME` a run in `cwd` gets for `home`: a relative `home` is joined to
+/// `cwd` (made absolute against the process's working directory), which is
+/// where the child, started in `cwd`, would look for it. [`configure`] hands
+/// the child this path and [`home_inside_cwd`] judges it, so both agree.
+pub fn child_home(cwd: &Path, home: &Path) -> PathBuf {
+    if home.is_absolute() {
+        return home.to_path_buf();
+    }
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap().join(cwd)
+    };
+    cwd.join(home)
+}
+
+/// The store the home-derived wrappers ([`ward`], [`ward_offline`],
+/// [`ward_env`]) use: `store` under the HOME the child gets, so a relative
+/// `home` names the same directory for both even when the arguments move
+/// the child with `-C`. An explicit store ([`ward_at`], [`command`]) is
+/// passed as given.
+pub fn home_store(cwd: &Path, home: &Path) -> PathBuf {
+    child_home(cwd, home).join("store")
+}
+
+/// `path` as the directory it names on disk: absolute against the process's
+/// working directory (where a child given it as `current_dir` would land),
+/// with each existing prefix canonicalized as it is reached, so a symlink
+/// resolves before a later `..` steps out of it. Components below the last
+/// existing one are kept as spelled, minus `.`, with `..` taken lexically.
+pub fn physical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap().join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+        if let Ok(canonical) = resolved.canonicalize() {
+            resolved = canonical;
+        }
+    }
+    resolved
+}
+
 /// The environment [`command_for`] gives the binary, applied to `command`,
 /// which may be a wrapper that execs the binary.
 fn configure(command: Command, cwd: &Path, home: &Path, store: &Path) -> Command {
-    // The layout [`command`] warns against, refused up front (#560): a
-    // project directory with HOME below it (temp/ as the project, with
-    // temp/home inside) passes only until its ecosystem's resolution runs
-    // confined. HOME as the directory itself is a command run outside any
-    // project, which the offline cases use.
+    // The layout [`command`] warns against, refused up front (#560).
     assert!(
-        home == cwd || cwd == Path::new("/") || !home.starts_with(cwd),
+        !home_inside_cwd(cwd, home),
         "test harness: HOME {} is inside the directory ward runs in, {}; put the project \
          beside home (temp/project and temp/home), see `command`",
         home.display(),
         cwd.display()
     );
+    let home = &child_home(cwd, home);
     let mut command = scrubbed(command, home);
     command
         .current_dir(cwd)
@@ -200,7 +267,7 @@ pub fn offline_command(cwd: &Path, home: &Path, store: &Path) -> Command {
 
 /// [`ward`] with the network cut, see [`offline_command`].
 pub fn ward_offline(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    offline_command(cwd, home, &home.join("store"))
+    offline_command(cwd, home, &home_store(cwd, home))
         .args(args)
         .output()
         .expect("spawn ward without network")
@@ -210,7 +277,7 @@ pub fn ward_offline(cwd: &Path, home: &Path, args: &[&str]) -> Output {
 /// store: the shape every offline suite uses, where the scratch directory
 /// is the home.
 pub fn ward(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    ward_at(cwd, home, &home.join("store"), args)
+    ward_at(cwd, home, &home_store(cwd, home), args)
 }
 
 /// [`ward`] with extra environment for the child; values are anything that
@@ -220,7 +287,7 @@ pub fn ward_env<V>(cwd: &Path, home: &Path, args: &[&str], env: &[(&str, &V)]) -
 where
     V: AsRef<OsStr> + ?Sized,
 {
-    let mut command = command(cwd, home, &home.join("store"));
+    let mut command = command(cwd, home, &home_store(cwd, home));
     command.args(args);
     for (name, value) in env {
         command.env(name, value);

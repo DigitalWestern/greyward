@@ -775,9 +775,9 @@ receipt .greyward/resolution/<ecosystem>.json, signed with
 GREYWARD_SIGNING_KEY. A sync joins a receipt into the closure when a key
 in the machine policy's [signing] list signed it; a lock without one
 records unrecorded-resolution, which --strict and the company policy
-refuse. With no ecosystem named, every ecosystem found here is attested,
-and nothing is written unless all pass. An ecosystem without a lock check
-through the door is refused with the reason.
+refuse. With no ecosystem named, every ecosystem found here that has a
+lock check through the door is attested, and nothing is written unless all
+pass. A named ecosystem without one is refused with the reason.
 --record-out writes the records to <path> instead (a file when one
 ecosystem is named, else a directory of <ecosystem>.json) and leaves the
 checkout unchanged: the CI artifact 'ward --resolution-record' reads.

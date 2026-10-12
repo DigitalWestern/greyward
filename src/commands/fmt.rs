@@ -25,7 +25,7 @@ pub fn run(
     args: &[String],
     frozen: bool,
 ) -> io::Result<i32> {
-    let cwd = project_dir();
+    let cwd = project_dir()?;
     let _policy = policy::init(&cwd)?;
 
     // `--eco` is ward's own ecosystem selector, not something a script can

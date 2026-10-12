@@ -114,7 +114,7 @@ pub fn run(ctx: &Context, cmd: &[String], frozen: bool) -> io::Result<i32> {
     }
     // Walk up from cwd to the nearest projected root, so `ward run`
     // works from workspace subdirectories like npm run does.
-    let cwd = ctx.project_dir();
+    let cwd = ctx.project_dir()?;
     // The environment the command runs in is the one the project's inputs
     // describe, so a missing or stale projection is synced here rather than
     // reported, and the root to read is the one that sync leaves behind.

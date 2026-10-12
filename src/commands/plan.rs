@@ -55,7 +55,7 @@ fn render(plans: &[String], json: bool) -> String {
 
 /// Each detected ecosystem's plan, in registry order.
 fn plans(ctx: &Context, frozen: bool) -> io::Result<Vec<String>> {
-    let dir = ctx.project_dir();
+    let dir = ctx.project_dir()?;
     // One descriptor for the whole plan, as sync holds one.
     let root = ProjectRoot::open(&dir)?;
     let _policy = policy::init_in(&root)?;

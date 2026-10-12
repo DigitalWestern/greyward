@@ -39,7 +39,7 @@ pub fn run(
     args: &[String],
     frozen: bool,
 ) -> io::Result<()> {
-    let cwd = ctx.project_dir();
+    let cwd = ctx.project_dir()?;
     let explicit = ecosystem
         .as_deref()
         .and_then(tailors::by_id)

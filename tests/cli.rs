@@ -1228,6 +1228,60 @@ fn quiet_keeps_the_users_programs_stderr() {
     assert_eq!(text(&out.stderr), "CE\n");
 }
 
+/// A shell can sit in a directory something else removed. Every command
+/// that needs the project fails saying so (in JSON under `--json`), never
+/// with ward's internal-error panic, and `doctor` still checks the host.
+#[test]
+fn a_removed_working_directory_is_an_error_not_a_panic() {
+    let home = TempDir::boundary("cli-gone-home");
+    let gone_from = |args: &[&str]| {
+        let gone = home.0.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        common::command_for(Path::new("/bin/sh"), &gone, &home.0, &home.0.join("store"))
+            .arg("-c")
+            .arg("rmdir \"$PWD\" && exec \"$0\" \"$@\"")
+            .arg(env!("CARGO_BIN_EXE_ward"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for args in [
+        &["status"][..],
+        &["plan"],
+        &["ls"],
+        &["env"],
+        &["audit"],
+        &[],
+    ] {
+        let out = gone_from(args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("the current directory no longer exists"),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stderr.contains("internal error"), "{args:?}: {stderr}");
+    }
+    let out = gone_from(&["status", "--json"]);
+    let failure: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+    assert!(failure["error"]
+        .as_str()
+        .unwrap()
+        .contains("no longer exists"));
+    let out = gone_from(&["doctor", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", text(&out.stderr)));
+    let checks = report["checks"].as_array().unwrap();
+    let project = checks.iter().find(|row| row["name"] == "project").unwrap();
+    assert_eq!(project["level"], "warn", "{report}");
+    assert!(project["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no longer exists"));
+    assert!(checks.iter().any(|row| row["name"] == "store"), "{report}");
+}
+
 #[test]
 fn store_path_honors_the_store_variable() {
     let home = TempDir::boundary("cli-store");

@@ -21,7 +21,7 @@ pub fn run(ctx: &Context, request: &cli::FileRun) -> io::Result<i32> {
             format!("unsupported ecosystem '{ecosystem}'"),
         )
     })?;
-    let cwd = ctx.project_dir();
+    let cwd = ctx.project_dir()?;
     let _policy = policy::init(&cwd)?;
     let toolchain = selected_toolchain(ctx.platform, &cwd, ecosystem)?;
     let extension = Path::new(file)

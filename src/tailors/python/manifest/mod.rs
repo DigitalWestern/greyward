@@ -2763,6 +2763,36 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         );
     }
 
+    /// setuptools splits the whole `file:` value on commas, its
+    /// continuation lines included, so a directive that carries on after a
+    /// trailing comma names every file on every line.
+    #[test]
+    fn a_setup_cfg_file_directive_continues_across_lines() {
+        let dir = temp_project("setupcfg-file-multiline");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = file: base.txt,\n    extra.txt\n\
+             [options.extras_require]\nfast = file: fast.txt,\n    more.txt\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("base.txt"), "six\n").unwrap();
+        fs::write(dir.0.join("extra.txt"), "idna>=3\n").unwrap();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        assert_eq!(manifest.requirements, ["six", "idna>=3"]);
+        let root = ProjectRoot::open(&dir.0).unwrap();
+        assert_eq!(
+            setup_cfg_file_inputs(&root).unwrap(),
+            [
+                PathBuf::from("base.txt"),
+                "extra.txt".into(),
+                "fast.txt".into(),
+                "more.txt".into()
+            ]
+        );
+    }
+
     #[test]
     fn indented_setup_cfg_install_requires_is_a_manifest_dependency() {
         let dir = temp_project("setupcfg-indented-manifest");

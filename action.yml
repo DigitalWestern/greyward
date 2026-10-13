@@ -10,7 +10,7 @@
 # the latest release. The `version` input names another. v0.1.0 was tagged
 # before this file existed, so the first tag that can be named there is the
 # next one. Whatever the version, install.sh installs it only if it is
-# signed by ward's release key.
+# signed by ward's release key and its binary reports that version.
 #
 # A composite action: its steps run on the caller's runner, in the caller's
 # job, so `ward` stays on PATH (and GREYWARD_POLICY set) for every later step.
@@ -183,17 +183,29 @@ runs:
             *) GREYWARD_ACTION_VERSION=latest ;;
           esac
         fi
+        # install.sh holds the binary to the tag: a named version (the input,
+        # or the action's tag ref) is installed even over a newer ward, and
+        # said to be a downgrade; latest, resolved here first, never is.
+        latest_tag=""
         case "$GREYWARD_ACTION_VERSION" in
-          latest) tag=() ;;
-          v*) tag=("$GREYWARD_ACTION_VERSION") ;;
-          *) tag=("v$GREYWARD_ACTION_VERSION") ;;
+          latest)
+            if ! tag="$(gh release view --repo DigitalWestern/greyward --json tagName --jq .tagName)"; then
+              echo "::error::cannot read the latest ward release of DigitalWestern/greyward; check that 'token' can read the releases"
+              exit 1
+            fi
+            latest_tag="$tag"
+            named=()
+            ;;
+          v*) tag="$GREYWARD_ACTION_VERSION"; named=("--version=$tag") ;;
+          *) tag="v$GREYWARD_ACTION_VERSION"; named=("--version=$tag") ;;
         esac
-        if ! gh release download "${tag[@]}" --repo DigitalWestern/greyward \
+        if ! gh release download "$tag" --repo DigitalWestern/greyward \
             --pattern 'greyward-x86_64-unknown-linux-gnu.tar.gz*' --dir "$assets"; then
-          echo "::error::cannot download ward ($GREYWARD_ACTION_VERSION) from DigitalWestern/greyward; check that the version exists, and that 'token' can read the releases"
+          echo "::error::cannot download ward ($tag) from DigitalWestern/greyward; check that the version exists, and that 'token' can read the releases"
           exit 1
         fi
-        GREYWARD_DOWNLOAD_BASE="file://$assets" sh "$GITHUB_ACTION_PATH/install.sh" \
+        GREYWARD_DOWNLOAD_BASE="file://$assets" GREYWARD_LATEST_TAG="$latest_tag" \
+          sh "$GITHUB_ACTION_PATH/install.sh" ${named[@]+"${named[@]}"} \
           --no-modify-path --no-completions --dir="$HOME/.local/bin"
         rm -rf "$assets"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"

@@ -31,7 +31,10 @@
 #
 # What it trusts: the archive must be signed by the release key below
 # (RELEASE_PUBLIC_KEY), checked with openssl 3.0 or newer, and the new binary
-# must run here (`ward --version`) before it replaces the old one.
+# must run here before it replaces the old one: `ward --version` exits 0 and
+# prints exactly the version of the tag being installed. Without --version,
+# a ward newer than the latest release is left alone; naming an older
+# version installs it, and says it is a downgrade.
 #
 # A script cannot change the PATH of the shell that piped it in. The last
 # line it prints is the one command that finishes the job for the current
@@ -184,13 +187,34 @@ resolve_path() {
 # program: it may block on a tty, a socket, or a lock. `timeout` is not in
 # POSIX and stock macOS does not ship it, so where it is missing the probe
 # runs unbounded -- which is what every version of this script did before.
-# Empty output, or a non-zero exit, is reported as no version at all.
-probe_version() {
+# run_version keeps the program's exit status; probe_version reports empty
+# output, or a non-zero exit, as no version at all.
+run_version() {
     if command -v timeout >/dev/null 2>&1; then
-        timeout 5 "$1" --version 2>/dev/null || true
+        timeout 5 "$1" --version 2>/dev/null
     else
-        "$1" --version 2>/dev/null || true
+        "$1" --version 2>/dev/null
     fi
+}
+probe_version() { run_version "$1" || true; }
+
+# Exit 0 when version $1 is older than version $2 (`0.2.0`, `0.3.0-rc.1`):
+# numeric major.minor.patch first, then a pre-release below its release.
+version_older() {
+    _vo_a="${1%%-*}"; _vo_b="${2%%-*}"
+    for _vo_i in 1 2 3; do
+        _vo_x="$(printf '%s' "$_vo_a" | cut -d. -f"$_vo_i")"
+        _vo_y="$(printf '%s' "$_vo_b" | cut -d. -f"$_vo_i")"
+        _vo_x="${_vo_x:-0}"; _vo_y="${_vo_y:-0}"
+        case "$_vo_x$_vo_y" in *[!0-9]*) return 1 ;; esac
+        [ "$_vo_x" -lt "$_vo_y" ] && return 0
+        [ "$_vo_x" -gt "$_vo_y" ] && return 1
+    done
+    case "$1/$2" in
+        *-*/*-*) [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | head -1)" = "$1" ] ;;
+        *-*/*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # --- uninstall --------------------------------------------------------------
@@ -361,24 +385,60 @@ fi
 
 # --- download ---------------------------------------------------------------
 asset="greyward-$triple.tar.gz"
-case "$VERSION" in
-    latest) base="https://github.com/$REPO/releases/latest/download" ;;
-    v*)     base="https://github.com/$REPO/releases/download/$VERSION" ;;
-    *)      base="https://github.com/$REPO/releases/download/v$VERSION" ;;
-esac
-# Test hook: serve the three asset files (the archive, its .sha256 and its
-# .sig) from anywhere (tests/install.sh and action.yml use it). The files are
-# still verified against the release key, so the hook moves where they come
-# from, never what is trusted.
-base="${GREYWARD_DOWNLOAD_BASE:-$base}"
 
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
+    # The URL $1 ends up at after its redirects.
+    final_url() { curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q -O "$2" "$1"; }
+    final_url() {
+        _fu_to="$(wget -S --spider -O /dev/null "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tail -1 | tr -d '\r')" \
+            || return 1
+        printf '%s' "${_fu_to:-$1}"
+    }
 else
-    fail "need curl or wget to download $base/$asset"
+    fail "need curl or wget to download the $asset release asset"
 fi
+
+# The exact release this run installs, as a tag, and whether it was named.
+# A named version may replace a newer installed ward (a downgrade, said as
+# one); `latest` never does. `latest` is read from where GitHub's
+# releases/latest redirects, before anything is downloaded, so the binary is
+# held to that tag below: an older release's validly signed assets, uploaded
+# into a newer release, do not install. GREYWARD_LATEST_TAG names the tag
+# for a caller that resolved it already (action.yml, with its token), and
+# GREYWARD_LATEST_URL another page to resolve it from (tests/install.sh).
+case "$VERSION" in
+    latest)
+        named=0
+        tag="${GREYWARD_LATEST_TAG:-}"
+        if [ -z "$tag" ]; then
+            latest_url="${GREYWARD_LATEST_URL:-https://github.com/$REPO/releases/latest}"
+            resolved="$(final_url "$latest_url")" \
+                || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
+            tag="${resolved##*/tag/}"
+            [ "$tag" != "$resolved" ] \
+                || fail "$latest_url led to $resolved, not a release tag; name one with --version=<tag>"
+        fi
+        ;;
+    v*) named=1; tag="$VERSION" ;;
+    *)  named=1; tag="v$VERSION" ;;
+esac
+case "$tag" in
+    v[0-9]*) ;;
+    *) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
+esac
+case "$tag" in
+    *[!A-Za-z0-9.+-]*) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
+esac
+want="${tag#v}"
+base="https://github.com/$REPO/releases/download/$tag"
+# Test hook: serve the three asset files (the archive, its .sha256 and its
+# .sig) from anywhere (tests/install.sh and action.yml use it). The files are
+# still verified against the release key, and the binary against $tag, so
+# the hook moves where they come from, never what is trusted.
+base="${GREYWARD_DOWNLOAD_BASE:-$base}"
 
 if command -v sha256sum >/dev/null 2>&1; then
     digest() { sha256sum "$1" | cut -d' ' -f1; }
@@ -442,6 +502,14 @@ if [ -x "$INSTALL_DIR/ward" ]; then
         *) previous="" ;;
     esac
 fi
+# `ward 0.3.0 (abc1234 2026-10-13)`: the version is the second word.
+previous_version="$(printf '%s\n' "$previous" | sed -n '1s/^ward \([^ ]*\).*$/\1/p')"
+downgrade=0
+if [ -n "$previous_version" ] && version_older "$want" "$previous_version"; then
+    [ "$named" = 1 ] || fail "$INSTALL_DIR/ward is $previous, newer than the latest release ($tag); it is untouched.
+  To install the older release anyway, name it:  --version=$tag"
+    downgrade=1
+fi
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
 # Copy to a sibling, run it there, and only then rename it over the old
 # binary: a running `ward` never sees a half-written file, and a release that
@@ -453,14 +521,20 @@ trap 'rm -rf "$tmp"; rm -f "$staged"' EXIT
 trap 'rm -rf "$tmp"; rm -f "$staged"; exit 1' INT TERM
 cp "$tmp/ward" "$staged" || fail "cannot write to $INSTALL_DIR"
 chmod 755 "$staged"
-installed="$("$staged" --version 2>/dev/null || true)"
+installed="$(run_version "$staged")" \
+    || fail "the downloaded ward does not run on this machine ('--version' failed); $INSTALL_DIR/ward is untouched"
+# Exactly `ward <version>`, optionally followed by ` (<commit> <date>)`, and
+# the version is the tag's: a release whose archive is another release's
+# binary is refused, the way `ward update --self` refuses it.
 case "$installed" in
-    "ward "*) ;;
-    *) fail "the downloaded ward does not run on this machine; $INSTALL_DIR/ward is untouched" ;;
+    "ward $want" | "ward $want ("*")") ;;
+    *) fail "the downloaded ward says '$installed', not ward $want; the release's asset does not match its tag $tag, and $INSTALL_DIR/ward is untouched" ;;
 esac
 mv -f "$staged" "$INSTALL_DIR/ward" || fail "cannot replace $INSTALL_DIR/ward"
 if [ -z "$previous" ]; then
     say "installed $installed to $INSTALL_DIR/ward"
+elif [ "$downgrade" = 1 ]; then
+    say "downgraded $previous -> $installed in $INSTALL_DIR (--version=$tag was named)"
 elif [ "$previous" = "$installed" ]; then
     say "reinstalled $installed to $INSTALL_DIR/ward (same version)"
 else

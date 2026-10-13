@@ -1031,7 +1031,9 @@ The action is newer than `v0.1.0`, so that tag does not carry it: name
 also picks the Greyward it installs (`@v0.3.0` installs v0.3.0); `@main` or a
 commit installs the latest release, and the `version` input overrides both.
 Either way the installer refuses a release not signed by Greyward's release
-key.
+key, or whose binary reports another version than the release's tag. A
+version named by the tag or the input is installed even over a newer ward
+(the log says it is a downgrade); `latest` never replaces a newer one.
 
 `--frozen` writes nothing, so `greyward-toolchain.toml` and the lockfiles have to
 be committed first: run `ward` once on your machine and commit what it wrote.

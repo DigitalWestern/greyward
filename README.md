@@ -86,7 +86,10 @@ Every new terminal has `ward` from then on. A script cannot change the
 PATH of the terminal that ran it, so it ends by printing the one command
 that finishes the job there (`source ~/.greyward/env`). It also prints where the
 store is and roughly how big it gets, and names the version it replaced when
-one was already there. Options: `--dir=<path>`, `--version=<tag>`,
+one was already there. The new binary must run and report the release's
+own version before it replaces the old one, and a `ward` newer than the
+latest release is left alone unless `--version` names the older one (then
+the installer says it is a downgrade). Options: `--dir=<path>`, `--version=<tag>`,
 `--no-modify-path`, `--no-completions`; the header of
 [install.sh](install.sh) lists every file it touches.
 

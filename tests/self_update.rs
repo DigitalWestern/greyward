@@ -46,6 +46,39 @@ struct Release<'a> {
     claimed_sha256: Option<&'a str>,
     /// Leave the platform's assets out of the manifest entirely.
     no_assets: bool,
+    /// The `.sig` file next to the archive.
+    signature: Signature,
+}
+
+/// What the release's `.sig` holds.
+#[derive(Clone, Copy)]
+enum Signature {
+    /// The test release key's signature over the archive.
+    Good,
+    /// No `.sig` asset at all.
+    Missing,
+    /// A signature over the archive by a key that is not the release key.
+    OtherKey,
+    /// The release key's signature over other bytes: an archive swapped
+    /// after signing, with its `.sha256` rewritten to match.
+    OtherBytes,
+}
+
+/// The release key the tests sign with: the binary under test is a debug
+/// build, which honors `GREYWARD_RELEASE_PUBLIC_KEY` (a release build does
+/// not, and trusts only the compiled-in key).
+const RELEASE_SEED: [u8; 32] = [5; 32];
+
+fn key_pair(seed: &[u8; 32]) -> ring::signature::Ed25519KeyPair {
+    ring::signature::Ed25519KeyPair::from_seed_unchecked(seed).unwrap()
+}
+
+fn release_public_key() -> String {
+    use ring::signature::KeyPair;
+    format!(
+        "ed25519:{}",
+        hex::encode(key_pair(&RELEASE_SEED).public_key().as_ref())
+    )
 }
 
 impl Release<'_> {
@@ -55,6 +88,7 @@ impl Release<'_> {
             binary: Some("ward 99.0.0 (test)"),
             claimed_sha256: None,
             no_assets: false,
+            signature: Signature::Good,
         }
     }
 }
@@ -95,19 +129,37 @@ fn publish(home: &Path, release: &Release<'_>) -> String {
         format!("{digest}  {asset}\n"),
     )
     .unwrap();
+    let archive = fs::read(dir.join(&asset)).unwrap();
+    let signed = match release.signature {
+        Signature::Good | Signature::Missing => key_pair(&RELEASE_SEED).sign(&archive),
+        Signature::OtherKey => key_pair(&[6; 32]).sign(&archive),
+        Signature::OtherBytes => key_pair(&RELEASE_SEED).sign(b"the archive that was signed"),
+    };
+    let sig_name = format!("{asset}.sig");
+    let _ = fs::remove_file(dir.join(&sig_name));
+    let mut assets = vec![
+        serde_json::json!({
+            "name": asset,
+            "browser_download_url": format!("file://{}", dir.join(&asset).display()),
+        }),
+        serde_json::json!({
+            "name": format!("{asset}.sha256"),
+            "browser_download_url": format!("file://{}", dir.join(format!("{asset}.sha256")).display()),
+        }),
+    ];
+    if !matches!(release.signature, Signature::Missing) {
+        // One line of base64, as tools/release-sign.sh writes it.
+        let line = base64_line(signed.as_ref());
+        fs::write(dir.join(&sig_name), format!("{line}\n")).unwrap();
+        assets.push(serde_json::json!({
+            "name": sig_name,
+            "browser_download_url": format!("file://{}", dir.join(&sig_name).display()),
+        }));
+    }
     let assets = if release.no_assets {
         serde_json::json!([])
     } else {
-        serde_json::json!([
-            {
-                "name": asset,
-                "browser_download_url": format!("file://{}", dir.join(&asset).display()),
-            },
-            {
-                "name": format!("{asset}.sha256"),
-                "browser_download_url": format!("file://{}", dir.join(format!("{asset}.sha256")).display()),
-            },
-        ])
+        serde_json::Value::Array(assets)
     };
     let manifest = dir.join("latest.json");
     fs::write(
@@ -136,8 +188,31 @@ fn run(binary: &Path, home: &Path, manifest: &str, args: &[&str]) -> Output {
     let mut command = command_for(binary, home, home, &home.join("store"));
     command
         .args(args)
-        .env("GREYWARD_RELEASE_MANIFEST", manifest);
+        .env("GREYWARD_RELEASE_MANIFEST", manifest)
+        .env("GREYWARD_RELEASE_PUBLIC_KEY", release_public_key());
     output_of(&mut command)
+}
+
+/// Standard base64 with padding: the crate's own codec is not public.
+fn base64_line(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> shift) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Run a binary this test just wrote. Another test thread that forks
@@ -295,6 +370,29 @@ fn a_bad_download_never_touches_the_binary() {
                 ..Release::newer()
             },
             &format!("release v99.0.0 has no greyward-{}.tar.gz", triple()),
+        ),
+        // #698: the .sha256 comes from the same release, so only the
+        // release key's signature over these exact bytes is trusted.
+        (
+            Release {
+                signature: Signature::Missing,
+                ..Release::newer()
+            },
+            &format!("greyward-{}.tar.gz.sig for this machine", triple()),
+        ),
+        (
+            Release {
+                signature: Signature::OtherKey,
+                ..Release::newer()
+            },
+            "is not signed by ward's release key",
+        ),
+        (
+            Release {
+                signature: Signature::OtherBytes,
+                ..Release::newer()
+            },
+            "is not signed by ward's release key",
         ),
     ] {
         let manifest = publish(&home.0, &release);

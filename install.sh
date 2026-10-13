@@ -29,6 +29,10 @@
 # environments, they can be several GiB, and --uninstall leaves them alone
 # and says so.
 #
+# What it trusts: the archive must be signed by the release key below
+# (RELEASE_PUBLIC_KEY), checked with openssl 3.0 or newer, and the new binary
+# must run here (`ward --version`) before it replaces the old one.
+#
 # A script cannot change the PATH of the shell that piped it in. The last
 # line it prints is the one command that finishes the job for the current
 # terminal; every new terminal picks it up on its own.
@@ -44,6 +48,15 @@ if [ -z "${HOME:-}" ]; then
 fi
 
 REPO="DigitalWestern/greyward"
+# The release key. Every greyward-<triple>.tar.gz is signed by its private
+# half, which never leaves the maintainer's machine (tools/release-sign.sh),
+# in <asset>.sig next to it; the .sha256 beside it comes from the same
+# release, so it only catches a corrupt download. `ward update --self`
+# compiles in the same value (src/commands/selfupdate.rs).
+RELEASE_PUBLIC_KEY="ed25519:ba1310b1b3eb6bc182ee4aef6058aaa2d643eaa71699ab87a2f6d02009fd32dd"
+# Test hook, like GREYWARD_DOWNLOAD_BASE: tests/install.sh signs its release
+# with a throwaway key.
+RELEASE_KEY="${GREYWARD_RELEASE_PUBLIC_KEY:-$RELEASE_PUBLIC_KEY}"
 VERSION="${GREYWARD_VERSION:-latest}"
 INSTALL_DIR="${GREYWARD_INSTALL_DIR:-$HOME/.local/bin}"
 # Only a real value turns PATH editing off: GREYWARD_NO_MODIFY_PATH=0 used to
@@ -84,6 +97,35 @@ shquote() {
         _sq_rest=${_sq_rest#*"$_sq_q"}
     done
     printf '%s%s%s' "$_sq_q" "$_sq_out$_sq_rest" "$_sq_q"
+}
+
+# $1 single-quoted for fish, whose single quotes treat a backslash as an
+# escape: every backslash and apostrophe gets one in front of it. One byte at
+# a time, with parameter expansion, for the same reason as shquote.
+fishquote() {
+    _fq_rest="$1"
+    _fq_out=""
+    while [ -n "$_fq_rest" ]; do
+        _fq_c="${_fq_rest%"${_fq_rest#?}"}"
+        _fq_rest="${_fq_rest#?}"
+        case "$_fq_c" in
+            "'" | \\) _fq_out="$_fq_out\\$_fq_c" ;;
+            *) _fq_out="$_fq_out$_fq_c" ;;
+        esac
+    done
+    printf "'%s'" "$_fq_out"
+}
+
+# Write the bytes the hex string $1 spells, two digits a byte. POSIX printf
+# has no \x escape, so each byte goes out as the octal one it does have.
+hex_to_bin() {
+    _hb_rest="$1"
+    while [ -n "$_hb_rest" ]; do
+        _hb_byte="${_hb_rest%"${_hb_rest#??}"}"
+        _hb_rest="${_hb_rest#??}"
+        # shellcheck disable=SC2059 # the format is the escape being written
+        printf "\\$(printf '%03o' "$((0x$_hb_byte))")"
+    done
 }
 
 usage() {
@@ -324,7 +366,10 @@ case "$VERSION" in
     v*)     base="https://github.com/$REPO/releases/download/$VERSION" ;;
     *)      base="https://github.com/$REPO/releases/download/v$VERSION" ;;
 esac
-# Test hook: serve the two asset files from anywhere (tests/install.sh uses it).
+# Test hook: serve the three asset files (the archive, its .sha256 and its
+# .sig) from anywhere (tests/install.sh and action.yml use it). The files are
+# still verified against the release key, so the hook moves where they come
+# from, never what is trusted.
 base="${GREYWARD_DOWNLOAD_BASE:-$base}"
 
 if command -v curl >/dev/null 2>&1; then
@@ -342,6 +387,15 @@ elif command -v shasum >/dev/null 2>&1; then
 else
     fail "need sha256sum or shasum to verify the download"
 fi
+
+# The signature check needs OpenSSL 3.0 or newer (`pkeyutl -rawin`, Ed25519).
+command -v openssl >/dev/null 2>&1 \
+    || fail "need openssl (3.0 or newer) to verify the release signature. Install it, or download
+  the release by hand and check it with:  gh attestation verify <asset> --repo $REPO"
+key_hex="${RELEASE_KEY#ed25519:}"
+case "$RELEASE_KEY" in ed25519:*) ;; *) key_hex="" ;; esac
+case "$key_hex" in *[!0-9a-f]*) key_hex="" ;; esac
+[ "${#key_hex}" = 64 ] || fail "release key '$RELEASE_KEY' is not ed25519:<64 lower-case hex>"
 
 tmp="$(mktemp -d 2>/dev/null || mktemp -d -t greyward-install)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -361,6 +415,19 @@ actual="$(digest "$tmp/$asset")"
   expected $expected
   got      $actual"
 
+# The signature: Ed25519 over the archive's bytes, one line of base64. The
+# public key goes to openssl as DER, the fixed SubjectPublicKeyInfo prefix
+# for Ed25519 followed by the key's 32 bytes.
+fetch "$base/$asset.sig" "$tmp/$asset.sig" \
+    || fail "signature file missing next to the release asset; refusing to install an unverified binary"
+hex_to_bin "302a300506032b6570032100$key_hex" >"$tmp/release-key.der"
+openssl base64 -d -A -in "$tmp/$asset.sig" -out "$tmp/$asset.sig.bin" 2>/dev/null \
+    || fail "the signature file for $asset is not base64; refusing to install an unverified binary"
+openssl pkeyutl -verify -pubin -keyform DER -inkey "$tmp/release-key.der" -rawin \
+    -in "$tmp/$asset" -sigfile "$tmp/$asset.sig.bin" >/dev/null 2>&1 \
+    || fail "$asset is not signed by ward's release key ($RELEASE_KEY); refusing to install it.
+  (This needs OpenSSL 3.0 or newer; 'openssl version' says: $(openssl version 2>&1))"
+
 tar -xzf "$tmp/$asset" -C "$tmp" || fail "cannot extract $asset"
 [ -f "$tmp/ward" ] || fail "archive did not contain a 'ward' binary"
 
@@ -376,12 +443,22 @@ if [ -x "$INSTALL_DIR/ward" ]; then
     esac
 fi
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
-# Copy to a sibling and rename so a running `ward` never sees a half-written file.
-cp "$tmp/ward" "$INSTALL_DIR/.greyward.tmp.$$" || fail "cannot write to $INSTALL_DIR"
-chmod 755 "$INSTALL_DIR/.greyward.tmp.$$"
-mv -f "$INSTALL_DIR/.greyward.tmp.$$" "$INSTALL_DIR/ward"
-installed="$("$INSTALL_DIR/ward" --version 2>/dev/null || true)"
-[ -n "$installed" ] || fail "$INSTALL_DIR/ward does not run on this machine"
+# Copy to a sibling, run it there, and only then rename it over the old
+# binary: a running `ward` never sees a half-written file, and a release that
+# cannot run here (another glibc, a broken build) never replaces one that
+# can. It is run from the install directory, not $tmp, because that is
+# where it will run from (and $tmp may be mounted noexec).
+staged="$INSTALL_DIR/.greyward.tmp.$$"
+trap 'rm -rf "$tmp"; rm -f "$staged"' EXIT
+trap 'rm -rf "$tmp"; rm -f "$staged"; exit 1' INT TERM
+cp "$tmp/ward" "$staged" || fail "cannot write to $INSTALL_DIR"
+chmod 755 "$staged"
+installed="$("$staged" --version 2>/dev/null || true)"
+case "$installed" in
+    "ward "*) ;;
+    *) fail "the downloaded ward does not run on this machine; $INSTALL_DIR/ward is untouched" ;;
+esac
+mv -f "$staged" "$INSTALL_DIR/ward" || fail "cannot replace $INSTALL_DIR/ward"
 if [ -z "$previous" ]; then
     say "installed $installed to $INSTALL_DIR/ward"
 elif [ "$previous" = "$installed" ]; then
@@ -401,13 +478,18 @@ case ":$PATH:" in
 esac
 
 mkdir -p "$GREYWARD_HOME"
+# The install directory as the startup code spells it: quoted, so a --dir
+# holding `"`, `$(...)` or a backtick is a path at every shell start and
+# never a command.
+dir_sh="$(shquote "$INSTALL_DIR")"
+dir_fish="$(fishquote "$INSTALL_DIR")"
 # ~/.greyward/env is POSIX sh: it is read by sh, bash, and zsh alike. Idempotent
 # so sourcing it twice does not grow PATH.
 cat >"$GREYWARD_HOME/env" <<EOF
 # ward: put the ward binary on PATH. Written by install.sh; safe to source repeatedly.
 case ":\${PATH}:" in
-    *":$INSTALL_DIR:"*) ;;
-    *) export PATH="$INSTALL_DIR:\$PATH" ;;
+    *:$dir_sh:*) ;;
+    *) export PATH=$dir_sh:"\$PATH" ;;
 esac
 EOF
 
@@ -451,8 +533,8 @@ if [ "$MODIFY_PATH" = 1 ] && [ "$on_path" = 0 ]; then
         fish_confd="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
         mkdir -p "$fish_confd" 2>/dev/null && cat >"$fish_confd/ward.fish" <<EOF
 # ward: put the ward binary on PATH. Written by install.sh.
-if not contains -- "$INSTALL_DIR" \$PATH
-    set -gx PATH "$INSTALL_DIR" \$PATH
+if not contains -- $dir_fish \$PATH
+    set -gx PATH $dir_fish \$PATH
 end
 EOF
         say "added PATH setup to $fish_confd/ward.fish"
@@ -518,11 +600,11 @@ if [ "$on_path" = 1 ]; then
     say "done. '$INSTALL_DIR' is already on PATH: try 'ward --version'"
 elif [ "$MODIFY_PATH" = 0 ]; then
     say "done. '$INSTALL_DIR' is not on PATH and --no-modify-path was given; add it yourself:"
-    printf '\n    export PATH="%s:$PATH"\n\n' "$INSTALL_DIR" >&2
+    printf '\n    export PATH=%s:"$PATH"\n\n' "$dir_sh" >&2
 else
     say "done. New terminals already have ward. For this one, run:"
     if [ "$shell_name" = fish ]; then
-        printf '\n    set -gx PATH "%s" $PATH\n\n' "$INSTALL_DIR" >&2
+        printf '\n    set -gx PATH %s $PATH\n\n' "$dir_fish" >&2
     else
         printf '\n    source "$HOME/.greyward/env"\n\n' >&2
     fi

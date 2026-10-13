@@ -3,19 +3,30 @@
 //!
 //! The release is whatever GitHub calls the latest release of the
 //! repository, read from its releases API (one request, JSON). The asset
-//! names, the `.sha256` file next to each asset, and the "copy to a sibling
-//! and rename" install are the rules `install.sh` follows, so a binary the
-//! script installed and one this verb installed are the same bytes at the
-//! same path. Nothing here opens the store or reads a project.
+//! names, the `.sha256` and `.sig` files next to each asset, and the "copy
+//! to a sibling, run it, rename" install are the rules `install.sh` follows,
+//! so a binary the script installed and one this verb installed are the same
+//! bytes at the same path. Nothing here opens the store or reads a project.
+//!
+//! The `.sha256` comes from the same release as the archive, so it only
+//! catches a corrupt download. What makes a release trusted is the `.sig`:
+//! an Ed25519 signature over the archive's bytes by the release key, whose
+//! public half is compiled in below ([`RELEASE_PUBLIC_KEY`]). The private
+//! half never reaches CI: `tools/release-sign.sh` signs a draft release on
+//! the maintainer's machine and publishes it, so a token that can write
+//! releases cannot ship a binary this verb installs (#698).
 //!
 //! `GREYWARD_RELEASE_MANIFEST` names another manifest URL (a `file://` path in
 //! the tests) and is the only way ward talks to anything but GitHub here.
+//! A debug build also honors `GREYWARD_RELEASE_PUBLIC_KEY`, so the tests can
+//! sign a release with a throwaway key; a release build has no such hook.
 
 use crate::cli;
 use crate::commands::inspect::{Check, Level};
 use crate::kernel::archive::{self, Compression};
 use crate::kernel::fetch;
 use crate::kernel::platform::Platform;
+use crate::kernel::signing::PublicKey;
 use crate::kernel::ui;
 use serde_json::Value;
 use std::fs;
@@ -30,6 +41,26 @@ const RELEASES_PAGE: &str = "https://github.com/DigitalWestern/greyward/releases
 /// invocation, so a slow or black-holed network must cost seconds, not
 /// minutes; the download that follows a real update is not bounded.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The release key: every `greyward-<triple>.tar.gz` a release carries is
+/// signed by its private half, in `<asset>.sig`. `install.sh` carries the
+/// same value (a unit test holds the two together).
+pub const RELEASE_PUBLIC_KEY: &str =
+    "ed25519:ba1310b1b3eb6bc182ee4aef6058aaa2d643eaa71699ab87a2f6d02009fd32dd";
+
+/// The key release archives must be signed by: [`RELEASE_PUBLIC_KEY`], or
+/// in a debug build the `GREYWARD_RELEASE_PUBLIC_KEY` the tests set.
+fn release_key() -> io::Result<PublicKey> {
+    #[cfg(debug_assertions)]
+    if let Some(key) = std::env::var("GREYWARD_RELEASE_PUBLIC_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return PublicKey::parse(key.trim())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error));
+    }
+    PublicKey::parse(RELEASE_PUBLIC_KEY).map_err(io::Error::other)
+}
 
 /// Where the latest-release manifest is read from.
 pub fn manifest_url() -> String {
@@ -147,20 +178,34 @@ impl Release {
             .map(|(_, url)| url.as_str())
     }
 
-    /// The archive and checksum URLs for `platform`, when this release
-    /// carries both.
-    fn build_for(&self, platform: Platform) -> Option<(&str, &str)> {
-        let (asset, checksum) = asset_names(platform);
-        Some((self.asset(&asset)?, self.asset(&checksum)?))
+    /// The archive, checksum and signature URLs for `platform`, when this
+    /// release carries all three. An unsigned archive is no build: nothing
+    /// here would install it.
+    fn build_for(&self, platform: Platform) -> Option<(&str, &str, &str)> {
+        let names = asset_names(platform);
+        Some((
+            self.asset(&names.archive)?,
+            self.asset(&names.checksum)?,
+            self.asset(&names.signature)?,
+        ))
     }
 }
 
-/// The archive `install.sh` and `update --self` take for `platform`, and
-/// the checksum file next to it.
-fn asset_names(platform: Platform) -> (String, String) {
-    let asset = format!("greyward-{}.tar.gz", platform.triple());
-    let checksum = format!("{asset}.sha256");
-    (asset, checksum)
+/// The archive `install.sh` and `update --self` take for a platform, and
+/// the checksum and signature files next to it.
+struct AssetNames {
+    archive: String,
+    checksum: String,
+    signature: String,
+}
+
+fn asset_names(platform: Platform) -> AssetNames {
+    let archive = format!("greyward-{}.tar.gz", platform.triple());
+    AssetNames {
+        checksum: format!("{archive}.sha256"),
+        signature: format!("{archive}.sig"),
+        archive,
+    }
 }
 
 /// Read the latest release. The only network request `doctor` makes.
@@ -393,6 +438,40 @@ fn parse_sha256(text: &str, asset: &str) -> io::Result<String> {
     Ok(digest)
 }
 
+/// The `.sig` file: the 64-byte Ed25519 signature as one line of standard
+/// base64, as `tools/release-sign.sh` writes it. Anything else is no
+/// signature, and an unsigned archive is never installed.
+fn parse_signature(text: &str, asset: &str) -> io::Result<Vec<u8>> {
+    let line = text.trim_end_matches(['\r', '\n']);
+    crate::kernel::base64::decode(line)
+        .filter(|bytes| bytes.len() == 64)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the signature file for {asset} does not hold an Ed25519 signature; refusing to install an unverified binary"),
+            )
+        })
+}
+
+/// The archive's bytes must carry `signature` by `key`, the release key.
+fn verify_signature(
+    archive: &Path,
+    signature: &[u8],
+    key: &PublicKey,
+    asset: &str,
+) -> io::Result<()> {
+    let bytes = fs::read(archive)?;
+    if key.verify_detached(&bytes, signature) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "{asset} is not signed by ward's release key ({key}); refusing to install it, and the current binary is untouched"
+        ),
+    ))
+}
+
 /// `<binary> --version`, so a download that does not run on this machine,
 /// or that is not the release it was published as, is refused before it
 /// replaces a binary that works.
@@ -457,16 +536,21 @@ pub fn run(platform: Platform) -> io::Result<i32> {
         ));
         return Ok(0);
     }
-    let (asset, checksum) = asset_names(platform);
-    let Some((asset_url, checksum_url)) = release.build_for(platform) else {
+    let AssetNames {
+        archive: asset,
+        checksum,
+        signature,
+    } = asset_names(platform);
+    let Some((asset_url, checksum_url, signature_url)) = release.build_for(platform) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "release {} has no {asset} and {checksum} for this machine; releases: {RELEASES_PAGE}",
+                "release {} has no {asset}, {checksum} and {signature} for this machine; releases: {RELEASES_PAGE}",
                 release.tag
             ),
         ));
     };
+    let key = release_key()?;
 
     // Refuse before downloading when the rename at the end cannot happen.
     let (stage, mut stage_file) = Stage::create(&target)?;
@@ -477,8 +561,14 @@ pub fn run(platform: Platform) -> io::Result<i32> {
             &fetch::fetch_text_within(checksum_url, Some(LOOKUP_TIMEOUT))?,
             &asset,
         )?;
+        let signature_bytes = parse_signature(
+            &fetch::fetch_text_within(signature_url, Some(LOOKUP_TIMEOUT))?,
+            &asset,
+        )?;
         let archive_path = scratch.0.join(&asset);
         fetch::download_file(asset_url, &archive_path, &expected)?;
+        // Before a byte of it is unpacked: the archive is the release key's.
+        verify_signature(&archive_path, &signature_bytes, &key, &asset)?;
         archive::extract_with_options(
             &archive_path,
             &scratch.0,
@@ -609,22 +699,25 @@ mod tests {
     #[test]
     fn a_newer_release_warns_only_when_this_machine_has_a_build() {
         let platform = Platform::X86_64UnknownLinuxGnu;
-        let (asset, checksum) = asset_names(platform);
+        let names = asset_names(platform);
         let mut release = Release {
             tag: "v99.0.0".to_string(),
             version: Version(99, 0, 0),
-            assets: vec![(asset, "https://example/a".to_string())],
+            assets: vec![(names.archive, "https://example/a".to_string())],
         };
-        // The archive without its checksum is no build.
-        let row = newer_release("ward 0.1.0", &release, Ok(platform));
-        assert_eq!(row.level, Level::Ok);
-        assert_eq!(
-            row.detail,
-            "ward 0.1.0; v99.0.0 is out, with no build for this machine (x86_64-unknown-linux-gnu)"
-        );
-        release
-            .assets
-            .push((checksum, "https://example/b".to_string()));
+        // The archive without its checksum, or without its signature, is
+        // no build.
+        for missing in [names.checksum, names.signature] {
+            let row = newer_release("ward 0.1.0", &release, Ok(platform));
+            assert_eq!(row.level, Level::Ok);
+            assert_eq!(
+                row.detail,
+                "ward 0.1.0; v99.0.0 is out, with no build for this machine (x86_64-unknown-linux-gnu)"
+            );
+            release
+                .assets
+                .push((missing, "https://example/b".to_string()));
+        }
         let row = newer_release("ward 0.1.0", &release, Ok(platform));
         assert_eq!(row.level, Level::Warn);
         assert!(
@@ -661,5 +754,60 @@ mod tests {
         assert!(parse_sha256(&format!("{hex}\tfile"), "x").is_err());
         assert!(parse_sha256("", "x").is_err());
         assert!(parse_sha256("deadbeef", "x").is_err());
+    }
+
+    /// Issue #698. The compiled-in release key is a key, it is the one
+    /// install.sh verifies with, and a build with no override uses it.
+    #[test]
+    fn the_release_key_is_compiled_in_and_matches_the_installer() {
+        let key = PublicKey::parse(RELEASE_PUBLIC_KEY).unwrap();
+        let installer = include_str!("../../install.sh");
+        assert!(
+            installer.contains(&format!("RELEASE_PUBLIC_KEY=\"{RELEASE_PUBLIC_KEY}\"")),
+            "install.sh does not carry {RELEASE_PUBLIC_KEY}"
+        );
+        if std::env::var_os("GREYWARD_RELEASE_PUBLIC_KEY").is_none() {
+            assert_eq!(release_key().unwrap(), key);
+        }
+    }
+
+    /// Issue #698. A `.sig` file is one line of base64 holding 64 bytes.
+    #[test]
+    fn signature_file_is_one_base64_line_of_64_bytes() {
+        let encoded = crate::kernel::base64::encode(&[9; 64]);
+        assert_eq!(parse_signature(&encoded, "x").unwrap(), vec![9; 64]);
+        assert_eq!(
+            parse_signature(&format!("{encoded}\r\n"), "x").unwrap(),
+            vec![9; 64]
+        );
+        let short = crate::kernel::base64::encode(&[9; 63]);
+        for bad in ["", "not base64!", short.as_str(), &format!(" {encoded}")] {
+            let error = parse_signature(bad, "x").unwrap_err();
+            assert!(
+                error.to_string().contains("refusing to install"),
+                "{bad:?}: {error}"
+            );
+        }
+    }
+
+    /// Issue #698. The archive must be signed by the release key: another
+    /// key's signature, or a signature over other bytes, is refused.
+    #[test]
+    fn only_the_release_keys_signature_over_these_bytes_is_accepted() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let dir = crate::kernel::testutil::TempDir::named("selfupdate-signature");
+        let archive = dir.0.join("greyward-x.tar.gz");
+        fs::write(&archive, b"the archive").unwrap();
+        let pair = Ed25519KeyPair::from_seed_unchecked(&[3; 32]).unwrap();
+        let key = PublicKey::from_hex(&hex::encode(pair.public_key().as_ref())).unwrap();
+        let signature = pair.sign(b"the archive");
+        verify_signature(&archive, signature.as_ref(), &key, "x").unwrap();
+        let other = pair.sign(b"other bytes");
+        let error = verify_signature(&archive, other.as_ref(), &key, "x").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("not signed by ward's release key"));
+        let release = PublicKey::parse(RELEASE_PUBLIC_KEY).unwrap();
+        assert!(verify_signature(&archive, signature.as_ref(), &release, "x").is_err());
     }
 }

@@ -38,10 +38,27 @@ esac
 # --- a release directory laid out exactly like the GitHub Release assets ----
 asset="greyward-$triple.tar.gz"
 mkdir -p "$WORK/release" "$WORK/stage"
+# A throwaway release key, made the way the real one was (`ward keygen`) and
+# used the way the real one is (tools/release-sign.sh). The installer is
+# pointed at its public half with GREYWARD_RELEASE_PUBLIC_KEY.
+RELEASE_KEY_FILE="$WORK/release.key"
+TEST_RELEASE_KEY="$("$BIN" keygen "$RELEASE_KEY_FILE" 2>/dev/null | sed -n 's/^trusted = \["\(.*\)"\]$/\1/p')"
+[ -n "$TEST_RELEASE_KEY" ] || { echo "ward keygen printed no public key" >&2; exit 1; }
+# The .sha256 and .sig of whatever release/$asset holds now.
+publish_sidecars() {
+    rm -f "$WORK/release/$asset.sig"
+    ( cd "$WORK/release" && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > "$asset.sha256" )
+    GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
+        "$ROOT/tools/release-sign.sh" --sign "$WORK/release/$asset" 2>/dev/null
+}
+# Pack the `ward` in directory $1 as release.yml packs it (no macOS
+# AppleDouble or xattr members), then checksum and sign it.
+publish_asset() {
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "$1" -czf "$WORK/release/$asset" ward
+    publish_sidecars
+}
 cp "$BIN" "$WORK/stage/ward"
-# Packed as release.yml packs it: no macOS AppleDouble or xattr members.
-COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK/stage" -czf "$WORK/release/$asset" ward
-( cd "$WORK/release" && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > "$asset.sha256" )
+publish_asset "$WORK/stage"
 
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
 python3 -m http.server "$port" --bind 127.0.0.1 --directory "$WORK/release" >/dev/null 2>&1 &
@@ -57,6 +74,7 @@ run_installer() { # HOME SHELL PATH [args...]
     mkdir -p "$home"
     env -i HOME="$home" SHELL="$shell" PATH="$path" TERM=dumb \
         GREYWARD_DOWNLOAD_BASE="$GREYWARD_DOWNLOAD_BASE" \
+        GREYWARD_RELEASE_PUBLIC_KEY="${RELEASE_KEY_OVERRIDE-$TEST_RELEASE_KEY}" \
         sh "$ROOT/install.sh" "$@"
 }
 
@@ -102,7 +120,7 @@ H="$WORK/h4"
 out="$(run_installer "$H" /bin/zsh "$BASE_PATH" --no-modify-path "--dir=$H/bin" 2>&1)" || { echo "$out"; bad "installer exited non-zero"; }
 check "installed into --dir"              "$H/bin/ward" --version
 check "no .zshrc written"                 test ! -e "$H/.zshrc"
-check "prints the export line"            grep -Fq "export PATH=\"$H/bin:\$PATH\"" <<<"$out"
+check "prints the export line"            grep -Fq "export PATH='$H/bin':\"\$PATH\"" <<<"$out"
 
 echo "== 5. tampered checksum is refused"
 H="$WORK/h5"
@@ -286,6 +304,7 @@ for value in 0 1; do
     H="$WORK/h11-$value"; mkdir -p "$H"
     env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
         GREYWARD_NO_MODIFY_PATH="$value" GREYWARD_DOWNLOAD_BASE="$GREYWARD_DOWNLOAD_BASE" \
+        GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
         sh "$ROOT/install.sh" >/dev/null 2>&1 || bad "installer exited non-zero"
     # A bash user's file is .bash_profile on macOS, whose terminals start
     # login shells, and .bashrc elsewhere.
@@ -296,6 +315,87 @@ for value in 0 1; do
         check "GREYWARD_NO_MODIFY_PATH=1 edits nothing"   test ! -e "$H/.bashrc" -a ! -e "$H/.bash_profile"
     fi
 done
+
+echo "== 22. a release that does not run here never replaces a ward that does"
+H="$WORK/h24"
+run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" >/dev/null 2>&1 || bad "installer exited non-zero"
+working="$("$H/.local/bin/ward" --version)"
+mkdir -p "$WORK/broken"
+cp -f "$WORK/release/$asset" "$WORK/good.tar.gz"
+printf '#!/bin/sh\necho "cannot run here" >&2\nexit 1\n' > "$WORK/broken/ward"
+chmod 755 "$WORK/broken/ward"
+publish_asset "$WORK/broken"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
+    && bad "installer accepted a binary that does not run" || ok "installer refused a binary that does not run"
+check "says the old binary is untouched"  grep -Fq 'is untouched' <<<"$out"
+check "the working ward is still there"   test "$("$H/.local/bin/ward" --version)" = "$working"
+check "no staged file left behind"        sh -c "! ls -a '$H/.local/bin' | grep -q '^\\.greyward\\.tmp'"
+cp -f "$WORK/good.tar.gz" "$WORK/release/$asset"
+publish_sidecars
+
+echo "== 23. an install dir with shell syntax in it stays a path in startup code"
+H="$WORK/h25"; mkdir -p "$H"
+odd="$H/bin \"\$(touch $H/pwned)\" \`touch $H/pwned2\` it's"
+run_installer "$H" /bin/bash "$BASE_PATH" "--dir=$odd" >/dev/null 2>&1 || bad "installer exited non-zero"
+check "installed into the odd dir"        "$odd/ward" --version
+found="$(env -i HOME="$H" PATH="$BASE_PATH" sh -c '. "$HOME/.greyward/env" && command -v ward')"
+check "the PATH entry is the dir, byte for byte" test "$found" = "$odd/ward"
+env -i HOME="$H" PATH="$BASE_PATH" TERM=dumb bash -ic 'true' >/dev/null 2>&1 || true
+check "no command ran from the dir name"  test ! -e "$H/pwned" -a ! -e "$H/pwned2"
+check "sourcing env twice does not grow PATH" env -i HOME="$H" PATH="$BASE_PATH" sh -c '. "$HOME/.greyward/env"; . "$HOME/.greyward/env"; [ "$(printf %s "$PATH" | tr : "\n" | grep -c "pwned2")" = 1 ]'
+if command -v fish >/dev/null 2>&1; then
+    found="$(env -i HOME="$H" PATH="$BASE_PATH" fish -c 'command -v ward' 2>/dev/null || true)"
+    check "fish finds ward in the odd dir" test "$found" = "$odd/ward"
+    check "no command ran from fish either" test ! -e "$H/pwned" -a ! -e "$H/pwned2"
+fi
+
+echo "== 24. only an archive signed by the release key is installed"
+# Signed by the test key, checked against the shipped release key.
+H="$WORK/h26"
+out="$(RELEASE_KEY_OVERRIDE="" run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
+    && bad "installer accepted another key's signature" || ok "installer refused another key's signature"
+check "names the release key"             grep -Fq "not signed by ward's release key" <<<"$out"
+check "nothing installed (other key)"     test ! -e "$H/.local/bin/ward"
+# A different archive whose .sha256 was rewritten to match, still carrying
+# the old archive's signature: what a writer of release assets without the
+# key could publish.
+cp -f "$WORK/release/$asset" "$WORK/good.tar.gz"
+cp -f "$WORK/release/$asset.sig" "$WORK/good.sig"
+mkdir -p "$WORK/swapped"
+printf '#!/bin/sh\necho "ward 99.0.0 (not ours)"\n' > "$WORK/swapped/ward"
+chmod 755 "$WORK/swapped/ward"
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK/swapped" -czf "$WORK/release/$asset" ward
+( cd "$WORK/release" && { sha256sum "$asset" 2>/dev/null || shasum -a 256 "$asset"; } > "$asset.sha256" )
+cp -f "$WORK/good.sig" "$WORK/release/$asset.sig"
+H="$WORK/h27"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
+    && bad "installer accepted a swapped archive" || ok "installer refused a swapped archive"
+check "nothing installed (swapped)"       test ! -e "$H/.local/bin/ward"
+cp -f "$WORK/good.tar.gz" "$WORK/release/$asset"
+publish_sidecars
+# No .sig at all.
+mv "$WORK/release/$asset.sig" "$WORK/good.sig"
+H="$WORK/h28"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
+    && bad "installer accepted an unsigned archive" || ok "installer refused an unsigned archive"
+check "says the signature is missing"     grep -Fq 'signature file missing' <<<"$out"
+check "nothing installed (unsigned)"      test ! -e "$H/.local/bin/ward"
+mv "$WORK/good.sig" "$WORK/release/$asset.sig"
+# No openssl: refused before anything is downloaded.
+mkdir -p "$WORK/no-openssl"
+for tool in /usr/bin/* /bin/*; do
+    name="${tool##*/}"
+    [ "$name" = openssl ] || [ -e "$WORK/no-openssl/$name" ] || ln -s "$tool" "$WORK/no-openssl/$name"
+done
+H="$WORK/h29"
+out="$(run_installer "$H" /bin/bash "$WORK/no-openssl" 2>&1)" \
+    && bad "installer ran without openssl" || ok "installer refused to run without openssl"
+check "says it needs openssl"             grep -Fq 'need openssl' <<<"$out"
+check "downloaded nothing without openssl" absent 'downloading' "$out"
+# The good release still installs.
+H="$WORK/h30"
+run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer refused the signed release"
+check "the signed release installs"       "$H/.local/bin/ward" --version
 
 echo
 echo "install.sh: $pass passed, $fail failed"

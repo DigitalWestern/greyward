@@ -5,9 +5,12 @@
 #   - uses: actions/checkout@v4
 #   - uses: DigitalWestern/greyward@main
 #
-# The ref after the `@` picks this file; which ward it installs is the
-# `version` input. v0.1.0 was tagged before this file existed, so the first
-# tag that can be named there is the next one.
+# The ref after the `@` picks this file, and by default the ward it installs:
+# `@v0.3.0` installs ward v0.3.0, and a branch or a commit (`@main`) installs
+# the latest release. The `version` input names another. v0.1.0 was tagged
+# before this file existed, so the first tag that can be named there is the
+# next one. Whatever the version, install.sh installs it only if it is
+# signed by ward's release key.
 #
 # A composite action: its steps run on the caller's runner, in the caller's
 # job, so `ward` stays on PATH (and GREYWARD_POLICY set) for every later step.
@@ -24,8 +27,12 @@ author: DigitalWestern
 
 inputs:
   version:
-    description: Release of ward to install, as a tag (v0.1.0) or 'latest'.
-    default: latest
+    description: >-
+      Release of ward to install, as a tag (v0.1.0) or 'latest'. Empty (the
+      default) installs the release the action's own ref names when that ref
+      is a version tag (`uses: DigitalWestern/greyward@v0.3.0`), and the
+      latest release otherwise.
+    default: ""
   token:
     description: >-
       Token that reads the releases of DigitalWestern/greyward. The repository
@@ -148,17 +155,18 @@ runs:
         one_line version "$GREYWARD_ACTION_VERSION"
         exit "$bad"
 
-    # install.sh does the verified install (sha256 next to the asset, the
-    # atomic rename). It is handed the two release files from a local
-    # directory, because `gh` downloads them with `token`, an authenticated
-    # request GitHub rate-limits far less than the installer's anonymous
-    # one.
+    # install.sh does the verified install (the release key's signature and
+    # the sha256 next to the asset, a run of the new binary, the atomic
+    # rename). It is handed the three release files from a local directory,
+    # because `gh` downloads them with `token`, an authenticated request
+    # GitHub rate-limits far less than the installer's anonymous one.
     - name: Install ward
       id: install
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         GREYWARD_ACTION_VERSION: ${{ inputs.version }}
+        GREYWARD_ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
         if [ "$RUNNER_OS" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
@@ -168,6 +176,13 @@ runs:
         assets="$RUNNER_TEMP/greyward-release"
         rm -rf "$assets"
         mkdir -p "$assets"
+        # No version: the one the action's ref names, when it is a tag.
+        if [ -z "$GREYWARD_ACTION_VERSION" ]; then
+          case "$GREYWARD_ACTION_REF" in
+            v[0-9]*.*[0-9]) GREYWARD_ACTION_VERSION="$GREYWARD_ACTION_REF" ;;
+            *) GREYWARD_ACTION_VERSION=latest ;;
+          esac
+        fi
         case "$GREYWARD_ACTION_VERSION" in
           latest) tag=() ;;
           v*) tag=("$GREYWARD_ACTION_VERSION") ;;

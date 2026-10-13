@@ -416,8 +416,10 @@ Constraints pass through to the tool: `react@18`, `rails@~> 7.1`.
 **update --self** updates Greyward itself and touches no project, store, or key.
 It reads GitHub's latest release (one request), stops with "nothing to do"
 when this build already is that version or newer, and otherwise downloads
-`greyward-<triple>.tar.gz` and its `.sha256` from the release, verifies the
-digest, extracts the binary to a sibling of the running one, runs its
+`greyward-<triple>.tar.gz`, its `.sha256` and its `.sig` from the release,
+verifies the digest and then the signature (Ed25519, by the release key whose
+public half is compiled into ward; a release without a valid `.sig` is never
+installed), extracts the binary to a sibling of the running one, runs its
 `--version`, and renames it over the running binary, which keeps working
 because it holds its open file. The writability probe runs before anything
 is downloaded: when the binary's directory cannot be written, the refusal
@@ -429,7 +431,11 @@ is "at the latest release's version" and stays. The asset names and the
 checksum rule are `install.sh`'s, so the two read a release the same way. Releases are built for Linux x86_64
 only for now (macOS waits on the macOS gate in FOLLOW-UPS.md); a 404 from the anonymous request is
 reported as no published release. `GREYWARD_RELEASE_MANIFEST` names another
-manifest URL (the tests use `file://`); nothing checks in the background.
+manifest URL (the tests use `file://`); nothing checks in the background. A
+debug build also reads `GREYWARD_RELEASE_PUBLIC_KEY` (`ed25519:<64 hex>`), the
+key the tests sign their releases with; a release build trusts only the
+compiled-in key. Each archive also carries a build provenance attestation,
+which `gh attestation verify <asset> --repo DigitalWestern/greyward` checks.
 
 **update --toolchain** `[<ecosystem>]` is the other update, and the two never
 mix. It re-reads the declarative toolchain sources, selects the shipped
@@ -1021,8 +1027,11 @@ jobs:
 ```
 
 The action is newer than `v0.1.0`, so that tag does not carry it: name
-`@main` until the next release is tagged, then the tag. Which Greyward it
-installs is the `version` input, not the ref after the `@`.
+`@main` until the next release is tagged, then the tag. A tag after the `@`
+also picks the Greyward it installs (`@v0.3.0` installs v0.3.0); `@main` or a
+commit installs the latest release, and the `version` input overrides both.
+Either way the installer refuses a release not signed by Greyward's release
+key.
 
 `--frozen` writes nothing, so `greyward-toolchain.toml` and the lockfiles have to
 be committed first: run `ward` once on your machine and commit what it wrote.
@@ -1031,7 +1040,7 @@ a later step can `ward run` the tests under the same policy. Its inputs:
 
 | input | default | what it does |
 |---|---|---|
-| `version` | `latest` | release to install, as a tag (`v0.1.0`) |
+| `version` | the action's tag, else `latest` | release to install, as a tag (`v0.1.0`) or `latest` |
 | `token` | the job's token | reads the release; the job's own token is enough, since Greyward's repository is public |
 | `working-directory` | `.` | the project to set up |
 | `policy` | *(empty)* | empty: the company deny list (`docs/human/policy-company.toml`); `none`: sets none (a policy already on the runner or in the project still applies); otherwise the path of a policy file. On a `pull_request` event the workspace is the pull request's checkout, so a file in it is the pull request's to edit (it could drop a denial or trust its own key): the action refuses one there. Name a file outside the workspace instead, for example the base branch's copy written under `$RUNNER_TEMP` by an earlier step |

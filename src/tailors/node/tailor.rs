@@ -575,7 +575,7 @@ impl Tailor for Node {
             // `git:<commit>` is not a digest of a file; its commit is in the
             // purl. An empty integrity names no digest at all.
             if !integrity.is_empty() && !integrity.starts_with("git:") {
-                push_sri_hashes(&mut c, &integrity).map_err(|e| {
+                push_sri_hashes(&mut c, &integrity, &p["matched_digest"]).map_err(|e| {
                     crate::kernel::cyclonedx::err(format!("{eco} closure: {path}: integrity: {e}"))
                 })?;
             }
@@ -739,10 +739,38 @@ fn closure_runtime(
     comforter::toolchain::runtime_object(store, activity, &closure, "bin/node")
 }
 
-/// Each SRI candidate as a CycloneDX hash: the algorithm by its CycloneDX
-/// name and the digest in hex, the same digest the SRI spells in base64.
-fn push_sri_hashes(c: &mut Value, integrity: &str) -> io::Result<()> {
-    let hashes = crate::kernel::digest::sri_candidates(integrity)?
+/// The digest the installed bytes matched as a CycloneDX hash: the
+/// algorithm by its CycloneDX name and the digest in hex, the same digest
+/// the SRI spells in base64. `matched` is the closure row's
+/// `matched_digest`, which must be one of the integrity's candidates. A
+/// closure written before rows named it lists every candidate instead and
+/// says so in a `greyward:hash-match` property, since only one of them is
+/// known to be the bytes'.
+fn push_sri_hashes(c: &mut Value, integrity: &str, matched: &Value) -> io::Result<()> {
+    let candidates = crate::kernel::digest::sri_candidates(integrity)?;
+    let digests = if matched.is_null() {
+        push_property(
+            c,
+            "greyward:hash-match",
+            "unrecorded: this closure predates the matched digest, so every integrity \
+             candidate is listed and only one is the installed bytes'; run `ward` to record it",
+        );
+        candidates
+    } else {
+        let algo = matched["algo"].as_str().unwrap_or_default();
+        let hex = matched["hex"].as_str().unwrap_or_default();
+        let digest = crate::kernel::digest::Digest::from_parts(algo, hex).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("matched_digest: {e}"))
+        })?;
+        if !candidates.contains(&digest) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("matched_digest {algo}:{hex} is not one of the integrity's digests"),
+            ));
+        }
+        vec![digest]
+    };
+    let hashes = digests
         .iter()
         .map(|digest| {
             let alg = match digest.algo() {
@@ -1478,7 +1506,8 @@ mod tests {
             "node_version": "22.0.0",
             "packages": [
                 {"path": "node_modules/@s/alias", "name": "@t/real", "version": "2.0.0",
-                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==",
+                 "matched_digest": {"algo": "sha512", "hex": "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"}},
                 {"path": "node_modules/gitdep", "name": "gitdep", "version": "1.0.0",
                  "integrity": "git:0123456789abcdef0123456789abcdef01234567",
                  "git": {"url": "https://github.com/o/gitdep.git",
@@ -1486,6 +1515,8 @@ mod tests {
                          "subdirectory": "packages/core"}},
                 {"path": "node_modules/a/node_modules/old", "version": "1.0.0",
                  "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
+                {"path": "node_modules/unmatched", "name": "unmatched", "version": "1.0.0",
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
             ],
         });
         let mut out = Vec::new();
@@ -1505,15 +1536,13 @@ mod tests {
             property(alias, "greyward:path").as_deref(),
             Some("node_modules/@s/alias")
         );
+        // Two candidates, and the bytes matched the first: only it is a
+        // hash of the component.
         let hashes = alias["hashes"].as_array().unwrap();
-        assert_eq!(hashes.len(), 2, "{hashes:?}");
-        assert!(
-            hashes
-                .iter()
-                .all(|hash| hash["alg"] == "SHA-512"
-                    && hash["content"].as_str().unwrap().len() == 128)
-        );
-        assert!(hashes.iter().any(|hash| hash["content"] == "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"));
+        assert_eq!(hashes.len(), 1, "{hashes:?}");
+        assert_eq!(hashes[0]["alg"], "SHA-512");
+        assert_eq!(hashes[0]["content"], "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75");
+        assert_eq!(property(alias, "greyward:hash-match"), None);
 
         let git = &out[1];
         assert_eq!(
@@ -1527,6 +1556,35 @@ mod tests {
         assert_eq!(old["name"], "old");
         assert_eq!(old["purl"], "pkg:npm/old@1.0.0");
         assert_eq!(old["hashes"][0]["content"], "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75");
+
+        // A row from a closure written before the matched digest: every
+        // candidate, and a property that says only one is the bytes'.
+        let unmatched = &out[3];
+        let hashes = unmatched["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 2, "{hashes:?}");
+        assert!(property(unmatched, "greyward:hash-match")
+            .unwrap()
+            .starts_with("unrecorded: this closure predates the matched digest"));
+        assert!(property(old, "greyward:hash-match").is_some());
+
+        // A matched digest that is none of the row's candidates is a
+        // damaged closure.
+        let mut out = Vec::new();
+        let stray = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [{"path": "node_modules/x", "version": "1.0.0",
+                          "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==",
+                          "matched_digest": {"algo": "sha512", "hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"}}],
+        });
+        let error = Node
+            .sbom_components("node", &stray, &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("is not one of the integrity's digests"),
+            "{error}"
+        );
 
         let mut out = Vec::new();
         let malformed = json!({

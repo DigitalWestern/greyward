@@ -27,8 +27,8 @@
 //! mode. Temporary cleanup after a failure is best-effort.
 
 use crate::kernel::store::{
-    fd_stat, fsync_directory, mkdir_at, open_file_at, read_dir_names_at, remove_tree_entry_at,
-    rename_at, same_inode, stat_at, stat_at_following, unlink_if_same,
+    fd_identity, fd_stat, fsync_directory, mkdir_at, open_file_at, read_dir_names_at,
+    remove_tree_entry_at, rename_at, same_inode, stat_at, stat_at_following, unlink_if_same,
 };
 use std::ffi::{CString, OsStr};
 use std::fs;
@@ -57,7 +57,7 @@ const ANCESTOR_FLAGS: libc::c_int = DIRECTORY_FLAGS;
 const TEMP_ATTEMPTS: usize = 8;
 
 mod containment;
-pub(crate) use containment::Containment;
+pub(crate) use containment::{Containment, LinkEnd};
 
 /// What a project-relative name resolves to, without following symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

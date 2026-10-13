@@ -2,7 +2,7 @@
 //! node_modules forest, workspace links, bin links, and the closure record.
 
 use super::*;
-use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::fsroot::{LinkEnd, ProjectRoot};
 
 pub(super) fn workspace_set(plan: &NpmPlan) -> Vec<String> {
     if !plan.workspaces.is_empty() {
@@ -719,6 +719,7 @@ fn link_workspace_sources(
             "a workspace link target in the project changed while the sync ran; run it again",
         ));
     }
+    let mut planted = Vec::new();
     for (l, resolved) in plan.links.iter().zip(link_targets) {
         let link_root = workspace_path(&l.path)
             .map(|(workspace, _)| {
@@ -776,8 +777,81 @@ fn link_workspace_sources(
                 )));
             }
         }
-        refuse_link_leading_out(project, &link, Path::new(resolved), &l.path)?;
+        let identity = refuse_link_leading_out(project, &link, Path::new(resolved), &l.path)?;
+        planted.push(PlantedLink {
+            link,
+            target: PathBuf::from(resolved),
+            name: l.path.clone(),
+            identity,
+        });
     }
+    recheck_links_before_publication(project, planted)
+}
+
+/// Make the projection's GC root durable
+/// (`comforter::persist_root_for_refs_with_project_lock`), first
+/// withdrawing the planted-link check an earlier sync of this project left:
+/// those links are not this sync's, whose own are checked once planted.
+fn persist_root(
+    project: &ProjectRoot,
+    store: &Store,
+    activity: &StoreActivity,
+    refs: &crate::comforter::ClosureRefs,
+    project_lock: &fs::File,
+) -> io::Result<()> {
+    crate::comforter::publication::withdraw_publication_check(project.path(), LINKS_CHECK);
+    crate::comforter::persist_root_for_refs_with_project_lock(
+        project,
+        store,
+        activity,
+        refs,
+        project_lock,
+    )
+}
+
+/// The name node's planted-link check is registered under.
+const LINKS_CHECK: &str = "node workspace links";
+
+/// A workspace link as it was planted: where it is, the project input it
+/// leads to, and that directory's device and inode then.
+struct PlantedLink {
+    link: PathBuf,
+    target: PathBuf,
+    name: String,
+    identity: (u64, u64),
+}
+
+/// Leave the closure writer a check that every planted link still leads to
+/// the directory it reached when planted, still inside the project
+/// (`comforter::publication`): a directory on the way moved out or swapped
+/// while the rest of the sync ran is refused right before anything is
+/// published, not only right after planting (#692).
+fn recheck_links_before_publication(
+    project: &ProjectRoot,
+    planted: Vec<PlantedLink>,
+) -> io::Result<()> {
+    let held = project.try_clone()?;
+    crate::comforter::publication::register_publication_check(
+        project.path(),
+        LINKS_CHECK,
+        std::sync::Arc::new(move || {
+            for planted in &planted {
+                let still =
+                    refuse_link_leading_out(&held, &planted.link, &planted.target, &planted.name)?;
+                if still != planted.identity {
+                    fs::remove_file(&planted.link)?;
+                    return Err(err(format!(
+                        "workspace link {} leads to another directory than when it was planted: \
+                         {} was replaced while the sync ran; the link was removed, so check the \
+                         project and run the sync again",
+                        planted.name,
+                        planted.target.display()
+                    )));
+                }
+            }
+            Ok(())
+        }),
+    );
     Ok(())
 }
 
@@ -793,14 +867,16 @@ fn refuse_link_leading_out(
     link: &Path,
     target: &Path,
     name: &str,
-) -> io::Result<()> {
+) -> io::Result<(u64, u64)> {
     let why = match project.link_leads_to(link, target)? {
-        Some(true) => return Ok(()),
-        Some(false) => {
+        LinkEnd::Target(identity) => return Ok(identity),
+        LinkEnd::Elsewhere => {
             "leads outside the project once planted: a directory on the way to its target was \
              replaced while the sync ran"
         }
-        None => "has no target: a workspace link target must exist when the link is planted",
+        LinkEnd::Gone => {
+            "has no target: a workspace link target must exist when the link is planted"
+        }
     };
     fs::remove_file(link)?;
     Err(err(format!(
@@ -1018,13 +1094,7 @@ pub fn project_node_env_recorded(
     }
     // The root is durable before any stale managed link is removed, any user
     // directory is moved, or the new forest is published.
-    crate::comforter::persist_root_for_refs_with_project_lock(
-        project,
-        &store,
-        activity,
-        &refs,
-        &project_lock,
-    )?;
+    persist_root(project, &store, activity, &refs, &project_lock)?;
     for (source, backup) in pending_backups {
         // Reaching here means the path was a real directory, not ward's
         // symlink: either a project ward has never synced, or one where an
@@ -1346,6 +1416,67 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("has no target"), "{error}");
         assert!(forest.join("gone").symlink_metadata().is_err());
+    }
+
+    /// Sol's move-out, after planting: the target's directory moved out of
+    /// the project with a symlink to its new place left behind keeps the
+    /// planted link reaching the same inode, and the check the closure
+    /// writer runs right before publication refuses it and removes the
+    /// link. A target replaced by another directory inside the project is
+    /// refused too: the link no longer reaches what was planted (#692).
+    #[test]
+    fn a_planted_link_is_checked_again_right_before_publication() {
+        let scratch = TempDir::named("link-publication-check");
+        let root = scratch.0.clone();
+        let project = root.join("project");
+        let forest = root.join("forest/node_modules");
+        for dir in [
+            project.join("src/lib"),
+            project.join("kept/lib"),
+            root.join("outside"),
+            forest.clone(),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let plan = |links: &[(&str, &str)]| NpmPlan {
+            node_version: "22.0.0".to_string(),
+            packages: Vec::new(),
+            links: links
+                .iter()
+                .map(|(path, target)| NpmLink {
+                    path: path.to_string(),
+                    target: target.to_string(),
+                })
+                .collect(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".to_string(),
+        };
+        let held = ProjectRoot::open(&project).unwrap();
+        let publish = || crate::comforter::publication::run_publication_checks(&held);
+        let plant = |links: &[(&str, &str)]| {
+            let targets: Vec<String> = links.iter().map(|(_, t)| t.to_string()).collect();
+            link_workspace_sources(&held, &plan(links), &targets, &root.join("forest"), &forest)
+                .unwrap();
+        };
+        plant(&[("node_modules/lib", "src/lib")]);
+        publish().unwrap();
+        fs::rename(project.join("src"), root.join("outside/src")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside/src"), project.join("src")).unwrap();
+        let error = publish().unwrap_err().to_string();
+        assert!(error.contains("leads outside"), "{error}");
+        assert!(forest.join("lib").symlink_metadata().is_err());
+
+        plant(&[("node_modules/kept", "kept/lib")]);
+        fs::rename(project.join("kept/lib"), project.join("kept/old")).unwrap();
+        fs::create_dir_all(project.join("kept/lib")).unwrap();
+        let error = publish().unwrap_err().to_string();
+        assert!(
+            error.contains("another directory than when it was planted"),
+            "{error}"
+        );
+        assert!(forest.join("kept").symlink_metadata().is_err());
+        crate::comforter::publication::withdraw_publication_check(&project, LINKS_CHECK);
+        publish().unwrap();
     }
 
     /// vite commits a fixture `node_modules` inside a workspace member

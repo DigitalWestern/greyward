@@ -647,14 +647,20 @@ fn extract_tarball_packages(
     Ok(())
 }
 
-/// A version as npm compares it: surrounding space, a leading `=` or `v`,
-/// and build metadata dropped (`semver.clean`), so `v1.0.0+sha.1` in a
-/// tarball's package.json is the `1.0.0` the registry and the lock name.
-fn clean_version(version: &str) -> &str {
-    let version = version.trim();
-    let version = version.strip_prefix('=').unwrap_or(version).trim_start();
-    let version = version.strip_prefix('v').unwrap_or(version);
-    version.split_once('+').map_or(version, |(core, _)| core)
+/// Do two versions name the same release as npm reads them? Both sides go
+/// through node-semver's loose `clean`, which npm applies to a
+/// package.json version when it reads one, so `v01.0.0+sha.1` in a
+/// tarball's package.json is the `1.0.0` the registry and the lock name,
+/// and `1.2.3-01` is `1.2.3-1`. A version `clean` refuses is one npm would
+/// refuse to read, so it matches only itself as written.
+fn same_version(a: &str, b: &str) -> bool {
+    match (
+        crate::kernel::semver::clean_loose(a),
+        crate::kernel::semver::clean_loose(b),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.trim() == b.trim(),
+    }
 }
 
 /// The bytes the integrity verified must be the package the lock entry
@@ -692,7 +698,7 @@ fn check_tarball_identity(p: &NpmPackage, dest: &Path) -> io::Result<()> {
             .map_err(|e| err(format!("{}: tarball package.json: {e}", p.path)))?;
     let name = manifest["name"].as_str().unwrap_or_default();
     let version = manifest["version"].as_str().unwrap_or_default();
-    if name == p.name && clean_version(version) == clean_version(&p.version) {
+    if name == p.name && same_version(version, &p.version) {
         return Ok(());
     }
     Err(err(format!(
@@ -1713,6 +1719,19 @@ mod tests {
             ),
             "{other}"
         );
+        // npm's loose clean: leading zeros in the core and in numeric
+        // prerelease identifiers are numbers, as `@npmcli/package-json`
+        // rewrites them on read.
+        check(Some(r#"{"name":"left-pad","version":"01.3.0"}"#), &left_pad).unwrap();
+        let pre = package("node_modules/left-pad", "left-pad", "1.2.3-1", registry);
+        check(Some(r#"{"name":"left-pad","version":"1.2.3-01"}"#), &pre).unwrap();
+        let next = check(Some(r#"{"name":"left-pad","version":"1.2.3-2"}"#), &pre).unwrap_err();
+        assert!(next.contains("is left-pad@1.2.3-2"), "{next}");
+        // A version npm cannot read matches only itself.
+        let odd = package("node_modules/left-pad", "left-pad", "not-semver", registry);
+        check(Some(r#"{"name":"left-pad","version":"not-semver"}"#), &odd).unwrap();
+        check(Some(r#"{"name":"left-pad","version":"1.3.0"}"#), &odd).unwrap_err();
+
         let older = check(Some(r#"{"name":"left-pad","version":"1.2.0"}"#), &left_pad).unwrap_err();
         assert!(older.contains("is left-pad@1.2.0"), "{older}");
         let unnamed = check(Some(r#"{"version":"1.3.0"}"#), &left_pad).unwrap_err();

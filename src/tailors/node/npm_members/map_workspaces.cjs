@@ -4,24 +4,42 @@
 //
 //   node map_workspaces.cjs <npm's node_modules> <project> <request> <out>
 //
-// <request> holds the package.json `workspaces` value; <out> gets a JSON
-// array of [name, directory] pairs, each directory relative to <project>
-// and `/`-separated, as map-workspaces found it. Pairs, not an object, so
-// a member named `__proto__` is kept like any other.
+// <request> holds the package.json `workspaces` value. <out> gets one JSON
+// object: `{"members": [[name, directory], ...]}` in npm's order, each
+// directory relative to <project> and `/`-separated, as map-workspaces
+// found it (pairs, not an object, so a member named `__proto__` is kept),
+// or `{"error": CODE}` when npm could not read the list.
+//
+// An error is only ever a code from the fixed list below. npm's messages
+// quote the file they failed on, and a member's package.json can be a
+// symlink to any file the user can read, so no message text, path or file
+// content leaves this process. ward discards its stdout and stderr too.
 const fs = require('fs')
 const path = require('path')
 
+const CODES = new Set([
+  'EJSONPARSE', 'ENOENT', 'EACCES', 'EPERM', 'ENOTDIR', 'EISDIR', 'ELOOP',
+  'ENAMETOOLONG', 'EMFILE', 'ENFILE', 'EIO',
+])
 const [modules, root, request, out] = process.argv.slice(2)
-const mapWorkspaces = require(path.join(modules, '@npmcli', 'map-workspaces'))
-const workspaces = JSON.parse(fs.readFileSync(request, 'utf8'))
 
-mapWorkspaces({ cwd: root, pkg: { workspaces } }).then(found => {
-  const members = []
-  for (const [name, dir] of found) {
-    members.push([name, path.relative(root, dir).split(path.sep).join('/')])
-  }
-  fs.writeFileSync(out, JSON.stringify(members))
-}, error => {
-  process.stderr.write(`${(error && error.message) || error}\n`)
-  process.exit(1)
-})
+function fail (error) {
+  const code = error && typeof error.code === 'string' && CODES.has(error.code)
+    ? error.code
+    : 'EUNKNOWN'
+  fs.writeFileSync(out, JSON.stringify({ error: code }))
+}
+
+try {
+  const mapWorkspaces = require(path.join(modules, '@npmcli', 'map-workspaces'))
+  const workspaces = JSON.parse(fs.readFileSync(request, 'utf8'))
+  mapWorkspaces({ cwd: root, pkg: { workspaces } }).then(found => {
+    const members = []
+    for (const [name, dir] of found) {
+      members.push([name, path.relative(root, dir).split(path.sep).join('/')])
+    }
+    fs.writeFileSync(out, JSON.stringify({ members }))
+  }, fail)
+} catch (error) {
+  fail(error)
+}

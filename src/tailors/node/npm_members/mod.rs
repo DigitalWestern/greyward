@@ -40,6 +40,10 @@ pub(crate) struct Found {
     /// Member directories npm found whose real directory is outside the
     /// project, by the path npm named them with, sorted.
     pub(crate) outside: Vec<String>,
+    /// npm's `[name, directory]` pair for each member in `members`, in
+    /// npm's order. The name is the `node_modules/<name>` link an npm lock
+    /// records for the member, so a renamed member is a changed member set.
+    pub(crate) named: Vec<(String, String)>,
 }
 
 /// What a membership run needs from the command: an open store with its
@@ -105,6 +109,16 @@ fn changed(root: &ProjectRoot, earlier: &Found, now: &Found) -> io::Error {
     let (before, after) = (all(earlier), all(now));
     let added: Vec<&String> = after.iter().filter(|dir| !before.contains(dir)).collect();
     let removed: Vec<&String> = before.iter().filter(|dir| !after.contains(dir)).collect();
+    let renamed: Vec<&(String, String)> = now
+        .named
+        .iter()
+        .filter(|pair| {
+            earlier
+                .named
+                .iter()
+                .any(|(name, dir)| dir == &pair.1 && name != &pair.0)
+        })
+        .collect();
     let moved: Vec<&String> = now
         .outside
         .iter()
@@ -117,15 +131,15 @@ fn changed(root: &ProjectRoot, earlier: &Found, now: &Found) -> io::Error {
         .collect();
     io::Error::other(format!(
         "{}: the npm workspace members changed while the command ran (added {added:?}, \
-         removed {removed:?}, moved across the project boundary {moved:?}); nothing \
-         was published for the changed set, so run the command again",
+         removed {removed:?}, renamed {renamed:?}, moved across the project boundary \
+         {moved:?}, or reordered); nothing was published for the changed set, so run the command again",
         root.path().display()
     ))
 }
 
 /// The member directories npm names, relative to the root, before ward's
 /// rule: the provider's Node runs map-workspaces in the sandbox.
-fn npm_named(root: &ProjectRoot, workspaces: &Value) -> io::Result<Vec<String>> {
+fn npm_named(root: &ProjectRoot, workspaces: &Value) -> io::Result<Vec<(String, String)>> {
     #[cfg(test)]
     if let Some(named) = tests::named_for_test(root, workspaces) {
         return named;
@@ -154,13 +168,18 @@ fn npm_named(root: &ProjectRoot, workspaces: &Value) -> io::Result<Vec<String>> 
 /// was opened and registered at, never resolved again: the sandbox binds
 /// the held descriptor there (`HeldRoots`), so npm reads the directory ward
 /// holds even if that path has since been pointed somewhere else.
+///
+/// Node's stdout and stderr go to `/dev/null`, never to ward's terminal or
+/// a CI log: npm sees the whole host read-only, and a member's
+/// `package.json` can be a symlink to any file the user can read, which an
+/// npm message would quote. The answer is the out file alone.
 fn run_map_workspaces(
     ctx: &Context,
     node: &Path,
     root: &ProjectRoot,
     workspaces: &Value,
     scratch: &Path,
-) -> io::Result<Vec<String>> {
+) -> io::Result<Vec<(String, String)>> {
     let project = root.path();
     let script = scratch.join("map_workspaces.cjs");
     let request = scratch.join("workspaces.json");
@@ -175,6 +194,10 @@ fn run_map_workspaces(
     };
     let node_bin = node.join("bin/node");
     let argv = [
+        std::ffi::OsStr::new("/bin/sh"),
+        std::ffi::OsStr::new("-c"),
+        std::ffi::OsStr::new("exec \"$@\" >/dev/null 2>&1"),
+        std::ffi::OsStr::new("sh"),
         node_bin.as_os_str(),
         script.as_os_str(),
         modules.as_os_str(),
@@ -207,24 +230,51 @@ fn run_map_workspaces(
                 format!("npm could not read the package.json workspaces list: {error}"),
             )
         })?;
-    parse_members(&std::fs::read(&out)?)
+    let answer = std::fs::read(&out).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            "npm could not read the package.json workspaces list: Node exited without an answer",
+        )
+    })?;
+    parse_members(&answer)
 }
 
-/// The wrapper's output: `[name, directory]` pairs, so a member named
-/// `__proto__` or `constructor` is a pair like any other.
-fn parse_members(out: &[u8]) -> io::Result<Vec<String>> {
-    let pairs: Vec<(String, String)> = serde_json::from_slice(out)
-        .map_err(|error| io::Error::other(format!("npm's workspace members: {error}")))?;
-    Ok(pairs.into_iter().map(|(_, dir)| dir).collect())
+/// The wrapper's answer: `{"members": [[name, directory], ...]}`, pairs so
+/// a member named `__proto__` or `constructor` is a pair like any other, or
+/// `{"error": CODE}`. Only a code made of capital letters is shown, so no
+/// text from a file npm read reaches the message.
+fn parse_members(out: &[u8]) -> io::Result<Vec<(String, String)>> {
+    let malformed =
+        || io::Error::other("npm's workspace members: the wrapper's answer is malformed");
+    let answer: Value = serde_json::from_slice(out).map_err(|_| malformed())?;
+    if let Some(code) = answer.get("error") {
+        let code = code
+            .as_str()
+            .filter(|code| (1..=16).contains(&code.len()))
+            .filter(|code| code.bytes().all(|byte| byte.is_ascii_uppercase()))
+            .unwrap_or("EUNKNOWN");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "npm could not read the package.json workspaces list or a member's package.json \
+                 ({code}); ward shows npm's error code only, since npm's message can quote the \
+                 file it read"
+            ),
+        ));
+    }
+    serde_json::from_value(answer.get("members").cloned().ok_or_else(malformed)?)
+        .map_err(|_| malformed())
 }
 
 /// ward's rule over the directories npm named: a plain path inside the
 /// project with a `package.json` is a member, one a symlink carries out of
 /// the project is outside, and one that is not a plain relative path is an
-/// error, since a record names files inside the project only.
-fn contained(root: &ProjectRoot, named: Vec<String>) -> io::Result<Found> {
+/// error, since a record names files inside the project only. A member
+/// inside whose `package.json` is a symlink to a file outside the member's
+/// own directory is refused: its manifest is not part of the member.
+fn contained(root: &ProjectRoot, named: Vec<(String, String)>) -> io::Result<Found> {
     let mut found = Found::default();
-    for dir in named {
+    for (name, dir) in named {
         if dir.is_empty() || dir == "." {
             continue;
         }
@@ -244,8 +294,9 @@ fn contained(root: &ProjectRoot, named: Vec<String>) -> io::Result<Found> {
         match root.input_containment(&path)? {
             Containment::Outside => found.outside.push(dir),
             Containment::Dangling => {}
-            Containment::Inside if root.is_input_file(&path.join("package.json")) => {
-                found.members.push(dir)
+            Containment::Inside if own_manifest(root, &path)? => {
+                found.members.push(dir.clone());
+                found.named.push((name, dir));
             }
             Containment::Inside => {}
         }
@@ -257,23 +308,68 @@ fn contained(root: &ProjectRoot, named: Vec<String>) -> io::Result<Found> {
     Ok(found)
 }
 
+/// Whether the member directory `dir`, inside the project, has a
+/// `package.json`, refusing one that leads outside the directory.
+fn own_manifest(root: &ProjectRoot, dir: &Path) -> io::Result<bool> {
+    let manifest = dir.join("package.json");
+    let refused = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: the workspace member's package.json is a symlink to a file outside the \
+                 member's directory; ward reads a member's manifest from the member only",
+                manifest.display()
+            ),
+        )
+    };
+    match root.input_containment(&manifest)? {
+        Containment::Outside => return Err(refused()),
+        Containment::Dangling => return Ok(false),
+        Containment::Inside => {}
+    }
+    if !root.is_input_file(&manifest) {
+        return Ok(false);
+    }
+    let real_dir = root.contained_input_path(dir)?;
+    let real_manifest = root.contained_input_path(&manifest)?;
+    if !real_manifest.starts_with(&real_dir) {
+        return Err(refused());
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::kernel::platform::Platform;
     use crate::kernel::testutil::TempDir;
 
-    type Fake = dyn Fn(&Value) -> Vec<String> + Send + Sync;
+    type Fake = dyn Fn(&Value) -> Vec<(String, String)> + Send + Sync;
 
     static FAKE: Mutex<Option<(PathBuf, Arc<Fake>)>> = Mutex::new(None);
     static SERIAL: Mutex<()> = Mutex::new(());
 
     /// While the returned guard lives, a membership run for the project at
-    /// `root` answers with `fake` instead of running npm, and the first
-    /// answers kept so far are dropped. Tests that read npm's members hold one.
+    /// `root` answers with `fake`'s directories instead of running npm,
+    /// each named by its last component as npm names a member whose
+    /// package.json has no name, and the first answers kept so far are
+    /// dropped. Tests that read npm's members hold one.
     pub(crate) fn fake_npm(
         root: &Path,
         fake: impl Fn(&Value) -> Vec<String> + Send + Sync + 'static,
+    ) -> impl Drop {
+        fake_npm_named(root, move |workspaces| {
+            fake(workspaces)
+                .into_iter()
+                .map(|dir| (dir.rsplit('/').next().unwrap_or(&dir).to_string(), dir))
+                .collect()
+        })
+    }
+
+    /// [`fake_npm`] with npm's `[name, directory]` pairs given in full.
+    pub(crate) fn fake_npm_named(
+        root: &Path,
+        fake: impl Fn(&Value) -> Vec<(String, String)> + Send + Sync + 'static,
     ) -> impl Drop {
         struct Reset(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
         impl Drop for Reset {
@@ -292,7 +388,7 @@ pub(crate) mod tests {
     pub(super) fn named_for_test(
         root: &ProjectRoot,
         workspaces: &Value,
-    ) -> Option<io::Result<Vec<String>>> {
+    ) -> Option<io::Result<Vec<(String, String)>>> {
         let slot = FAKE.lock().unwrap_or_else(|p| p.into_inner());
         let (at, fake) = slot.as_ref()?;
         let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
@@ -346,10 +442,101 @@ pub(crate) mod tests {
     /// A member named `__proto__` is a pair like any other (#694).
     #[test]
     fn a_member_named_like_an_object_property_is_kept() {
-        let named =
-            parse_members(br#"[["__proto__","packages/proto"],["constructor","packages/c"]]"#)
-                .unwrap();
-        assert_eq!(named, ["packages/proto", "packages/c"]);
+        let named = parse_members(
+            br#"{"members":[["__proto__","packages/proto"],["constructor","packages/c"]]}"#,
+        )
+        .unwrap();
+        let pair = |name: &str, dir: &str| (name.to_string(), dir.to_string());
+        assert_eq!(
+            named,
+            [
+                pair("__proto__", "packages/proto"),
+                pair("constructor", "packages/c")
+            ]
+        );
+    }
+
+    /// The wrapper's error is a code, and only a code made of capital
+    /// letters is shown: anything else, such as text a confused wrapper
+    /// copied from a file, becomes `EUNKNOWN` (#694).
+    #[test]
+    fn an_npm_error_shows_its_code_only() {
+        let error = parse_members(br#"{"error":"EJSONPARSE"}"#).unwrap_err();
+        assert!(error.to_string().contains("(EJSONPARSE)"), "{error}");
+        for answer in [
+            r#"{"error":"token=SECRET-MARKER-123"}"#,
+            r#"{"error":{"message":"SECRET-MARKER-123"}}"#,
+        ] {
+            let error = parse_members(answer.as_bytes()).unwrap_err().to_string();
+            assert!(error.contains("(EUNKNOWN)"), "{error}");
+            assert!(!error.contains("SECRET"), "{error}");
+        }
+        let error = parse_members(b"SECRET-MARKER-123").unwrap_err().to_string();
+        assert!(!error.contains("SECRET"), "{error}");
+    }
+
+    /// A member renamed while the command ran (its package.json `name`
+    /// changed, the directory the same) is a changed member set: the lock's
+    /// `node_modules/<name>` link would be the old one (#694).
+    #[test]
+    fn a_member_renamed_while_the_command_runs_is_refused() {
+        let scratch = TempDir::named("npm-members-renamed");
+        let root = scratch.0.join("project");
+        std::fs::create_dir_all(root.join("packages/lib")).unwrap();
+        std::fs::write(root.join("packages/lib/package.json"), "{}").unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let _fake = fake_npm_named(&root, move |_| {
+            let call = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let name = if call == 0 { "a" } else { "b" };
+            vec![(name.to_string(), "packages/lib".to_string())]
+        });
+        let list = serde_json::json!(["packages/*"]);
+        let first = npm_members(&held, &list).unwrap();
+        assert_eq!(first.named, [("a".to_string(), "packages/lib".to_string())]);
+        let error = npm_members(&held, &list).unwrap_err().to_string();
+        assert!(
+            error.contains("changed while the command ran") && error.contains("\"b\""),
+            "{error}"
+        );
+    }
+
+    /// A member whose package.json is a symlink out of its own directory is
+    /// refused, whether the file is outside the project or elsewhere in it;
+    /// one pointing further down its own directory is kept (#694).
+    #[test]
+    fn a_member_whose_manifest_leads_out_of_it_is_refused() {
+        let scratch = TempDir::named("npm-members-manifest");
+        let root = scratch.0.join("project");
+        for dir in ["packages/out", "packages/side", "packages/down/real"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(scratch.0.join("secret.txt"), "{}").unwrap();
+        std::fs::write(root.join("shared.json"), "{}").unwrap();
+        std::fs::write(root.join("packages/down/real/package.json"), "{}").unwrap();
+        let link = std::os::unix::fs::symlink;
+        link(
+            "../../../secret.txt",
+            root.join("packages/out/package.json"),
+        )
+        .unwrap();
+        link("../../shared.json", root.join("packages/side/package.json")).unwrap();
+        link("real/package.json", root.join("packages/down/package.json")).unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        for dir in ["packages/out", "packages/side"] {
+            let _fake = fake_npm(&root, move |_| vec![dir.to_string()]);
+            let error = npm_members(&held, &serde_json::json!(["packages/*"]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("outside the member's directory"),
+                "{dir}: {error}"
+            );
+        }
+        let _fake = fake_npm(&root, |_| vec!["packages/down".to_string()]);
+        let found = npm_members(&held, &serde_json::json!(["packages/*"])).unwrap();
+        assert_eq!(found.members, ["packages/down"]);
     }
 
     /// A member added during a sync, after the freshness check read the
@@ -557,6 +744,64 @@ pub(crate) mod tests {
         let error = npm_members(&held, &serde_json::json!(["packages/*"]))
             .expect_err("npm read the tree the old path now leads to");
         assert!(error.to_string().contains("symlink"), "{error}");
+    }
+
+    /// A member's package.json symlinked to a host file is never quoted:
+    /// not by npm's parse error, which names the file's text, not in the
+    /// error ward returns, and not on ward's stdout or stderr, which this
+    /// test points at a file for the run. A host file that parses is
+    /// refused by ward's own rule without its contents either (#694).
+    #[test]
+    #[ignore = "realizes the store Node and runs it in the Linux sandbox"]
+    fn a_member_manifest_linked_to_a_host_file_is_never_quoted() {
+        use std::os::fd::AsRawFd;
+        if !crate::kernel::sandbox::linux_ready("npm_members_marker") {
+            return;
+        }
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        install_shipped_node();
+        const MARKER: &str = "SECRET-MARKER-5f1c";
+        for (secret, expected) in [
+            (format!("token={MARKER} not json"), "(EJSONPARSE)"),
+            (
+                format!("{{\"name\":\"{MARKER}\"}}"),
+                "outside the member's directory",
+            ),
+        ] {
+            let scratch = TempDir::named("npm-ws-marker");
+            let root = scratch.0.join("project");
+            std::fs::create_dir_all(root.join("packages/leak")).unwrap();
+            std::fs::create_dir_all(root.join("packages/ok")).unwrap();
+            std::fs::write(root.join("packages/ok/package.json"), r#"{"name":"ok"}"#).unwrap();
+            std::fs::write(scratch.0.join("secret.txt"), &secret).unwrap();
+            std::os::unix::fs::symlink(
+                "../../../secret.txt",
+                root.join("packages/leak/package.json"),
+            )
+            .unwrap();
+            let held = ProjectRoot::open(&root).unwrap();
+            let captured = std::fs::File::create(scratch.0.join("captured")).unwrap();
+            // SAFETY: dup and dup2 on this process's own standard
+            // descriptors; both are restored before the test reads them.
+            let saved = unsafe { [libc::dup(1), libc::dup(2)] };
+            unsafe {
+                libc::dup2(captured.as_raw_fd(), 1);
+                libc::dup2(captured.as_raw_fd(), 2);
+            }
+            let result = npm_members(&held, &serde_json::json!(["packages/*"]));
+            unsafe {
+                libc::dup2(saved[0], 1);
+                libc::dup2(saved[1], 2);
+                libc::close(saved[0]);
+                libc::close(saved[1]);
+            }
+            let error = result.expect_err("a member's manifest out of it was accepted");
+            let error = error.to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains(MARKER), "{error}");
+            let printed = std::fs::read_to_string(scratch.0.join("captured")).unwrap();
+            assert!(!printed.contains(MARKER), "printed: {printed}");
+        }
     }
 
     /// The provider the ignored tests use: the shipped Node, in the store

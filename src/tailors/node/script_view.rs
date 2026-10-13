@@ -153,6 +153,7 @@ fn scripts_in_view(
         Err(e)
             if refused.get()
                 || hostfallback::is_host_changed(&e)
+                || crate::kernel::error::is_sandbox_setup(&e)
                 || matches!(
                     e.kind(),
                     io::ErrorKind::Unsupported | io::ErrorKind::Interrupted

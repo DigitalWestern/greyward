@@ -430,20 +430,19 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
-        // Every failure before bubblewrap starts is a sandbox that could not
-        // be set up, never a failed build (#679). The preflight's own
-        // verdicts already say so (`Unsupported`, or an interrupt). The
-        // spawn itself is marked where it happens (`spawn_unmanaged`,
-        // `supervise::status_with_stderr`).
+        // A failure before bubblewrap starts is a sandbox not set up, never a
+        // failed build (#679); the preflight's verdicts say so themselves and
+        // the spawn is marked where it happens (`spawn_unmanaged`).
         let setup = crate::kernel::error::sandbox_setup;
-        let held = HeldRoots::resolve(self, cwd).map_err(setup)?;
+        let mut held = HeldRoots::resolve(self, cwd).map_err(setup)?;
         self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)
             .map_err(setup)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
         #[cfg(test)]
-        let engine = held::ENGINE_OVERRIDE.with(|engine| engine.borrow().clone());
+        let engine = held::ENGINE_OVERRIDE.with(|hook| hook.borrow_mut().as_mut().map(|f| f()));
         #[cfg(test)]
         let bwrap = engine.as_deref().unwrap_or(bwrap);
+        held.pin().map_err(setup)?;
         let mut invocation = self
             .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
             .map_err(setup)?;
@@ -460,7 +459,8 @@ impl Sandbox<'_> {
         let options = args_file(options).map_err(setup)?;
         let options_fd = pass_in_place(&mut command, &options);
         command.arg("--args").arg(options_fd.to_string()).args(own);
-        pass_fds(&mut command, held.passed());
+        held::keep_in_place(&mut command, held.in_place());
+        pass_fds(&mut command, held.moved());
         // The descriptors are duplicated only when the child is spawned.
         invocation._held = held;
         invocation._options = Some(options);
@@ -1926,7 +1926,7 @@ mod tests {
             "the held cwd was not resolved"
         );
         assert_eq!(held.dest(&member).unwrap(), member);
-        assert!(held.passed().is_empty());
+        assert!(held.in_place().is_empty() && held.moved().is_empty());
         let error = held.place_one(&member).unwrap_err().to_string();
         assert!(error.contains("not a declared sandbox root"), "{error}");
     }
@@ -2555,7 +2555,8 @@ mod tests {
         if let Some(scratch) = std::env::var_os(VANISHED_ENGINE_CHILD) {
             let scratch = PathBuf::from(scratch);
             let missing = scratch.join("no-such-bwrap");
-            held::ENGINE_OVERRIDE.with(|engine| *engine.borrow_mut() = Some(missing));
+            held::ENGINE_OVERRIDE
+                .with(|hook| *hook.borrow_mut() = Some(Box::new(move || missing.clone())));
             let sandbox = Sandbox {
                 read: vec![],
                 write: vec![&scratch],
@@ -2579,6 +2580,79 @@ mod tests {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
             .env(VANISHED_ENGINE_CHILD, &scratch)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const VANISHED_ENGINE_HELD_CHILD: &str = "GREYWARD_TEST_VANISHED_ENGINE_HELD_SCRATCH";
+
+    /// The same with seven held project roots: their descriptors must not
+    /// be moved onto std's spawn-error channel in the child either. Numbers
+    /// 3 to 9 are taken while the roots are opened, so their descriptors
+    /// land above 9, and free again before the spawn, where std's pipes
+    /// would take them.
+    #[test]
+    fn linux_an_engine_gone_with_held_roots_is_a_setup_failure() {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        const NAME: &str =
+            "kernel::sandbox::tests::linux_an_engine_gone_with_held_roots_is_a_setup_failure";
+        if !linux_ready("linux_an_engine_gone_with_held_roots_is_a_setup_failure") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(VANISHED_ENGINE_HELD_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let projects: Vec<PathBuf> = (0..7)
+                .map(|i| {
+                    let project = scratch.join(format!("project{i}"));
+                    fs::create_dir_all(&project).unwrap();
+                    project.canonicalize().unwrap()
+                })
+                .collect();
+            let mut low: Vec<OwnedFd> = Vec::new();
+            loop {
+                let fd = OwnedFd::from(fs::File::open("/dev/null").unwrap());
+                if fd.as_raw_fd() > 9 {
+                    break;
+                }
+                low.push(fd);
+            }
+            let _held: Vec<_> = projects
+                .iter()
+                .map(|project| crate::kernel::fsroot::ProjectRoot::open(project).unwrap())
+                .collect();
+            let missing = scratch.join("no-such-bwrap");
+            let mut low = Some(low);
+            held::ENGINE_OVERRIDE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    low.take();
+                    missing.clone()
+                }))
+            });
+            let work = scratch.join("work");
+            fs::create_dir(&work).unwrap();
+            let sandbox = Sandbox {
+                read: projects.iter().map(PathBuf::as_path).collect(),
+                write: vec![&work],
+                host_view: HostView::Full,
+            };
+            let result =
+                sandbox.run_bwrap_capture(&["/usr/bin/true"], "/usr/bin:/bin", &work, &work, &[]);
+            let error = result.expect_err("a missing engine starts nothing");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            return;
+        }
+        let root = temp_dir("vanished-engine-held");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(VANISHED_ENGINE_HELD_CHILD, &root.0)
             .output()
             .unwrap();
         let report = format!(

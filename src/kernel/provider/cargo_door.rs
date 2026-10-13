@@ -1991,6 +1991,51 @@ mod tests {
                 "[registries.evil]\nindex = \"ssh://-oProxyCommand=evil/index\"\n".to_string(),
                 "registries.evil.index",
             ),
+            // Unstable compiler flags (a codegen backend is a library rustc
+            // loads) and what turns them on for the stable compiler.
+            (
+                "[env]\nRUSTC_BOOTSTRAP = \"1\"\n".to_string(),
+                "env.RUSTC_BOOTSTRAP",
+            ),
+            (
+                "[env]\nRUSTC_BOOTSTRAP_PROC_MACRO = \"1\"\n".to_string(),
+                "env.RUSTC_BOOTSTRAP_PROC_MACRO",
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\n\
+                 rustflags = [\"-Zcodegen-backend=/project/evil.so\"]\n"
+                    .to_string(),
+                "target.x86_64-unknown-linux-gnu.rustflags",
+            ),
+            (
+                "[target.'cfg(unix)']\nrustflags = \"-C codegen-backend=/project/evil.so\"\n"
+                    .to_string(),
+                "target.cfg(unix).rustflags",
+            ),
+            (
+                "[build]\nrustflags = \"-Z unstable-options\"\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustdocflags = [\"-Zunstable-options\"]\n".to_string(),
+                "build.rustdocflags",
+            ),
+            (
+                "[build]\nrustflags = [\"@/project/args\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[env]\nRUSTFLAGS = \"-Copt-level=2 -Zcodegen-backend=x\"\n".to_string(),
+                "env.RUSTFLAGS",
+            ),
+            (
+                "[env]\nCARGO_ENCODED_RUSTFLAGS = \"-Copt-level=2\\u001f-Zx\"\n".to_string(),
+                "env.CARGO_ENCODED_RUSTFLAGS",
+            ),
+            (
+                "[env]\nRUSTDOCFLAGS = { value = \"-Z x\", force = true }\n".to_string(),
+                "env.RUSTDOCFLAGS",
+            ),
         ] {
             let error = check(&text).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{key}");
@@ -2047,6 +2092,11 @@ mod tests {
              [registries.c]\nindex = \"git://git.internal.test/index\"\n\
              [registry]\nindex = \"https://github.com/rust-lang/crates.io-index\"\n\
              [source.g]\ngit = \"https://git.internal.test/repo\"\n"
+                .to_string(),
+            "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n\
+             rustdocflags = \"--cfg docsrs\"\n\
+             [target.'cfg(unix)']\nrustflags = \"-Copt-level=2\"\n\
+             [env]\nRUSTFLAGS = \"-Copt-level=2\"\n"
                 .to_string(),
             "[env]\nMY_SETTING = \"1\"\nOPENSSL_DIR = { value = \"/opt\", force = true }\n"
                 .to_string(),

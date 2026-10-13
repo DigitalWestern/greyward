@@ -472,9 +472,15 @@ Selection covers every patch of each maintained CPython minor that python-build-
     ssh git dependency does;
   - an `[alias]` whose expansion holds `--config` or `-Z`, which `ward run`'s wrapper would
     not see (it refuses `--config` on the command line);
-  - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`) or a variable Greyward
-    forces for cargo (`CARGO_HOME`, `PATH`, `RUSTC_WRAPPER`, ...): cargo sets `[env]` for
-    every program it starts, the compiler probe in resolution included.
+  - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`), `RUSTC_BOOTSTRAP`
+    (or `RUSTC_BOOTSTRAP_*`), or a variable Greyward forces for cargo (`CARGO_HOME`, `PATH`,
+    `RUSTC_WRAPPER`, ...): cargo sets `[env]` for every program it starts, the compiler probe
+    in resolution included;
+  - compiler flags (`build.rustflags`, `build.rustdocflags`, `host.rustflags`,
+    `target.<triple or cfg>.rustflags` or `rustdocflags`, and `RUSTFLAGS`, `RUSTDOCFLAGS` or
+    `CARGO_ENCODED_*` in `[env]`) holding a `-Z` flag, a `codegen-backend` or an `@file`
+    argument file: cargo passes them to the compiler probe, and rustc loads a codegen backend
+    library, running its code, before checking it.
 
   `ward attest` also refuses a lock when `cargo metadata` shows a crate the lock pins to a
   registry or a commit read from anywhere but cargo's own download of it. Metadata prints no

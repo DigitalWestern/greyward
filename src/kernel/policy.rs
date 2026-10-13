@@ -1563,6 +1563,8 @@ deny = ["git-dependency"]"#,
             BUILT_FROM_SOURCE,
             EXTERNAL_TOOLCHAIN,
             HOST_BUILD_INPUTS,
+            HOST_GIT_TRANSPORT,
+            UNPINNED_DIGEST,
         ];
         for kind in KINDS {
             let object = OBJECT_KINDS.contains(kind);
@@ -1620,17 +1622,17 @@ deny = ["git-dependency"]"#,
         let _guard = exception_guard();
         let permissive = Policy::default();
         let attribution = Attribution::open("node").unwrap();
-        for kind in KINDS.iter().copied().chain(["host-git-transport"]) {
+        for kind in KINDS {
             record_with(&permissive, kind, "dep@1.0.0", "fetched").unwrap();
         }
         let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
         let expected: Vec<&str> = KINDS
             .iter()
             .copied()
-            .chain(["host-git-transport"])
             .filter(|kind| !PLAN_TIME_KINDS.contains(kind))
             .collect();
         assert_eq!(stored, expected);
+        assert!(stored.iter().any(|kind| kind == HOST_GIT_TRANSPORT));
         attribution.discard();
     }
 

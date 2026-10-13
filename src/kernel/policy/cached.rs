@@ -4,7 +4,7 @@
 
 use super::{
     current, denied, record, Exception, ARTIFACT_NOT_PROVISIONED, ARTIFACT_PROVISIONED,
-    BUILT_FROM_SOURCE, EXTERNAL_TOOLCHAIN,
+    BUILT_FROM_SOURCE, EXTERNAL_TOOLCHAIN, HOST_GIT_TRANSPORT, UNPINNED_DIGEST,
 };
 use crate::kernel::store::Store;
 use std::io;
@@ -15,12 +15,15 @@ use std::io;
 /// producer that wrote another kind explicitly still has it). A `/2`
 /// object may have been built with any of these and not say so, so
 /// [`check_cached_reusable`] rebuilds it rather than trust it under a
-/// policy that denies one.
+/// policy that denies one. `host-git-transport` and `unpinned-digest` are
+/// newer than `/2`, so no `/2` record holds them either.
 pub const KINDS_NOT_IN_META_2: &[&str] = &[
     ARTIFACT_NOT_PROVISIONED,
     ARTIFACT_PROVISIONED,
     BUILT_FROM_SOURCE,
     EXTERNAL_TOOLCHAIN,
+    HOST_GIT_TRANSPORT,
+    UNPINNED_DIGEST,
 ];
 
 /// Refuse a cached object when its recorded exceptions are denied now.

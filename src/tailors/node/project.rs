@@ -427,6 +427,9 @@ struct ForestPaths {
     /// resolution only treats a directory as a package root when its
     /// basename is node_modules, and cloned packages realpath to this tree.
     forest: PathBuf,
+    /// Each workspace link's target as the held descriptor resolved it
+    /// ([`resolved_link_targets`]), keyed on and planted to.
+    link_targets: Vec<String>,
 }
 
 /// The registry packages that depend on a workspace package, by lock path.
@@ -533,8 +536,8 @@ fn forest_paths(
     plan: &NpmPlan,
     reasons: &CloneReasons,
     workspaces: &[String],
-    link_targets: &[String],
 ) -> io::Result<ForestPaths> {
+    let link_targets = resolved_link_targets(project, plan)?;
     use sha2::{Digest as _, Sha256};
     let CloneReasons {
         mutable,
@@ -555,7 +558,7 @@ fn forest_paths(
     let link_key: String = plan
         .links
         .iter()
-        .zip(link_targets)
+        .zip(&link_targets)
         .map(|(l, resolved)| {
             if *resolved == l.target {
                 format!("{}={};", l.path, l.target)
@@ -584,6 +587,7 @@ fn forest_paths(
         nm_root,
         proj_dir,
         forest,
+        link_targets,
     })
 }
 
@@ -626,6 +630,7 @@ fn build_project_forest(
         nm_root,
         proj_dir,
         forest,
+        ..
     } = paths;
     if fresh && proj_dir.exists() {
         crate::kernel::store::remove_tree(proj_dir)?;
@@ -944,16 +949,7 @@ pub fn project_node_env_recorded(
         &tracked,
     )?;
 
-    let link_targets = resolved_link_targets(project, plan)?;
-    let paths = forest_paths(
-        project,
-        &env_obj,
-        &store,
-        plan,
-        &reasons,
-        &workspaces,
-        &link_targets,
-    )?;
+    let paths = forest_paths(project, &env_obj, &store, plan, &reasons, &workspaces)?;
     let ForestPaths {
         proj_dir, forest, ..
     } = &paths;
@@ -1006,7 +1002,7 @@ pub fn project_node_env_recorded(
         reasons.cloned(),
         fresh,
     )?;
-    link_workspace_sources(project, plan, &link_targets, proj_dir, forest)?;
+    link_workspace_sources(project, plan, &paths.link_targets, proj_dir, forest)?;
     // Old forests are deliberately NOT pruned here: a dev server may still
     // be running from one, and pruning would break it mid-session. They are
     // cheap symlink trees; explicit `ward gc` with liveness checks is the
@@ -1184,8 +1180,8 @@ mod tests {
     /// A link target that passes through a symlink in the project is
     /// planted to where the held descriptor resolved it, so repointing the
     /// symlink afterwards cannot carry the link outside the project; and
-    /// one repointed between the check and the planting is refused (Sol
-    /// review of #692).
+    /// one repointed between the check and the planting is refused
+    /// (#692).
     #[test]
     fn a_workspace_link_is_planted_to_its_resolved_target() {
         let scratch = TempDir::named("link-resolved-target");

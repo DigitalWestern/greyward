@@ -433,7 +433,7 @@ mod tests {
         NpmWorkspaces::new(&entries).unwrap()
     }
 
-    /// The braces minimatch expands before it globs (Sol review of #694).
+    /// The braces minimatch expands before it globs (#694).
     #[test]
     fn braces_expand_as_minimatch_expands_them() {
         let expand = |pattern: &str| expand_braces(pattern).unwrap();

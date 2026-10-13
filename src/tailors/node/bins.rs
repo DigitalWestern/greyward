@@ -278,7 +278,7 @@ mod tests {
     }
 
     /// A scope or package name that contains `node_modules` is a name, not
-    /// the directory that holds the package (Sol review of #695).
+    /// the directory that holds the package (#695).
     #[test]
     fn the_holding_node_modules_is_a_whole_path_component() {
         assert_eq!(

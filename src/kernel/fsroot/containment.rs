@@ -147,7 +147,7 @@ mod tests {
 
     /// The path a link is planted to is the one the held descriptor
     /// reached, symlinks resolved, so repointing one later cannot redirect
-    /// the link (Sol review of #692).
+    /// the link (#692).
     #[test]
     fn a_contained_input_path_has_its_symlinks_resolved() {
         let scratch = crate::kernel::testutil::TempDir::named("contained-path");

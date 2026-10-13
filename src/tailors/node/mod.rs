@@ -1169,8 +1169,7 @@ mod tests {
     ///
     /// `/6` has the `/5` inputs, built by the #695 realization rules: the
     /// `/5` spelling gives back the `/5` goldens, so only the schema moved
-    /// and every environment the old rules built gets a new id (Sol review
-    /// of #695).
+    /// and every environment the old rules built gets a new id (#695).
     ///
     /// `/5` is `/4` plus `gyp_python`: taking that input away and spelling
     /// the schema `/4` gives back the `/4` goldens byte for byte, so nothing

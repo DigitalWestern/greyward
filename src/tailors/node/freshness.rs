@@ -811,8 +811,7 @@ dependencies:
     }
 
     /// npm expands `workspaces` with minimatch, braces included, so a
-    /// member a `{a,b}` set names is one the lock must list (Sol review of
-    /// #694). A dot-named directory a wildcard would reach is not one.
+    /// member a `{a,b}` set names is one the lock must list (#694). A dot-named directory a wildcard would reach is not one.
     #[test]
     fn a_brace_pattern_names_members_the_lock_must_list() {
         let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-braces");

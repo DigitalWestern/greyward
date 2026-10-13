@@ -1301,6 +1301,20 @@ pub fn cargo_confined<'a>(
     confined.forced.cargo_registries = registries;
     confined.store_reads = vec![run.rust_obj.to_path_buf()];
     confined.extra_roots = path_dependency_roots(run.lock_root)?;
+    // The transports the configuration reaches (an ssh mirror replacing
+    // crates.io, which the lock still names as crates.io) are facts of the
+    // run: recorded under its policy with the lock's and the session's, and
+    // carried in the signed record. `run_cargo_with` records them once
+    // before cargo starts as well, so a policy denying them refuses early.
+    let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
+    confined.facts = index_transports(&files)
+        .into_iter()
+        .map(|exception| Fact {
+            kind: crate::kernel::policy::HOST_GIT_TRANSPORT,
+            subject: exception.subject,
+            detail: exception.detail,
+        })
+        .collect();
     // cargo's build output is not a resolution input.
     confined.exclude = vec![PathGlob::new("target")?];
     confined.routes = vec![crates_index::route()?];
@@ -2371,8 +2385,9 @@ mod tests {
 
     /// A git index over ssh is recorded as `host-git-transport`, as a git
     /// dependency over ssh is: cargo's git reaches it with this machine's
-    /// ssh configuration and agent, not through the proxy. https and git
-    /// indexes record nothing.
+    /// ssh configuration and agent, not through the proxy, and so is one
+    /// over the git protocol, which this machine dials unauthenticated. An
+    /// https index records nothing.
     #[test]
     fn an_ssh_index_is_a_host_git_transport() {
         let temp = TempDir::named("cargo-index-transport");
@@ -2395,6 +2410,7 @@ mod tests {
             found,
             [
                 "ssh://git@git.internal.test/index",
+                "git://git.internal.test/index",
                 "ssh://git@git.internal.test/mirror"
             ]
             .map(|url| (
@@ -2832,7 +2848,7 @@ mod tests {
 
     /// What the lock check accepts it returns the transports of, each
     /// `host-git-transport` once: git over file:// and ssh://, an ssh
-    /// registry index. https and git:// record nothing.
+    /// registry index, git and an index over git://. https records nothing.
     #[test]
     fn the_lock_check_returns_each_host_git_transport() {
         let commit = "0123456789abcdef0123456789abcdef01234567";
@@ -2855,12 +2871,64 @@ mod tests {
             [
                 "file:///srv/a",
                 "ssh://git@g.test/b",
-                "ssh://git@g.test/index"
+                "ssh://git@g.test/index",
+                "git://g.test/e",
+                "git://g.test/index"
             ]
         );
         assert!(found
             .iter()
             .all(|e| e.kind == crate::kernel::policy::HOST_GIT_TRANSPORT));
+    }
+
+    /// An ssh mirror replacing crates.io is a transport the lock never
+    /// names (it still says crates.io): it is a fact of the confined run,
+    /// so the door records it under the run's policy with the lock's and
+    /// the session's and carries it into the signed record, each once.
+    #[test]
+    fn a_config_transport_is_a_fact_of_the_confined_run() {
+        let temp = TempDir::named("cargo-config-fact");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"ws\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[source.crates-io]\nreplace-with = \"m\"\n\
+             [source.m]\nregistry = \"ssh://git@mirror.test/index\"\n",
+        )
+        .unwrap();
+        let run = CargoRun {
+            rust_obj: Path::new("/nonexistent/rust"),
+            lock_root: &root,
+            args: &["generate-lockfile"],
+            publish: CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+        };
+        let confined = cargo_confined(
+            &run,
+            CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+            &[],
+        )
+        .unwrap();
+        let facts: Vec<(&str, &str)> = confined
+            .facts
+            .iter()
+            .map(|fact| (fact.kind, fact.subject.as_str()))
+            .collect();
+        assert_eq!(
+            facts,
+            [(
+                crate::kernel::policy::HOST_GIT_TRANSPORT,
+                "ssh://git@mirror.test/index"
+            )]
+        );
     }
 
     /// A refusal from inside the door keeps its class through the cargo

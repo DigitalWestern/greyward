@@ -346,30 +346,16 @@ pub fn network_url(url: &str) -> bool {
 }
 
 /// `host-git-transport` for each git index or source the files reach over
-/// ssh, as a git dependency over ssh records it
-/// ([`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception)):
-/// cargo's git dials it with this machine's ssh configuration and agent,
-/// not through the proxy. `git://` offers no credential and records
-/// nothing, as for a git dependency. The sync and the resolution door
+/// ssh or the git protocol ([`cargo_transport`]): cargo's git dials it from
+/// this machine (over ssh with its ssh configuration and agent), not
+/// through the proxy. The sync and the resolution door
 /// record what this returns; it does not judge the URL (a refused one is
 /// refused by [`refuse_unneutralized_settings`] first).
 pub fn index_transports(files: &[ConfigFile]) -> Vec<crate::kernel::policy::Exception> {
     let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
     for file in files {
         for (_, url) in url_settings(&file.table) {
-            // The scheme in any case, as cargo reads it.
-            let Some(rest) = url.get(6..).filter(|_| {
-                url.get(..6)
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
-            }) else {
-                continue;
-            };
-            let source = crate::kernel::gitsrc::GitSource {
-                url: format!("ssh://{rest}"),
-                commit: "0".repeat(40),
-                subdirectory: None,
-            };
-            if let Some(exception) = crate::kernel::gitsrc::transport_exception(&source) {
+            if let Some(exception) = git_index(url).as_ref().and_then(cargo_transport) {
                 if !found.contains(&exception) {
                     found.push(exception);
                 }
@@ -377,6 +363,46 @@ pub fn index_transports(files: &[ConfigFile]) -> Vec<crate::kernel::policy::Exce
         }
     }
     found
+}
+
+/// A registry index URL over `ssh://` or `git://` (the scheme in any case,
+/// as cargo reads it) as the git source cargo's git fetches; `None` for any
+/// other.
+fn git_index(url: &str) -> Option<crate::kernel::gitsrc::GitSource> {
+    let scheme = ["ssh://", "git://"].into_iter().find(|scheme| {
+        url.get(..6)
+            .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+    })?;
+    Some(crate::kernel::gitsrc::GitSource {
+        url: format!("{scheme}{}", &url[6..]),
+        commit: "0".repeat(40),
+        subdirectory: None,
+    })
+}
+
+/// `host-git-transport` for a git source cargo's git reaches from this
+/// machine rather than through the proxy: `ssh://` and `file://`, as a git
+/// dependency records them
+/// ([`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception)),
+/// and `git://`, which dials the host directly, unauthenticated and
+/// unencrypted, with no proxy check.
+fn cargo_transport(
+    source: &crate::kernel::gitsrc::GitSource,
+) -> Option<crate::kernel::policy::Exception> {
+    if let Some(exception) = crate::kernel::gitsrc::transport_exception(source) {
+        return Some(exception);
+    }
+    let git = source
+        .url
+        .get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("git://"));
+    git.then(|| crate::kernel::policy::Exception {
+        kind: crate::kernel::policy::HOST_GIT_TRANSPORT.into(),
+        subject: source.url.clone(),
+        detail: "fetched over the git protocol from this machine, unauthenticated and \
+                 unencrypted, outside the proxy"
+            .into(),
+    })
 }
 
 /// Record [`index_transports`] into the current attribution.
@@ -553,12 +579,10 @@ pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<crate::kernel::policy:
 
 /// `host-git-transport` for each source in a parsed `Cargo.lock` that cargo
 /// reached through this machine's git transport rather than the proxy: a
-/// git dependency over `file://` or `ssh://`
-/// ([`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception),
+/// git dependency over `file://`, `ssh://` or `git://` ([`cargo_transport`],
 /// the subject its vendoring records), and a registry index over `ssh://`
-/// (as [`index_transports`] records one a config names; a manifest's
-/// `registry-index` needs no config). `git://` offers no credential and
-/// records nothing, as for a git dependency. Each once.
+/// or `git://` (as [`index_transports`] records one a config names; a
+/// manifest's `registry-index` needs no config). Each once.
 fn lock_transports(table: &toml::Table) -> Vec<crate::kernel::policy::Exception> {
     let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
     let sources = table
@@ -571,23 +595,9 @@ fn lock_transports(table: &toml::Table) -> Vec<crate::kernel::policy::Exception>
         let git = if source.starts_with("git+") {
             super::crates::parse_cargo_git_source(source).map(|git| git.inner)
         } else {
-            source
-                .strip_prefix("registry+")
-                .filter(|index| {
-                    index
-                        .get(..6)
-                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
-                })
-                .map(|index| crate::kernel::gitsrc::GitSource {
-                    url: format!("ssh://{}", &index[6..]),
-                    commit: "0".repeat(40),
-                    subdirectory: None,
-                })
+            source.strip_prefix("registry+").and_then(git_index)
         };
-        if let Some(exception) = git
-            .as_ref()
-            .and_then(crate::kernel::gitsrc::transport_exception)
-        {
+        if let Some(exception) = git.as_ref().and_then(cargo_transport) {
             if !found.contains(&exception) {
                 found.push(exception);
             }

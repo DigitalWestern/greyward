@@ -116,9 +116,9 @@ pub(crate) fn run_go(
     };
     let confined = go_confined(&run, publish)?;
     let spec = go_spec(run.go_obj, run.lock_root, run.modcache, false, run.args);
-    let report = door
-        .run_confined(spec, confined)
-        .map_err(|e| io::Error::new(e.kind(), format!("store go {}: {e}", run.args.join(" "))))?;
+    let report = door.run_confined(spec, confined).map_err(|e| {
+        crate::kernel::error::context(e, format_args!("store go {}", run.args.join(" ")))
+    })?;
     if let (Some(project), Some(objects)) = (project, &report.ledger) {
         ledger::root(door.store(), door.lease(), project, objects)?;
     }

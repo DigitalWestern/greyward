@@ -933,7 +933,9 @@ dependency fetched over `ssh://` (or `git@host:repo`), which offers this
 machine's ssh agent keys under its ssh configuration, or read from a
 `file://` path on this machine. It is recorded before the fetch, so a
 policy that denies it stops the sync before the host or path is reached.
-An `https://` or `git://` source does not record it. Submodules are
+An `https://` or `git://` source does not record it, except in cargo: a
+cargo git dependency or registry index over `git://`, which cargo's git
+dials from this machine, records it too. Submodules are
 checked the same way, one level at a time: each submodule URL, as git
 resolves it, records the kind before that level is fetched, at any depth
 and under any source, and the exceptions stay with the stored checkout,

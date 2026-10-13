@@ -468,6 +468,19 @@ Selection covers every patch of each maintained CPython minor that python-build-
   with no `packages` key (one that only holds settings) is read as naming no members, and a
   `packages` value that is not a plain list (an anchor, an alias) skips the member check with
   a note.
+- **A workspace member reached through a symlink out of the project is left out.** npm takes
+  a directory its `workspaces` patterns find through a symlink, wherever the symlink leads.
+  Greyward takes one whose target is inside the project, and leaves out one that leads
+  outside, recording it as a `requirement-skipped` exception, since a resolution record
+  names files inside the project only.
+- **Workspace links are checked when they are planted, not afterwards.** A `node_modules`
+  link to a workspace package is planted to the target's symlink-free path, resolved through
+  the held project descriptor, and opened through itself once planted: a directory on the
+  way that a concurrent writer swapped for a symlink out of the project is caught, and the
+  link is removed and the sync refused. Edits the project's owner makes to their own tree
+  after the sync (replacing a member directory with a symlink elsewhere) are outside
+  Greyward's guarantee: the link points at the project's own source, which its owner
+  controls, and the next sync checks it again.
 - **A workspace member whose `node_modules` holds files git tracks is not projected.** Some
   repositories commit a fixture `node_modules` (vite does). Greyward moves an npm-made
   `node_modules` into the store's backups before projecting, but moving a tracked one would

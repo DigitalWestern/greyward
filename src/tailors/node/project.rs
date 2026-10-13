@@ -776,8 +776,24 @@ fn link_workspace_sources(
                 )));
             }
         }
+        refuse_link_leading_out(project, &link, &l.path)?;
     }
     Ok(())
+}
+
+/// The planted link at `link`, opened through itself: a directory on the
+/// way to its target swapped for a symlink out of the project between the
+/// check and the plant carries it outside, and it is removed and refused
+/// rather than left for the package to use (#692).
+fn refuse_link_leading_out(project: &ProjectRoot, link: &Path, name: &str) -> io::Result<()> {
+    if project.path_leads_inside(link)? != Some(false) {
+        return Ok(());
+    }
+    fs::remove_file(link)?;
+    Err(err(format!(
+        "workspace link {name} leads outside the project once planted: a directory on the way \
+         to its target was replaced while the sync ran; the link was removed, run it again"
+    )))
 }
 
 /// iCloud/Drive-synced folders resurrect each replaced symlink as a
@@ -1241,6 +1257,39 @@ mod tests {
             "{error}"
         );
         assert!(forest.join("lib").symlink_metadata().is_err());
+    }
+
+    /// The race the planting cannot close by checking first: a directory
+    /// on the way to the target renamed away and replaced with a symlink
+    /// out of the project after the check. The planted link is opened
+    /// through itself, then removed and refused (#692).
+    #[test]
+    fn a_link_whose_target_was_swapped_out_of_the_project_is_removed() {
+        let scratch = TempDir::named("link-swapped-target");
+        let root = scratch.0.clone();
+        let project = root.join("project");
+        let forest = root.join("forest/node_modules");
+        for dir in [
+            project.join("src/lib"),
+            project.join("kept/lib"),
+            root.join("outside/lib"),
+            forest.clone(),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let held = ProjectRoot::open(&project).unwrap();
+        for (name, target) in [("lib", "src/lib"), ("kept", "kept/lib")] {
+            let relative = relative_path(&forest, &project.join(target)).unwrap();
+            std::os::unix::fs::symlink(relative, forest.join(name)).unwrap();
+        }
+        fs::rename(project.join("src"), project.join("src.moved")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), project.join("src")).unwrap();
+        let error =
+            refuse_link_leading_out(&held, &forest.join("lib"), "node_modules/lib").unwrap_err();
+        assert!(error.to_string().contains("leads outside"), "{error}");
+        assert!(forest.join("lib").symlink_metadata().is_err());
+        refuse_link_leading_out(&held, &forest.join("kept"), "node_modules/kept").unwrap();
+        assert!(forest.join("kept").symlink_metadata().is_ok());
     }
 
     /// vite commits a fixture `node_modules` inside a workspace member

@@ -922,17 +922,81 @@ fn a_cached_skipped_download_is_refused_under_a_denying_policy() {
         "the object does not carry the skipped download: {stored:?}"
     );
 
-    let _scope = policy::PolicyScope::install(policy::Policy {
-        deny: [policy::ARTIFACT_NOT_PROVISIONED.to_string()].into(),
-        ..Default::default()
-    });
-    let attribution = policy::Attribution::open("node").expect("test attribution");
-    let error =
-        realize().expect_err("a warm sync under a denying policy must refuse the cached object");
-    attribution.discard();
-    let message = error.to_string();
-    assert!(message.contains("cached object"), "{message}");
-    assert!(message.contains("artifact-not-provisioned"), "{message}");
+    let deny = |kind: &str| {
+        policy::PolicyScope::install(policy::Policy {
+            deny: [kind.to_string()].into(),
+            ..Default::default()
+        })
+    };
+    {
+        let _scope = deny(policy::ARTIFACT_NOT_PROVISIONED);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let error = realize()
+            .expect_err("a warm sync under a denying policy must refuse the cached object");
+        attribution.discard();
+        let message = error.to_string();
+        assert!(message.contains("cached object"), "{message}");
+        assert!(message.contains("artifact-not-provisioned"), "{message}");
+    }
+
+    // The same environment as a ward before `object-meta/3` recorded it:
+    // schema `/2`, and no skipped download, which `/2` never stored.
+    let id = env.file_name().unwrap().to_str().unwrap().to_string();
+    let meta = store.root.join("meta").join(format!("{id}.json"));
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    let mut old = current.clone();
+    old["schema"] = serde_json::json!("object-meta/2");
+    old["exceptions"] = serde_json::json!([]);
+    let write_old = || std::fs::write(&meta, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    let schema = || -> serde_json::Value {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&meta).unwrap()).unwrap()
+            ["schema"]
+            .clone()
+    };
+    write_old();
+
+    // A policy that denies none of the kinds `/2` could lack reuses it.
+    {
+        let _scope = deny(policy::FILE_COLLISION);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let warm = realize().expect("a /2 object is reused when nothing it could lack is denied");
+        attribution.discard();
+        assert_eq!(warm, env);
+        assert_eq!(schema(), "object-meta/2");
+    }
+
+    // One that denies the skipped download cannot trust the `/2` record,
+    // so the environment is built again, and the build refuses the skip
+    // as it happens (not as a cached object).
+    {
+        let _scope = deny(policy::ARTIFACT_NOT_PROVISIONED);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let error = realize().expect_err("the rebuild must refuse the skipped download");
+        attribution.discard();
+        let message = error.to_string();
+        assert!(!message.contains("cached object"), "{message}");
+        assert!(message.contains("artifact-not-provisioned"), "{message}");
+        assert_eq!(schema(), "object-meta/2");
+    }
+
+    // A rebuild the policy allows upgrades the record in place to `/3`
+    // with the whole set, the skipped download included.
+    {
+        let _scope = deny(policy::BUILT_FROM_SOURCE);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let rebuilt = realize().expect("the allowed rebuild commits the same id");
+        attribution.discard();
+        assert_eq!(rebuilt, env);
+        assert_eq!(schema(), "object-meta/3");
+        let stored = store.exceptions(&id).unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|exception| exception.kind == policy::ARTIFACT_NOT_PROVISIONED),
+            "the upgraded record lacks the skipped download: {stored:?}"
+        );
+    }
 }
 
 #[test]
@@ -1064,7 +1128,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
         )
         .unwrap();
         let inputs = &meta["identity"]["inputs"];
-        assert_eq!(inputs["schema"], "node-env/5");
+        assert_eq!(inputs["schema"], "node-env/6");
         assert!(
             inputs["gyp_python"]
                 .as_str()

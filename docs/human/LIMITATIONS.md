@@ -395,6 +395,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
+- **An optional Node dependency Greyward cannot verify is left out, and recorded.** An
+  optional package with no integrity, a non-https tarball, or a local reference the lock cannot
+  place is not installed, whichever of `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock`
+  names it, and the closure records `requirement-skipped` for it, so `ward audit` and the SBOM
+  show it is missing. npm would install it unverified. A required one stops the sync.
 - **A `pnpm-workspace.yaml` whose `packages` Greyward cannot read refuses sync, edits, and
   `attest`** (an anchor, an alias, a block scalar, a mapping item): a resolution record names
   every workspace member's `package.json`, so a members list Greyward cannot read would leave a

@@ -563,7 +563,7 @@ pub(super) fn workspace_target(
     } else {
         relative.join("/")
     };
-    contain_link_target(project.path(), &target, raw)?;
+    contain_link_target(project, &target, raw)?;
     Ok(target)
 }
 
@@ -930,6 +930,10 @@ pub(super) fn pnpm_nodes(
                 "pnpm snapshot {snapshot_key} has no matching packages metadata"
             )));
         };
+        // pnpm 9 writes `optional: true` on the snapshot (the package
+        // entry carries none): a package reached only through optional
+        // dependencies, which pnpm leaves out where it cannot install.
+        node.optional |= yaml_bool(snapshot.get("optional"));
         node.deps = snapshot_dependencies(&snapshot, &snapshot_key, &snapshot_metadata, project)?;
         nodes.insert(snapshot_key, node);
     }
@@ -945,6 +949,14 @@ pub(super) fn importer_map(
     let map = yaml_map(value, "importers")?;
     map.iter()
         .map(|(key, value)| {
+            // An importer key is a directory in the project the plan writes
+            // a node_modules into: `.` or a plain relative path, never one
+            // that climbs (`../outside`) or is absolute.
+            if key != "." && !crate::tailors::node::project::safe_workspace_path(key) {
+                return Err(err(format!(
+                    "pnpm-lock.yaml: importer {key:?} is not a safe project-relative path"
+                )));
+            }
             Ok((
                 key.clone(),
                 yaml_map(value, &format!("importer {key}"))?.clone(),

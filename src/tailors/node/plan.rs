@@ -486,8 +486,11 @@ pub(super) fn dependency_names(entry: &serde_json::Value) -> impl Iterator<Item 
 }
 
 /// A `link: true` lock entry: a symlink into the project's own source. The
-/// target comes from the lockfile (attacker-editable), so it is validated
-/// before it can become a projected symlink.
+/// target comes from the lockfile (attacker-editable), so its text is
+/// checked here: relative, plain names only. Whether a symlink in the
+/// project carries it outside is the shared plan check's
+/// (`lock_import::validate_plan`), which resolves it from the held project
+/// directory.
 fn lock_link_entry(path: &str, entry: &serde_json::Value) -> io::Result<NpmLink> {
     let target = entry["resolved"].as_str().unwrap_or_default();
     let ok = !target.is_empty()
@@ -543,8 +546,9 @@ fn entry_platform_compatible(
 enum PinnedGit {
     /// The entry is realizable: `Some` from git, `None` from its tarball.
     Resolved(Option<crate::kernel::gitsrc::GitSource>),
-    /// An unrealizable git dependency that is optional: recorded as a policy
-    /// exception and dropped with its subtree.
+    /// An optional dependency ward cannot verify (an unpinned git source, a
+    /// non-https tarball, no integrity): recorded as a policy exception and
+    /// dropped with its subtree.
     SkipOptional,
 }
 
@@ -579,6 +583,17 @@ fn pinned_git_for_entry(
         }
     }
     match pinned_git.is_none().then(|| tarball_url_refusal(resolved)) {
+        Some(Some(TarballUrlRefusal::NotHttps)) if entry["optional"].as_bool() == Some(true) => {
+            crate::tailors::node::lock_import::skip_unverifiable_optional(
+                path,
+                &format!(
+                    "only https registry tarballs supported (v0), got {}",
+                    redact_url_userinfo(resolved)
+                ),
+                record,
+            )?;
+            return Ok(PinnedGit::SkipOptional);
+        }
         Some(Some(TarballUrlRefusal::NotHttps)) => {
             return Err(err(format!(
                 "{path}: only https registry tarballs supported (v0), got {}",
@@ -595,20 +610,29 @@ fn pinned_git_for_entry(
 
 /// A git package's content is verified by the commit hash, so the lockfile
 /// carries no SRI for it.
+/// `None` is an optional entry with no integrity, left out and recorded.
 fn entry_integrity(
     path: &str,
     entry: &serde_json::Value,
     pinned_git: &Option<crate::kernel::gitsrc::GitSource>,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
-) -> io::Result<String> {
+) -> io::Result<Option<String>> {
     if pinned_git.is_some() {
-        return Ok(String::new());
+        return Ok(Some(String::new()));
     }
-    let integrity = entry["integrity"].as_str().ok_or_else(|| {
-        err(format!(
+    let Some(integrity) = entry["integrity"].as_str() else {
+        if entry["optional"].as_bool() == Some(true) {
+            crate::tailors::node::lock_import::skip_unverifiable_optional(
+                path,
+                "missing 'integrity'",
+                record,
+            )?;
+            return Ok(None);
+        }
+        return Err(err(format!(
             "{path}: missing 'integrity' (regenerate the lockfile)"
-        ))
-    })?;
+        )));
+    };
     // npm writes a list when a package was published with several hashes:
     // every hash of the strongest algorithm is kept, and the tarball may
     // match any of them.
@@ -626,7 +650,7 @@ fn entry_integrity(
             )));
         }
     }
-    Ok(integrity)
+    Ok(Some(integrity))
 }
 
 fn npm_package_from_entry(
@@ -736,25 +760,39 @@ pub fn plan_npm_with(
     lock_json: &str,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
+    plan_npm_lock(platform, "package-lock.json", lock_json, node_version)
+}
+
+/// `plan_npm_with` for the npm lock named `lock_name`: `package-lock.json`
+/// or `npm-shrinkwrap.json`, one format, which the plan records as its
+/// `lock_source`.
+pub fn plan_npm_lock(
+    platform: Platform,
+    lock_name: &str,
+    lock_json: &str,
+    node_version: &str,
+) -> io::Result<NpmPlan> {
     plan_npm_recording(
         platform,
+        lock_name,
         lock_json,
         node_version,
         &mut crate::kernel::policy::record,
     )
 }
 
-/// `plan_npm_with` recording exceptions through `record`, so a test can
+/// `plan_npm_lock` recording exceptions through `record`, so a test can
 /// pass a policy of its own instead of the process one.
 fn plan_npm_recording(
     platform: Platform,
+    lock_name: &str,
     lock_json: &str,
     node_version: &str,
     record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
 ) -> io::Result<NpmPlan> {
     let v: serde_json::Value =
-        serde_json::from_str(lock_json).map_err(|e| err(format!("package-lock.json: {e}")))?;
-    refuse_json_url_credentials("package-lock.json", &v)?;
+        serde_json::from_str(lock_json).map_err(|e| err(format!("{lock_name}: {e}")))?;
+    refuse_json_url_credentials(lock_name, &v)?;
     let lockfile_version = v["lockfileVersion"].as_u64().unwrap_or(0);
     if lockfile_version != 2 && lockfile_version != 3 {
         return Err(err(format!(
@@ -763,7 +801,7 @@ fn plan_npm_recording(
     }
     let packages = v["packages"]
         .as_object()
-        .ok_or_else(|| err("package-lock.json has no packages map"))?;
+        .ok_or_else(|| err(format!("{lock_name} has no packages map")))?;
 
     let mut out = Vec::new();
     let mut links = Vec::new();
@@ -796,7 +834,15 @@ fn plan_npm_recording(
             continue; // root project entry
         }
         if workspace_dirs.contains(&path.as_str()) {
-            continue; // workspace source dir definition
+            // A workspace source dir definition: the user's own source,
+            // which the projection writes a node_modules into, so its key is
+            // a plain path inside the project (`../outside` is not).
+            if !super::project::safe_workspace_path(path) {
+                return Err(err(format!(
+                    "{lock_name}: workspace path {path:?} is not a safe project-relative path"
+                )));
+            }
+            continue;
         }
         validate_lock_path(path)?;
         if skipped.iter().any(|s| path.starts_with(s.as_str())) {
@@ -833,7 +879,10 @@ fn plan_npm_recording(
                 continue;
             }
         };
-        let integrity = entry_integrity(path, entry, &pinned_git, record)?;
+        let Some(integrity) = entry_integrity(path, entry, &pinned_git, record)? else {
+            skipped.push(format!("{path}/"));
+            continue;
+        };
         out.push(npm_package_from_entry(
             path, entry, resolved, pinned_git, integrity,
         ));
@@ -852,7 +901,7 @@ fn plan_npm_recording(
         packages: out,
         links,
         workspaces: workspace_dirs.into_iter().map(str::to_string).collect(),
-        lock_source: "package-lock.json".into(),
+        lock_source: lock_name.into(),
     })
 }
 
@@ -888,6 +937,7 @@ mod lock_shape_tests {
         let shipped = crate::tailors::node::shipped_selection().unwrap();
         let plan = plan_npm_recording(
             Platform::X86_64UnknownLinuxGnu,
+            "package-lock.json",
             &entry("node_modules/a", "https://r/a.tgz", SHA1_SRI),
             shipped.version("node").unwrap(),
             &mut |kind: &str, subject: &str, detail: &str| {

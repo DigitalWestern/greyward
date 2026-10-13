@@ -527,14 +527,16 @@ pub fn hash_pins(text: &str, file: &str) -> io::Result<Vec<HashPin>> {
 
 /// Whether `pin` is the pin of a locked `name` at `version`: the same
 /// package, at a version the line's specifier allows, matched as PEP 440
-/// does (`==1.*` and `==1.17` both allow `1.17.0`). A specifier ward cannot
+/// does (`==1.*` and `==1.17` both allow `1.17.0`), pre-releases included:
+/// uv picks `1.2.0rc1` for `==1.2.*` when only pre-releases fit, and the
+/// pin still guards it. A specifier ward cannot
 /// read applies, so its hashes are held to rather than dropped. The caller
 /// has already left out the pins whose marker is false for the target
 /// environment.
 fn pin_applies(pin: &HashPin, name: &str, version: &str) -> bool {
     pin.name == name
         && pin.specifier.as_deref().is_none_or(|specifier| {
-            crate::kernel::pep440::matches_specifier(specifier, version).unwrap_or(true)
+            crate::kernel::pep440::admits_version(specifier, version).unwrap_or(true)
         })
 }
 
@@ -1928,6 +1930,15 @@ mod requirement_hash_pin_tests {
                 "{line}"
             );
         }
+        // uv falls back on a pre-release when only pre-releases fit, and
+        // the pin still applies to it.
+        let rc = format!("six==1.2.0rc1 --hash=sha256:{A} --hash=sha256:{B}\n");
+        let user = pins(&format!("six==1.2.* --hash=sha256:{A}\n"));
+        check_hash_pins(&user, &format!("six==1.2.0rc1 --hash=sha256:{B}\n")).unwrap_err();
+        assert_eq!(
+            narrow_to_pins(&rc, &user),
+            format!("six==1.2.0rc1 --hash=sha256:{A}\n")
+        );
         // A specifier the locked version is outside is another line's pin.
         let other = pins(&format!("six==1.16.* --hash=sha256:{A}\n"));
         check_hash_pins(&other, &dropped).unwrap();

@@ -1,22 +1,25 @@
 //! npm's workspace member set, read by npm itself. A `workspaces` value is
 //! handed to the `@npmcli/map-workspaces` bundled with the npm of the
 //! project's selected Node, run by that Node in the network-denied sandbox
-//! with the project read-only. Whatever globs, braces, extglobs, negations
-//! and symlink rules npm applies are then npm's own, so ward's member set
-//! cannot drift from the one `npm ci` builds from.
+//! with the whole host read-only (`HostView::WholeHost`) and the project
+//! bound from the descriptor ward holds. Whatever globs, braces, extglobs,
+//! negations and symlink rules npm applies are then npm's own, and npm sees
+//! every directory an unconfined run would, so ward's member set cannot
+//! drift from the one `npm ci` builds from.
 //!
-//! What npm returns passes one rule of ward's own: a member whose real
-//! directory is outside the project is left out (a member is read from
-//! inside the project only) and reported in [`Found::outside`], so a sync
-//! can record it. npm can only return such a member if it can see it, so
-//! the directory a symlink below a pattern's literal prefix leads to
-//! outside the project is mounted read-only beside the project.
+//! What npm returns passes one rule of ward's own, resolved through the
+//! held project descriptor: a member whose real directory is outside the
+//! project is left out (a member is read from inside the project only) and
+//! reported in [`Found::outside`], so a sync can record it.
 //!
-//! Each answer is kept for the rest of the process, keyed by the project's
-//! path and the `workspaces` value, so one command runs npm once per list.
+//! Nothing is cached: every question runs npm again, so the freshness check
+//! and the closure's resolution record each see the tree as it is then.
+//! The first answer for each project and list is kept only to compare
+//! against: a later answer that differs refuses, since members added or
+//! removed while a command ran would leave what it publishes uncovered.
 
 use crate::kernel::context::Context;
-use crate::kernel::fsroot::{Containment, Entry, ProjectRoot};
+use crate::kernel::fsroot::{Containment, ProjectRoot};
 use crate::kernel::sandbox::{HostView, Sandbox};
 use crate::kernel::toolchain::Selected;
 use serde_json::Value;
@@ -25,12 +28,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// The script the sandboxed Node runs.
-const SCRIPT: &str = include_str!("map_workspaces.js");
-
-/// How deep the search for symlinks leading out of the project goes below
-/// a pattern's literal prefix.
-const MAX_DEPTH: usize = 24;
+/// The script the sandboxed Node runs. It is staged as `.cjs` so it runs as
+/// CommonJS whatever `"type"` a `package.json` above the store declares.
+const SCRIPT: &str = include_str!("map_workspaces.cjs");
 
 /// npm's members of one `workspaces` list, after ward's symlink rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -48,8 +48,10 @@ pub(crate) type Provider = dyn Fn(&Path) -> io::Result<(Context, Selected)> + Se
 
 static PROVIDER: Mutex<Option<Arc<Provider>>> = Mutex::new(None);
 
-type Memo = BTreeMap<(PathBuf, String), Found>;
-static MEMO: Mutex<Memo> = Mutex::new(BTreeMap::new());
+/// The first answer for each project path and `workspaces` value in this
+/// process, compared against and never served.
+type FirstAnswers = BTreeMap<(PathBuf, String), Found>;
+static FIRST: Mutex<FirstAnswers> = Mutex::new(BTreeMap::new());
 
 /// Install the provider for this process. The command layer calls it once,
 /// before any verb runs; the first install wins.
@@ -62,7 +64,9 @@ pub(crate) fn install(provider: Arc<Provider>) {
 
 /// npm's members of `workspaces` (a `package.json` `workspaces` value, or
 /// the one an npm lock's root entry copies) for the project at `root`. No
-/// value, or an empty list, names no members and runs nothing.
+/// value, or an empty list, names no members and runs nothing. An answer
+/// that differs from this process's first one for the same project and
+/// list is refused.
 pub(crate) fn npm_members(root: &ProjectRoot, workspaces: &Value) -> io::Result<Found> {
     if workspaces.is_null()
         || workspaces.as_array().is_some_and(Vec::is_empty)
@@ -73,16 +77,50 @@ pub(crate) fn npm_members(root: &ProjectRoot, workspaces: &Value) -> io::Result<
     {
         return Ok(Found::default());
     }
+    let found = contained(root, npm_named(root, workspaces)?)?;
     let key = (root.path().to_path_buf(), workspaces.to_string());
-    if let Some(found) = MEMO.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
-        return Ok(found.clone());
+    let mut first = FIRST.lock().unwrap_or_else(|p| p.into_inner());
+    match first.get(&key) {
+        Some(earlier) if earlier != &found => Err(changed(root, earlier, &found)),
+        Some(_) => Ok(found),
+        None => {
+            first.insert(key, found.clone());
+            Ok(found)
+        }
     }
-    let named = npm_named(root, workspaces)?;
-    let found = contained(root, named)?;
-    MEMO.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(key, found.clone());
-    Ok(found)
+}
+
+/// The refusal for a member set that changed while the command ran.
+fn changed(root: &ProjectRoot, earlier: &Found, now: &Found) -> io::Error {
+    let all = |found: &Found| -> Vec<String> {
+        let mut all: Vec<String> = found
+            .members
+            .iter()
+            .chain(&found.outside)
+            .cloned()
+            .collect();
+        all.sort();
+        all
+    };
+    let (before, after) = (all(earlier), all(now));
+    let added: Vec<&String> = after.iter().filter(|dir| !before.contains(dir)).collect();
+    let removed: Vec<&String> = before.iter().filter(|dir| !after.contains(dir)).collect();
+    let moved: Vec<&String> = now
+        .outside
+        .iter()
+        .filter(|dir| earlier.members.contains(dir))
+        .chain(
+            now.members
+                .iter()
+                .filter(|dir| earlier.outside.contains(dir)),
+        )
+        .collect();
+    io::Error::other(format!(
+        "{}: the npm workspace members changed while the command ran (added {added:?}, \
+         removed {removed:?}, moved across the project boundary {moved:?}); nothing \
+         was published for the changed set, so run the command again",
+        root.path().display()
+    ))
 }
 
 /// The member directories npm names, relative to the root, before ward's
@@ -112,6 +150,10 @@ fn npm_named(root: &ProjectRoot, workspaces: &Value) -> io::Result<Vec<String>> 
     Ok(named)
 }
 
+/// Run the wrapper in the sandbox. The project is named by the path `root`
+/// was opened and registered at, never resolved again: the sandbox binds
+/// the held descriptor there (`HeldRoots`), so npm reads the directory ward
+/// holds even if that path has since been pointed somewhere else.
 fn run_map_workspaces(
     ctx: &Context,
     node: &Path,
@@ -119,24 +161,17 @@ fn run_map_workspaces(
     workspaces: &Value,
     scratch: &Path,
 ) -> io::Result<Vec<String>> {
-    let project = std::fs::canonicalize(root.path())?;
-    let script = scratch.join("map_workspaces.js");
+    let project = root.path();
+    let script = scratch.join("map_workspaces.cjs");
     let request = scratch.join("workspaces.json");
     let out = scratch.join("members.json");
     std::fs::write(&script, SCRIPT)?;
     std::fs::write(&request, workspaces.to_string())?;
-    let outside = outside_targets(root, workspaces)?;
     let modules = node.join("lib/node_modules/npm/node_modules");
-    let mut read: Vec<&Path> = vec![node, &project];
-    read.extend(outside.iter().map(PathBuf::as_path));
     let sandbox = Sandbox {
-        read,
+        read: vec![project],
         write: vec![scratch],
-        host_view: if ctx.platform.is_macos() {
-            HostView::Full
-        } else {
-            HostView::RuntimeOnly
-        },
+        host_view: HostView::WholeHost,
     };
     let node_bin = node.join("bin/node");
     let argv = [
@@ -162,7 +197,7 @@ fn run_map_workspaces(
             &argv,
             &path_env,
             scratch,
-            &project,
+            project,
             &[],
             Some(&ctx.activity),
         )
@@ -172,9 +207,15 @@ fn run_map_workspaces(
                 format!("npm could not read the package.json workspaces list: {error}"),
             )
         })?;
-    let members: BTreeMap<String, String> = serde_json::from_slice(&std::fs::read(&out)?)
+    parse_members(&std::fs::read(&out)?)
+}
+
+/// The wrapper's output: `[name, directory]` pairs, so a member named
+/// `__proto__` or `constructor` is a pair like any other.
+fn parse_members(out: &[u8]) -> io::Result<Vec<String>> {
+    let pairs: Vec<(String, String)> = serde_json::from_slice(out)
         .map_err(|error| io::Error::other(format!("npm's workspace members: {error}")))?;
-    Ok(members.into_values().collect())
+    Ok(pairs.into_iter().map(|(_, dir)| dir).collect())
 }
 
 /// ward's rule over the directories npm named: a plain path inside the
@@ -216,111 +257,6 @@ fn contained(root: &ProjectRoot, named: Vec<String>) -> io::Result<Found> {
     Ok(found)
 }
 
-/// The real directories outside the project that symlinks below the
-/// literal prefix of a positive pattern lead to, for the sandbox to mount
-/// read-only so npm sees what it would see unconfined.
-fn outside_targets(root: &ProjectRoot, workspaces: &Value) -> io::Result<Vec<PathBuf>> {
-    let list = workspaces
-        .as_array()
-        .or_else(|| workspaces.get("packages").and_then(Value::as_array));
-    let mut targets = Vec::new();
-    for pattern in list.into_iter().flatten().filter_map(Value::as_str) {
-        if pattern.starts_with('!') {
-            continue;
-        }
-        let Some(prefix) = literal_prefix(pattern) else {
-            continue;
-        };
-        if prefix.as_os_str().is_empty() {
-            walk(root, Path::new("."), 0, &mut targets)?;
-            continue;
-        }
-        match root.input_containment(&prefix)? {
-            Containment::Outside => push_target(root, &prefix, &mut targets),
-            Containment::Inside if root.is_input_dir(&prefix) => {
-                walk(root, &root.contained_input_path(&prefix)?, 0, &mut targets)?
-            }
-            _ => {}
-        }
-    }
-    targets.sort();
-    targets.dedup();
-    Ok(targets)
-}
-
-/// The segments of `pattern` before its first one with glob syntax, past a
-/// leading `./` or `/`; `None` when one of them is `..`.
-fn literal_prefix(pattern: &str) -> Option<PathBuf> {
-    const MAGIC: &[char] = &['*', '?', '[', ']', '{', '}', '(', ')', '!', '+', '@', '\\'];
-    let undotted = pattern.strip_prefix('.').unwrap_or(pattern);
-    let pattern = if undotted.starts_with('/') {
-        undotted
-    } else {
-        pattern
-    };
-    let mut prefix = PathBuf::new();
-    for segment in pattern.trim_start_matches('/').split('/') {
-        if segment.contains(MAGIC) {
-            break;
-        }
-        match segment {
-            ".." => return None,
-            "" | "." => {}
-            name => prefix.push(name),
-        }
-    }
-    Some(prefix)
-}
-
-fn walk(
-    root: &ProjectRoot,
-    dir: &Path,
-    depth: usize,
-    targets: &mut Vec<PathBuf>,
-) -> io::Result<()> {
-    if depth >= MAX_DEPTH {
-        return Ok(());
-    }
-    let Some(names) = root.read_input_dir(dir)? else {
-        return Ok(());
-    };
-    for name in names {
-        if name == "node_modules" || name == ".git" {
-            continue;
-        }
-        let child = if dir == Path::new(".") {
-            PathBuf::from(&name)
-        } else {
-            dir.join(&name)
-        };
-        match root.entry(&child)? {
-            Entry::Directory => walk(root, &child, depth + 1, targets)?,
-            Entry::Symlink => match root.input_containment(&child)? {
-                // Listed at the real path it resolves to: the strict
-                // reader does not list through a link.
-                Containment::Inside if root.is_input_dir(&child) => walk(
-                    root,
-                    &root.contained_input_path(&child)?,
-                    depth + 1,
-                    targets,
-                )?,
-                Containment::Outside => push_target(root, &child, targets),
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn push_target(root: &ProjectRoot, relative: &Path, targets: &mut Vec<PathBuf>) {
-    if let Ok(real) = std::fs::canonicalize(root.path().join(relative)) {
-        if real.is_dir() {
-            targets.push(real);
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -333,8 +269,8 @@ pub(crate) mod tests {
     static SERIAL: Mutex<()> = Mutex::new(());
 
     /// While the returned guard lives, a membership run for the project at
-    /// `root` answers with `fake` instead of running npm, and the answers
-    /// kept so far are dropped. Tests that read npm's members hold one.
+    /// `root` answers with `fake` instead of running npm, and the first
+    /// answers kept so far are dropped. Tests that read npm's members hold one.
     pub(crate) fn fake_npm(
         root: &Path,
         fake: impl Fn(&Value) -> Vec<String> + Send + Sync + 'static,
@@ -343,11 +279,11 @@ pub(crate) mod tests {
         impl Drop for Reset {
             fn drop(&mut self) {
                 *FAKE.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                MEMO.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                FIRST.lock().unwrap_or_else(|p| p.into_inner()).clear();
             }
         }
         let serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-        MEMO.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        FIRST.lock().unwrap_or_else(|p| p.into_inner()).clear();
         *FAKE.lock().unwrap_or_else(|p| p.into_inner()) =
             Some((root.to_path_buf(), Arc::new(fake)));
         Reset(serial)
@@ -407,34 +343,65 @@ pub(crate) mod tests {
         assert!(error.to_string().contains("not a plain path"), "{error}");
     }
 
-    /// The directories outside the project that the sandbox mounts: a
-    /// symlink below a pattern's literal prefix that leads out, and a
-    /// literal prefix that is itself one, but nothing below a negation
-    /// (#694).
+    /// A member named `__proto__` is a pair like any other (#694).
     #[test]
-    fn symlinks_leading_out_below_a_pattern_are_mounted() {
-        let scratch = TempDir::named("npm-members-mounts");
+    fn a_member_named_like_an_object_property_is_kept() {
+        let named =
+            parse_members(br#"[["__proto__","packages/proto"],["constructor","packages/c"]]"#)
+                .unwrap();
+        assert_eq!(named, ["packages/proto", "packages/c"]);
+    }
+
+    /// A member added during a sync, after the freshness check read the
+    /// members, refuses the resolution record's later question instead of
+    /// answering the old set (#694).
+    #[test]
+    fn a_member_added_while_the_command_runs_is_refused() {
+        let scratch = TempDir::named("npm-members-drift");
         let root = scratch.0.join("project");
-        for dir in ["packages/a", "tools/deep/x", "skipped"] {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        let member = |dir: &str| {
             std::fs::create_dir_all(root.join(dir)).unwrap();
-        }
-        for dir in ["out/one", "out/two", "out/three"] {
-            std::fs::create_dir_all(scratch.0.join(dir)).unwrap();
-        }
-        std::os::unix::fs::symlink("../../out/one", root.join("packages/one")).unwrap();
-        std::os::unix::fs::symlink("../../../out/two", root.join("tools/deep/two")).unwrap();
-        std::os::unix::fs::symlink("../out/three", root.join("direct")).unwrap();
-        std::os::unix::fs::symlink("../../out/one", root.join("skipped/one")).unwrap();
+            std::fs::write(root.join(dir).join("package.json"), "{}").unwrap();
+        };
+        member("packages/a");
         let held = ProjectRoot::open(&root).unwrap();
-        let workspaces = serde_json::json!(["./packages/*", "tools/**", "direct", "!skipped/*"]);
-        let real = |dir: &str| std::fs::canonicalize(scratch.0.join(dir)).unwrap();
-        assert_eq!(
-            outside_targets(&held, &workspaces).unwrap(),
-            [real("out/one"), real("out/three"), real("out/two")]
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let listed = root.clone();
+        // npm's answer is the tree as it is: every member directory there.
+        let _fake = fake_npm(&root, move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ["packages/a", "packages/b"]
+                .into_iter()
+                .filter(|dir| listed.join(dir).is_dir())
+                .map(String::from)
+                .collect()
+        });
+        // The freshness check reads the members, then the sync downloads.
+        let resolve = super::super::resolve::npm_manifest_members;
+        assert_eq!(resolve(&held).unwrap(), ["packages/a"]);
+        member("packages/b");
+        // The closure's resolution record asks again before publishing.
+        let error = super::super::resolve::resolution_outputs(&held)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("changed while the command ran") && error.contains("packages/b"),
+            "{error}"
         );
-        assert_eq!(literal_prefix("a/b/@(c|d)/e"), Some(PathBuf::from("a/b")));
-        assert_eq!(literal_prefix("/x/{a,b}"), Some(PathBuf::from("x")));
-        assert_eq!(literal_prefix("../x"), None);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "npm ran each time"
+        );
+        // Another list is another question, with its own first answer.
+        assert!(npm_members(&held, &serde_json::json!(["packages/a"])).is_ok());
     }
 
     /// The corpus, through the real path: for each case, the member set
@@ -492,12 +459,17 @@ pub(crate) mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// A member npm reaches through a symlink out of the project is seen
-    /// by the sandboxed npm and reported outside; a symlink out of the
-    /// project that no pattern names is not (#694).
+    /// The sandboxed npm sees what unconfined npm sees, with no walk of
+    /// ward's own to miss anything (#694): a member through a symlink out
+    /// of the project is reported outside, and so is one behind a second
+    /// link out of the first target, one 25 directories down, and one a
+    /// `!!` pattern names; a symlink out that no pattern matches is not
+    /// reported; an unreadable directory npm never needs does not stop it;
+    /// and a member named `__proto__` is kept.
     #[test]
     #[ignore = "realizes the store Node and runs it in the Linux sandbox"]
     fn a_member_symlinked_out_of_the_project_is_reported_and_an_unnamed_one_is_not() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
         if !crate::kernel::sandbox::linux_ready("npm_members_outside") {
             return;
         }
@@ -505,21 +477,86 @@ pub(crate) mod tests {
         install_shipped_node();
         let scratch = TempDir::named("npm-ws-outside");
         let root = scratch.0.join("project");
-        for dir in ["project/packages/a", "elsewhere/ext", "elsewhere/z"] {
-            std::fs::create_dir_all(scratch.0.join(dir)).unwrap();
-            let name = dir.rsplit('/').next().unwrap();
-            std::fs::write(
-                scratch.0.join(dir).join("package.json"),
-                format!("{{\"name\":\"{name}\"}}"),
-            )
-            .unwrap();
+        let deep = format!("packages/{}", ["d"; 25].join("/"));
+        let manifest = |dir: &Path, name: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("package.json"), format!("{{\"name\":\"{name}\"}}")).unwrap();
+        };
+        manifest(&root.join("packages/a"), "a");
+        manifest(&root.join("packages/proto"), "__proto__");
+        manifest(&root.join("lit"), "lit");
+        for name in ["ext", "z", "two", "bang", "far"] {
+            manifest(&scratch.0.join("elsewhere").join(name), name);
         }
-        std::os::unix::fs::symlink("../../elsewhere/ext", root.join("packages/ext")).unwrap();
-        std::os::unix::fs::symlink("../../elsewhere/z", root.join("packages/z")).unwrap();
+        std::fs::create_dir_all(scratch.0.join("elsewhere/one")).unwrap();
+        symlink("../two", scratch.0.join("elsewhere/one/member")).unwrap();
+        symlink("../../elsewhere/ext", root.join("packages/ext")).unwrap();
+        symlink("../../elsewhere/z", root.join("packages/z")).unwrap();
+        symlink("../../elsewhere/one", root.join("packages/chain")).unwrap();
+        symlink("../elsewhere/bang", root.join("bang")).unwrap();
+        std::fs::create_dir_all(root.join(&deep)).unwrap();
+        symlink(
+            scratch.0.join("elsewhere/far"),
+            root.join(&deep).join("ext"),
+        )
+        .unwrap();
+        let private = root.join("lit/private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
         let held = ProjectRoot::open(&root).unwrap();
-        let found = npm_members(&held, &serde_json::json!(["packages/a*", "packages/e*"])).unwrap();
-        assert_eq!(found.members, ["packages/a"]);
-        assert_eq!(found.outside, ["packages/ext"]);
+        let found = npm_members(
+            &held,
+            &serde_json::json!([
+                "packages/a*",
+                "packages/e*",
+                "packages/p*",
+                "packages/chain/*",
+                "packages/**/ext",
+                "!!bang",
+                "lit"
+            ]),
+        );
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = found.unwrap();
+        assert_eq!(found.members, ["lit", "packages/a", "packages/proto"]);
+        let mut outside = vec![
+            "bang".to_string(),
+            "packages/chain/member".to_string(),
+            format!("{deep}/ext"),
+            "packages/ext".to_string(),
+        ];
+        outside.sort();
+        assert_eq!(found.outside, outside);
+    }
+
+    /// npm never reads a tree other than the one ward holds: a project
+    /// renamed after it was opened, with its old path pointed at another
+    /// tree, is refused, since the sandbox binds the held directory at the
+    /// path it was opened at and will not mount over a symlink (#694).
+    #[test]
+    #[ignore = "realizes the store Node and runs it in the Linux sandbox"]
+    fn a_project_whose_path_is_swapped_is_refused_not_read_elsewhere() {
+        if !crate::kernel::sandbox::linux_ready("npm_members_swapped") {
+            return;
+        }
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        install_shipped_node();
+        let scratch = TempDir::named("npm-ws-swapped");
+        let root = scratch.0.join("project");
+        std::fs::create_dir_all(root.join("packages/a")).unwrap();
+        std::fs::write(root.join("packages/a/package.json"), r#"{"name":"a"}"#).unwrap();
+        std::fs::create_dir_all(scratch.0.join("decoy/packages/other")).unwrap();
+        std::fs::write(
+            scratch.0.join("decoy/packages/other/package.json"),
+            r#"{"name":"other"}"#,
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        std::fs::rename(&root, scratch.0.join("moved")).unwrap();
+        std::os::unix::fs::symlink("decoy", &root).unwrap();
+        let error = npm_members(&held, &serde_json::json!(["packages/*"]))
+            .expect_err("npm read the tree the old path now leads to");
+        assert!(error.to_string().contains("symlink"), "{error}");
     }
 
     /// The provider the ignored tests use: the shipped Node, in the store
@@ -531,6 +568,6 @@ pub(crate) mod tests {
                 super::super::shipped_selection()?,
             ))
         }));
-        MEMO.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        FIRST.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
 }

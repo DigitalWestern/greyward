@@ -231,7 +231,7 @@ fn hold_workspace_root(root_dir: &Path, member: &Path) -> io::Result<ProjectRoot
             for _ in member.components() {
                 held = held.parent()?.ok_or(error_at_top(root_dir))?;
             }
-            Ok(held)
+            Ok(held.registered())
         }
         opened => opened,
     }

@@ -848,5 +848,27 @@
     "expected": [
       "packages/a/pkg"
     ]
+  },
+  {
+    "name": "two symlinks back to their own directory",
+    "workspaces": [
+      "packages/*"
+    ],
+    "dirs": [
+      "packages/x"
+    ],
+    "links": [
+      [
+        "packages/a",
+        "."
+      ],
+      [
+        "packages/b",
+        "."
+      ]
+    ],
+    "expected": [
+      "packages/x"
+    ]
   }
 ]

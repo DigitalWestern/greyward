@@ -206,10 +206,12 @@ it); a pnpm v9/v6 or Yarn classic lockfile is imported by
 recorded); with none of these, the store node's bundled npm runs
 `npm install --package-lock-only`. npm's workspace members are read by
 npm itself: the `@npmcli/map-workspaces` bundled with the store node's npm
-runs in the sandbox, with no network and the project read-only, on the
-root's `workspaces` list, and its answer is the member set every npm
-check uses (lock freshness, the resolution record's inputs, which root a
-member's edit writes to). Before planning, `plan` and `sync`
+runs in the sandbox's whole-host view (`HostView::WholeHost`: the host
+read-only, no network, only scratch writable, the held project bound from
+its descriptor) on the root's `workspaces` list, and its answer is the
+member set every npm check uses (lock freshness, the resolution record's
+inputs, which root a member's edit writes to). It runs again for each of
+them, and an answer that changes within one command refuses it. Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's, `peerDependencies` included), the

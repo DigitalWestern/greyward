@@ -161,6 +161,132 @@ pub fn normalize_name(name: &str) -> String {
     out
 }
 
+/// The version a locked package's artifact must carry, or `None` when the
+/// lock does not know it: a git dependency is locked as
+/// `0+git.<commit>`, and only the checkout's own metadata names its
+/// release. Once packed into an sdist the package keeps a `git+` URL but
+/// no `git` source, so both say "git".
+pub(crate) fn locked_version(package: &LockedPackage) -> Option<&str> {
+    (package.git.is_none() && !package.url.starts_with("git+")).then_some(package.version.as_str())
+}
+
+/// Two versions as PEP 440 compares them (`1.0 == 1.0.0`), or as
+/// lowercased text when either does not parse.
+fn same_version(a: &str, b: &str) -> bool {
+    use crate::kernel::pep440::Version;
+    match (Version::parse(a), Version::parse(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
+/// Refuse a distribution named `found_name` at `found_version` where the
+/// lock says `name` at `version` (`None`: the name alone is checked).
+/// `what` says where the found pair was read.
+pub(crate) fn check_distribution(
+    what: &str,
+    found_name: &str,
+    found_version: &str,
+    name: &str,
+    version: Option<&str>,
+) -> io::Result<()> {
+    let name_matches = normalize_name(found_name) == normalize_name(name);
+    let version_matches = version.is_none_or(|version| same_version(found_version, version));
+    if name_matches && version_matches {
+        return Ok(());
+    }
+    let locked = match version {
+        Some(version) => format!("{name} {version}"),
+        None => name.to_string(),
+    };
+    Err(err(format!(
+        "{what} is {found_name} {found_version}, but the lock names {locked}; refusing to \
+         install one package under another's name"
+    )))
+}
+
+/// The distribution name and version a wheel or sdist filename states
+/// (PEP 427 for a wheel; `{name}-{version}` plus the archive extension for
+/// an sdist). An sdist's name may itself hold a `-` (legacy uploads), so
+/// every split is offered, longest name first, and the caller picks the
+/// one that matches.
+fn filename_distributions(filename: &str, kind: ArtifactKind) -> Option<Vec<(&str, &str)>> {
+    match kind {
+        ArtifactKind::Wheel => {
+            let stem = filename.strip_suffix(".whl")?;
+            let parts: Vec<&str> = stem.split('-').collect();
+            if !matches!(parts.len(), 5 | 6) || parts.iter().any(|part| part.is_empty()) {
+                return None;
+            }
+            Some(vec![(parts[0], parts[1])])
+        }
+        ArtifactKind::Sdist => {
+            let lower = filename.to_ascii_lowercase();
+            let extension = [".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz", ".tar"]
+                .into_iter()
+                .find(|extension| lower.ends_with(extension))?;
+            let stem = &filename[..filename.len() - extension.len()];
+            let splits: Vec<(&str, &str)> = stem
+                .rmatch_indices('-')
+                .map(|(at, _)| (&stem[..at], &stem[at + 1..]))
+                .filter(|(name, version)| !name.is_empty() && !version.is_empty())
+                .collect();
+            (!splits.is_empty()).then_some(splits)
+        }
+    }
+}
+
+/// Refuse a locked file whose name says it is another distribution or
+/// another version than its lock entry: the bytes are checked against the
+/// lock's hash, and this ties the entry's name and version to them too, so
+/// a closure or SBOM row names what is installed (#688). `filename` may be
+/// percent-encoded, as it is in a URL.
+pub(crate) fn check_filename(
+    filename: &str,
+    kind: ArtifactKind,
+    name: &str,
+    version: Option<&str>,
+) -> io::Result<()> {
+    let decoded = crate::kernel::gitsrc::percent_decode(filename);
+    let what = match kind {
+        ArtifactKind::Wheel => "wheel",
+        ArtifactKind::Sdist => "sdist",
+    };
+    let candidates = filename_distributions(&decoded, kind).ok_or_else(|| {
+        err(format!(
+            "{what} file {decoded:?} is not named <name>-<version> as a {what} is"
+        ))
+    })?;
+    let what = format!("{what} file {decoded:?}");
+    let check = |&(found_name, found_version): &(&str, &str)| {
+        check_distribution(&what, found_name, found_version, name, version)
+    };
+    if candidates.iter().any(|candidate| check(candidate).is_ok()) {
+        return Ok(());
+    }
+    // None matched: report the most natural reading, the first candidate.
+    candidates.first().map_or(Ok(()), check)
+}
+
+/// Refuse a wheel a source build left for `package` that is another
+/// package, as pip and uv do: `foo==1.0` that builds `bar-9.9` is refused
+/// rather than installed and recorded as foo (#688). A git dependency's
+/// version is its commit, so only its name is checked.
+pub(crate) fn check_built_wheel(
+    wheel: &std::path::Path,
+    package: &LockedPackage,
+) -> io::Result<()> {
+    let filename = wheel
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let version = locked_version(package);
+    check_filename(filename, ArtifactKind::Wheel, &package.name, version).map_err(|e| {
+        let at = format!("{}=={}", package.name, package.version);
+        io::Error::new(e.kind(), format!("{at}: built {e}"))
+    })
+}
+
 /// Strip a comment: '#' at line start or preceded by whitespace.
 fn strip_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
@@ -890,6 +1016,7 @@ pub fn lock_requirements(
         // into an sdist at realization (build::git_sdist_package).
         if let Some(source) = &r.git {
             out.push(LockedPackage {
+                index: None,
                 name: r.name.clone(),
                 version: r.version.clone(),
                 filename: format!("{}-{}.tar.gz", r.name, r.version),
@@ -952,6 +1079,7 @@ fn lock_from_candidates(
         )));
     };
     Ok(LockedPackage {
+        index: None,
         name: r.name.clone(),
         version: r.version.clone(),
         filename: chosen.filename.clone(),
@@ -1083,6 +1211,78 @@ pub(crate) fn lock_requirement_text_with_uv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_locked_file_must_be_named_for_its_entry() {
+        // #688: the hash ties the bytes to the lock, and the filename ties
+        // the lock entry's name and version to the bytes.
+        let wheel = ArtifactKind::Wheel;
+        let sdist = ArtifactKind::Sdist;
+        let ok = |file, kind, name, version| check_filename(file, kind, name, version);
+        ok(
+            "requests-2.32.3-py3-none-any.whl",
+            wheel,
+            "requests",
+            Some("2.32.3"),
+        )
+        .unwrap();
+        // PEP 503 names and PEP 440 versions compare as they normalize.
+        ok(
+            "Zope_Interface-6.0-cp312-cp312-linux_x86_64.whl",
+            wheel,
+            "zope.interface",
+            Some("6.0.0"),
+        )
+        .unwrap();
+        ok(
+            "foo-1.0+local-py3-none-any.whl",
+            wheel,
+            "foo",
+            Some("1.0+local"),
+        )
+        .unwrap();
+        // A URL's filename may be percent-encoded.
+        ok(
+            "foo-1.0%2Blocal-py3-none-any.whl",
+            wheel,
+            "foo",
+            Some("1.0+local"),
+        )
+        .unwrap();
+        // A legacy sdist whose name holds a dash.
+        ok(
+            "python-dateutil-2.9.0.tar.gz",
+            sdist,
+            "python-dateutil",
+            Some("2.9.0"),
+        )
+        .unwrap();
+        ok("Foo-1.0.ZIP", sdist, "foo", Some("1.0")).unwrap();
+        // A git package: the name alone.
+        ok("foo-3.1-py3-none-any.whl", wheel, "foo", None).unwrap();
+
+        let refused = |file, kind, name, version| {
+            check_filename(file, kind, name, version)
+                .unwrap_err()
+                .to_string()
+        };
+        let other = refused(
+            "totally_other-9.9-py3-none-any.whl",
+            wheel,
+            "requests",
+            Some("2.32.3"),
+        );
+        assert!(other.contains("totally_other 9.9"), "{other}");
+        assert!(other.contains("the lock names requests 2.32.3"), "{other}");
+        let older = refused("click-2.0.0.tar.gz", sdist, "click", Some("2.1.0"));
+        assert!(older.contains("click 2.0.0"), "{older}");
+        let git = refused("bar-3.1-py3-none-any.whl", wheel, "foo", None);
+        assert!(git.contains("the lock names foo;"), "{git}");
+        let shape = refused("six.whl", wheel, "six", Some("1.17.0"));
+        assert!(shape.contains("is not named <name>-<version>"), "{shape}");
+        let shape = refused("six.tar.gz", sdist, "six", Some("1.17.0"));
+        assert!(shape.contains("is not named <name>-<version>"), "{shape}");
+    }
 
     #[test]
     fn parses_multiline_with_hashes() {

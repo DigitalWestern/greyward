@@ -6,7 +6,11 @@ use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use zip::ZipArchive;
+use crate::kernel::archive::{ZipMember, ZipReader};
+
+/// The most bytes one wheel may unpack to, counted in the bytes its
+/// members really inflate to. Real CUDA and torch wheels pass 1 GiB.
+const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Install one wheel into an environment being assembled (PEP 427,
 /// pragmatic subset). Routes `{name}.data/{purelib,platlib,headers,scripts,data}`,
@@ -21,10 +25,12 @@ pub fn install_wheel(
     python_exe: &Path,
     installed: &mut BTreeMap<std::path::PathBuf, String>,
 ) -> io::Result<()> {
-    let file = fs::File::open(wheel_path)?;
-    let mut archive = ZipArchive::new(file).map_err(zip_error)?;
+    // The kernel reader refuses what the tar path refuses (#675): unsafe or
+    // repeated names, symlinks and special files, and members that inflate
+    // past the size they declare, counted against this aggregate cap.
+    let mut archive = ZipReader::open(wheel_path, MAX_UNPACKED_BYTES)?;
 
-    let distribution_id = scan_dist_info(&mut archive, wheel_path)?;
+    let distribution_id = scan_dist_info(archive.members(), wheel_path)?;
     let data_prefix = format!(
         "{}.data/",
         distribution_id
@@ -38,7 +44,6 @@ pub fn install_wheel(
         .to_string();
     let distribution_name = distribution_dir.replace('_', "-");
     let entry_points = read_entry_points(&mut archive, &distribution_id)?;
-
     let env_root = bin_dir.parent().ok_or_else(|| {
         invalid_data(format!(
             "bin directory has no environment root: {}",
@@ -50,16 +55,34 @@ pub fn install_wheel(
         .join("include/site")
         .join(format!("python{python_minor}"))
         .join(&distribution_dir);
-    let mut directory_modes = Vec::new();
 
-    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
-    let mut total_written: u64 = 0;
+    // Every member's final path is checked before any of this wheel is
+    // written: `bin/.ward-scripts` belongs to ward's wrapper code alone.
+    let mut destinations = Vec::new();
+    for member in archive.members() {
+        let name = member.name.as_str();
+        if let Some((base, relative, _)) = route_entry(
+            name,
+            &data_prefix,
+            site_packages,
+            &headers_dir,
+            bin_dir,
+            env_root,
+        )? {
+            destinations.push(safe_destination(base, relative, env_root, name)?);
+        }
+    }
+    refuse_reserved_paths(
+        &destinations,
+        entry_points.as_deref(),
+        bin_dir,
+        &distribution_id,
+    )?;
 
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(zip_error)?;
-        let name = entry.name().to_string();
+    archive.for_each(|member, reader| {
+        let name = member.name.as_str();
         let Some((base, relative, executable)) = route_entry(
-            &name,
+            name,
             &data_prefix,
             site_packages,
             &headers_dir,
@@ -67,16 +90,14 @@ pub fn install_wheel(
             env_root,
         )?
         else {
-            continue;
+            return Ok(());
         };
 
-        let destination = safe_destination(base, relative, env_root, &name)?;
-        if entry.is_dir() {
-            fs::create_dir_all(&destination)?;
-            if let Some(mode) = entry.unix_mode() {
-                directory_modes.push((destination, mode & 0o777));
-            }
-            continue;
+        let destination = safe_destination(base, relative, env_root, name)?;
+        if member.dir {
+            // A directory's stored mode is ignored, as pip ignores it: a
+            // read-only one would stop the next wheel writing into it.
+            return fs::create_dir_all(&destination);
         }
 
         if destination.symlink_metadata().is_ok() {
@@ -91,19 +112,30 @@ pub fn install_wheel(
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        total_written += entry.size();
-        if total_written > MAX_UNPACKED_BYTES {
-            return Err(invalid_data(format!(
-                "wheel expands past {MAX_UNPACKED_BYTES} bytes; refusing (zip bomb guard)"
-            )));
-        }
-        write_wheel_entry(&mut entry, &destination, executable, python_exe)?;
+        let script = write_wheel_entry(
+            reader,
+            member,
+            &destination,
+            executable,
+            python_exe,
+            bin_dir,
+            &|real| match real.symlink_metadata() {
+                Ok(_) => resolve_file_collision(
+                    real,
+                    env_root,
+                    installed,
+                    &distribution_id,
+                    &distribution_name,
+                ),
+                Err(_) => Ok(()),
+            },
+        )?;
         installed.insert(destination, distribution_id.clone());
-    }
-
-    for (directory, mode) in directory_modes {
-        set_mode(&directory, mode)?;
-    }
+        if let Some(real) = script {
+            installed.insert(real, distribution_id.clone());
+        }
+        Ok(())
+    })?;
 
     if let Some(entry_points) = entry_points {
         install_launchers(
@@ -120,19 +152,52 @@ pub fn install_wheel(
     Ok(())
 }
 
-/// First pass over the archive: reject unsafe or symlink entries and return
-/// the single `.dist-info` directory name the wheel declares.
-fn scan_dist_info(archive: &mut ZipArchive<fs::File>, wheel_path: &Path) -> io::Result<String> {
+/// Refuse a wheel whose `.dist-info` names another distribution or another
+/// version than the lock entry it is installed for (`version` `None`: the
+/// name alone, for a git dependency). Read from the listing only, before
+/// anything is written (#688).
+pub fn check_wheel_package(
+    wheel_path: &Path,
+    package: &crate::kernel::types::LockedPackage,
+) -> io::Result<()> {
+    let version = crate::tailors::python::pypi::locked_version(package);
+    check_wheel_distribution(wheel_path, &package.name, version)
+}
+
+/// The name-and-version check behind [`check_wheel_package`]; `version`
+/// `None` checks the name alone.
+fn check_wheel_distribution(
+    wheel_path: &Path,
+    name: &str,
+    version: Option<&str>,
+) -> io::Result<()> {
+    let archive = ZipReader::open(wheel_path, MAX_UNPACKED_BYTES)?;
+    let distribution_id = scan_dist_info(archive.members(), wheel_path)?;
+    let stem = distribution_id
+        .strip_suffix(".dist-info")
+        .unwrap_or(&distribution_id);
+    let (found_name, found_version) = stem.rsplit_once('-').ok_or_else(|| {
+        invalid_data(format!(
+            "{}: {distribution_id} is not named <name>-<version>.dist-info",
+            wheel_path.display()
+        ))
+    })?;
+    crate::tailors::python::pypi::check_distribution(
+        &format!("the wheel's {distribution_id}"),
+        found_name,
+        found_version,
+        name,
+        version,
+    )
+}
+
+/// Reject names the wheel layout cannot place and return the single
+/// `.dist-info` directory name the wheel declares.
+fn scan_dist_info(members: &[ZipMember], wheel_path: &Path) -> io::Result<String> {
     let mut dist_info: Option<String> = None;
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(zip_error)?;
-        let name = entry.name();
+    for member in members {
+        let name = member.name.as_str();
         validate_entry_name(name)?;
-        if entry.is_symlink() {
-            return Err(invalid_data(format!(
-                "symlink entry is not allowed: {name}"
-            )));
-        }
         let top_level = name.split('/').next().unwrap_or_default();
         if top_level.ends_with(".dist-info") {
             match &dist_info {
@@ -155,16 +220,18 @@ fn scan_dist_info(archive: &mut ZipArchive<fs::File>, wheel_path: &Path) -> io::
 }
 
 /// Read `{dist_info}/entry_points.txt`, if the wheel ships one.
-fn read_entry_points(
-    archive: &mut ZipArchive<fs::File>,
-    dist_info: &str,
-) -> io::Result<Option<String>> {
-    let Ok(mut entry) = archive.by_name(&format!("{dist_info}/entry_points.txt")) else {
+fn read_entry_points(archive: &mut ZipReader, dist_info: &str) -> io::Result<Option<String>> {
+    // Entry points are a few lines; 16 MiB is the manifest cap the sdist
+    // readers use.
+    const ENTRY_POINTS_CAP: u64 = 16 << 20;
+    let name = format!("{dist_info}/entry_points.txt");
+    if archive.file(&name).is_none() {
         return Ok(None);
-    };
-    let mut contents = String::new();
-    entry.read_to_string(&mut contents)?;
-    Ok(Some(contents))
+    }
+    let bytes = archive.read(&name, ENTRY_POINTS_CAP)?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| invalid_data(format!("{name} is not UTF-8")))
 }
 
 /// Route one archive entry to its install base and relative path. Entries
@@ -262,20 +329,47 @@ fn supersede(
     fs::remove_file(destination)
 }
 
-/// Unpack one file entry and set its mode. Scripts are buffered so a
+/// Unpack one file entry and set its mode: 0o755 for a script or a file
+/// with any execute bit, else 0o644 (pip's rule). Scripts are buffered so a
 /// `#!python` shebang can be pointed at the environment's interpreter.
+///
+/// When `#!<python>` cannot exec the interpreter (see [`needs_trampoline`]),
+/// the script's body is never rewritten: Python reads a module docstring,
+/// a `from __future__` import and a line-two coding declaration by their
+/// position, and a line put in front of them moves all three. The script is
+/// installed as shipped, under its own name, in a private directory beside
+/// `destination` ([`hidden_script`]), after
+/// `claim` has cleared that path, and `destination` becomes a `/bin/sh`
+/// wrapper that runs the interpreter on it ([`script_wrapper`]). Returns
+/// that hidden file's path, for the caller to record.
 fn write_wheel_entry(
-    entry: &mut zip::read::ZipFile<'_>,
+    entry: &mut dyn Read,
+    member: &ZipMember,
     destination: &Path,
     executable: bool,
     python_exe: &Path,
-) -> io::Result<()> {
+    bin_dir: &Path,
+    claim: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<Option<PathBuf>> {
+    let mut real = None;
     if executable {
         // Scripts are small; buffer them for shebang rewriting.
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
         if contents.starts_with(b"#!python") {
-            contents = rewrite_shebang(&contents, python_exe);
+            if needs_trampoline(python_exe) {
+                let hidden = hidden_script(destination)?;
+                claim(&hidden)?;
+                if let Some(dir) = hidden.parent() {
+                    fs::create_dir_all(dir)?;
+                }
+                fs::write(&hidden, &contents)?;
+                set_mode(&hidden, 0o644)?;
+                contents = script_wrapper(python_exe, &final_path(&hidden, bin_dir, python_exe)?);
+                real = Some(hidden);
+            } else {
+                contents = rewrite_shebang(&contents, python_exe)?;
+            }
         }
         fs::write(destination, contents)?;
     } else {
@@ -283,14 +377,105 @@ fn write_wheel_entry(
         io::copy(entry, &mut out)?;
     }
     let mode = if executable {
-        Some(0o755)
+        0o755
     } else {
-        entry.unix_mode().map(|mode| (mode & 0o777).max(0o644))
+        member.file_mode()
     };
-    if let Some(mode) = mode {
-        set_mode(destination, mode)?;
+    set_mode(destination, mode)?;
+    Ok(real)
+}
+
+/// The private directory beside a wrapper that holds the shipped script it
+/// runs. The script keeps its own name in it, so `sys.argv[0]`'s basename
+/// and `__file__`'s name are the ones it shipped with.
+const SHIPPED_SCRIPTS: &str = ".ward-scripts";
+
+/// Refuse, before anything is written, a wheel whose members or
+/// entry-point launchers would land at `bin/.ward-scripts` or inside it,
+/// by any route (`scripts`, `data/bin`, ...): that name is ward's private
+/// directory in `bin`, under every store path, written only by
+/// [`write_wheel_entry`]'s wrapper code, so no package may claim it whether
+/// or not its own scripts are wrapped. `destinations` are the members' final
+/// paths, as [`safe_destination`] maps them.
+fn refuse_reserved_paths(
+    destinations: &[PathBuf],
+    entry_points: Option<&str>,
+    bin_dir: &Path,
+    distribution_id: &str,
+) -> io::Result<()> {
+    let launchers: Vec<PathBuf> = match entry_points {
+        Some(text) => parse_entry_points(text)?
+            .into_iter()
+            .map(|(name, _, _)| bin_dir.join(name))
+            .collect(),
+        None => Vec::new(),
+    };
+    let reserved = destinations.iter().chain(&launchers).find_map(|path| {
+        let relative = path.strip_prefix(bin_dir).ok()?;
+        relative
+            .components()
+            .any(|part| part.as_os_str() == SHIPPED_SCRIPTS)
+            .then(|| relative.display().to_string())
+    });
+    if let Some(path) = reserved {
+        return Err(invalid_data(format!(
+            "{distribution_id} installs bin/{path}, but bin/{SHIPPED_SCRIPTS} is reserved for \
+             ward's wrapped scripts; refusing the wheel"
+        )));
     }
     Ok(())
+}
+
+/// `<dir>/.ward-scripts/<name>`, for the script `destination` names.
+fn hidden_script(destination: &Path) -> io::Result<PathBuf> {
+    let name = destination
+        .file_name()
+        .ok_or_else(|| invalid_data(format!("script {} has no name", destination.display())))?;
+    let parent = destination.parent().ok_or_else(|| {
+        invalid_data(format!("script {} has no directory", destination.display()))
+    })?;
+    Ok(parent.join(SHIPPED_SCRIPTS).join(name))
+}
+
+/// Where `hidden`, written under `bin_dir` in the environment being
+/// assembled, will be once it is committed: `python_exe` is the committed
+/// environment's interpreter, in its `bin`, so the committed path is that
+/// directory joined with the script's path below `bin_dir`.
+fn final_path(hidden: &Path, bin_dir: &Path, python_exe: &Path) -> io::Result<PathBuf> {
+    let unplaced = || {
+        invalid_data(format!(
+            "script {} is not under {}, beside {}",
+            hidden.display(),
+            bin_dir.display(),
+            python_exe.display()
+        ))
+    };
+    let final_bin = python_exe.parent().ok_or_else(unplaced)?;
+    let below = hidden.strip_prefix(bin_dir).map_err(|_| unplaced())?;
+    Ok(final_bin.join(below))
+}
+
+/// The `/bin/sh` wrapper a shipped script runs through when its shebang
+/// cannot hold the interpreter: `exec '<python>' '<script>' "$@"`. Each path
+/// is one sh single-quoted word, `'` written as `'\''`, so no byte of either
+/// path is ever read by the shell as syntax.
+fn script_wrapper(python_exe: &Path, script: &Path) -> Vec<u8> {
+    fn quoted(path: &Path, out: &mut Vec<u8>) {
+        out.push(b'\'');
+        for &byte in path.as_os_str().as_encoded_bytes() {
+            match byte {
+                b'\'' => out.extend_from_slice(b"'\\''"),
+                byte => out.push(byte),
+            }
+        }
+        out.push(b'\'');
+    }
+    let mut wrapper = b"#!/bin/sh\nexec ".to_vec();
+    quoted(python_exe, &mut wrapper);
+    wrapper.push(b' ');
+    quoted(script, &mut wrapper);
+    wrapper.extend_from_slice(b" \"$@\"\n");
+    wrapper
 }
 
 /// Generate `console_scripts`/`gui_scripts` launchers into `bin_dir`.
@@ -304,7 +489,7 @@ fn install_launchers(
     installed: &mut BTreeMap<PathBuf, String>,
 ) -> io::Result<()> {
     for (name, module, attr) in parse_entry_points(entry_points)? {
-        let launcher = launcher_source(python_exe, &module, &attr);
+        let launcher = launcher_source(python_exe, &module, &attr)?;
         let destination = bin_dir.join(name);
         if destination.symlink_metadata().is_ok() {
             resolve_script_collision(
@@ -324,27 +509,91 @@ fn install_launchers(
 }
 
 /// The launcher script pip would have written for one entry point.
-fn launcher_source(python_exe: &Path, module: &str, attr: &str) -> String {
+fn launcher_source(python_exe: &Path, module: &str, attr: &str) -> io::Result<Vec<u8>> {
     let attr0 = attr.split('.').next().unwrap();
-    format!(
-        concat!(
-            "#!{}\n",
-            "# -*- coding: utf-8 -*-\n",
-            "import re, sys\n",
-            "from {module} import {attr0}\n",
-            "if __name__ == \"__main__\":\n",
-            "    sys.argv[0] = re.sub(r\"(-script\\.pyw?|\\.exe)?$\", \"\", sys.argv[0])\n",
-            "    sys.exit({attr}())\n",
-        ),
-        python_exe.display(),
-        module = module,
-        attr0 = attr0,
-        attr = attr
-    )
+    let mut source = shebang(python_exe)?;
+    source.extend_from_slice(
+        format!(
+            concat!(
+                "# -*- coding: utf-8 -*-\n",
+                "import re, sys\n",
+                "from {module} import {attr0}\n",
+                "if __name__ == \"__main__\":\n",
+                "    sys.argv[0] = re.sub(r\"(-script\\.pyw?|\\.exe)?$\", \"\", sys.argv[0])\n",
+                "    sys.exit({attr}())\n",
+            ),
+            module = module,
+            attr0 = attr0,
+            attr = attr
+        )
+        .as_bytes(),
+    );
+    Ok(source)
 }
 
-fn zip_error(error: zip::result::ZipError) -> io::Error {
-    invalid_data(error.to_string())
+/// The longest `#!` line Linux reads whole: `BINPRM_BUF_SIZE`, 256 bytes
+/// since Linux 5.1, the `#!` and the newline included. A longer line is
+/// cut or refused by the kernel.
+const MAX_SHEBANG_LINE: usize = 256;
+
+/// The opening of a script `python_exe` runs, newline included.
+///
+/// Normally `#!<python>`. Linux ends the interpreter at the first space or
+/// tab and reads at most [`MAX_SHEBANG_LINE`] bytes, so a store under
+/// `/srv/ci data/` or a long store root would exec the wrong program or
+/// none (#691). Then this is the `/bin/sh` trampoline pip's distlib
+/// writes: sh runs line two, which execs the interpreter on the script,
+/// and Python reads lines two and three as one string literal and skips
+/// it.
+///
+/// ```text
+/// #!/bin/sh
+/// '''exec' "/srv/ci data/store/.../bin/python" "$0" "$@"
+/// ' '''
+/// ```
+///
+/// The path is in sh double quotes, so `$`, `` ` ``, `"` and `\` are each
+/// written as a single-quoted sh word (`"'$'"`), and a `'` as `'""`, which
+/// sh reads as itself and which never lets three `'` meet and end Python's
+/// string early. No backslash reaches Python except as `\'`, so the
+/// literal compiles without an invalid-escape warning.
+fn shebang(python_exe: &Path) -> io::Result<Vec<u8>> {
+    if !needs_trampoline(python_exe) {
+        let mut line = b"#!".to_vec();
+        line.extend_from_slice(python_exe.as_os_str().as_encoded_bytes());
+        line.push(b'\n');
+        return Ok(line);
+    }
+    // Python reads the trampoline as source, which must be UTF-8.
+    let text = python_exe.to_str().ok_or_else(|| {
+        invalid_data(format!(
+            "interpreter path {} needs a /bin/sh launcher and is not UTF-8",
+            python_exe.display()
+        ))
+    })?;
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        match c {
+            '$' | '`' | '"' | '\\' => {
+                quoted.push_str("\"'");
+                quoted.push(c);
+                quoted.push_str("'\"");
+            }
+            '\'' => quoted.push_str("'\"\""),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    Ok(format!("#!/bin/sh\n'''exec' {quoted} \"$0\" \"$@\"\n' '''\n").into_bytes())
+}
+
+/// Whether `#!<python_exe>` would not exec `python_exe`: a space, tab or
+/// newline in the path, or a line past [`MAX_SHEBANG_LINE`].
+fn needs_trampoline(python_exe: &Path) -> bool {
+    let bytes = python_exe.as_os_str().as_encoded_bytes();
+    bytes.iter().any(|b| matches!(b, b' ' | b'\t' | b'\n'))
+        || "#!".len() + bytes.len() + "\n".len() > MAX_SHEBANG_LINE
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -429,11 +678,21 @@ fn safe_destination(
     Ok(destination)
 }
 
-fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> Vec<u8> {
+/// Point a `#!python` script at `python_exe` when a `#!` line can hold it
+/// (the caller checks [`needs_trampoline`]): its first line becomes
+/// `#!<python_exe>`, keeping a CRLF or a missing final newline as written.
+fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> io::Result<Vec<u8>> {
     let newline = contents.iter().position(|byte| *byte == b'\n');
     let line_end = newline.map(|index| index + 1).unwrap_or(contents.len());
+    if needs_trampoline(python_exe) {
+        return Err(invalid_data(format!(
+            "a #! line cannot hold {}",
+            python_exe.display()
+        )));
+    }
     let has_crlf = line_end > 1 && contents[line_end - 2] == b'\r';
-    let mut rewritten = format!("#!{}", python_exe.display()).into_bytes();
+    let mut rewritten = b"#!".to_vec();
+    rewritten.extend_from_slice(python_exe.as_os_str().as_encoded_bytes());
     if newline.is_some() {
         if has_crlf {
             rewritten.extend_from_slice(b"\r\n");
@@ -442,7 +701,7 @@ fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> Vec<u8> {
         }
     }
     rewritten.extend_from_slice(&contents[line_end..]);
-    rewritten
+    Ok(rewritten)
 }
 
 fn parse_entry_points(text: &str) -> io::Result<Vec<(String, String, String)>> {
@@ -588,11 +847,114 @@ mod tests {
         let file = fs::File::create(path).unwrap();
         let mut writer = ZipWriter::new(file);
         for (name, contents) in entries {
+            if name.ends_with('/') {
+                let options = SimpleFileOptions::default().unix_permissions(0o700);
+                writer.add_directory(*name, options).unwrap();
+                continue;
+            }
             let options = SimpleFileOptions::default().unix_permissions(0o600);
             writer.start_file(*name, options).unwrap();
             writer.write_all(contents).unwrap();
         }
         writer.finish().unwrap();
+    }
+
+    /// #688: the `.dist-info` a wheel installs names the distribution and
+    /// release the environment records, so it must be the lock entry's.
+    #[test]
+    fn a_wheel_whose_dist_info_names_another_package_is_refused() {
+        let temp = TempDir::new();
+        let wheel = temp.0.join("requests-2.32.3-py3-none-any.whl");
+        let dist_info = |id: &str| {
+            write_wheel(
+                &wheel,
+                &[("pkg/__init__.py", b""), (&format!("{id}/RECORD"), b"")],
+            );
+        };
+        dist_info("requests-2.32.3.dist-info");
+        check_wheel_distribution(&wheel, "Requests", Some("2.32.3")).unwrap();
+        dist_info("Zope_Interface-6.0.dist-info");
+        check_wheel_distribution(&wheel, "zope.interface", Some("6.0.0")).unwrap();
+
+        dist_info("evil-9.9.dist-info");
+        let error = check_wheel_distribution(&wheel, "requests", Some("2.32.3"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("evil-9.9.dist-info is evil 9.9, but the lock names requests 2.32.3"),
+            "{error}"
+        );
+        dist_info("requests-2.0.0.dist-info");
+        let error = check_wheel_distribution(&wheel, "requests", Some("2.32.3"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is requests 2.0.0"), "{error}");
+        // A git package is locked by commit: its name alone is checked.
+        check_wheel_distribution(&wheel, "requests", None).unwrap();
+        dist_info("evil-1.0.dist-info");
+        assert!(check_wheel_distribution(&wheel, "requests", None).is_err());
+    }
+
+    /// Sol's rounds 3 and 4: `bin/.ward-scripts` is ward's private
+    /// directory, so any member whose final path is it or inside it, by the
+    /// `scripts` or the `data/bin` route, and an entry point by that name,
+    /// is refused up front, with nothing written, under an ordinary store
+    /// path too.
+    #[test]
+    fn a_wheel_claiming_the_private_scripts_directory_is_refused() {
+        let temp = TempDir::new();
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python");
+        let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
+        let entry_points: &[u8] = b"[console_scripts]\n.ward-scripts = demo:main\n";
+        for entries in [
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/scripts/.ward-scripts", b"#!/bin/sh\n"),
+            ][..],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/scripts/sub/.ward-scripts/x", b"#!/bin/sh\n"),
+            ],
+            // Sol's round 4: the destination decides, not the route.
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/data/bin/.ward-scripts", b"not a directory\n"),
+                ("demo-1.0.data/scripts/raw", b"#!python\nprint('raw')\n"),
+            ],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/data/bin/.ward-scripts/raw", b"#!python\n"),
+            ],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/data/bin/.ward-scripts/", b""),
+            ],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.dist-info/entry_points.txt", entry_points),
+            ],
+        ] {
+            write_wheel(&wheel, entries);
+            let error = install_wheel(&wheel, &site, &bin, "3.12", &python, &mut BTreeMap::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("demo-1.0.dist-info installs bin/")
+                    && error.contains("bin/.ward-scripts is reserved"),
+                "{error}"
+            );
+            assert!(!site.join("demo").exists(), "nothing is written first");
+        }
     }
 
     #[test]
@@ -863,9 +1225,19 @@ mod tests {
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
 
-        for (index, data_entry) in [
-            ("absolute", "demo-1.0.data/data//outside.txt"),
-            ("escaping", "demo-1.0.data/data/sub/../../outside.txt"),
+        // The kernel's zip listing refuses both names before the wheel's
+        // own destination check would.
+        for (index, data_entry, needle) in [
+            (
+                "absolute",
+                "demo-1.0.data/data//outside.txt",
+                "empty path component",
+            ),
+            (
+                "escaping",
+                "demo-1.0.data/data/sub/../../outside.txt",
+                "`..` path component",
+            ),
         ] {
             let wheel = temp.0.join(format!("bad-{index}.whl"));
             write_wheel(
@@ -882,7 +1254,7 @@ mod tests {
                 &mut BTreeMap::new(),
             )
             .unwrap_err();
-            assert!(error.to_string().contains("unsafe zip entry"), "{error}");
+            assert!(error.to_string().contains(needle), "{error}");
             assert!(!temp.0.join("outside.txt").exists());
         }
     }
@@ -1065,6 +1437,114 @@ mod tests {
             format!("console-script collision: {}", bin.join("tool").display())
         );
     }
+
+    /// An environment's `site-packages` and `bin` under a fresh temp dir.
+    fn env(temp: &TempDir) -> (PathBuf, PathBuf) {
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        (site, bin)
+    }
+
+    /// Members as `(name, mode, bytes)`; a name ending in `/` is a directory.
+    fn write_wheel_with_modes(path: &Path, entries: &[(&str, u32, &[u8])]) {
+        let mut writer = ZipWriter::new(fs::File::create(path).unwrap());
+        for (name, mode, contents) in entries {
+            let options = SimpleFileOptions::default().unix_permissions(*mode);
+            if name.ends_with('/') {
+                writer.add_directory(*name, options).unwrap();
+            } else {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(contents).unwrap();
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    /// The size guard counts the bytes a member really inflates to, not the
+    /// size its header claims (#675): a member that claims one byte and
+    /// inflates to a megabyte is refused, not installed.
+    #[test]
+    fn a_member_that_inflates_past_its_claimed_size_is_refused() {
+        let temp = TempDir::new();
+        let (site, bin) = env(&temp);
+        let wheel = temp.0.join("demo.whl");
+        write_wheel(
+            &wheel,
+            &[
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo/big.bin", &vec![0u8; 1 << 20]),
+            ],
+        );
+        let mut bytes = fs::read(&wheel).unwrap();
+        crate::kernel::archive::zip_testing::claim_size(&mut bytes, "demo/big.bin", 1);
+        fs::write(&wheel, bytes).unwrap();
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("inflates past"), "{error}");
+        let written = fs::metadata(site.join("demo/big.bin")).map_or(0, |m| m.len());
+        assert!(written <= 1, "{written}");
+    }
+
+    /// pip's modes: any execute bit gives 0o755, else 0o644, and a stored
+    /// directory mode is ignored, so no wheel can hide a file from other
+    /// users or lock a shared directory against the next wheel.
+    #[test]
+    fn file_modes_are_pips_and_directory_modes_are_ignored() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let (site, bin) = env(&temp);
+        let first = temp.0.join("first.whl");
+        write_wheel_with_modes(
+            &first,
+            &[
+                ("first-1.0.dist-info/RECORD", 0o644, b""),
+                ("ns/", 0o555, b""),
+                ("ns/a.py", 0o600, b"a"),
+                ("ns/group.py", 0o660, b"g"),
+                ("ns/tool.sh", 0o700, b"t"),
+                ("first-1.0.data/purelib/", 0o500, b""),
+                ("locked/", 0o000, b""),
+            ],
+        );
+        let second = temp.0.join("second.whl");
+        write_wheel_with_modes(
+            &second,
+            &[
+                ("second-1.0.dist-info/RECORD", 0o644, b""),
+                ("ns/b.py", 0o644, b"b"),
+            ],
+        );
+        let mut installed = BTreeMap::new();
+        for wheel in [&first, &second] {
+            install_wheel(
+                wheel,
+                &site,
+                &bin,
+                "3.12",
+                &bin.join("python"),
+                &mut installed,
+            )
+            .unwrap();
+        }
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&site.join("ns/a.py")), 0o644);
+        assert_eq!(mode(&site.join("ns/group.py")), 0o644);
+        assert_eq!(mode(&site.join("ns/tool.sh")), 0o755);
+        assert_eq!(fs::read(site.join("ns/b.py")).unwrap(), b"b");
+        // site-packages itself keeps its mode, and the 0o000 directory is
+        // still listable.
+        assert_ne!(mode(&site) & 0o200, 0);
+        assert!(fs::read_dir(site.join("locked")).is_ok());
+    }
 }
 
 /// Offline tests for the wheel entry guards (#348): the zip entry names a
@@ -1133,9 +1613,11 @@ mod entry_guard_tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(
-            error.to_string(),
-            "symlink entry is not allowed: pkg/passwd"
+        assert!(
+            error
+                .to_string()
+                .ends_with("entry \"pkg/passwd\" is a symlink"),
+            "{error}"
         );
         assert!(
             fs::read_dir(&site).unwrap().next().is_none(),
@@ -1277,5 +1759,187 @@ bad/name = x:y\n";
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod shebang_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    /// A stand-in interpreter at `path`: it prints each argument it was
+    /// given on its own line.
+    fn fake_python(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Install a wheel with one console script and one `#!python` script
+    /// against `python`, in the environment whose `bin` holds it, and
+    /// return that `bin`.
+    fn install_against(temp: &TempDir, python: &Path) -> PathBuf {
+        let bin = python.parent().unwrap().to_path_buf();
+        let site = bin.parent().unwrap().join("lib/python3.12/site-packages");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
+        let mut writer = ZipWriter::new(fs::File::create(&wheel).unwrap());
+        for (name, bytes) in [
+            (
+                "demo-1.0.dist-info/entry_points.txt",
+                &b"[console_scripts]\ntool = demo:main\n"[..],
+            ),
+            ("demo-1.0.data/scripts/raw", b"#!python\r\nprint('raw')\n"),
+        ] {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        install_wheel(&wheel, &site, &bin, "3.12", python, &mut BTreeMap::new()).unwrap();
+        bin
+    }
+
+    /// What `script` hands its interpreter when run with `args`.
+    fn run(script: &Path, args: &[&str]) -> Vec<String> {
+        let output = Command::new(script).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_short_plain_path_keeps_the_plain_shebang() {
+        let python = Path::new("/store/objects/abc/bin/python");
+        assert_eq!(
+            shebang(python).unwrap(),
+            b"#!/store/objects/abc/bin/python\n"
+        );
+        assert_eq!(
+            rewrite_shebang(b"#!python\r\nx\n", python).unwrap(),
+            b"#!/store/objects/abc/bin/python\r\nx\n"
+        );
+        let longest = format!("/{}", "a".repeat(MAX_SHEBANG_LINE - 4));
+        assert!(!needs_trampoline(Path::new(&longest)));
+        assert!(needs_trampoline(Path::new(&format!("{longest}a"))));
+    }
+
+    /// A store path with a space, shell metacharacters and quotes, and one
+    /// past Linux's 256-byte shebang limit: every launcher still execs the
+    /// interpreter with the script and its arguments (#691).
+    #[test]
+    fn launchers_exec_the_interpreter_from_a_path_a_shebang_cannot_hold() {
+        let temp = TempDir::named("wheel-shebang");
+        let spaced = temp
+            .0
+            .join("ci data/$HOME `x` \"q\" back\\slash it's '''/bin/python");
+        let long = temp.0.join(format!("{}/bin/python", "d".repeat(240)));
+        for python in [spaced, long] {
+            assert!(needs_trampoline(&python));
+            fake_python(&python);
+            let bin = install_against(&temp, &python);
+            // A launcher ward writes runs itself; a shipped script runs as
+            // shipped, from its hidden sibling.
+            for (script, runs) in [("tool", "tool"), ("raw", ".ward-scripts/raw")] {
+                let path = bin.join(script);
+                assert_eq!(
+                    run(&path, &["one arg", "$two"]),
+                    [
+                        bin.join(runs).display().to_string(),
+                        "one arg".into(),
+                        "$two".into()
+                    ],
+                    "{script} via {}",
+                    python.display()
+                );
+            }
+            assert_eq!(
+                fs::read(bin.join(".ward-scripts/raw")).unwrap(),
+                b"#!python\r\nprint('raw')\n"
+            );
+            // Python reads the trampoline as a string literal, without a
+            // warning, and goes on to the script's own code.
+            if Path::new("/usr/bin/python3").is_file() {
+                let output = Command::new("/usr/bin/python3")
+                    .args(["-W", "error", "-c"])
+                    .arg("import sys; compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')")
+                    .arg(bin.join("tool"))
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "tool: {output:?}");
+            }
+        }
+    }
+
+    /// Sol's review of #691: a shipped script whose header Python reads by
+    /// position still runs when the shebang cannot hold the interpreter. A
+    /// module docstring must come before `from __future__`, and a coding
+    /// declaration must be on line one or two; a line put in front of the
+    /// body broke both.
+    #[test]
+    fn a_shipped_script_runs_unchanged_from_a_path_a_shebang_cannot_hold() {
+        let host = Path::new("/usr/bin/python3");
+        if !host.is_file() {
+            return;
+        }
+        let temp = TempDir::named("wheel-script-header");
+        // The environment itself sits under a path with a space and a quote,
+        // and its interpreter is the host's.
+        let env = temp.0.join("ci data/it's/env");
+        let site = env.join("lib/python3.12/site-packages");
+        let bin = env.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python");
+        std::os::unix::fs::symlink(host, &python).unwrap();
+        assert!(needs_trampoline(&python));
+        let docstring: &[u8] =
+            b"#!python\n\"\"\"Doc.\"\"\"\nfrom __future__ import annotations\nimport sys\nprint('doc', sys.argv[1:])\n";
+        let latin: &[u8] = b"#!python\n# coding: latin-1\nprint('caf\xe9'.encode('utf-8').hex())\n";
+        // Sol's round 2: a script that dispatches on its own name.
+        let dispatch: &[u8] = b"#!python\nimport os, sys\nhandlers = {'tool': lambda: print('tool ran')}\nhandlers[os.path.basename(sys.argv[0])]()\nprint(os.path.basename(__file__))\n";
+        let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
+        let mut writer = ZipWriter::new(fs::File::create(&wheel).unwrap());
+        for (name, bytes) in [
+            ("demo-1.0.dist-info/RECORD", &b""[..]),
+            ("demo-1.0.data/scripts/doc", docstring),
+            ("demo-1.0.data/scripts/latin", latin),
+            ("demo-1.0.data/scripts/tool", dispatch),
+        ] {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        install_wheel(&wheel, &site, &bin, "3.12", &python, &mut BTreeMap::new()).unwrap();
+
+        // Each body is installed byte for byte, beside its wrapper.
+        assert_eq!(fs::read(bin.join(".ward-scripts/doc")).unwrap(), docstring);
+        assert_eq!(fs::read(bin.join(".ward-scripts/latin")).unwrap(), latin);
+        let output = |script: &str, args: &[&str]| {
+            let output = Command::new(bin.join(script)).args(args).output().unwrap();
+            assert!(output.status.success(), "{script}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert_eq!(output("doc", &["a b", "$c"]), "doc ['a b', '$c']\n");
+        // Read as latin-1, `é` is one character, which is `c3a9` in UTF-8.
+        assert_eq!(output("latin", &[]), "636166c3a9\n");
+        // The shipped script keeps its name: argv[0] and __file__ end in it.
+        assert_eq!(output("tool", &[]), "tool ran\ntool\n");
     }
 }

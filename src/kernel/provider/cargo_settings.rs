@@ -217,101 +217,58 @@ fn words(value: &toml::Value, separator: char) -> Vec<&str> {
     }
 }
 
-/// Whether compiler flags can load project code into rustc, read as
-/// rustc's getopts reads them: an unstable `-Z` option, the codegen option
-/// `codegen-backend` (an underscore for the dash too, as rustc allows), or
-/// an `@file` argument file rustc reads further flags from (rustc expands
-/// one wherever it stands, so every word is checked for it).
+/// Whether compiler flags can load project code into rustc or rustdoc:
 ///
-/// A long option (`--codegen`, `--cfg`) takes its value after `=` or as
-/// the next word. A single-dash word is a cluster of short options, as
-/// getopts parses it: a flag-only one (`-g`, `-O`, `-h`, `-V`, `-v`)
-/// continues the cluster, and a value-taking one (`-C`, `-Z`, `-L`, `-l`,
-/// `-o`, `-A`, `-W`, `-D`, `-F`, rustc 1.98's whole list) takes the rest of
-/// the word as its value or, when that is empty, the next word. So
-/// `-gZcodegen-backend=x` is `-g` then `-Z codegen-backend=x`, and
-/// `--cfg 'feature="codegen-backend"'` or `-L /x/-Zdir` is no backend and
-/// no `-Z`. A short option rustc does not list is refused, so a newer
-/// rustc's option is not read as something it is not.
+/// - An unstable `-Z` option, however getopts would read it: any word that
+///   starts with `-` and holds a capital `Z` before its first `=` (`-Z`,
+///   `-Zx`, `-gZ`, `--Z`, `--Z=x`). No option rustc or rustdoc lists but
+///   `-Z` itself has a `Z` in its name
+///   (`no_rustc_or_rustdoc_option_but_z_names_a_capital_z`), so this needs
+///   no table of their options and passes each tool's own (rustdoc's `-e`,
+///   `-w`). A value (`-L /x/-Zdir`'s path, `-lstatic=Zlib`'s name) is not an
+///   option part and is not read.
+/// - The option `codegen-backend` (a library rustc loads, an underscore
+///   for the dash too) in a `-C` or `--codegen` spelling: `-C x`,
+///   `-gC x`, `--codegen x` for the next word `x`, and `-Cx`, `-gCx`,
+///   `--codegen=x` inline. Also the word after a `-Z` option, though that
+///   is refused for its `Z` already.
+/// - An `@file` argument file rustc reads further flags from (rustc
+///   expands one wherever it stands).
+///
+/// So `--cfg 'feature="codegen-backend"'` and a `--remap-path-prefix`
+/// through a `codegen-backend` directory stay allowed.
 fn loads_project_code(flags: &[&str]) -> bool {
-    /// rustc's long options that take a value, given after `=` or as the
-    /// next word (`rustc --help -v`, and the unstable `--env-set`).
-    const LONG_TAKES_VALUE: &[&str] = &[
-        "cfg",
-        "check-cfg",
-        "crate-type",
-        "crate-name",
-        "edition",
-        "emit",
-        "print",
-        "out-dir",
-        "explain",
-        "target",
-        "allow",
-        "warn",
-        "force-warn",
-        "deny",
-        "forbid",
-        "cap-lints",
-        "extern",
-        "sysroot",
-        "error-format",
-        "json",
-        "color",
-        "diagnostic-width",
-        "remap-path-prefix",
-        "remap-path-scope",
-        "env-set",
-    ];
-    /// rustc's short options that take no value.
-    const SHORT_FLAGS: &[char] = &['g', 'O', 'h', 'V', 'v'];
-    /// rustc's short options that take a value.
-    const SHORT_TAKES_VALUE: &[char] = &['C', 'Z', 'L', 'l', 'o', 'A', 'W', 'D', 'F'];
+    let option_part = |word: &'_ str| -> Option<String> {
+        word.starts_with('-')
+            .then(|| word.split('=').next().unwrap_or(word).to_string())
+    };
+    let names_unstable = |word: &str| option_part(word).is_some_and(|part| part.contains('Z'));
+    let single_dash = |word: &str| word.starts_with('-') && !word.starts_with("--");
     let is_backend = |option: &str| {
         let name = option.split('=').next().unwrap_or(option);
         name.replace('_', "-") == "codegen-backend"
     };
-    if flags.iter().any(|flag| flag.starts_with('@')) {
-        return true;
-    }
-    let mut words = flags.iter().copied();
-    while let Some(word) = words.next() {
-        if let Some(long) = word.strip_prefix("--") {
-            let (name, inline) = match long.split_once('=') {
-                Some((name, value)) => (name, Some(value)),
-                None => (long, None),
-            };
-            if name == "codegen" {
-                if inline.or_else(|| words.next()).is_some_and(is_backend) {
-                    return true;
-                }
-            } else if inline.is_none() && LONG_TAKES_VALUE.contains(&name) {
-                words.next();
-            }
-            continue;
+    let mut previous: Option<&str> = None;
+    for &word in flags {
+        if word.starts_with('@') || names_unstable(word) {
+            return true;
         }
-        let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
-            // An input file, or `-` for standard input.
-            continue;
-        };
-        for (at, short) in cluster.char_indices() {
-            if SHORT_FLAGS.contains(&short) {
-                continue;
-            }
-            if !SHORT_TAKES_VALUE.contains(&short) {
+        if let Some(previous) = previous {
+            let takes_codegen = previous == "--codegen"
+                || (single_dash(previous)
+                    && option_part(previous).is_some_and(|p| p.ends_with('C')));
+            if (takes_codegen || names_unstable(previous)) && is_backend(word) {
                 return true;
             }
-            let rest = &cluster[at + short.len_utf8()..];
-            let value = if rest.is_empty() {
-                words.next().unwrap_or("")
-            } else {
-                rest
-            };
-            if short == 'Z' || (short == 'C' && is_backend(value)) {
-                return true;
-            }
-            break;
         }
+        let inline = word.strip_prefix("--codegen=").or_else(|| {
+            let part = option_part(word).filter(|_| single_dash(word))?;
+            part.find('C').map(|at| &word[at + 1..])
+        });
+        if inline.is_some_and(is_backend) {
+            return true;
+        }
+        previous = Some(word);
     }
     false
 }

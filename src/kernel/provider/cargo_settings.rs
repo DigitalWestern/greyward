@@ -217,14 +217,78 @@ fn words(value: &toml::Value, separator: char) -> Vec<&str> {
     }
 }
 
-/// Whether compiler flags can load project code into rustc: an unstable
-/// `-Z` flag in any spelling (`-Zcodegen-backend=`, `-Z` then its value),
-/// a `codegen-backend` however it is passed, or an `@file` argument file
-/// rustc reads further flags from.
+/// Whether compiler flags can load project code into rustc, read as rustc
+/// reads them: an unstable `-Z` flag (`-Zx`, or `-Z` then its value), the
+/// codegen option `codegen-backend` (`-C codegen-backend=`,
+/// `-Ccodegen-backend=`, `--codegen codegen-backend=`,
+/// `--codegen=codegen-backend=`, an underscore for the dash as rustc
+/// allows), or an `@file` argument file rustc reads further flags from
+/// (rustc expands one wherever it stands, so every word is checked for
+/// it). An option that takes its value as the next word consumes it, so
+/// `--cfg 'feature="codegen-backend"'` or `-L /x/-Zdir` is no backend and
+/// no `-Z`.
 fn loads_project_code(flags: &[&str]) -> bool {
-    flags.iter().any(|flag| {
-        flag.starts_with("-Z") || flag.contains("codegen-backend") || flag.starts_with('@')
-    })
+    /// rustc's options whose value may be the next word.
+    const TAKES_VALUE: &[&str] = &[
+        "--cfg",
+        "--check-cfg",
+        "-L",
+        "-l",
+        "--crate-type",
+        "--crate-name",
+        "--edition",
+        "--emit",
+        "--print",
+        "-o",
+        "--out-dir",
+        "--explain",
+        "--target",
+        "-A",
+        "--allow",
+        "-W",
+        "--warn",
+        "--force-warn",
+        "-D",
+        "--deny",
+        "-F",
+        "--forbid",
+        "--cap-lints",
+        "--extern",
+        "--sysroot",
+        "--error-format",
+        "--json",
+        "--color",
+        "--remap-path-prefix",
+        "--diagnostic-width",
+        "--env-set",
+    ];
+    let is_backend = |option: &str| {
+        let name = option.split('=').next().unwrap_or(option);
+        name.replace('_', "-") == "codegen-backend"
+    };
+    if flags.iter().any(|flag| flag.starts_with('@')) {
+        return true;
+    }
+    let mut words = flags.iter().copied();
+    while let Some(word) = words.next() {
+        if word.starts_with("-Z") {
+            return true;
+        }
+        let codegen = match word {
+            "-C" | "--codegen" => words.next(),
+            _ => word
+                .strip_prefix("--codegen=")
+                .or_else(|| word.strip_prefix("-C")),
+        };
+        if let Some(option) = codegen {
+            if is_backend(option) {
+                return true;
+            }
+        } else if TAKES_VALUE.contains(&word) {
+            words.next();
+        }
+    }
+    false
 }
 
 /// Every registry, index and source URL a config table sets, with its key

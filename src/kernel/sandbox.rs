@@ -459,8 +459,8 @@ impl Sandbox<'_> {
         let options = args_file(options).map_err(setup)?;
         let options_fd = pass_in_place(&mut command, &options);
         command.arg("--args").arg(options_fd.to_string()).args(own);
-        held::keep_in_place(&mut command, held.in_place());
-        pass_fds(&mut command, held.moved());
+        debug_assert!(!held.numbers().contains(&options_fd));
+        held::keep_in_place(&mut command, held.numbers());
         // The descriptors are duplicated only when the child is spawned.
         invocation._held = held;
         invocation._options = Some(options);
@@ -663,7 +663,7 @@ impl Sandbox<'_> {
         // descriptor leads out of the sandbox through `..`. The system
         // shell closes them before anything of the build runs.
         if let Some(close) = held.close_script() {
-            push_arg(&mut args, "/bin/sh");
+            push_arg(&mut args, held.close_shell()?);
             push_arg(&mut args, "-c");
             push_arg(&mut args, close);
             push_arg(&mut args, "sh");
@@ -1926,7 +1926,7 @@ mod tests {
             "the held cwd was not resolved"
         );
         assert_eq!(held.dest(&member).unwrap(), member);
-        assert!(held.in_place().is_empty() && held.moved().is_empty());
+        assert!(held.numbers().is_empty());
         let error = held.place_one(&member).unwrap_err().to_string();
         assert!(error.contains("not a declared sandbox root"), "{error}");
     }
@@ -2653,6 +2653,86 @@ mod tests {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
             .env(VANISHED_ENGINE_HELD_CHILD, &root.0)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const DISTINCT_HELD_CHILD: &str = "GREYWARD_TEST_DISTINCT_HELD_SCRATCH";
+
+    /// Two held roots never share a descriptor number, or bubblewrap would
+    /// mount one of them at both places: here a read-only root above 9 and a
+    /// writable one already at 3, with 4 to 9 taken. Each is then bound at
+    /// its own place, and closed above 9 too. Run in a child of this
+    /// binary, which starts with only the standard descriptors.
+    #[test]
+    fn linux_two_held_roots_never_share_a_descriptor() {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        const NAME: &str = "kernel::sandbox::tests::linux_two_held_roots_never_share_a_descriptor";
+        if !linux_ready("linux_two_held_roots_never_share_a_descriptor") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(DISTINCT_HELD_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let dir = |name: &str| {
+                let path = scratch.join(name);
+                fs::create_dir_all(&path).unwrap();
+                fs::write(path.join("marker"), name).unwrap();
+                path.canonicalize().unwrap()
+            };
+            let (read_only, writable) = (dir("ro"), dir("rw"));
+            let writable_dir = fs::File::open(&writable).unwrap();
+            assert_eq!(writable_dir.as_raw_fd(), 3, "the child starts clean");
+            let mut low: Vec<OwnedFd> = Vec::new();
+            while low.last().is_none_or(|fd| fd.as_raw_fd() < 9) {
+                low.push(OwnedFd::from(fs::File::open("/dev/null").unwrap()));
+            }
+            let read_only_dir = fs::File::open(&read_only).unwrap();
+            assert!(read_only_dir.as_raw_fd() > 9);
+            let mut held = HeldRoots::bound_for_test(vec![
+                (read_only_dir, read_only.clone()),
+                (writable_dir, writable.clone()),
+            ]);
+            held.pin().unwrap();
+            let numbers = held.numbers();
+            assert_ne!(numbers[0], numbers[1], "both roots at {numbers:?}");
+            let work = scratch.join("work");
+            fs::create_dir(&work).unwrap();
+            let sandbox = Sandbox {
+                read: vec![&read_only],
+                write: vec![&writable, &work],
+                host_view: HostView::Full,
+            };
+            let script = format!(
+                "cat {}/marker {}/marker; for fd in /proc/self/fd/*; do \
+                 if [ -d \"$fd\" ]; then echo \" leak $fd\"; fi; done",
+                read_only.display(),
+                writable.display()
+            );
+            let cmd = ["/bin/sh", "-c", &script];
+            let invocation = sandbox
+                .bwrap_args(&cmd, "/usr/bin:/bin", &work, &work, &[], &held)
+                .unwrap();
+            let mut command = bwrap_command(&find_bwrap().unwrap()).unwrap();
+            command.args(&invocation.args);
+            held::keep_in_place(&mut command, numbers);
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "rorw", "{stderr}");
+            drop((held, low));
+            return;
+        }
+        let root = temp_dir("distinct-held");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(DISTINCT_HELD_CHILD, &root.0)
             .output()
             .unwrap();
         let report = format!(

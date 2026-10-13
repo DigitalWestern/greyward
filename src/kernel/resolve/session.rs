@@ -180,7 +180,8 @@ struct UrlClaims(BTreeMap<(u8, String), BTreeSet<String>>);
 impl UrlClaims {
     fn add(&mut self, claim: &Claim) {
         let rank = match claim.algo() {
-            "sha512" => 3,
+            "sha512" => 4,
+            "sha384" => 3,
             "sha256" => 2,
             _ => 1,
         };

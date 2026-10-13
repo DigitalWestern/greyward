@@ -85,6 +85,7 @@ fn sdist(dir: &Path, name: &str, prelude: &str, modules: &str) -> LockedPackage 
     assert!(status.success(), "tar {filename}");
     let bytes = std::fs::read(&archive).unwrap();
     LockedPackage {
+        index: None,
         name: name.into(),
         version: "0.1".into(),
         filename,

@@ -195,6 +195,7 @@ mod tests {
 
     fn package(name: &str) -> LockedPackage {
         LockedPackage {
+            index: None,
             name: name.into(),
             version: "1.0.0".into(),
             filename: format!("{name}-1.0.0.tar.gz"),

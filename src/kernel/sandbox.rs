@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 
 mod held;
 pub(crate) use held::pass_fds;
-use held::HeldRoots;
+use held::{args_file, pass_in_place, refuse_unpassable, HeldRoots};
 
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
@@ -214,16 +214,22 @@ fn status_with_stderr(
 // Reviewed site (tests/architecture.rs): `None` arm of `Option<&StoreActivity>`: no store is involved.
 #[allow(clippy::disallowed_methods)]
 fn spawn_unmanaged(command: &mut Command) -> io::Result<std::process::Child> {
-    command.spawn()
+    // A child that never started ran no build (#679).
+    command.spawn().map_err(crate::kernel::error::sandbox_spawn)
 }
 
 /// The child's status, unless its stderr shows the sandbox itself failed
-/// to start: that is an error of its own, never the command's exit.
+/// to start: an error of its own, never the command's exit. An E2BIG from
+/// bubblewrap's exec of `program` is the build's (`held::exec_too_long`).
 fn refuse_setup_failure(
     status: std::process::ExitStatus,
     stderr: &[u8],
     cmd: &[&str],
+    program: Option<&OsStr>,
 ) -> io::Result<std::process::ExitStatus> {
+    if program.is_some_and(|program| held::exec_too_long(&status, stderr, program)) {
+        return Err(io::Error::from_raw_os_error(libc::E2BIG));
+    }
     if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, stderr) {
         return Err(sandbox_failure_error(
             SandboxFailureKind::Setup,
@@ -387,7 +393,7 @@ impl Sandbox<'_> {
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::piped());
         let (status, stderr) = status_with_stderr(&mut command, activity)?;
-        refuse_setup_failure(status, &stderr, cmd)
+        refuse_setup_failure(status, &stderr, cmd, None)
     }
 
     fn run_bwrap_status(
@@ -399,7 +405,7 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<std::process::ExitStatus> {
-        let (mut command, _invocation) = self.bwrap(cmd, env_path, tmp, cwd, envs, activity)?;
+        let (mut command, invocation) = self.bwrap(cmd, env_path, tmp, cwd, envs, activity)?;
         // stderr is piped so bwrap's own setup errors ("bwrap: ...") can be
         // classified, but the build's diagnostics must still reach the user:
         // the relay streams every byte to our stderr and keeps the leading
@@ -409,7 +415,8 @@ impl Sandbox<'_> {
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::piped());
         let (status, stderr) = status_with_stderr(&mut command, activity)?;
-        refuse_setup_failure(status, &stderr, cmd)
+        let program = &invocation.args[invocation.command_start];
+        refuse_setup_failure(status, &stderr, cmd, Some(program))
     }
 
     /// The bwrap command for `cmd`, after the socket scan and the preflight,
@@ -423,15 +430,40 @@ impl Sandbox<'_> {
         envs: &[(String, String)],
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
-        let held = HeldRoots::resolve(self, cwd)?;
-        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)?;
+        // A failure before bubblewrap starts is a sandbox not set up, never a
+        // failed build (#679); the preflight's verdicts say so themselves and
+        // the spawn is marked where it happens (`spawn_unmanaged`).
+        let setup = crate::kernel::error::sandbox_setup;
+        let mut held = HeldRoots::resolve(self, cwd).map_err(setup)?;
+        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)
+            .map_err(setup)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
-        let mut invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs, &held)?;
-        let mut command = bwrap_command(bwrap)?;
-        command.args(&invocation.args);
-        pass_fds(&mut command, held.passed());
+        #[cfg(test)]
+        let engine = held::ENGINE_OVERRIDE.with(|hook| hook.borrow_mut().as_mut().map(|f| f()));
+        #[cfg(test)]
+        let bwrap = engine.as_deref().unwrap_or(bwrap);
+        held.pin().map_err(setup)?;
+        let mut invocation = self
+            .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
+            .map_err(setup)?;
+        let mut command = bwrap_command(bwrap).map_err(setup)?;
+        // Unmarked: a value the build supplied that cannot be passed is its
+        // own failure.
+        refuse_unpassable(&invocation.args, envs)?;
+        // bubblewrap's own options (mounts, flags) reach it through a
+        // descriptor, and only the command and its environment stay on
+        // argv, so only they count toward the kernel's argument limits: a
+        // spawn that fails with E2BIG is the build's failure in either view
+        // (#679, `error::sandbox_spawn`).
+        let (options, own) = invocation.args.split_at(invocation.command_start);
+        let options = args_file(options).map_err(setup)?;
+        let options_fd = pass_in_place(&mut command, &options);
+        command.arg("--args").arg(options_fd.to_string()).args(own);
+        debug_assert!(!held.numbers().contains(&options_fd));
+        held::keep_in_place(&mut command, held.numbers());
         // The descriptors are duplicated only when the child is spawned.
         invocation._held = held;
+        invocation._options = Some(options);
         Ok((command, invocation))
     }
 
@@ -596,44 +628,42 @@ impl Sandbox<'_> {
             push_arg(&mut args, "--tmpfs");
             push_arg(&mut args, cwd.as_os_str());
         }
-        for (flag, binds) in [("--ro-bind", &read_binds), ("--bind", &write_binds)] {
-            for (source, dest) in binds {
-                push_arg(&mut args, flag);
-                args.push(source.clone().into_os_string());
-                args.push(dest.clone().into_os_string());
-            }
-        }
+        push_root_binds(&mut args, &read_binds, &write_binds);
 
-        push_setenv(&mut args, "PATH", env_path);
-        push_setenv(&mut args, "HOME", &scratch);
-        push_setenv(&mut args, "TMPDIR", &scratch);
-        push_setenv(&mut args, "LANG", "en_US.UTF-8");
-        push_setenv(&mut args, "SOURCE_DATE_EPOCH", "315532800");
+        // The command's environment goes on argv, as `NAME=VALUE` operands
+        // of `/usr/bin/env` below, never through bubblewrap's `--args`: then
+        // only the build's command and environment count toward the kernel's
+        // limits, and a spawn that exceeds them is the build's failure (#679).
+        let mut assignments = vec![
+            assignment("PATH", env_path),
+            assignment("HOME", &scratch),
+            assignment("TMPDIR", &scratch),
+            assignment("LANG", "en_US.UTF-8"),
+            assignment("SOURCE_DATE_EPOCH", "315532800"),
+        ];
         if self.host_view == HostView::RuntimeOnly
             && !envs.iter().any(|(key, _)| key == "PKG_CONFIG_LIBDIR")
         {
             // See `hostview::PKG_CONFIG_LIBDIR`. PKG_CONFIG_PATH is unset by
             // --clearenv unless the caller sets it.
-            push_setenv(
-                &mut args,
+            assignments.push(assignment(
                 "PKG_CONFIG_LIBDIR",
                 crate::kernel::hostview::PKG_CONFIG_LIBDIR,
-            );
+            ));
         }
-        for (key, value) in envs {
-            push_setenv(&mut args, key, value);
-        }
+        assignments.extend(envs.iter().map(|(key, value)| assignment(key, value)));
         push_arg(&mut args, "--chdir");
         args.push(cwd.into_os_string());
         push_arg(&mut args, "--unsetenv");
         push_arg(&mut args, "PWD");
 
+        let command_start = args.len();
         // The held descriptors bubblewrap bound from reach the command too
         // (its pid 1 closes only its own copies), and a host directory's
         // descriptor leads out of the sandbox through `..`. The system
         // shell closes them before anything of the build runs.
         if let Some(close) = held.close_script() {
-            push_arg(&mut args, "/bin/sh");
+            args.extend(held.close_shell()?.iter().map(OsString::from));
             push_arg(&mut args, "-c");
             push_arg(&mut args, close);
             push_arg(&mut args, "sh");
@@ -644,6 +674,7 @@ impl Sandbox<'_> {
         push_arg(&mut args, "-u");
         push_arg(&mut args, "PWD");
         push_arg(&mut args, "--");
+        args.extend(assignments);
         args.extend(cmd.iter().map(OsString::from));
         if args.len() > BWRAP_MAX_ARGS {
             return Err(io::Error::new(
@@ -658,9 +689,34 @@ impl Sandbox<'_> {
         }
         Ok(BwrapInvocation {
             args,
+            command_start,
             _skeleton: skeleton,
             _held: HeldRoots::default(),
+            _options: None,
         })
+    }
+}
+
+/// The declared roots' binds. A later bind covers an earlier one under
+/// it, so the binds go shallowest first: a read-only root under a writable
+/// root stays read-only, and a writable root under a read-only root stays
+/// writable (#680). At the same depth read-only goes first, so a root
+/// declared both ways is writable.
+fn push_root_binds(
+    args: &mut Vec<OsString>,
+    read: &[(PathBuf, PathBuf)],
+    write: &[(PathBuf, PathBuf)],
+) {
+    let mut binds: Vec<(&str, &PathBuf, &PathBuf)> = read
+        .iter()
+        .map(|(source, dest)| ("--ro-bind", source, dest))
+        .chain(write.iter().map(|(source, dest)| ("--bind", source, dest)))
+        .collect();
+    binds.sort_by_key(|(flag, _, dest)| (dest.components().count(), *flag == "--bind"));
+    for (flag, source, dest) in binds {
+        push_arg(args, flag);
+        args.push(source.clone().into_os_string());
+        args.push(dest.clone().into_os_string());
     }
 }
 
@@ -693,9 +749,13 @@ const BWRAP_MAX_ARGS: usize = 9000;
 /// so it must outlive the child.
 struct BwrapInvocation {
     args: Vec<OsString>,
+    /// Where in `args` bubblewrap's own options end and the command starts.
+    command_start: usize,
     _skeleton: Option<crate::kernel::hostview::ViewSkeleton>,
     /// The held roots the command passes to bubblewrap, open until it runs.
     _held: HeldRoots,
+    /// The options bubblewrap reads through `--args`, open until it runs.
+    _options: Option<fs::File>,
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own
@@ -705,7 +765,7 @@ use crate::kernel::supervise::CLASSIFIER_PREFIX as STDERR_PREFIX_LIMIT;
 /// Copy a child's output stream to `sink` as it arrives, with the signing
 /// key scrubbed out by the same
 /// [`Scrubber`](crate::kernel::resolve::confine::Scrubber) the supervisor's
-/// relay uses (#430), retaining the first `limit` scrubbed bytes. Relay
+/// relay uses (#430), retaining what a `Capture` of `limit` keeps. Relay
 /// failures (e.g. our stderr closed) are ignored: they must not turn a
 /// successful build into a failure.
 fn relay_scrubbed(
@@ -715,11 +775,10 @@ fn relay_scrubbed(
     limit: usize,
 ) -> Vec<u8> {
     let mut scrubber = crate::kernel::resolve::confine::Scrubber::new(secrets.to_vec());
-    let mut prefix = Vec::new();
+    let mut prefix = crate::kernel::supervise::Capture::new(limit);
     let mut buffer = [0u8; 8192];
     let mut pass_on = |bytes: Vec<u8>| {
-        let keep = bytes.len().min(limit - prefix.len());
-        prefix.extend_from_slice(&bytes[..keep]);
+        prefix.push(&bytes);
         let _ = sink.write_all(&bytes);
     };
     loop {
@@ -731,7 +790,7 @@ fn relay_scrubbed(
     }
     pass_on(scrubber.finish());
     let _ = sink.flush();
-    prefix
+    prefix.finish()
 }
 
 /// Run `command` outside the supervisor, both its streams piped and
@@ -962,11 +1021,18 @@ fn mark_fds_cloexec_with_fcntl(fds: &[RawFd]) -> io::Result<()> {
     Ok(())
 }
 
+/// A command for the bubblewrap (or podman) at `path` that starts with an
+/// empty environment and no inherited descriptors.
+///
+/// bubblewrap needs no environment of its own, and `--clearenv` cleans only
+/// the command it launches. Without `--as-pid-1`, bubblewrap's helper is the
+/// namespace's pid 1, readable by the build at `/proc/1/environ`, so an
+/// inherited environment (tokens, credentials, `SSH_AUTH_SOCK`) would be
+/// readable inside every sandbox (#669). Callers that need variables for
+/// the program itself, such as podman, set them after this.
 pub(crate) fn bwrap_command(path: &Path) -> io::Result<Command> {
-    // Only the Linux block below mutates `command`; without the attribute macOS
-    // builds warn about an unused `mut`.
-    #[allow(unused_mut)]
     let mut command = Command::new(path);
+    command.env_clear();
     #[cfg(target_os = "linux")]
     {
         // The fallback list is collected before fork because pre_exec must
@@ -1214,16 +1280,26 @@ fn supervise_output_status(command: &mut Command, activity: &StoreActivity) -> i
 }
 
 fn find_bwrap() -> Option<PathBuf> {
+    find_bwrap_in(Path::new("/usr/bin/bwrap"), std::env::var_os("PATH"))
+}
+
+/// The bubblewrap at `system`, else the first on `path`.
+fn find_bwrap_in(system: &Path, path: Option<OsString>) -> Option<PathBuf> {
     // The distro binary first (mirrors the hardcoded /usr/bin/sandbox-exec on
     // macOS); PATH only as a fallback for unusual installs.
-    let system = PathBuf::from("/usr/bin/bwrap");
-    if let Ok(metadata) = fs::metadata(&system) {
+    if let Ok(metadata) = fs::metadata(system) {
         if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
-            return Some(system);
+            return Some(system.to_path_buf());
         }
     }
-    let path = std::env::var_os("PATH")?;
+    let path = path?;
     for directory in std::env::split_paths(&path) {
+        // A relative entry (`.`, `node_modules/.bin`) names a directory under
+        // the cwd, usually the project, whose `bwrap` must not become the
+        // sandbox engine (#680).
+        if !directory.is_absolute() {
+            continue;
+        }
         let candidate = directory.join("bwrap");
         let Ok(metadata) = fs::metadata(&candidate) else {
             continue;
@@ -1231,10 +1307,7 @@ fn find_bwrap() -> Option<PathBuf> {
         if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
             continue;
         }
-        let Ok(candidate) = fs::canonicalize(candidate) else {
-            continue;
-        };
-        if candidate.is_absolute() {
+        if let Ok(candidate) = fs::canonicalize(candidate) {
             return Some(candidate);
         }
     }
@@ -1409,10 +1482,12 @@ pub(crate) fn push_bind_path(args: &mut Vec<OsString>, flag: &str, path: &Path) 
     args.push(path.as_os_str().to_os_string());
 }
 
-pub(crate) fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef<OsStr>) {
-    push_arg(args, "--setenv");
-    push_arg(args, key);
-    args.push(value.as_ref().to_os_string());
+/// `key=value`, a variable `/usr/bin/env` sets for the command.
+fn assignment(key: &str, value: impl AsRef<OsStr>) -> OsString {
+    let mut assignment = OsString::from(key);
+    assignment.push("=");
+    assignment.push(value);
+    assignment
 }
 
 /// `tests::linux_ready`, for a test outside this module that starts a
@@ -1440,6 +1515,42 @@ mod tests {
         assert!(crate::kernel::supervise::interrupted(&error).is_some());
         let other = io::Error::new(io::ErrorKind::NotFound, "no such file");
         assert_eq!(probe_failure(other).unwrap(), "no such file");
+    }
+
+    /// The last line the E2BIG check reads is the stream's own, however
+    /// long the stream: one whose kept head ends with the line but goes on
+    /// is no failed exec, and one that ends with it past the head is.
+    #[test]
+    fn the_failed_exec_line_is_judged_on_the_whole_stream() {
+        use std::os::unix::process::ExitStatusExt;
+        let env = OsStr::new("/usr/bin/env");
+        let failed = std::process::ExitStatus::from_raw(1 << 8);
+        let line = b"bwrap: execvp /usr/bin/env: Argument list too long\n";
+        let relayed = |stream: Vec<u8>| {
+            relay_scrubbed(
+                io::Cursor::new(stream),
+                &mut Vec::new(),
+                &[],
+                STDERR_PREFIX_LIMIT,
+            )
+        };
+        let lines_of = |len: usize| [vec![b'x'; len - 1], vec![b'\n']].concat();
+        let mut at_the_boundary = lines_of(STDERR_PREFIX_LIMIT - line.len());
+        at_the_boundary.extend_from_slice(line);
+        assert_eq!(at_the_boundary.len(), STDERR_PREFIX_LIMIT);
+        at_the_boundary.extend_from_slice(b"the build went on\n");
+        assert!(!held::exec_too_long(
+            &failed,
+            &relayed(at_the_boundary),
+            env
+        ));
+        let mut past_the_head = lines_of(2 * STDERR_PREFIX_LIMIT);
+        past_the_head.extend_from_slice(line);
+        assert!(held::exec_too_long(&failed, &relayed(past_the_head), env));
+        // A last line longer than the window is not judged on its end.
+        let mut one_long_line = vec![b'x'; 2 * STDERR_PREFIX_LIMIT];
+        one_long_line.extend_from_slice(line);
+        assert!(!held::exec_too_long(&failed, &relayed(one_long_line), env));
     }
 
     /// The no-store relay scrubs the signing key as the supervisor's does,
@@ -1850,7 +1961,7 @@ mod tests {
             "the held cwd was not resolved"
         );
         assert_eq!(held.dest(&member).unwrap(), member);
-        assert!(held.passed().is_empty());
+        assert!(held.numbers().is_empty());
         let error = held.place_one(&member).unwrap_err().to_string();
         assert!(error.contains("not a declared sandbox root"), "{error}");
     }
@@ -2107,6 +2218,51 @@ mod tests {
         assert!(result.is_err(), "read-only parent accepted a write");
     }
 
+    /// The opposite nesting: a read-only root under a writable root stays
+    /// read-only, while the rest of the writable root stays writable (#680).
+    #[test]
+    fn linux_read_only_child_under_writable_parent_stays_read_only() {
+        if !linux_ready("linux_read_only_child_under_writable_parent_stays_read_only") {
+            return;
+        }
+        let root = temp_dir("overlap-ro");
+        let scratch = root.0.join("scratch");
+        let parent = root.0.join("parent");
+        let child = parent.join("ro");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&child).unwrap();
+        let sandbox = Sandbox {
+            read: vec![&child],
+            write: vec![&parent, &scratch],
+            host_view: HostView::Full,
+        };
+        let child_file = child.join("written");
+        let result = run(
+            &sandbox,
+            &["/usr/bin/touch", child_file.to_str().unwrap()],
+            &scratch,
+            &parent,
+            &[],
+        );
+        assert!(result.is_err(), "read-only child accepted a write");
+        assert!(!child_file.exists());
+
+        let parent_file = parent.join("y");
+        let result = run(
+            &sandbox,
+            &["/usr/bin/touch", parent_file.to_str().unwrap()],
+            &scratch,
+            &parent,
+            &[],
+        );
+        assert!(
+            result.is_ok(),
+            "writable parent refused a write: {result:?}"
+        );
+        assert!(parent_file.exists());
+    }
+
     #[test]
     fn linux_unbound_cwd_is_enterable_but_empty() {
         if !linux_ready("linux_unbound_cwd_is_enterable_but_empty") {
@@ -2264,6 +2420,732 @@ mod tests {
         assert!(!read_lines(&output)
             .iter()
             .any(|line| line.starts_with("PWD=")));
+    }
+
+    /// A relative PATH entry resolves against the cwd, usually the project,
+    /// so its `bwrap` is never the engine. The same file through an
+    /// absolute entry is (#680).
+    #[test]
+    fn bwrap_lookup_skips_relative_path_entries() {
+        let root = temp_dir("relative-path-bwrap");
+        let bin = root.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fake = bin.join("bwrap");
+        fs::write(&fake, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let missing = root.0.join("no-system-bwrap");
+        // `bin` spelled relative to this process's cwd.
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(bin.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        assert!(relative.join("bwrap").is_file());
+        assert_eq!(
+            find_bwrap_in(&missing, Some(relative.into_os_string())),
+            None
+        );
+        assert_eq!(
+            find_bwrap_in(&missing, Some(bin.clone().into_os_string())),
+            Some(fs::canonicalize(&fake).unwrap())
+        );
+    }
+
+    /// A sandbox engine that could not be started ran no build, supervised
+    /// or not. One that ran and failed returns its status, and a spawn the
+    /// command's own arguments made fail stays the build's failure (#679).
+    #[test]
+    fn a_sandbox_engine_that_never_started_is_a_setup_failure() {
+        let root = temp_dir("never-started");
+        let store_root = root.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(store_root.join(sub)).unwrap();
+        }
+        let store = crate::kernel::store::Store::for_test(store_root);
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let missing = root.0.join("no-such-engine");
+        for supervised in [None, Some(&activity)] {
+            let mut command = Command::new(&missing);
+            command.stderr(std::process::Stdio::piped());
+            let error = status_with_stderr(&mut command, supervised).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "exit 3"])
+                .stderr(std::process::Stdio::piped());
+            let (status, _) = status_with_stderr(&mut command, supervised).unwrap();
+            assert_eq!(status.code(), Some(3));
+
+            // A spawn the command's own arguments make fail is the build's
+            // failure: an argument past the kernel's 128 KiB limit, and
+            // one holding a NUL byte.
+            let script = format!("# {}", "x".repeat(200 * 1024));
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", &script])
+                .stderr(std::process::Stdio::piped());
+            let error = status_with_stderr(&mut command, supervised).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+            assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "true\0"])
+                .stderr(std::process::Stdio::piped());
+            let error = status_with_stderr(&mut command, supervised).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+        }
+    }
+
+    const UNWRITABLE_TMPDIR_CHILD: &str = "GREYWARD_TEST_UNWRITABLE_TMPDIR_SCRATCH";
+
+    /// A C-runtime-only view that cannot be built (here: TMPDIR is not
+    /// writable, so its skeleton cannot be made) ran no build. The hermetic
+    /// attempt returns that error as is: no `host-build-inputs` exception,
+    /// no retry against the whole host (#679). TMPDIR is set in a child run
+    /// of this test binary, which reports through its exit status.
+    #[test]
+    fn linux_a_view_that_cannot_be_set_up_is_no_failed_hermetic_build() {
+        use std::os::unix::fs::PermissionsExt;
+        const NAME: &str =
+            "kernel::sandbox::tests::linux_a_view_that_cannot_be_set_up_is_no_failed_hermetic_build";
+        if !linux_ready("linux_a_view_that_cannot_be_set_up_is_no_failed_hermetic_build") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(UNWRITABLE_TMPDIR_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let mut views = Vec::new();
+            let mut recorded = Vec::new();
+            let result = crate::kernel::hostfallback::hermetic_first(
+                "probe",
+                "detail",
+                crate::kernel::hostfallback::Attempt {
+                    record: |kind: &str, subject: &str, _: &str| {
+                        recorded.push(format!("{kind} {subject}"));
+                        Ok(())
+                    },
+                    discard: || Ok(()),
+                    fingerprint: || Ok("fingerprint".to_string()),
+                    build: |host_view: HostView| {
+                        views.push(host_view);
+                        let sandbox = Sandbox {
+                            read: vec![],
+                            write: vec![&scratch],
+                            host_view,
+                        };
+                        run(&sandbox, &["/usr/bin/true"], &scratch, &scratch, &[])
+                    },
+                },
+            );
+            let error = result.unwrap_err();
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            assert_eq!(views, [HostView::RuntimeOnly]);
+            assert!(recorded.is_empty(), "{recorded:?}");
+            return;
+        }
+        let root = temp_dir("unwritable-tmpdir");
+        let scratch = root.0.join("scratch");
+        let unwritable = root.0.join("tmp");
+        fs::create_dir(&scratch).unwrap();
+        fs::create_dir(&unwritable).unwrap();
+        fs::set_permissions(&unwritable, fs::Permissions::from_mode(0o555)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(UNWRITABLE_TMPDIR_CHILD, &scratch)
+            .env("TMPDIR", &unwritable)
+            .output()
+            .unwrap();
+        fs::set_permissions(&unwritable, fs::Permissions::from_mode(0o755)).unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        // The child ran the test rather than filtering it out.
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const VANISHED_ENGINE_CHILD: &str = "GREYWARD_TEST_VANISHED_ENGINE_SCRATCH";
+
+    /// bubblewrap gone between the preflight and the spawn is a sandbox that
+    /// never started, reported through std's spawn-error channel. The
+    /// `--args` descriptor must not land on that channel's child end, so
+    /// the test runs in a child of this binary that starts with only the
+    /// standard descriptors, where the channel takes the lowest free
+    /// numbers.
+    #[test]
+    fn linux_an_engine_gone_after_the_preflight_is_a_setup_failure() {
+        const NAME: &str =
+            "kernel::sandbox::tests::linux_an_engine_gone_after_the_preflight_is_a_setup_failure";
+        if !linux_ready("linux_an_engine_gone_after_the_preflight_is_a_setup_failure") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(VANISHED_ENGINE_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let missing = scratch.join("no-such-bwrap");
+            held::ENGINE_OVERRIDE
+                .with(|hook| *hook.borrow_mut() = Some(Box::new(move || missing.clone())));
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&scratch],
+                host_view: HostView::Full,
+            };
+            let result = sandbox.run_bwrap_capture(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[],
+            );
+            let error = result.expect_err("a missing engine starts nothing");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            return;
+        }
+        let root = temp_dir("vanished-engine");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(VANISHED_ENGINE_CHILD, &scratch)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const VANISHED_ENGINE_HELD_CHILD: &str = "GREYWARD_TEST_VANISHED_ENGINE_HELD_SCRATCH";
+
+    /// The same with seven held project roots: their descriptors must not
+    /// be moved onto std's spawn-error channel in the child either. Numbers
+    /// 3 to 9 are taken while the roots are opened, so their descriptors
+    /// land above 9, and free again before the spawn, where std's pipes
+    /// would take them.
+    #[test]
+    fn linux_an_engine_gone_with_held_roots_is_a_setup_failure() {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        const NAME: &str =
+            "kernel::sandbox::tests::linux_an_engine_gone_with_held_roots_is_a_setup_failure";
+        if !linux_ready("linux_an_engine_gone_with_held_roots_is_a_setup_failure") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(VANISHED_ENGINE_HELD_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let projects: Vec<PathBuf> = (0..7)
+                .map(|i| {
+                    let project = scratch.join(format!("project{i}"));
+                    fs::create_dir_all(&project).unwrap();
+                    project.canonicalize().unwrap()
+                })
+                .collect();
+            let mut low: Vec<OwnedFd> = Vec::new();
+            loop {
+                let fd = OwnedFd::from(fs::File::open("/dev/null").unwrap());
+                if fd.as_raw_fd() > 9 {
+                    break;
+                }
+                low.push(fd);
+            }
+            let _held: Vec<_> = projects
+                .iter()
+                .map(|project| crate::kernel::fsroot::ProjectRoot::open(project).unwrap())
+                .collect();
+            let missing = scratch.join("no-such-bwrap");
+            let mut low = Some(low);
+            held::ENGINE_OVERRIDE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    low.take();
+                    missing.clone()
+                }))
+            });
+            let work = scratch.join("work");
+            fs::create_dir(&work).unwrap();
+            let sandbox = Sandbox {
+                read: projects.iter().map(PathBuf::as_path).collect(),
+                write: vec![&work],
+                host_view: HostView::Full,
+            };
+            let result =
+                sandbox.run_bwrap_capture(&["/usr/bin/true"], "/usr/bin:/bin", &work, &work, &[]);
+            let error = result.expect_err("a missing engine starts nothing");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            return;
+        }
+        let root = temp_dir("vanished-engine-held");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(VANISHED_ENGINE_HELD_CHILD, &root.0)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const DISTINCT_HELD_CHILD: &str = "GREYWARD_TEST_DISTINCT_HELD_SCRATCH";
+
+    /// Two held roots never share a descriptor number, or bubblewrap would
+    /// mount one of them at both places: here a read-only root above 9 and a
+    /// writable one already at 3, with 4 to 9 taken. Each is then bound at
+    /// its own place, and closed above 9 too. Run in a child of this
+    /// binary, which starts with only the standard descriptors.
+    #[test]
+    fn linux_two_held_roots_never_share_a_descriptor() {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        const NAME: &str = "kernel::sandbox::tests::linux_two_held_roots_never_share_a_descriptor";
+        if !linux_ready("linux_two_held_roots_never_share_a_descriptor") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(DISTINCT_HELD_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let dir = |name: &str| {
+                let path = scratch.join(name);
+                fs::create_dir_all(&path).unwrap();
+                fs::write(path.join("marker"), name).unwrap();
+                path.canonicalize().unwrap()
+            };
+            let (read_only, writable) = (dir("ro"), dir("rw"));
+            let writable_dir = fs::File::open(&writable).unwrap();
+            assert_eq!(writable_dir.as_raw_fd(), 3, "the child starts clean");
+            let mut low: Vec<OwnedFd> = Vec::new();
+            while low.last().is_none_or(|fd| fd.as_raw_fd() < 9) {
+                low.push(OwnedFd::from(fs::File::open("/dev/null").unwrap()));
+            }
+            let read_only_dir = fs::File::open(&read_only).unwrap();
+            assert!(read_only_dir.as_raw_fd() > 9);
+            let mut held = HeldRoots::bound_for_test(vec![
+                (read_only_dir, read_only.clone()),
+                (writable_dir, writable.clone()),
+            ]);
+            held.pin().unwrap();
+            let numbers = held.numbers();
+            assert_ne!(numbers[0], numbers[1], "both roots at {numbers:?}");
+            let work = scratch.join("work");
+            fs::create_dir(&work).unwrap();
+            let sandbox = Sandbox {
+                read: vec![&read_only],
+                write: vec![&writable, &work],
+                host_view: HostView::Full,
+            };
+            let script = format!(
+                "cat {}/marker {}/marker; for fd in /proc/self/fd/*; do \
+                 if [ -d \"$fd\" ]; then echo \" leak $fd\"; fi; done",
+                read_only.display(),
+                writable.display()
+            );
+            let cmd = ["/bin/sh", "-c", &script];
+            let invocation = sandbox
+                .bwrap_args(&cmd, "/usr/bin:/bin", &work, &work, &[], &held)
+                .unwrap();
+            let mut command = bwrap_command(&find_bwrap().unwrap()).unwrap();
+            command.args(&invocation.args);
+            held::keep_in_place(&mut command, numbers);
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "rorw", "{stderr}");
+            drop((held, low));
+            return;
+        }
+        let root = temp_dir("distinct-held");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(DISTINCT_HELD_CHILD, &root.0)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const STARTUP_FILE_CHILD: &str = "GREYWARD_TEST_STARTUP_FILE_SCRATCH";
+
+    /// The shell that closes the held descriptors runs no startup file
+    /// first, or a build could plant one in a writable home and reach the
+    /// host through a descriptor not closed yet. Bash sources `~/.bashrc`
+    /// for a `-c` shell whose stdin is a socket: here with the held number
+    /// above 9 (bash closes it) and below (the system shell does), the home
+    /// a writable root. Run in a child of this binary, which starts with
+    /// only the standard descriptors.
+    #[test]
+    fn linux_the_closing_shell_reads_no_startup_file() {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        const NAME: &str = "kernel::sandbox::tests::linux_the_closing_shell_reads_no_startup_file";
+        if !linux_ready("linux_the_closing_shell_reads_no_startup_file") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(STARTUP_FILE_CHILD) {
+            let home = PathBuf::from(scratch).join("home");
+            fs::create_dir_all(&home).unwrap();
+            let home = home.canonicalize().unwrap();
+            let marker = home.join("startup-file-ran");
+            let plant = format!("echo ran > {}\n", marker.display());
+            for name in [".bashrc", ".bash_profile", ".profile"] {
+                fs::write(home.join(name), &plant).unwrap();
+            }
+            let work = home.join("work");
+            fs::create_dir(&work).unwrap();
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&home, &work],
+                host_view: HostView::Full,
+            };
+            for busy in [true, false] {
+                let mut low: Vec<OwnedFd> = Vec::new();
+                while busy && low.last().is_none_or(|fd| fd.as_raw_fd() < 9) {
+                    low.push(OwnedFd::from(fs::File::open("/dev/null").unwrap()));
+                }
+                let dir = fs::File::open(&home).unwrap();
+                let mut held = HeldRoots::bound_for_test(vec![(dir, home.clone())]);
+                held.pin().unwrap();
+                assert_eq!(held.numbers()[0] > 9, busy, "{:?}", held.numbers());
+                let cmd = ["/usr/bin/true"];
+                let mut invocation = sandbox
+                    .bwrap_args(&cmd, "/usr/bin:/bin", &work, &work, &[], &held)
+                    .unwrap();
+                let at = invocation.command_start;
+                // The shell's environment is empty: nothing names a file.
+                assert!(!invocation.args[..at].iter().any(|arg| arg == "--setenv"));
+                // HOME as the passwd entry a shell falls back to without one.
+                let home_env = ["--setenv".into(), "HOME".into(), home.clone().into()];
+                invocation.args.splice(at..at, home_env);
+                let (stdin, _peer) = UnixStream::pair().unwrap();
+                let mut command = bwrap_command(&find_bwrap().unwrap()).unwrap();
+                command.args(&invocation.args).stdin(OwnedFd::from(stdin));
+                held::keep_in_place(&mut command, held.numbers());
+                let output = command.output().unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stderr}");
+                assert!(!marker.exists(), "busy {busy}: a startup file ran first");
+                drop((held, low));
+            }
+            return;
+        }
+        let root = temp_dir("startup-file");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(STARTUP_FILE_CHILD, &root.0)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    /// ward's own bubblewrap arguments do not count toward the kernel's
+    /// argument limit, so a build command that fits on its own starts
+    /// however many mounts the sandbox generates: here a few hundred long
+    /// read roots (about 1.8 MB of arguments) and a 1 MB command, past the
+    /// 2 MiB limit together (#679). bubblewrap closes the descriptor it
+    /// read them from, so the build never sees it.
+    #[test]
+    fn linux_generated_arguments_leave_the_argument_limit_to_the_build() {
+        if !linux_ready("linux_generated_arguments_leave_the_argument_limit_to_the_build") {
+            return;
+        }
+        let root = temp_dir("many-roots");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let mut deep = root.0.join("roots");
+        for level in 0..11 {
+            deep.push(format!("{level}{}", "d".repeat(250)));
+        }
+        let roots: Vec<PathBuf> = (0..300).map(|i| deep.join(format!("r{i}"))).collect();
+        for path in &roots {
+            fs::create_dir_all(path).unwrap();
+        }
+        let sandbox = Sandbox {
+            read: roots.iter().map(PathBuf::as_path).collect(),
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let generated: usize = sandbox
+            .bwrap_args(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[],
+                &HeldRoots::default(),
+            )
+            .unwrap()
+            .args
+            .iter()
+            .map(|arg| arg.len() + 1)
+            .sum();
+        assert!(generated > 1_700_000, "{generated}");
+        let chunk = "x".repeat(100 * 1024);
+        let mut cmd = vec!["/bin/sh", "-c", "ls /proc/self/fd", "sh"];
+        cmd.extend(std::iter::repeat_n(chunk.as_str(), 10));
+        let listed = run_capture(&sandbox, &cmd, &scratch, &scratch, &[])
+            .expect("a command that fits the limit on its own starts");
+        let listed = String::from_utf8(listed).unwrap();
+        // The descriptor is numbered past every held root's (3 to 9).
+        assert!(
+            listed.lines().all(|fd| fd.parse::<i32>().unwrap() < 10),
+            "the build sees bubblewrap's --args descriptor: {listed}"
+        );
+    }
+
+    /// A NUL byte in a value the build supplies (here a lock's version
+    /// reaching `npm_package_version`) would end its argument early in
+    /// bubblewrap's `--args` data and turn the rest into options of its
+    /// own. Such a value is refused as the build's own failure, as the
+    /// kernel refused it on argv, and nothing is mounted.
+    #[test]
+    fn linux_a_nul_in_a_build_value_adds_no_sandbox_option() {
+        if !linux_ready("linux_a_nul_in_a_build_value_adds_no_sandbox_option") {
+            return;
+        }
+        let root = temp_dir("nul-option");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let envs = [(
+            "npm_package_version".to_string(),
+            "1.0.0\0--ro-bind\0/\0/host".to_string(),
+        )];
+        let result = sandbox.run_bwrap_capture(
+            &["/bin/sh", "-c", "test -e /host/etc && echo mounted"],
+            "/usr/bin:/bin",
+            &scratch,
+            &scratch,
+            &envs,
+        );
+        if let Ok(output) = &result {
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("mounted"),
+                "the value mounted the host at /host"
+            );
+        }
+        let error = result.expect_err("a value holding a NUL starts nothing");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+        // `/usr/bin/env` would read a name holding `=` as another variable.
+        for key in ["PATH=/host/bin:", ""] {
+            let envs = [(key.to_string(), "x".to_string())];
+            let error = sandbox
+                .run_bwrap_capture(
+                    &["/usr/bin/true"],
+                    "/usr/bin:/bin",
+                    &scratch,
+                    &scratch,
+                    &envs,
+                )
+                .expect_err("a name env cannot pass starts nothing");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+        }
+    }
+
+    /// The build's environment stays on argv, so an oversized value fails
+    /// the spawn with E2BIG, the build's own failure, rather than bubblewrap's
+    /// exec of the command, which reads as a sandbox that could not start.
+    #[test]
+    fn linux_an_oversized_build_environment_is_the_builds_failure() {
+        if !linux_ready("linux_an_oversized_build_environment_is_the_builds_failure") {
+            return;
+        }
+        let root = temp_dir("big-env");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let envs = [("BIG".to_string(), "x".repeat(200 * 1024))];
+        let error = sandbox
+            .run_in_status_on(
+                Platform::X86_64UnknownLinuxGnu,
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &envs,
+                None,
+            )
+            .expect_err("a value past the kernel's limit starts nothing");
+        assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+    }
+
+    /// bubblewrap adds PWD before it runs the command, so an environment
+    /// that just fits bubblewrap's own start can fail bubblewrap's exec of
+    /// the command with E2BIG. Every argument ward generates is in the
+    /// `--args` data, so that is the build's command and environment too:
+    /// the build's own failure, as an E2BIG at the spawn is. The size is
+    /// searched for: the largest environment bubblewrap still starts with.
+    #[test]
+    fn linux_an_environment_too_large_for_bubblewraps_exec_is_the_builds_failure() {
+        if !linux_ready("linux_an_environment_too_large_for_bubblewraps_exec_is_the_builds_failure")
+        {
+            return;
+        }
+        let root = temp_dir("exec-e2big");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        // SAFETY: sysconf reads no memory of ours.
+        let arg_max = usize::try_from(unsafe { libc::sysconf(libc::_SC_ARG_MAX) }).unwrap();
+        let filler = "x".repeat(100_000);
+        let envs = |rest: usize| -> Vec<(String, String)> {
+            let mut envs: Vec<(String, String)> = (0..arg_max / 100_000)
+                .map(|i| (format!("FILL{i}"), filler.clone()))
+                .collect();
+            envs.push(("REST".to_string(), "y".repeat(rest)));
+            envs
+        };
+        let started = |rest: usize| {
+            sandbox.run_bwrap_capture(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &envs(rest),
+            )
+        };
+        // The largest REST bubblewrap itself starts with.
+        let (mut low, mut high) = (0, 130_000);
+        assert!(started(low).is_ok(), "the base environment starts");
+        assert!(started(high).is_err(), "the largest environment does not");
+        while high - low > 1 {
+            let middle = (low + high) / 2;
+            if started(middle).is_ok() {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        let output = started(low).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with("bwrap: execvp ") && stderr.contains("Argument list too long"),
+            "bubblewrap's exec of the command did not fail: {stderr}"
+        );
+        let error = sandbox
+            .run_in_status_on(
+                Platform::X86_64UnknownLinuxGnu,
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &envs(low),
+                None,
+            )
+            .expect_err("an environment past the limit runs nothing");
+        assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+    }
+
+    /// A build that prints bubblewrap's E2BIG line itself, for another
+    /// program or with another exit status, did start: its failure is no
+    /// E2BIG of bubblewrap's exec.
+    #[test]
+    fn linux_a_build_printing_the_e2big_line_is_no_failed_exec() {
+        if !linux_ready("linux_a_build_printing_the_e2big_line_is_no_failed_exec") {
+            return;
+        }
+        let root = temp_dir("fake-e2big");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        for script in [
+            "echo 'bwrap: execvp /usr/bin/env: Argument list too long' >&2; exit 7",
+            "echo 'bwrap: execvp /unrelated/setup-helper: Argument list too long' >&2; exit 1",
+        ] {
+            let result = sandbox.run_in_status_on(
+                Platform::X86_64UnknownLinuxGnu,
+                &["/bin/sh", "-c", script],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[],
+                None,
+            );
+            assert!(
+                result
+                    .as_ref()
+                    .map_or_else(|error| error.raw_os_error() != Some(libc::E2BIG), |_| true),
+                "{script}: {result:?}"
+            );
+        }
+    }
+
+    /// bubblewrap's helper is the sandbox's pid 1, readable by the build,
+    /// so its environment must hold nothing from the host (#669).
+    #[test]
+    fn linux_pid_one_environment_holds_no_host_variable() {
+        if !linux_ready("linux_pid_one_environment_holds_no_host_variable") {
+            return;
+        }
+        // Planted once, under a name no other test reads.
+        std::env::set_var("GREYWARD_TEST_PID_ONE_CANARY", "leaked");
+        let root = temp_dir("pid-one-env");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let output = run_capture(
+            &sandbox,
+            &["/bin/sh", "-c", "tr '\\0' '\\n' < /proc/1/environ"],
+            &scratch,
+            &scratch,
+            &[],
+        )
+        .expect("read /proc/1/environ");
+        let environ = String::from_utf8(output).unwrap();
+        assert!(
+            !environ.contains("GREYWARD_TEST_PID_ONE_CANARY"),
+            "{environ}"
+        );
+        // `/usr/bin/env` sets the sandbox's variables after pid 1 forked,
+        // so pid 1 holds at most these (PWD from bubblewrap's --chdir).
+        let own = ["PATH", "HOME", "TMPDIR", "LANG", "SOURCE_DATE_EPOCH", "PWD"];
+        for line in environ.lines().filter(|line| !line.is_empty()) {
+            let key = line.split('=').next().unwrap();
+            assert!(own.contains(&key), "pid 1 inherited {line:?}: {environ}");
+        }
     }
 
     #[test]
@@ -2798,7 +3680,7 @@ mod tests {
             "{after_system:?}"
         );
         assert!(
-            !full.iter().any(|arg| arg == "PKG_CONFIG_LIBDIR"),
+            !full.iter().any(|arg| arg.starts_with("PKG_CONFIG_LIBDIR")),
             "{full:?}"
         );
 
@@ -2809,7 +3691,7 @@ mod tests {
             runtime_only[..start + system.len()],
             full[..start + system.len()]
         );
-        let view_len = runtime_only.len() - full.len() - 3;
+        let view_len = runtime_only.len() - full.len() - 1;
         let view = &runtime_only[start + system.len()..start + system.len() + view_len];
         assert!(
             view.iter()
@@ -2819,11 +3701,11 @@ mod tests {
         let tail = &runtime_only[start + system.len() + view_len..];
         let full_tail = &full[start + system.len()..];
         let env = tail
-            .windows(3)
-            .position(|window| window == ["--setenv", "PKG_CONFIG_LIBDIR", "/dev/null"])
+            .iter()
+            .position(|arg| arg == "PKG_CONFIG_LIBDIR=/dev/null")
             .expect("RuntimeOnly sets PKG_CONFIG_LIBDIR");
         let mut without_env = tail.to_vec();
-        without_env.drain(env..env + 3);
+        without_env.remove(env);
         // The loader cache is the view's own, which names the libraries
         // it moved out of the linker's reach (#332), and no
         // LD_LIBRARY_PATH outranks a program's RUNPATH.
@@ -2864,12 +3746,12 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            own.iter().filter(|arg| *arg == "PKG_CONFIG_LIBDIR").count(),
+            own.iter()
+                .filter(|arg| arg.starts_with("PKG_CONFIG_LIBDIR"))
+                .count(),
             1
         );
-        assert!(own
-            .windows(3)
-            .any(|w| w == ["--setenv", "PKG_CONFIG_LIBDIR", "/mine"]));
+        assert!(own.iter().any(|arg| arg == "PKG_CONFIG_LIBDIR=/mine"));
     }
 
     /// The first host library directory (Fedora's or Debian's) that has
@@ -2999,16 +3881,28 @@ echo "PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR-unset}"
                 seen("-lz=no"),
                 "-lz linked against a host library: {lines:?}"
             );
-            let nss = Path::new("/usr/lib64/libnss3.so");
-            let nss_is_elf = fs::symlink_metadata(nss).is_ok_and(|metadata| metadata.is_file())
-                && fs::read(nss).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF"));
+            // NSS's runtime soname is the unversioned libnss3.so: Fedora
+            // keeps it in /usr/lib64, Debian and Ubuntu in the multiarch
+            // directory.
+            let nss_is_elf = [
+                "/usr/lib64",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/aarch64-linux-gnu",
+            ]
+            .iter()
+            .filter(|dir| !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_symlink()))
+            .map(|dir| Path::new(dir).join("libnss3.so"))
+            .any(|nss| {
+                fs::symlink_metadata(&nss).is_ok_and(|metadata| metadata.is_file())
+                    && fs::read(&nss).is_ok_and(|bytes| bytes.starts_with(b"\x7fELF"))
+            });
             if nss_is_elf {
                 assert!(
                     seen("-lnss3=no"),
                     "-lnss3 linked the host's runtime libnss3.so: {lines:?}"
                 );
             } else {
-                eprintln!("skip -lnss3: host has no regular ELF /usr/lib64/libnss3.so");
+                eprintln!("skip -lnss3: host has no regular ELF libnss3.so");
             }
         } else {
             eprintln!("skip C checks: host has no /usr/bin/cc");
@@ -3263,6 +4157,46 @@ esac
             classify_sandbox_failure(&status, b"formatter: could not parse input\n"),
             Some(SandboxFailureKind::Command)
         );
+        // Only bubblewrap's exec of the program it was given failing with
+        // E2BIG is the build's own: that program, bubblewrap's exit status
+        // for a failed exec (1), and the last line. Anything else keeps its
+        // classification.
+        let env = OsStr::new("/usr/bin/env");
+        let exited = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+        let too_long = b"bwrap: execvp /usr/bin/env: Argument list too long\n";
+        assert!(held::exec_too_long(&exited(1), too_long, env));
+        assert!(held::exec_too_long(
+            &exited(1),
+            &too_long[..too_long.len() - 1],
+            env
+        ));
+        assert!(held::exec_too_long(
+            &exited(1),
+            b"bwrap: warning\nbwrap: execvp /bin/sh: Argument list too long\n",
+            OsStr::new("/bin/sh")
+        ));
+        for (code, stderr) in [
+            (
+                1,
+                &b"bwrap: execvp /unrelated/setup-helper: Argument list too long\n"[..],
+            ),
+            (7, too_long),
+            (
+                1,
+                b"bwrap: execvp /usr/bin/env: No such file or directory\n",
+            ),
+            (1, b"bwrap: Can't mount tmpfs: Argument list too long\n"),
+            (
+                1,
+                b"bwrap: execvp /usr/bin/env: Argument list too long\nbwrap: more\n",
+            ),
+        ] {
+            assert!(!held::exec_too_long(&exited(code), stderr, env), "{code}");
+            assert_eq!(
+                classify_sandbox_failure(&exited(code), stderr),
+                Some(SandboxFailureKind::Setup)
+            );
+        }
         assert_eq!(
             classify_sandbox_failure(
                 &std::process::ExitStatus::from_raw(0),
@@ -3326,17 +4260,14 @@ esac
         );
         assert!(argv.contains(&"--unshare-net"), "{rendered}");
         assert!(argv.contains(&"--clearenv"), "{rendered}");
-        assert!(has(&["--setenv", "CHECK", "ok"]), "{rendered}");
+        // The environment is set by `/usr/bin/env`, on argv, after the
+        // sandbox's own variables.
         assert!(
-            argv.ends_with(&[
-                "/usr/bin/env",
-                "-u",
-                "PWD",
-                "--",
-                "/usr/bin/sh",
-                "-c",
-                "printf sample"
-            ]),
+            has(&["/usr/bin/env", "-u", "PWD", "--", "PATH=/usr/bin:/bin"]),
+            "{rendered}"
+        );
+        assert!(
+            argv.ends_with(&["CHECK=ok", "/usr/bin/sh", "-c", "printf sample"]),
             "{rendered}"
         );
     }

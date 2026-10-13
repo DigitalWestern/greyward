@@ -44,13 +44,6 @@ pub fn install_wheel(
         .to_string();
     let distribution_name = distribution_dir.replace('_', "-");
     let entry_points = read_entry_points(&mut archive, &distribution_id)?;
-    refuse_reserved_script_names(
-        archive.members(),
-        &data_prefix,
-        entry_points.as_deref(),
-        &distribution_id,
-    )?;
-
     let env_root = bin_dir.parent().ok_or_else(|| {
         invalid_data(format!(
             "bin directory has no environment root: {}",
@@ -62,6 +55,29 @@ pub fn install_wheel(
         .join("include/site")
         .join(format!("python{python_minor}"))
         .join(&distribution_dir);
+
+    // Every member's final path is checked before any of this wheel is
+    // written: `bin/.ward-scripts` belongs to ward's wrapper code alone.
+    let mut destinations = Vec::new();
+    for member in archive.members() {
+        let name = member.name.as_str();
+        if let Some((base, relative, _)) = route_entry(
+            name,
+            &data_prefix,
+            site_packages,
+            &headers_dir,
+            bin_dir,
+            env_root,
+        )? {
+            destinations.push(safe_destination(base, relative, env_root, name)?);
+        }
+    }
+    refuse_reserved_paths(
+        &destinations,
+        entry_points.as_deref(),
+        bin_dir,
+        &distribution_id,
+    )?;
 
     archive.for_each(|member, reader| {
         let name = member.name.as_str();
@@ -374,33 +390,34 @@ fn write_wheel_entry(
 /// and `__file__`'s name are the ones it shipped with.
 const SHIPPED_SCRIPTS: &str = ".ward-scripts";
 
-/// Refuse, before anything is written, a wheel that would put a script or
-/// an entry-point launcher at a path through [`SHIPPED_SCRIPTS`]: that name
-/// is ward's private directory in `bin`, under every store path, so no
-/// package may claim it whether or not its own scripts are wrapped.
-fn refuse_reserved_script_names(
-    members: &[ZipMember],
-    data_prefix: &str,
+/// Refuse, before anything is written, a wheel whose members or
+/// entry-point launchers would land at `bin/.ward-scripts` or inside it,
+/// by any route (`scripts`, `data/bin`, ...): that name is ward's private
+/// directory in `bin`, under every store path, written only by
+/// [`write_wheel_entry`]'s wrapper code, so no package may claim it whether
+/// or not its own scripts are wrapped. `destinations` are the members' final
+/// paths, as [`safe_destination`] maps them.
+fn refuse_reserved_paths(
+    destinations: &[PathBuf],
     entry_points: Option<&str>,
+    bin_dir: &Path,
     distribution_id: &str,
 ) -> io::Result<()> {
-    let scripts = format!("{data_prefix}scripts/");
-    let shipped = members
-        .iter()
-        .filter_map(|member| member.name.strip_prefix(&scripts));
-    let launchers = match entry_points {
+    let launchers: Vec<PathBuf> = match entry_points {
         Some(text) => parse_entry_points(text)?
             .into_iter()
-            .map(|(name, _, _)| name)
+            .map(|(name, _, _)| bin_dir.join(name))
             .collect(),
         None => Vec::new(),
     };
-    let reserved = |path: &str| path.split('/').any(|part| part == SHIPPED_SCRIPTS);
-    if let Some(path) = shipped
-        .map(str::to_string)
-        .chain(launchers)
-        .find(|path| reserved(path))
-    {
+    let reserved = destinations.iter().chain(&launchers).find_map(|path| {
+        let relative = path.strip_prefix(bin_dir).ok()?;
+        relative
+            .components()
+            .any(|part| part.as_os_str() == SHIPPED_SCRIPTS)
+            .then(|| relative.display().to_string())
+    });
+    if let Some(path) = reserved {
         return Err(invalid_data(format!(
             "{distribution_id} installs bin/{path}, but bin/{SHIPPED_SCRIPTS} is reserved for \
              ward's wrapped scripts; refusing the wheel"
@@ -830,6 +847,11 @@ mod tests {
         let file = fs::File::create(path).unwrap();
         let mut writer = ZipWriter::new(file);
         for (name, contents) in entries {
+            if name.ends_with('/') {
+                let options = SimpleFileOptions::default().unix_permissions(0o700);
+                writer.add_directory(*name, options).unwrap();
+                continue;
+            }
             let options = SimpleFileOptions::default().unix_permissions(0o600);
             writer.start_file(*name, options).unwrap();
             writer.write_all(contents).unwrap();
@@ -873,9 +895,11 @@ mod tests {
         assert!(check_wheel_distribution(&wheel, "requests", None).is_err());
     }
 
-    /// Sol's round 3: `bin/.ward-scripts` is ward's private directory, so a
-    /// shipped script or an entry point by that name is refused up front,
-    /// with nothing written, under an ordinary store path too.
+    /// Sol's rounds 3 and 4: `bin/.ward-scripts` is ward's private
+    /// directory, so any member whose final path is it or inside it, by the
+    /// `scripts` or the `data/bin` route, and an entry point by that name,
+    /// is refused up front, with nothing written, under an ordinary store
+    /// path too.
     #[test]
     fn a_wheel_claiming_the_private_scripts_directory_is_refused() {
         let temp = TempDir::new();
@@ -896,6 +920,23 @@ mod tests {
                 ("demo/__init__.py", &b""[..]),
                 ("demo-1.0.dist-info/RECORD", b""),
                 ("demo-1.0.data/scripts/sub/.ward-scripts/x", b"#!/bin/sh\n"),
+            ],
+            // Sol's round 4: the destination decides, not the route.
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/data/bin/.ward-scripts", b"not a directory\n"),
+                ("demo-1.0.data/scripts/raw", b"#!python\nprint('raw')\n"),
+            ],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/data/bin/.ward-scripts/raw", b"#!python\n"),
+            ],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/data/bin/.ward-scripts/", b""),
             ],
             &[
                 ("demo/__init__.py", &b""[..]),

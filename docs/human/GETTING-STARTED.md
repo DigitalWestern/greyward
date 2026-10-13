@@ -25,7 +25,8 @@ On Linux x86_64 the installer is one line:
 curl -fsSL https://raw.githubusercontent.com/DigitalWestern/greyward/main/install.sh | sh
 ```
 
-It downloads the release binary for your machine, checks its sha256, puts it
+It downloads the release binary for your machine, checks its sha256 and its
+signature by Greyward's release key (this needs `openssl`), puts it
 in `~/.local/bin`, installs bash and zsh completions (and fish's too, but
 only when fish is on PATH or is your `$SHELL`), and tells you where the
 store will be and roughly how large it gets. A script cannot change the

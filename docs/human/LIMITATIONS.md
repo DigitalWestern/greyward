@@ -129,6 +129,18 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   name `file://` (a Rust `source = "path"` row names a local tree and downloads
   nothing); the generic fetch helper that package-registry downloads use still
   accepts it.
+- **Greyward's own binary is trusted through one release key.** `install.sh`, `ward
+  update --self` and the GitHub Action install a release only when its archive carries an
+  Ed25519 signature by the release key, whose public half is compiled into ward and
+  written into `install.sh`. The private half never reaches CI: release.yml makes a draft,
+  and `tools/release-sign.sh` signs and publishes it on the maintainer's machine, so a
+  token that can write releases cannot ship a binary those three accept. Whoever holds the
+  key can, and a lost key means a new one ships in a new `install.sh` and a new ward,
+  which every existing ward must reach by `install.sh` once. The installer needs OpenSSL
+  3.0 or newer to check the signature, and refuses without it. The `.sha256` beside each
+  archive comes from the same release, so it only catches a corrupt download; the build
+  provenance attestation (`gh attestation verify`) is a second check for people who use
+  `gh`, not one any installer runs.
 - **Frozen validation reads declarative files only.** A project whose only statement of
   its runtime version is computed — `setup.py` metadata, `mix.exs` compatibility, a
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the

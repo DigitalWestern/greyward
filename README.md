@@ -74,7 +74,8 @@ Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
 tag, for Linux x86_64 only (macOS arm64 waits on the macOS gate in FOLLOW-UPS.md). On Linux x86_64
 this is one line. It downloads the release binary for your machine, checks
-its sha256, puts it in `~/.local/bin`, adds that directory to PATH if it is
+its sha256 and its signature by Greyward's release key (with `openssl`, 3.0 or
+newer), runs it once, puts it in `~/.local/bin`, adds that directory to PATH if it is
 not already there, and installs bash, zsh, and fish completions:
 
 ```sh
@@ -107,7 +108,8 @@ ward update --self
 
 It reads the newest release from GitHub, stops when this build already is
 that version, and otherwise downloads the binary for your machine, checks
-the sha256 the release publishes, and renames it over the running one. It
+the sha256 the release publishes and the release key's signature (whose
+public half is compiled in), runs it once, and renames it over the running one. It
 refuses, naming the directory, when that directory is not writable. `ward
 doctor` says when a newer release exists (one request; "not checked" when
 offline, or while no release can be read; an `ok` row naming this machine

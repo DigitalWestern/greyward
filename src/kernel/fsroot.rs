@@ -57,7 +57,7 @@ const ANCESTOR_FLAGS: libc::c_int = DIRECTORY_FLAGS;
 const TEMP_ATTEMPTS: usize = 8;
 
 mod containment;
-pub(crate) use containment::{Containment, LinkEnd};
+pub(crate) use containment::{Containment, LinkEnd, MemberManifest};
 
 /// What a project-relative name resolves to, without following symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

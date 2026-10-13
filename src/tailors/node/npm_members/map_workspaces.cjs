@@ -14,6 +14,11 @@
 // quote the file they failed on, and a member's package.json can be a
 // symlink to any file the user can read, so no message text, path or file
 // content leaves this process. ward discards its stdout and stderr too.
+// ward never prints the code or anything else it gets here: every failure
+// is one fixed message, and the code is shown only when the user sets
+// GREYWARD_DEBUG_NPM_MEMBERS. Each directory and name in a success is
+// checked by ward against the member's own package.json, read beneath the
+// project, before any of it is kept.
 const fs = require('fs')
 const path = require('path')
 

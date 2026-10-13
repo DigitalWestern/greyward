@@ -865,9 +865,12 @@ dependencies:
                 vec![(name.to_string(), "packages/lib".to_string())]
             })
         };
+        let manifest = scratch.0.join("packages/lib/package.json");
+        std::fs::write(&manifest, r#"{"name":"a"}"#).unwrap();
         let npm = named("a");
         check_lock_freshness(&project, &plan).unwrap();
         drop(npm);
+        std::fs::write(&manifest, r#"{"name":"b"}"#).unwrap();
         let _npm = named("b");
         assert_eq!(
             message(check_lock_freshness(&project, &plan)),

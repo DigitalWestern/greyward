@@ -261,25 +261,6 @@ pub(crate) fn npm_manifest_named(root: &ProjectRoot) -> io::Result<Vec<(String, 
     Ok(npm_manifest_membership(root)?.named)
 }
 
-/// Record, as a skipped requirement, each directory npm takes as a member
-/// through a symlink that leads outside the project: ward reads a member
-/// from inside the project only, so it leaves the directory out of the
-/// member set, and the closure says so (#694).
-pub(crate) fn record_members_outside(
-    root: &ProjectRoot,
-    attribution: &crate::kernel::policy::Attribution,
-) -> io::Result<()> {
-    for member in npm_manifest_membership(root)?.outside {
-        attribution.record(
-            crate::kernel::policy::REQUIREMENT_SKIPPED,
-            &member,
-            "workspace member left out: it is a symlink that leads outside the project, \
-             and ward reads workspace members from inside the project only",
-        )?;
-    }
-    Ok(())
-}
-
 fn npm_manifest_membership(root: &ProjectRoot) -> io::Result<super::npm_members::Found> {
     let Some(text) = root.read_input_string(Path::new("package.json"))? else {
         return Ok(super::npm_members::Found::default());
@@ -655,13 +636,12 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// A member npm reaches through a symlink out of the project is left
-    /// out and recorded; one through a symlink inside it is a member
-    /// (#694). npm's answer is faked here; the ignored test in
-    /// `npm_members` runs the real one.
+    /// A member npm reaches through a symlink out of the project makes the
+    /// whole member set undetermined, with the one fixed refusal; one
+    /// through a symlink inside it is a member (#694). npm's answer is
+    /// faked here; the ignored tests in `npm_members` run the real one.
     #[test]
-    fn a_member_symlinked_outside_the_project_is_recorded_as_skipped() {
-        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+    fn a_member_symlinked_outside_the_project_leaves_the_members_undetermined() {
         let temp = TempDir::named("node-outside-member");
         let root = temp.0.join("ws");
         write(
@@ -673,32 +653,27 @@ mod tests {
         write(&root, "vendor/lib/package.json", "{}");
         write(&temp.0, "elsewhere/package.json", "{}");
         std::os::unix::fs::symlink("../vendor/lib", root.join("packages/lib")).unwrap();
-        std::os::unix::fs::symlink("../../elsewhere", root.join("packages/ext")).unwrap();
         let held = ProjectRoot::open(&root).unwrap();
         let _npm = crate::tailors::node::npm_members::tests::fake_npm(&root, |_| {
-            ["packages/a", "packages/lib", "packages/ext"]
-                .map(String::from)
-                .to_vec()
+            ["packages/a", "packages/lib"].map(String::from).to_vec()
         });
         assert_eq!(
             npm_manifest_members(&held).unwrap(),
             ["packages/a", "packages/lib"]
         );
-        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
-        record_members_outside(&held, &attribution).unwrap();
-        let recorded: Vec<(String, String)> = attribution
-            .recorded()
-            .into_iter()
-            .map(|exception| (exception.kind, exception.subject))
-            .collect();
-        attribution.discard();
-        assert_eq!(
-            recorded,
-            [(
-                crate::kernel::policy::REQUIREMENT_SKIPPED.to_string(),
-                "packages/ext".to_string()
-            )]
+        drop(_npm);
+        std::os::unix::fs::symlink("../../elsewhere", root.join("packages/ext")).unwrap();
+        let _npm = crate::tailors::node::npm_members::tests::fake_npm(&root, |_| {
+            ["packages/a", "packages/lib", "packages/ext"]
+                .map(String::from)
+                .to_vec()
+        });
+        let error = npm_manifest_members(&held).unwrap_err().to_string();
+        assert!(
+            error.contains("could not be determined inside the project"),
+            "{error}"
         );
+        assert!(!error.contains("packages/ext"), "{error}");
     }
 
     /// npm's words on a failure are kept: the resolve-only form lowers the
@@ -770,7 +745,6 @@ mod tests {
             } else {
                 &[
                     "packages/a",
-                    "packages/linked",
                     "apps/web",
                     "apps/nested/deep",
                     "tools/cli",
@@ -853,11 +827,13 @@ mod tests {
             "{error}"
         );
 
-        // A member named outside the project cannot be in a record.
+        // A member named outside the project cannot be in a record: the
+        // members are undetermined, and only the declared pattern is shown.
         write(&root, "package.json", r#"{"workspaces":["../elsewhere"]}"#);
         let error = resolution_outputs(&held).unwrap_err().to_string();
         assert!(
-            error.contains("../elsewhere") && error.contains("not a plain path"),
+            error.contains("could not be determined inside the project")
+                && error.contains(r#"(workspaces ["../elsewhere"])"#),
             "{error}"
         );
         // A members list ward cannot read fails closed.

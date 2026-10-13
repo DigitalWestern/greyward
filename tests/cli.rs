@@ -1458,12 +1458,11 @@ fn pip_activate_and_npm_install_are_refused_with_the_ward_verb() {
 #[test]
 fn a_panic_is_printed_even_under_quiet() {
     let home = TempDir::boundary("cli-panic-quiet");
-    // No HOME and no GREYWARD_STORE: the store's home lookup panics. The only
-    // deterministic panic the CLI can be driven into from outside.
+    // A debug build's `store path` panics under GREYWARD_TEST_PANIC: since
+    // an unset HOME became an error (#681), no input panics the CLI.
     let out = command(&home.0, &home.0, &home.0.join("store"))
         .args(["--quiet", "store", "path"])
-        .env_remove("HOME")
-        .env_remove("GREYWARD_STORE")
+        .env("GREYWARD_TEST_PANIC", "1")
         .output()
         .expect("spawn ward");
     assert_eq!(out.status.code(), Some(101));
@@ -1472,8 +1471,36 @@ fn a_panic_is_printed_even_under_quiet() {
         stderr.contains("internal error"),
         "quiet swallowed: {stderr:?}"
     );
-    assert!(stderr.contains("HOME"), "{stderr}");
+    assert!(stderr.contains("GREYWARD_TEST_PANIC"), "{stderr}");
     assert!(stderr.contains("bug in ward"), "{stderr}");
+}
+
+/// The store's default location is under HOME, and HOME is held to `x`'s
+/// rule: an unset or relative HOME is refused by name, never a panic and
+/// never a store under the working directory (#681).
+#[test]
+fn an_unset_or_relative_home_is_refused_for_the_store() {
+    let dir = TempDir::boundary("cli-store-home");
+    for home in [None, Some(""), Some("relative")] {
+        let mut cmd = command(&dir.0, &dir.0, &dir.0.join("store"));
+        cmd.args(["store", "path"]).env_remove("GREYWARD_STORE");
+        match home {
+            Some(value) => cmd.env("HOME", value),
+            None => cmd.env_remove("HOME"),
+        };
+        let out = cmd.output().expect("spawn ward");
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{home:?}: {stderr}");
+        let expected = if home.is_none() {
+            "HOME is not set"
+        } else {
+            "HOME must be an absolute directory"
+        };
+        assert!(stderr.contains(expected), "{home:?}: {stderr}");
+        assert!(stderr.contains("GREYWARD_STORE"), "{home:?}: {stderr}");
+        assert!(!stderr.contains("internal error"), "{home:?}: {stderr}");
+        assert!(text(&out.stdout).is_empty(), "{home:?}");
+    }
 }
 
 #[test]
@@ -1777,7 +1804,7 @@ fn successful_reports_ignore_store_permissions_and_the_gc_lease() {
     let lock = store.root.join("activity.lock");
     let before = common::snapshot(&store.root);
 
-    let check_reports = || {
+    let check_reports = |before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>| {
         for args in [["status", "--json"].as_slice(), ["sbom"].as_slice()] {
             let mut child = command(&project.0, &home.0, &store.root)
                 .args(args)
@@ -1803,17 +1830,19 @@ fn successful_reports_ignore_store_permissions_and_the_gc_lease() {
                 assert_eq!(value["bomFormat"], "CycloneDX");
             }
         }
-        assert_eq!(common::snapshot(&store.root), before);
+        assert_eq!(&common::snapshot(&store.root), before);
     };
 
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
     std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o555)).unwrap();
-    check_reports();
+    check_reports(&before);
     std::fs::set_permissions(&store.root, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let _gc = store.activity(ActivityMode::Exclusive).unwrap();
-    check_reports();
+    // The held lease names itself under jobs/ (#678): that note is this
+    // test's, so the reports are compared with the store as it is now.
+    check_reports(&common::snapshot(&store.root));
 }
 
 /// A closure whose inputs were never recorded cannot be compared with the
@@ -2479,6 +2508,122 @@ fn gc_reset_dry_run_lists_what_it_would_remove_and_writes_nothing() {
     let out = ward(&home.0, &home.0, &["gc", "--dry-run"]);
     assert_eq!(out.status.code(), Some(3));
     assert!(text(&out.stderr).contains("has no format marker"));
+}
+
+/// `GREYWARD_STORE` pointed at an ordinary directory that happens to have a
+/// `tmp/` and a `records/` (#676): no command calls it an old store or
+/// offers a reset, `gc --reset` refuses it, and every file is still there.
+#[test]
+fn a_directory_that_is_no_store_is_refused_and_never_reset() {
+    let home = TempDir::boundary("cli-not-a-store");
+    let dir = home.0.join("notastore");
+    for (path, bytes) in [
+        ("tmp/draft.txt", "draft"),
+        ("records/2026.csv", "a,b\n"),
+        ("docs/a.txt", "a"),
+    ] {
+        std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(path), bytes).unwrap();
+    }
+    for args in [
+        &["store", "roots"][..],
+        &["gc"],
+        &["gc", "--reset", "--dry-run"],
+        &["gc", "--reset"],
+    ] {
+        let out = ward_at(&home.0, &home.0, &dir, args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {stderr}");
+        assert!(stderr.contains("is not a ward store"), "{args:?}: {stderr}");
+        // No fix line: a reset is the one command not to run here.
+        assert!(!stderr.contains("fix:"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("older ward"), "{args:?}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tmp/draft.txt")).unwrap(),
+        "draft"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("records/2026.csv")).unwrap(),
+        "a,b\n"
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["docs", "records", "tmp"], "ward wrote into it");
+}
+
+/// An unrelated `format` beside the same files reads as a marker ward cannot
+/// read, which used to skip the refusal above and let `gc --reset` empty
+/// `records/` and `meta/` (#676 review). Without store evidence beside it,
+/// a `format` file, directory or link makes no store: every command refuses
+/// the directory and the reset removes nothing. So does a `meta` or
+/// `objects` linked to another store's, whose records are not this
+/// directory's.
+#[test]
+fn an_unrelated_format_or_linked_namespace_is_no_store_to_reset() {
+    let home = TempDir::boundary("cli-not-a-store-format");
+    let (real_store, _) = pre_epoch_store(&home.0);
+    type Plant = Box<dyn Fn(&std::path::Path)>;
+    let plants: Vec<(&str, Plant)> = vec![
+        (
+            "a format file",
+            Box::new(|dir| std::fs::write(dir.join("format"), "A4\n").unwrap()),
+        ),
+        (
+            "a format directory",
+            Box::new(|dir| std::fs::create_dir(dir.join("format")).unwrap()),
+        ),
+        (
+            "a format link",
+            Box::new(|dir| std::os::unix::fs::symlink("/nowhere", dir.join("format")).unwrap()),
+        ),
+        (
+            "meta linked to a store's",
+            Box::new({
+                let target = real_store.join("meta");
+                move |dir| std::os::unix::fs::symlink(&target, dir.join("meta")).unwrap()
+            }),
+        ),
+        (
+            "objects linked to a store's",
+            Box::new({
+                let target = real_store.join("objects");
+                move |dir| std::os::unix::fs::symlink(&target, dir.join("objects")).unwrap()
+            }),
+        ),
+    ];
+    for (index, (what, plant)) in plants.iter().enumerate() {
+        let dir = home.0.join(format!("notastore-{index}"));
+        std::fs::create_dir_all(dir.join("records")).unwrap();
+        std::fs::write(dir.join("records/2026.csv"), "a,b\n").unwrap();
+        plant(&dir);
+        let before = common::snapshot(&dir);
+        for args in [
+            &["gc", "--reset", "--dry-run"][..],
+            &["gc", "--reset"],
+            &["store", "roots"],
+        ] {
+            let out = ward_at(&home.0, &home.0, &dir, args);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{what} {args:?}: {stderr}");
+            assert!(
+                stderr.contains("is not a ward store"),
+                "{what} {args:?}: {stderr}"
+            );
+            assert!(!stderr.contains("fix:"), "{what} {args:?}: {stderr}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("records/2026.csv")).unwrap(),
+            "a,b\n",
+            "{what}"
+        );
+        assert_eq!(common::snapshot(&dir), before, "{what}: ward changed it");
+    }
+    // The linked store itself is untouched.
+    assert!(real_store.join("meta").is_dir());
 }
 
 /// `gc --reset` takes no other option: a reset that also swept, registered
@@ -4141,6 +4286,83 @@ fn synced_python_closure_with_exception(home: &Path, project: &Path, kind: &str)
     signing_key(home).sign(&mut envelope).unwrap();
     std::fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
     path
+}
+
+/// The settings that tighten policy never load as permissive by mistake
+/// (#681): `GREYWARD_STRICT` takes the true-like words `CI` takes and refuses
+/// any other value with a usage error, a dangling machine-policy symlink is
+/// an error rather than no policy, and an empty HOME does not make the
+/// project's own `.greyward/policy.toml` the machine policy.
+#[test]
+fn policy_settings_fail_closed() {
+    let home = TempDir::boundary("cli-policy-closed-home");
+    let project = TempDir::boundary("cli-policy-closed-project");
+    let key_home = TempDir::boundary("cli-policy-closed-key");
+    synced_python_closure_with_exception(&key_home.0, &project.0, "git-dependency");
+    let audit = |env: &[(&str, &str)]| {
+        let out = ward_env(&project.0, &home.0, &["audit"], env);
+        let shown = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        (out.status.code(), shown)
+    };
+    let (code, shown) = audit(&[]);
+    assert_eq!(code, Some(0), "{shown}");
+
+    for strict in ["1", "true", "TRUE", "yes", " Yes "] {
+        let (code, shown) = audit(&[("GREYWARD_STRICT", strict)]);
+        assert_eq!(code, Some(1), "GREYWARD_STRICT={strict:?}: {shown}");
+        assert!(shown.contains("denied"), "{strict:?}: {shown}");
+    }
+    for lenient in ["", "0", "false", "No"] {
+        let (code, shown) = audit(&[("GREYWARD_STRICT", lenient)]);
+        assert_eq!(code, Some(0), "GREYWARD_STRICT={lenient:?}: {shown}");
+    }
+    for args in [&["audit"][..], &["audit", "--json"], &["store", "path"]] {
+        let out = ward_env(&project.0, &home.0, args, &[("GREYWARD_STRICT", "maybe")]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("GREYWARD_STRICT=")
+                && stderr.contains("maybe")
+                && stderr.contains("1, true or yes"),
+            "{args:?}: {stderr}"
+        );
+        assert!(text(&out.stdout).is_empty(), "{args:?}");
+        if args.contains(&"--json") {
+            let error: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+            assert!(
+                error["error"].as_str().unwrap().contains("maybe"),
+                "{stderr}"
+            );
+        }
+    }
+
+    // A machine policy symlinked to a file that is gone keeps its meaning:
+    // the audit refuses, naming the link, instead of judging with no policy.
+    let machine = home.0.join(".greyward/policy.toml");
+    std::fs::create_dir_all(machine.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(home.0.join("unmounted/policy.toml"), &machine).unwrap();
+    let (code, shown) = audit(&[]);
+    assert_eq!(code, Some(1), "{shown}");
+    assert!(
+        shown.contains(&machine.display().to_string())
+            && shown.contains("symlink to a file that does not exist"),
+        "{shown}"
+    );
+    assert!(!shown.contains("clean"), "{shown}");
+    std::fs::remove_file(&machine).unwrap();
+
+    // HOME="" would name ./.greyward/policy.toml, the project's own file,
+    // as the machine policy: refused, naming the way around.
+    std::fs::write(project.0.join(".greyward/policy.toml"), "deny = []\n").unwrap();
+    for empty_or_relative in ["", "."] {
+        let (code, shown) = audit(&[("HOME", empty_or_relative)]);
+        assert_eq!(code, Some(1), "HOME={empty_or_relative:?}: {shown}");
+        assert!(
+            shown.contains("HOME must be an absolute directory")
+                && shown.contains("GREYWARD_POLICY"),
+            "{shown}"
+        );
+    }
 }
 
 /// The solo setup: no `[signing]` table anywhere. `audit` judges the

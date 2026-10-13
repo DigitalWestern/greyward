@@ -97,7 +97,13 @@ other toolchains, and npm, Hex, sdist and crate archives, still call
 byte-identical, because object ids depend on it. Zip archives (wheels, zip
 sdists, the Elixir zip, Hex `.ez`, the outer `.conda` layer) go through
 `src/kernel/archive/zipfile.rs` under the same name rules, plus a byte
-budget counted in real inflated bytes and pip's modes (#675).
+budget counted in real inflated bytes and pip's modes (#675). The reader
+also refuses the extra fields the zip crate and Python's `zipfile` read
+differently: a ZIP64 field over sizes the header gives as ordinary values,
+or longer than the header's sentinels ask for, and a Unicode path or
+comment field that is not version 1, repeats, or names another entry. pip
+never re-reads an sdist archive: every sdist build hands it the tree ward
+unpacked.
 
 ### Embedded components (bundled npm, node-gyp)
 

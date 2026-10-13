@@ -18,6 +18,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod source;
+use source::{pip_wheel_argv, SdistSource};
+
 pub(crate) const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
     (
         "pip",
@@ -827,9 +830,9 @@ fn prepare_rust(
 }
 
 /// For a Rust sdist, the source unpacked under `work` and the Rust inputs
-/// planned from it; `(None, None)` for any other. The archive's lease is
-/// released once it is unpacked: toolchain realization can fetch more
-/// cache entries.
+/// planned from it; any other stays the held archive, unpacked once the
+/// wheel cache has missed. The archive's lease is released once it is
+/// unpacked: toolchain realization can fetch more cache entries.
 fn unpack_rust_source(
     door: &mut ResolutionDoor<'_>,
     sdist: crate::kernel::fetch::CacheLease,
@@ -838,9 +841,9 @@ fn unpack_rust_source(
     rust: Option<&Selected>,
     info: &ArchiveInfo,
     work: &Path,
-) -> io::Result<(Option<PathBuf>, Option<RustPlanInputs>)> {
+) -> io::Result<(SdistSource, Option<RustPlanInputs>)> {
     if !info.rust_build {
-        return Ok((None, None));
+        return Ok((SdistSource::Held(sdist), None));
     }
     let source =
         build_requires::extract_sdist_for(door.lease(), &sdist, &work.join("source"), info)?;
@@ -853,7 +856,7 @@ fn unpack_rust_source(
         &source,
         info,
     )?;
-    Ok((Some(source), Some(inputs)))
+    Ok((SdistSource::Unpacked(source), Some(inputs)))
 }
 
 /// What a build mounts besides its environment and interpreter: the native
@@ -916,20 +919,7 @@ fn run_sdist_build(
 ) -> io::Result<()> {
     let py = build_env.join("bin/python");
     let log = work.join("pip-build.log");
-    let argv = vec![
-        py.to_string_lossy().into_owned(),
-        "-m".into(),
-        "pip".into(),
-        "--log".into(),
-        log.to_string_lossy().into_owned(),
-        "wheel".into(),
-        "--no-deps".into(),
-        "--no-build-isolation".into(),
-        "--no-index".into(),
-        "-w".into(),
-        outdir.to_string_lossy().into_owned(),
-        input.to_string_lossy().into_owned(),
-    ];
+    let argv = pip_wheel_argv(&py, &log, outdir, input)?;
     let mut envs = sdist_build_env(platform);
     let cores = std::thread::available_parallelism()
         .map(|value| value.get())
@@ -1126,7 +1116,6 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let work = store.stage_with_activity(activity)?;
     let outdir = work.join("out");
     fs::create_dir_all(&outdir)?;
-    let sdist_named = stage_sdist_copy(&sdist, &work, pkg)?;
 
     let (source, rust_inputs) = unpack_rust_source(door, sdist, pkg, selected, rust, &info, &work)?;
     let identity = sdist_build_identity(
@@ -1150,6 +1139,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
             });
         }
     }
+    let source = source.unpacked(activity, &info, &work)?;
 
     let Toolchains {
         native_libs,
@@ -1167,7 +1157,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     )?;
 
     let cpython_obj = crate::tailors::python::realize_runtime(store, activity, platform, selected)?;
-    let input = source.as_deref().unwrap_or(&sdist_named);
+    let input = source.as_path();
     let build = |host_view: HostView| {
         run_sdist_build(
             activity,
@@ -1194,7 +1184,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
             &info,
             &work,
             &outdir,
-            source.as_deref(),
+            Some(input),
             rust_inputs
                 .as_ref()
                 .and_then(RustPlanInputs::generated_lock_text),
@@ -1231,23 +1221,6 @@ fn admit_sdist_build(platform: Platform, pkg: &LockedPackage, depth: usize) -> i
         ));
     }
     crate::kernel::platform::require_host(platform, "sdist build")
-}
-
-/// Copy the verified archive into the work tree under its locked filename.
-fn stage_sdist_copy(sdist: &Path, work: &Path, pkg: &LockedPackage) -> io::Result<PathBuf> {
-    if pkg.filename.contains('/')
-        || pkg.filename.contains('\\')
-        || pkg.filename.contains("..")
-        || pkg.filename.is_empty()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsafe sdist filename: {:?}", pkg.filename),
-        ));
-    }
-    let sdist_named = work.join(&pkg.filename);
-    fs::copy(sdist, &sdist_named)?;
-    Ok(sdist_named)
 }
 
 /// The identity of the wheel this build will produce. A Rust source adds
@@ -1500,6 +1473,66 @@ mod isolation_tests;
 
 #[cfg(test)]
 mod tests {
+    /// Sol's review of #675: pip re-read the original zip sdist with its own
+    /// parser, which can see other sizes and names than ward inspected.
+    /// Every sdist build now hands pip ward's unpacked tree, and the argv
+    /// refuses anything else.
+    #[test]
+    fn pip_builds_a_plain_sdist_from_the_tree_ward_unpacked() {
+        use sha2::Digest as _;
+        use std::io::Write as _;
+        let dir = crate::kernel::testutil::TempDir::named("plain-sdist-tree");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(dir.0.join(sub)).unwrap();
+        }
+        let store = crate::kernel::store::Store::for_test(dir.0.clone());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let archive = dir.0.join("plain-1.0.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        for (name, mode, bytes) in [
+            (
+                "plain-1.0/pyproject.toml",
+                0o644,
+                &b"[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n"[..],
+            ),
+            ("plain-1.0/run.sh", 0o700, b"#!/bin/sh\n"),
+        ] {
+            let options = zip::write::SimpleFileOptions::default().unix_permissions(mode);
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        let sha256 = hex::encode(sha2::Sha256::digest(std::fs::read(&archive).unwrap()));
+        let url = format!("file://{}", archive.display());
+        let lease = super::download_verified_held(&store, &activity, &url, &sha256).unwrap();
+        let info = super::build_requires::inspect_sdist(&lease).unwrap();
+        assert!(!info.rust_build);
+        let work = store.stage_with_activity(&activity).unwrap();
+        let tree = super::SdistSource::Held(lease)
+            .unpacked(&activity, &info, &work)
+            .unwrap();
+        assert!(tree.join("pyproject.toml").is_file(), "{}", tree.display());
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(tree.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+
+        let (py, log, out) = (work.join("py"), work.join("log"), work.join("out"));
+        let argv = super::pip_wheel_argv(&py, &log, &out, &tree).unwrap();
+        assert_eq!(argv.last().map(String::as_str), tree.to_str());
+        let refused = super::pip_wheel_argv(&py, &log, &out, &archive).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("pip builds from the tree ward unpacked"),
+            "{refused}"
+        );
+    }
+
     /// #688: a build of `foo==1.0` that leaves another project's wheel, or
     /// another release's, is refused; a git package is held to its name.
     #[test]
@@ -2008,11 +2041,21 @@ mod tests {
         )
         .unwrap();
         let key = format!("pkg:{}", pkg.name);
-        assert_eq!(current.inputs[&key], planned.input);
+        assert_eq!(
+            current.inputs[&key],
+            format!("{}|{}|{}", planned.input, pkg.version, pkg.filename)
+        );
         let mut old_parent = current.clone();
-        old_parent
-            .inputs
-            .insert(key, format!("Sdist:{}:{}", pkg.sha256, legacy.object_id()));
+        old_parent.inputs.insert(
+            key,
+            format!(
+                "Sdist:{}:{}|{}|{}",
+                pkg.sha256,
+                legacy.object_id(),
+                pkg.version,
+                pkg.filename
+            ),
+        );
         let digest = crate::tailors::python::env::package_digest_of_inputs(&old_parent.inputs);
         old_parent.inputs.insert("package_digest".into(), digest);
         assert_eq!(

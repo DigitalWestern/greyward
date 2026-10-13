@@ -79,7 +79,7 @@ impl ZipReader {
         // zipfile extracts both and the last wins: the two readers would
         // disagree about which bytes the archive holds. Count the records
         // themselves.
-        let records = central_records(path, archive.central_directory_start())?;
+        let records = central_records(path, archive.central_directory_start())?.map_err(refuse)?;
         if records != archive.len() {
             return Err(refuse(format!(
                 "the central directory holds {records} records for {} distinct names; \
@@ -289,8 +289,9 @@ pub fn extract_zip(path: &Path, destination: &Path, budget: u64) -> io::Result<(
 }
 
 /// How many central-directory file headers (`PK\x01\x02`) follow one
-/// another from `start`, the offset the crate read them from.
-fn central_records(path: &Path, start: u64) -> io::Result<usize> {
+/// another from `start`, the offset the crate read them from, each with
+/// extra fields [`check_extra_fields`] accepts. `Ok(Err(_))` is a refusal.
+fn central_records(path: &Path, start: u64) -> io::Result<Result<usize, String>> {
     use std::io::{BufReader, Seek, SeekFrom};
     let mut reader = BufReader::new(File::open(path)?);
     reader.seek(SeekFrom::Start(start))?;
@@ -299,16 +300,147 @@ fn central_records(path: &Path, start: u64) -> io::Result<usize> {
     loop {
         match reader.read_exact(&mut header) {
             Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(records),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(Ok(records)),
             Err(e) => return Err(e),
         }
         if &header[..4] != b"PK\x01\x02" {
-            return Ok(records);
+            return Ok(Ok(records));
         }
-        let field = |at: usize| u16::from_le_bytes([header[at], header[at + 1]]) as i64;
-        reader.seek_relative(field(28) + field(30) + field(32))?;
+        let short = |at: usize| u16::from_le_bytes([header[at], header[at + 1]]);
+        let long = |at: usize| {
+            u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
+        let mut name = vec![0u8; usize::from(short(28))];
+        let mut extra = vec![0u8; usize::from(short(30))];
+        reader.read_exact(&mut name)?;
+        reader.read_exact(&mut extra)?;
+        reader.seek_relative(i64::from(short(32)))?;
+        let sentinels = Sentinels {
+            uncompressed: long(24) == u32::MAX,
+            compressed: long(20) == u32::MAX,
+            offset: long(42) == u32::MAX,
+            disk: short(34) == u16::MAX,
+        };
+        if let Err(why) = check_extra_fields(&name, &extra, sentinels) {
+            return Ok(Err(format!(
+                "entry {:?}: {why}, refusing",
+                String::from_utf8_lossy(&name)
+            )));
+        }
         records += 1;
     }
+}
+
+/// The zip format's CRC-32 (IEEE, reflected), bit by bit: it runs over an
+/// entry name, a few hundred bytes at most.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// Which of a central header's fields hold the all-ones value that sends a
+/// reader to the ZIP64 extra field for the real one.
+#[derive(Clone, Copy)]
+struct Sentinels {
+    uncompressed: bool,
+    compressed: bool,
+    offset: bool,
+    disk: bool,
+}
+
+#[cfg(test)]
+impl Sentinels {
+    const NONE: Sentinels = Sentinels {
+        uncompressed: false,
+        compressed: false,
+        offset: false,
+        disk: false,
+    };
+}
+
+/// Refuse the extra fields the zip crate and Python's `zipfile` (pip's
+/// reader) read differently, so the two never list one archive as two.
+///
+/// - ZIP64 (`0x0001`): the crate takes all three 64-bit values from a field
+///   of 24 bytes or more whatever the header says; Python takes a value only
+///   where the header's field is the all-ones sentinel. The field is
+///   accepted only when both sizes are sentinels, and it is exactly as long
+///   as the sentinels in the header ask for.
+/// - Unicode path (`0x7075`) and comment (`0x6375`): the crate drops the
+///   version byte; Python honours the field only at version 1. The crate
+///   checks a second path field's CRC against the first one's name. Each
+///   may appear once, at version 1, with a CRC of the header's own name and
+///   a UTF-8 name that is not empty.
+/// - The fields must tile the extra block exactly.
+fn check_extra_fields(name: &[u8], mut extra: &[u8], sentinels: Sentinels) -> Result<(), String> {
+    let mut seen = Vec::new();
+    while !extra.is_empty() {
+        if extra.len() < 4 {
+            return Err("its extra fields end inside a field header".into());
+        }
+        let kind = u16::from_le_bytes([extra[0], extra[1]]);
+        let len = usize::from(u16::from_le_bytes([extra[2], extra[3]]));
+        let data = extra
+            .get(4..4 + len)
+            .ok_or("an extra field runs past the end of its block")?;
+        extra = &extra[4 + len..];
+        if matches!(kind, 0x0001 | 0x7075 | 0x6375) {
+            if seen.contains(&kind) {
+                return Err(format!("extra field {kind:#06x} appears twice"));
+            }
+            seen.push(kind);
+        }
+        match kind {
+            0x0001 => {
+                if !(sentinels.uncompressed && sentinels.compressed) {
+                    return Err(
+                        "a ZIP64 extra field overrides sizes the header gives as ordinary values"
+                            .into(),
+                    );
+                }
+                if sentinels.disk {
+                    return Err("a ZIP64 extra field names a disk number".into());
+                }
+                let expected = 16 + if sentinels.offset { 8 } else { 0 };
+                if len != expected {
+                    return Err(format!(
+                        "its ZIP64 extra field is {len} bytes where the header's sentinels ask for {expected}"
+                    ));
+                }
+            }
+            0x7075 | 0x6375 => {
+                let what = if kind == 0x7075 {
+                    "Unicode path"
+                } else {
+                    "Unicode comment"
+                };
+                if data.len() < 5 || data[0] != 1 {
+                    return Err(format!("its {what} extra field is not version 1"));
+                }
+                if kind == 0x7075 {
+                    let crc = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                    if crc != crc32(name) {
+                        return Err("its Unicode path extra field is for another name".into());
+                    }
+                    if data.len() == 5 || std::str::from_utf8(&data[5..]).is_err() {
+                        return Err("its Unicode path extra field holds no UTF-8 name".into());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -435,6 +567,185 @@ mod tests {
     use zip::ZipWriter;
 
     const BUDGET: u64 = 1 << 30;
+
+    /// One stored member of a hand-built zip: its central header's sizes
+    /// (`None`: the real size) and its central extra block.
+    struct Raw<'a> {
+        name: &'a [u8],
+        data: &'a [u8],
+        sizes: Option<u32>,
+        extra: Vec<u8>,
+    }
+
+    /// A zip written byte by byte, so a test can put any extra field in a
+    /// central header, which the zip crate's writer refuses to.
+    fn raw_zip(members: &[Raw]) -> Vec<u8> {
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        let le16 = |v: usize, out: &mut Vec<u8>| out.extend_from_slice(&(v as u16).to_le_bytes());
+        let le32 = |v: u32, out: &mut Vec<u8>| out.extend_from_slice(&v.to_le_bytes());
+        for member in members {
+            let offset = out.len() as u32;
+            let (crc, size) = (crc32(member.data), member.data.len() as u32);
+            out.extend_from_slice(b"PK\x03\x04\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00");
+            le32(crc, &mut out);
+            le32(size, &mut out);
+            le32(size, &mut out);
+            le16(member.name.len(), &mut out);
+            le16(0, &mut out);
+            out.extend_from_slice(member.name);
+            out.extend_from_slice(member.data);
+            central
+                .extend_from_slice(b"PK\x01\x02\x1e\x03\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00");
+            le32(crc, &mut central);
+            le32(member.sizes.unwrap_or(size), &mut central);
+            le32(member.sizes.unwrap_or(size), &mut central);
+            le16(member.name.len(), &mut central);
+            le16(member.extra.len(), &mut central);
+            central.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            le32(0o100644 << 16, &mut central);
+            le32(offset, &mut central);
+            central.extend_from_slice(member.name);
+            central.extend_from_slice(&member.extra);
+        }
+        let start = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(b"PK\x05\x06\x00\x00\x00\x00");
+        le16(members.len(), &mut out);
+        le16(members.len(), &mut out);
+        le32(central.len() as u32, &mut out);
+        le32(start, &mut out);
+        le16(0, &mut out);
+        out
+    }
+
+    fn field(kind: u16, data: &[u8]) -> Vec<u8> {
+        let mut field = kind.to_le_bytes().to_vec();
+        field.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        field.extend_from_slice(data);
+        field
+    }
+
+    fn zip64(values: &[u64]) -> Vec<u8> {
+        field(
+            0x0001,
+            &values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn unicode_path(version: u8, crc_of: &[u8], name: &[u8]) -> Vec<u8> {
+        let mut data = vec![version];
+        data.extend_from_slice(&crc32(crc_of).to_le_bytes());
+        data.extend_from_slice(name);
+        field(0x7075, &data)
+    }
+
+    fn open_raw(temp: &TempDir, members: &[Raw]) -> io::Result<ZipReader> {
+        let path = temp.0.join("raw.zip");
+        fs::write(&path, raw_zip(members)).unwrap();
+        ZipReader::open(&path, BUDGET)
+    }
+
+    #[test]
+    fn crc32_is_the_zip_checksum() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
+    }
+
+    /// Sol's review of #675: the crate takes all three ZIP64 values from a
+    /// 24-byte field whatever the header says, and Python's `zipfile` only
+    /// where the header holds the sentinel. A header that claimed 2 GiB over
+    /// a field claiming one byte was budgeted at one byte by ward and
+    /// extracted at 2 GiB by pip. Only a field both readers read alike is
+    /// accepted.
+    #[test]
+    fn a_zip64_field_two_readers_read_differently_is_refused() {
+        let temp = TempDir::named("zip64-extra");
+        let raw = |sizes, extra| Raw {
+            name: b"pkg/a.txt",
+            data: b"hello",
+            sizes,
+            extra,
+        };
+        // The exploit's shape: ordinary sizes, overridden by the field.
+        let message = open_raw(&temp, &[raw(None, zip64(&[5, 5, 0]))])
+            .err()
+            .expect("an ordinary-size header with a ZIP64 field is refused")
+            .to_string();
+        assert!(
+            message.contains("overrides sizes the header gives as ordinary values"),
+            "{message}"
+        );
+        // Sentinel sizes with a field longer than they ask for.
+        let message = open_raw(&temp, &[raw(Some(u32::MAX), zip64(&[5, 5, 0]))])
+            .err()
+            .expect("a ZIP64 field longer than its sentinels is refused")
+            .to_string();
+        assert!(
+            message.contains("is 24 bytes where the header's sentinels ask for 16"),
+            "{message}"
+        );
+        // Both readers take the sizes from a field the sentinels call for.
+        let mut reader = open_raw(&temp, &[raw(Some(u32::MAX), zip64(&[5, 5]))]).unwrap();
+        assert_eq!(reader.members()[0].size, 5);
+        assert_eq!(reader.read("pkg/a.txt", 16).unwrap(), b"hello");
+    }
+
+    /// Sol's review of #675: the crate drops a Unicode path field's version
+    /// byte, and Python honours only version 1, so a version-2 field showed
+    /// ward one name and pip another.
+    #[test]
+    fn a_unicode_path_field_two_readers_read_differently_is_refused() {
+        let temp = TempDir::named("zip-unicode-extra");
+        let raw = |extra| Raw {
+            name: b"pkg/pyproject.toml",
+            data: b"x",
+            sizes: None,
+            extra,
+        };
+        let refused = |extra: Vec<u8>, needle: &str| {
+            let message = open_raw(&temp, &[raw(extra)])
+                .err()
+                .expect(needle)
+                .to_string();
+            assert!(message.contains(needle), "{message}");
+        };
+        let name: &[u8] = b"pkg/pyproject.toml";
+        refused(
+            unicode_path(2, name, b"pkg/unused.txt"),
+            "Unicode path extra field is not version 1",
+        );
+        refused(unicode_path(1, name, b""), "holds no UTF-8 name");
+        // The crate checks a second field against the first one's name, so
+        // two fields over one name pass it and Python reads both.
+        let twice = [unicode_path(1, name, name), unicode_path(1, name, name)].concat();
+        refused(twice, "extra field 0x7075 appears twice");
+        refused(
+            field(0x6375, &[2, 0, 0, 0, 0]),
+            "Unicode comment extra field is not version 1",
+        );
+        // A field for another name, and a block that ends inside a field
+        // header, are refused too (the crate already refuses both).
+        assert!(open_raw(&temp, &[raw(unicode_path(1, b"pkg/other", b"pkg/x"))]).is_err());
+        assert!(open_raw(&temp, &[raw(vec![0x75, 0x70, 9])]).is_err());
+        assert_eq!(
+            check_extra_fields(name, &[0x75, 0x70, 9], Sentinels::NONE),
+            Err("its extra fields end inside a field header".into())
+        );
+        assert_eq!(
+            check_extra_fields(
+                name,
+                &unicode_path(1, b"pkg/other", b"pkg/x"),
+                Sentinels::NONE
+            ),
+            Err("its Unicode path extra field is for another name".into())
+        );
+        // Version 1 over the header's own name: both readers use it.
+        let reader = open_raw(&temp, &[raw(unicode_path(1, name, b"pkg/setup.cfg"))]).unwrap();
+        assert_eq!(reader.members()[0].name, "pkg/setup.cfg");
+    }
 
     /// A zip of `(name, mode, bytes)` members; a name ending in `/` is a
     /// directory.

@@ -420,4 +420,28 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     })
     .expect("second vendor was not a cache hit");
     assert_eq!(vendor, again);
+
+    // The file:// source's host-git-transport, recorded cold, stays with
+    // the vendor object: a warm sync under a policy denying only that kind
+    // refuses the cached object rather than publish without it.
+    let id = vendor.file_name().unwrap().to_str().unwrap().to_string();
+    let kept: Vec<String> = store
+        .exceptions(&id)
+        .unwrap()
+        .into_iter()
+        .map(|exception| exception.kind)
+        .collect();
+    assert_eq!(
+        kept,
+        [policy::GIT_DEPENDENCY, policy::HOST_GIT_TRANSPORT].map(String::from)
+    );
+    let mut deny = policy::Policy::default();
+    deny.deny.insert(policy::HOST_GIT_TRANSPORT.to_string());
+    let _scope = policy::PolicyScope::install(deny);
+    let warm = policy::Attribution::open("cargo").expect("test attribution");
+    let error = greyward::tailors::cargo::realize_vendor(&store, activity, &plan)
+        .expect_err("a denied kind must refuse the cached vendor object")
+        .to_string();
+    warm.discard();
+    assert!(error.contains(policy::HOST_GIT_TRANSPORT), "{error}");
 }

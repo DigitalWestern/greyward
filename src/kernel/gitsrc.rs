@@ -159,12 +159,25 @@ fn transport_exception(source: &GitSource) -> Option<crate::kernel::policy::Exce
 /// `source`, and its transport ([`record_transport`]), before the fetch: a
 /// policy denying either kind stops the sync before git contacts the host.
 pub fn record_git_dependency(subject: &str, source: &GitSource) -> io::Result<()> {
-    crate::kernel::policy::record(
-        crate::kernel::policy::GIT_DEPENDENCY,
-        subject,
-        &format!("{} at {}", source.url, source.commit),
-    )?;
-    record_transport(source)
+    record_git_dependency_kept(subject, source).map(drop)
+}
+
+/// [`record_git_dependency`], returning what it recorded, for a realizer
+/// that keeps the exceptions with the object it builds.
+pub fn record_git_dependency_kept(
+    subject: &str,
+    source: &GitSource,
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    let mut recorded = vec![crate::kernel::policy::Exception {
+        kind: crate::kernel::policy::GIT_DEPENDENCY.into(),
+        subject: subject.into(),
+        detail: format!("{} at {}", source.url, source.commit),
+    }];
+    recorded.extend(transport_exception(source));
+    for exception in &recorded {
+        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
+    Ok(recorded)
 }
 
 pub fn is_full_commit(value: &str) -> bool {

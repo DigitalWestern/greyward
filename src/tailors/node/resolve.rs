@@ -10,6 +10,7 @@
 
 use super::door::{self, NodeRun, NodeTool};
 use super::edit::NodeLock;
+use super::workspace_glob;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::Publish;
 use crate::kernel::resolve::{record, ResolutionDoor};
@@ -23,9 +24,6 @@ pub(crate) const LOCKS: [&str; 3] = ["package-lock.json", "npm-shrinkwrap.json",
 
 /// The files a Node door's tool reads at the lock root but never writes.
 const INPUTS: [&str; 3] = [".npmrc", "pnpm-workspace.yaml", ".pnpmfile.cjs"];
-
-/// The deepest workspace member an npm `workspaces` glob is expanded to.
-const MAX_DEPTH: usize = 24;
 
 /// `Tailor::resolution_outputs` for Node: the lock root's `package.json`
 /// and every lock a door writes there, and the `package.json` of every
@@ -139,10 +137,9 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
         let package: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
             io::Error::new(io::ErrorKind::InvalidData, format!("package.json: {error}"))
         })?;
-        for pattern in npm_workspace_patterns(&package)? {
-            for dir in expand_workspace_glob(root, &pattern)? {
-                add(&dir, "package.json")?;
-            }
+        let entries = npm_workspace_entries(&package)?;
+        for dir in workspace_glob::every_named_directory(root, &entries)? {
+            add(&dir, "package.json")?;
         }
     }
     match super::lock_import::pnpm_workspace_members(root)? {
@@ -174,15 +171,14 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
         let lock: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
             io::Error::new(io::ErrorKind::InvalidData, format!("{lock_name}: {error}"))
         })?;
-        let listed = lock["packages"][""]["workspaces"]
+        let listed: Vec<String> = lock["packages"][""]["workspaces"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|entry| entry.as_str());
-        for entry in listed {
-            for dir in expand_workspace_glob(root, entry)? {
-                add(&dir, lock_name)?;
-            }
+            .filter_map(|entry| entry.as_str().map(str::to_string))
+            .collect();
+        for dir in workspace_glob::every_named_directory(root, &listed)? {
+            add(&dir, lock_name)?;
         }
         break;
     }
@@ -195,16 +191,6 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
 /// is realized rather than when the closure is written.
 pub(crate) fn check_members_readable(root: &ProjectRoot) -> io::Result<()> {
     workspace_members(root).map(drop)
-}
-
-/// The `workspaces` patterns of a `package.json`: a list, or the object
-/// form's `packages` list. A `!` pattern narrows npm's set; it is left out
-/// so the record covers what it would exclude too.
-fn npm_workspace_patterns(package: &serde_json::Value) -> io::Result<Vec<String>> {
-    Ok(npm_workspace_entries(package)?
-        .into_iter()
-        .filter(|entry| !entry.starts_with('!'))
-        .collect())
 }
 
 /// Whether npm, run in `root_dir.join(member)`, would take `root_dir` as
@@ -227,46 +213,8 @@ pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
     if entries.is_empty() || !root_dir.join(member).join("package.json").is_file() {
         return false;
     }
-    entries_name(&entries, &member.to_string_lossy().replace('\\', "/"))
-}
-
-/// Whether the `workspaces` entries `entries` (in order, `!` patterns
-/// included) name the directory `relative`: the last entry that matches it
-/// decides, a positive one naming it and a `!` one taking it out again, as
-/// `@npmcli/map-workspaces` applies them.
-fn entries_name(entries: &[String], relative: &str) -> bool {
-    let relative = relative.trim_end_matches('/');
-    let options = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: true,
-        require_literal_leading_dot: false,
-    };
-    let matches = |pattern: &str| {
-        let trimmed = pattern.trim_start_matches("./").trim_end_matches('/');
-        if trimmed == relative {
-            return true;
-        }
-        trimmed.contains(['*', '?', '['])
-            && glob::Pattern::new(trimmed)
-                .map(|compiled| compiled.matches_with(relative, options))
-                .unwrap_or(false)
-    };
-    let mut named = false;
-    for entry in entries {
-        match entry.strip_prefix('!') {
-            Some(excluded) => {
-                if matches(excluded) {
-                    named = false;
-                }
-            }
-            None => {
-                if matches(entry) {
-                    named = true;
-                }
-            }
-        }
-    }
-    named
+    let relative = member.to_string_lossy().replace('\\', "/");
+    workspace_glob::NpmWorkspaces::new(&entries).is_ok_and(|workspaces| workspaces.names(&relative))
 }
 
 /// npm's own workspace member set for the project at `root`: every
@@ -286,28 +234,27 @@ pub(crate) fn npm_manifest_members(root: &ProjectRoot) -> io::Result<Vec<String>
         io::Error::new(io::ErrorKind::InvalidData, format!("package.json: {error}"))
     })?;
     let entries = npm_workspace_entries(&package)?;
+    let workspaces = workspace_glob::NpmWorkspaces::new(&entries)?;
     let mut members: Vec<String> = Vec::new();
-    for pattern in entries.iter().filter(|entry| !entry.starts_with('!')) {
-        for dir in expand_workspace_glob(root, pattern)? {
-            if dir.is_empty() || dir == "." || members.contains(&dir) {
-                continue;
-            }
-            let path = PathBuf::from(&dir);
-            let plain = path
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)));
-            if !plain {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "package.json names the workspace member {pattern:?}, which is not a \
-                         plain path inside the project"
-                    ),
-                ));
-            }
-            if root.is_input_file(&path.join("package.json")) && entries_name(&entries, &dir) {
-                members.push(dir);
-            }
+    for dir in workspaces.directories(root)? {
+        if dir.is_empty() || dir == "." || members.contains(&dir) {
+            continue;
+        }
+        let path = PathBuf::from(&dir);
+        let plain = path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+        if !plain {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "package.json names the workspace member {dir:?}, which is not a plain \
+                     path inside the project"
+                ),
+            ));
+        }
+        if root.is_input_file(&path.join("package.json")) {
+            members.push(dir);
         }
     }
     members.sort();
@@ -342,60 +289,6 @@ fn npm_workspace_entries(package: &serde_json::Value) -> io::Result<Vec<String>>
         .filter_map(|entry| entry.as_str())
         .map(str::to_string)
         .collect())
-}
-
-/// The directories under the project that `pattern` (an npm `workspaces`
-/// entry: a path, or a glob with `*`, `?`, `[..]`, and `**`) names, and its
-/// literal path, each relative to the root. The walk follows no symlink
-/// and skips `node_modules`.
-fn expand_workspace_glob(root: &ProjectRoot, pattern: &str) -> io::Result<Vec<String>> {
-    let trimmed = pattern.trim_start_matches("./").trim_end_matches('/');
-    let mut found = vec![trimmed.to_string()];
-    if !trimmed.contains(['*', '?', '[']) {
-        return Ok(found);
-    }
-    let compiled = glob::Pattern::new(trimmed).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("package.json: the workspaces pattern {pattern:?} is not a glob: {error}"),
-        )
-    })?;
-    let options = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: true,
-        require_literal_leading_dot: false,
-    };
-    let mut stack: Vec<(PathBuf, usize)> = vec![(PathBuf::new(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
-        let Some(entries) = root.read_input_dir(if dir.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            &dir
-        })?
-        else {
-            continue;
-        };
-        for name in entries {
-            if name == "node_modules" {
-                continue;
-            }
-            let path = dir.join(&name);
-            if !matches!(
-                root.entry(&path),
-                Ok(crate::kernel::fsroot::Entry::Directory)
-            ) {
-                continue;
-            }
-            let relative = path.to_string_lossy().into_owned();
-            if compiled.matches_with(&relative, options) {
-                found.push(relative);
-            }
-            if depth + 1 < MAX_DEPTH {
-                stack.push((path, depth + 1));
-            }
-        }
-    }
-    Ok(found)
 }
 
 /// The closure's `resolution_basis`: every resolution file of the lock

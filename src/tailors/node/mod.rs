@@ -38,6 +38,7 @@ mod project;
 mod realize;
 mod script_view;
 mod unpack;
+mod workspace_glob;
 
 use bins::*;
 use classify::*;

@@ -900,6 +900,7 @@ build-backend = "hatchling.build"
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
             packages: vec![crate::kernel::types::LockedPackage {
+                index: None,
                 name: "NumPy".into(),
                 version: "1.26.4".into(),
                 filename: "numpy.whl".into(),

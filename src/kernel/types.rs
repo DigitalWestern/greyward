@@ -74,6 +74,12 @@ pub struct LockedPackage {
     /// written before this field stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitSource>,
+    /// The package index the lock names for this package, when it is not
+    /// the public PyPI: the SBOM's `repository_url` (#688). Absent for the
+    /// default index, so plans written before this field stay readable and
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

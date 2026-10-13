@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 
 use crate::kernel::archive::{ZipMember, ZipReader};
 
+/// The most bytes one wheel may unpack to, counted in the bytes its
+/// members really inflate to. Real CUDA and torch wheels pass 1 GiB.
+const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Install one wheel into an environment being assembled (PEP 427,
 /// pragmatic subset). Routes `{name}.data/{purelib,platlib,headers,scripts,data}`,
 /// rewrites `#!python` shebangs, generates console/gui-script launchers,
@@ -24,7 +28,6 @@ pub fn install_wheel(
     // The kernel reader refuses what the tar path refuses (#675): unsafe or
     // repeated names, symlinks and special files, and members that inflate
     // past the size they declare, counted against this aggregate cap.
-    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
     let mut archive = ZipReader::open(wheel_path, MAX_UNPACKED_BYTES)?;
 
     let distribution_id = scan_dist_info(archive.members(), wheel_path)?;
@@ -105,6 +108,45 @@ pub fn install_wheel(
     }
 
     Ok(())
+}
+
+/// Refuse a wheel whose `.dist-info` names another distribution or another
+/// version than the lock entry it is installed for (`version` `None`: the
+/// name alone, for a git dependency). Read from the listing only, before
+/// anything is written (#688).
+pub fn check_wheel_package(
+    wheel_path: &Path,
+    package: &crate::kernel::types::LockedPackage,
+) -> io::Result<()> {
+    let version = crate::tailors::python::pypi::locked_version(package);
+    check_wheel_distribution(wheel_path, &package.name, version)
+}
+
+/// The name-and-version check behind [`check_wheel_package`]; `version`
+/// `None` checks the name alone.
+fn check_wheel_distribution(
+    wheel_path: &Path,
+    name: &str,
+    version: Option<&str>,
+) -> io::Result<()> {
+    let archive = ZipReader::open(wheel_path, MAX_UNPACKED_BYTES)?;
+    let distribution_id = scan_dist_info(archive.members(), wheel_path)?;
+    let stem = distribution_id
+        .strip_suffix(".dist-info")
+        .unwrap_or(&distribution_id);
+    let (found_name, found_version) = stem.rsplit_once('-').ok_or_else(|| {
+        invalid_data(format!(
+            "{}: {distribution_id} is not named <name>-<version>.dist-info",
+            wheel_path.display()
+        ))
+    })?;
+    crate::tailors::python::pypi::check_distribution(
+        &format!("the wheel's {distribution_id}"),
+        found_name,
+        found_version,
+        name,
+        version,
+    )
 }
 
 /// Reject names the wheel layout cannot place and return the single
@@ -648,6 +690,42 @@ mod tests {
             writer.write_all(contents).unwrap();
         }
         writer.finish().unwrap();
+    }
+
+    /// #688: the `.dist-info` a wheel installs names the distribution and
+    /// release the environment records, so it must be the lock entry's.
+    #[test]
+    fn a_wheel_whose_dist_info_names_another_package_is_refused() {
+        let temp = TempDir::new();
+        let wheel = temp.0.join("requests-2.32.3-py3-none-any.whl");
+        let dist_info = |id: &str| {
+            write_wheel(
+                &wheel,
+                &[("pkg/__init__.py", b""), (&format!("{id}/RECORD"), b"")],
+            );
+        };
+        dist_info("requests-2.32.3.dist-info");
+        check_wheel_distribution(&wheel, "Requests", Some("2.32.3")).unwrap();
+        dist_info("Zope_Interface-6.0.dist-info");
+        check_wheel_distribution(&wheel, "zope.interface", Some("6.0.0")).unwrap();
+
+        dist_info("evil-9.9.dist-info");
+        let error = check_wheel_distribution(&wheel, "requests", Some("2.32.3"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("evil-9.9.dist-info is evil 9.9, but the lock names requests 2.32.3"),
+            "{error}"
+        );
+        dist_info("requests-2.0.0.dist-info");
+        let error = check_wheel_distribution(&wheel, "requests", Some("2.32.3"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is requests 2.0.0"), "{error}");
+        // A git package is locked by commit: its name alone is checked.
+        check_wheel_distribution(&wheel, "requests", None).unwrap();
+        dist_info("evil-1.0.dist-info");
+        assert!(check_wheel_distribution(&wheel, "requests", None).is_err());
     }
 
     #[test]

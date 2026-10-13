@@ -374,7 +374,7 @@ pub struct ObjectKind {
 static KERNEL_KINDS: &[ObjectKind] = &[
     ObjectKind {
         kind: "git-source",
-        schema: Some("git-source/2"),
+        schema: Some("git-source/3"),
         live_required: &["schema", "url", "commit"],
         live_optional: &[],
         live_contract: None,
@@ -585,7 +585,7 @@ mod tests {
             "example",
             "abc123",
             &[
-                ("schema", "git-source/2"),
+                ("schema", "git-source/3"),
                 ("url", "https://example.invalid/repo.git"),
                 ("commit", &sha1('c')),
             ],
@@ -610,7 +610,7 @@ mod tests {
             "example",
             "abc123",
             &[
-                ("schema", "git-source/2"),
+                ("schema", "git-source/3"),
                 ("url", "https://example.invalid/repo.git"),
                 ("commit", &sha1('c')),
             ],
@@ -619,7 +619,7 @@ mod tests {
         let reason = check_identity_grammar(&schema_removed).unwrap_err();
         assert!(reason.contains("git-source"), "{reason}");
         assert!(reason.contains("None"), "{reason}");
-        assert!(reason.contains("git-source/2"), "{reason}");
+        assert!(reason.contains("git-source/3"), "{reason}");
 
         let schemaless_with_schema = ident(
             "cpython",

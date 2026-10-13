@@ -890,7 +890,11 @@ dependency fetched over `ssh://` (or `git@host:repo`), which offers this
 machine's ssh agent keys under its ssh configuration, or read from a
 `file://` path on this machine. It is recorded before the fetch, so a
 policy that denies it stops the sync before the host or path is reached.
-An `https://` or `git://` source does not record it.
+An `https://` or `git://` source does not record it. Submodules are
+checked the same way, one level at a time: each submodule URL, as git
+resolves it, records the kind before that level is fetched, at any depth
+and under any source, and the exceptions stay with the stored checkout,
+so a later sync that reuses it is judged by them too.
 
 `unpinned-digest` is recorded, per gem, when a `Gemfile.lock` has no
 `CHECKSUMS` entry for it: the gem's bytes are then verified against the

@@ -480,26 +480,36 @@ Selection covers every patch of each maintained CPython minor that python-build-
   host Unix socket: no socket scan can cover `/`, so the trust is in the tool, which is the
   store's hash-checked npm reading the project's patterns as data and running none of the
   project's code. The project itself is bound from the directory Greyward holds; a project
-  whose path was pointed elsewhere after Greyward opened it is refused. npm runs again for
-  every question, and if its answer changes while one command runs (a member added during
-  a sync), the command refuses rather than publish a record for the old set.
+  whose path was pointed elsewhere after Greyward opened it is refused. Nothing npm prints
+  reaches the terminal or a CI log: its output goes nowhere, and when it fails Greyward
+  shows only npm's error code (`EJSONPARSE`, `ENOENT`), never npm's message, since a
+  member's `package.json` can be a symlink to any host file and npm's parse error quotes
+  the file it read. A member whose `package.json` leads outside the member's own directory
+  is refused. npm runs again for every question, and if its answer changes while one
+  command runs (a member added, removed or renamed during a sync, or listed in another
+  order), the command refuses rather than publish a record for the old set.
 - **A workspace member reached through a symlink out of the project is left out.** npm takes
   a directory its `workspaces` patterns find through a symlink, wherever the symlink leads.
   Greyward takes, of the members npm returns, the ones whose target is inside the project,
   and leaves out one that leads outside, recording it as a `requirement-skipped` exception,
   since a resolution record names files inside the project only. A symlink out of the
   project that no pattern matches is not recorded.
-- **Workspace links are checked when they are planted, not afterwards.** A `node_modules`
-  link to a workspace package is planted to the target's symlink-free path, resolved through
-  the held project descriptor. Once planted, the target is opened again from that
-  descriptor with `openat2` (`RESOLVE_BENEATH`, so a symlink on the way that leads out of
-  the project fails the open), the link is opened through itself, and both must be the same
-  directory: a directory on the way that a concurrent writer swapped for a symlink out of
-  the project, before the check or during it, is caught, and the link is removed and the
-  sync refused. A link whose target no longer exists once planted is removed and refused the
-  same way. On a Linux kernel older than 5.6 (no `openat2`) and on macOS, the link is judged
-  by opening it through itself alone, which a swap during the check can pass. Edits the project's owner makes to their own tree
-  after the sync (replacing a member directory with a symlink elsewhere) are outside
+- **Workspace links are checked when they are planted and right before publication, not
+  afterwards.** A `node_modules` link to a workspace package is planted to the target's
+  symlink-free path, resolved through the held project descriptor. Once planted, the target
+  is opened again from that descriptor with `openat2` (`RESOLVE_BENEATH`, so a symlink on
+  the way that leads out of the project fails the open), the link is opened through itself,
+  both must be the same directory, and that directory must then still be inside the held
+  project. So a directory on the way that a concurrent writer swapped for a symlink out of
+  the project, or moved out of the project and replaced with a symlink to its new place,
+  is caught, and the link is removed and the sync refused. The same check runs again right
+  before the closure is published, and the link must still reach the very directory it
+  reached when planted. The link itself cannot be opened from the project descriptor in one
+  step: it lives in the store, outside the project, and reaches the target by the project's
+  path. A link whose target no longer exists is removed and refused the same way. On a Linux
+  kernel older than 5.6 (no `openat2`) and on macOS, the first open is skipped and the
+  directory the link reaches is judged alone. Edits the project's owner makes to their own
+  tree after the sync (replacing a member directory with a symlink elsewhere) are outside
   Greyward's guarantee: the link points at the project's own source, which its owner
   controls, and the next sync checks it again.
 - **A workspace member whose `node_modules` holds files git tracks is not projected.** Some

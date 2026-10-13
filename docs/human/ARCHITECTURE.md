@@ -1007,7 +1007,13 @@ and refuses a mismatch. An environment built before that check could hold a
 tarball the lock mislabeled, and the closure rows and the SBOM would name the
 wrong package. The schema string alone moves, so every such environment is
 rebuilt once, under the check. The goldens check that spelling the schema
-`/5` gives back the `/5` ids byte for byte.
+`/5` gives back the `/5` ids byte for byte. A `/6` environment also records,
+in `.greyward/archives.json` at its root, which integrity candidate each
+registry package's tarball matched when it was fetched and verified. The
+closure rows and the SBOM name that digest. The environment's cache set
+cannot say it, since it also holds the declared artifacts lifecycle scripts
+were given, and one of those can be another candidate of a package's
+integrity.
 
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes

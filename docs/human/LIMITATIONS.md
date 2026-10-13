@@ -360,9 +360,22 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   macOS by the cross-check, as before, rather than extracted as the wrong tree (#307 stays
   open until a macOS run shows whether `--no-mac-metadata` on `-t` lifts it). Single
   manifests read out of an sdist come from the same validated in-process stream, never a
-  second tar child. The Elixir release zip and Hex's own `.ez` archive are
-  unpacked by `/usr/bin/unzip`, inheriting the user's `UNZIP`/`UNZIPOPT`. Wheels, zip sdists
-  and the outer zip of a `.conda` package are read in process with the `zip` crate.
+  second tar child. Zip archives (wheels, zip sdists, the Elixir release zip, Hex's own
+  `.ez` archive and the outer zip of a `.conda` package) are read in process by one kernel
+  reader under the tarball's name rules: no unsafe, invisible or twice-written name, no
+  symlink or special file, no encrypted entry, and no ZIP64 or Unicode-name extra field
+  that two zip readers would read differently. An sdist is built by pip from the tree ward
+  unpacked, never from the archive. Each member must inflate to exactly the size
+  it declares, and the declared sizes count against a budget (4 GiB for a wheel, 1 GiB for
+  the rest) before anything is written. Modes follow pip: a file with any execute bit is
+  0755, every other file 0644, and directory modes are ignored.
+- When a store path holds a space, tab or newline, or puts an environment's interpreter
+  past Linux's 256-byte `#!` limit, a wheel's own `#!python` script is installed unchanged
+  under its own name in a private `bin/.ward-scripts/` directory, and `bin/<name>` is a
+  `/bin/sh` wrapper that runs the interpreter on it. Its name in `sys.argv[0]` and
+  `__file__` is the shipped one, but `__file__`'s directory is the private one, so such a
+  script does not see data files placed beside it in `bin/`. Under an ordinary store path
+  the script is installed in `bin/` with its `#!` line rewritten, as pip does.
 
 ## Python
 

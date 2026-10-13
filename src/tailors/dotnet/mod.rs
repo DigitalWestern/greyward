@@ -1056,7 +1056,7 @@ pub fn realize_packages(
     // the user's project and global.json are never evaluated in realization.
     let staged = store.stage_with_activity(activity)?;
     let verifier = scratch.join("verifier");
-    fs::create_dir_all(&verifier)?;
+    fs::create_dir_all(verifier.join("obj"))?;
     prepare_scratch(&scratch)?;
     let tfm = target_framework(
         plan.targets
@@ -1296,7 +1296,7 @@ fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Ve
 
 /// The locked-mode package verification: `dotnet restore` of the synthetic
 /// verifier project against the local feed. It writes only the staged
-/// package tree and the selected CoreCLR tmp root.
+/// package tree, the verifier's `obj/` and the CoreCLR tmp root (#680).
 fn verify_spec(
     sdk_obj: &Path,
     feed: &Path,
@@ -1324,7 +1324,7 @@ fn verify_spec(
             feed.to_path_buf(),
             verifier.to_path_buf(),
         ],
-        write: add_dotnet_tmp_write_root(vec![staged.to_path_buf()], dotnet_tmp),
+        write: add_dotnet_tmp_write_root(vec![staged.into(), verifier.join("obj")], dotnet_tmp),
         scratch: scratch.to_path_buf(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
         host_view: crate::kernel::sandbox::HostView::Full,
@@ -2078,7 +2078,10 @@ mod tests {
         );
         let restore = phase.spec(false, Vec::new(), Vec::new(), dotnet_tmp.clone());
         let build = phase.spec(true, Vec::new(), Vec::new(), dotnet_tmp.clone());
-        assert_eq!(verify.write, [staged.clone(), dotnet_tmp.clone()]);
+        assert_eq!(
+            verify.write,
+            [staged.clone(), verifier.join("obj"), dotnet_tmp.clone()]
+        );
         assert_eq!(restore.write, [objdir.clone(), dotnet_tmp.clone()]);
         assert_eq!(
             build.write,

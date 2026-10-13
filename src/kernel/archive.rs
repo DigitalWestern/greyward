@@ -44,9 +44,13 @@ use std::process::Command;
 use crate::kernel::activity::StoreActivity;
 
 mod validate;
+mod zipfile;
 #[cfg(test)]
 pub use validate::validate;
 pub use validate::validate_with_options;
+#[cfg(test)]
+pub(crate) use zipfile::testing as zip_testing;
+pub use zipfile::{extract_zip, ZipMember, ZipReader};
 
 /// One archive member as the header reader read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,17 +151,28 @@ const TAR_LIST_FLAGS: [&str; 1] = ["--numeric-owner"];
 /// bytes, the executable bit) by telling tar not to restore extended
 /// attributes, ACLs, BSD file flags or macOS AppleDouble metadata from the
 /// archive. GNU tar restores none of these unless asked; bsdtar restores
-/// all of them by default when it runs as root.
+/// all of them by default when it runs as root. Both tars, as root, also
+/// keep the archive's owners and its setuid and setgid bits by default:
+/// `--no-same-owner` and `--no-same-permissions` extract as the running
+/// user under its umask, as they do for anyone else (#674).
 #[cfg(target_os = "macos")]
-const TAR_EXTRACT_FLAGS: [&str; 5] = [
+const TAR_EXTRACT_FLAGS: [&str; 7] = [
     "--numeric-owner",
+    "--no-same-owner",
+    "--no-same-permissions",
     "--no-xattrs",
     "--no-acls",
     "--no-fflags",
     "--no-mac-metadata",
 ];
 #[cfg(not(target_os = "macos"))]
-const TAR_EXTRACT_FLAGS: [&str; 3] = ["--numeric-owner", "--no-xattrs", "--no-acls"];
+const TAR_EXTRACT_FLAGS: [&str; 5] = [
+    "--numeric-owner",
+    "--no-same-owner",
+    "--no-same-permissions",
+    "--no-xattrs",
+    "--no-acls",
+];
 
 /// List `archive` by reading its tar headers, cross-checked against the
 /// platform tar's own listing.
@@ -303,16 +318,18 @@ fn read_archive(archive: &Path, compression: Compression) -> io::Result<Vec<Entr
     let file = io::BufReader::new(File::open(archive)?);
     match compression {
         Compression::None => read_entries(file, None),
-        // Multi-member, matching what `tar -z` accepts.
+        // Multi-member or multi-stream, matching what `tar -z`, `-j` and
+        // `-J` accept (pigz, pbzip2 and parallel xz write several).
         Compression::Gzip => read_entries(
             io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
             None,
         ),
-        Compression::Bzip2 => {
-            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), None)
-        }
+        Compression::Bzip2 => read_entries(
+            io::BufReader::new(bzip2::read::MultiBzDecoder::new(file)),
+            None,
+        ),
         Compression::Xz => read_entries(
-            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            io::BufReader::new(liblzma::read::XzDecoder::new_multi_decoder(file)),
             None,
         ),
     }
@@ -1179,11 +1196,12 @@ fn capture(
             io::BufReader::new(flate2::read::MultiGzDecoder::new(file)),
             want,
         ),
-        Compression::Bzip2 => {
-            read_entries(io::BufReader::new(bzip2::read::BzDecoder::new(file)), want)
-        }
+        Compression::Bzip2 => read_entries(
+            io::BufReader::new(bzip2::read::MultiBzDecoder::new(file)),
+            want,
+        ),
         Compression::Xz => read_entries(
-            io::BufReader::new(liblzma::read::XzDecoder::new(file)),
+            io::BufReader::new(liblzma::read::XzDecoder::new_multi_decoder(file)),
             want,
         ),
     }
@@ -1659,7 +1677,13 @@ mod tests {
             &ExtractOptions::stripped(1),
             Compression::Gzip,
         ));
-        for flag in ["--numeric-owner", "--no-xattrs", "--no-acls"] {
+        for flag in [
+            "--numeric-owner",
+            "--no-same-owner",
+            "--no-same-permissions",
+            "--no-xattrs",
+            "--no-acls",
+        ] {
             assert!(
                 extract_args.contains(&flag.to_string()),
                 "{flag} missing: {extract_args:?}"
@@ -1744,6 +1768,100 @@ mod tests {
     }
 
     // ---- the header reader -------------------------------------------------
+
+    /// Set a member's mode and numeric owner, which come out of the archive.
+    fn with_mode_and_uid(mut header: Vec<u8>, mode: u32, uid: u32) -> Vec<u8> {
+        header[100..108].copy_from_slice(format!("{mode:07o}\0").as_bytes());
+        header[108..116].copy_from_slice(format!("{uid:07o}\0").as_bytes());
+        reseal(header)
+    }
+
+    const ROOT_CHILD: &str = "GREYWARD_TEST_ARCHIVE_ROOT_CHILD";
+
+    /// As root, tar keeps an archive's setuid bits and numeric owners
+    /// unless told not to, and a setuid file or a file owned by a stranger
+    /// would reach the store (#674). The root run is this test again under
+    /// `unshare -r`, where GNU tar sees uid 0; it reports through its exit
+    /// status.
+    #[test]
+    fn extraction_as_root_keeps_no_setuid_bit_or_archive_owner() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        const NAME: &str =
+            "kernel::archive::tests::extraction_as_root_keeps_no_setuid_bit_or_archive_owner";
+        if std::env::var_os(ROOT_CHILD).is_some() {
+            // SAFETY: geteuid has no preconditions.
+            assert_eq!(unsafe { libc::geteuid() }, 0, "the child is not root");
+            let scratch = temp_dir("root-extract");
+            let archive = scratch.0.join("a.tar");
+            write_tar(
+                &archive,
+                &[
+                    with_mode_and_uid(ustar("pkg/", b'5', "", b""), 0o2755, 0),
+                    with_mode_and_uid(ustar("pkg/tool", b'0', "", b"tool\n"), 0o6777, 0),
+                    with_mode_and_uid(ustar("pkg/other", b'0', "", b"other\n"), 0o644, 4242),
+                ],
+            );
+            let out = scratch.0.join("out");
+            fs::create_dir(&out).unwrap();
+            extract(&archive, &out, 1, Compression::None).unwrap();
+            for name in ["tool", "other"] {
+                let metadata = fs::metadata(out.join(name)).unwrap();
+                assert_eq!(metadata.mode() & 0o7000, 0, "{name} kept a setuid bit");
+                assert_eq!(metadata.uid(), 0, "{name} kept the archive's owner");
+            }
+            assert_ne!(fs::metadata(out.join("tool")).unwrap().mode() & 0o111, 0);
+            crate::kernel::store::make_read_only_for_test(&out).unwrap();
+            let mode = fs::metadata(out.join("tool")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o7222, 0, "{mode:o}");
+            return;
+        }
+        let probe = Command::new("unshare").args(["-r", "/bin/true"]).status();
+        if !probe.is_ok_and(|status| status.success()) {
+            assert!(
+                std::env::var_os("GREYWARD_SANDBOX_TESTS").is_none_or(|value| value.is_empty()),
+                "required test {NAME} cannot run: unshare -r is unavailable"
+            );
+            eprintln!("skip {NAME}: unshare -r is unavailable");
+            return;
+        }
+        let output = Command::new("unshare")
+            .arg("-r")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(ROOT_CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        // The child ran the test rather than filtering it out.
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    /// Commit clears the setuid, setgid and sticky bits whichever
+    /// extractor set them (#674).
+    #[test]
+    fn commit_clears_setuid_setgid_and_sticky_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = temp_dir("commit-setid");
+        let tree = scratch.0.join("tree");
+        let sub = tree.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let tool = sub.join("tool");
+        fs::write(&tool, b"tool\n").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o6755)).unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o3755)).unwrap();
+        crate::kernel::store::make_read_only_for_test(&tree).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&tool), 0o555);
+        assert_eq!(mode(&sub), 0o555);
+        // The scratch tree must stay removable.
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&tree, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     /// Owner and group names are archive content, so an attacker chooses
     /// them. The previous listing parser skipped a fixed number of
@@ -2572,6 +2690,49 @@ mod tests {
         let compressed = temp.0.join("pkg.tar.xz");
         fs::write(&compressed, encoder.finish().unwrap()).unwrap();
         assert_eq!(list(&compressed, Compression::Xz).unwrap(), expected);
+
+        // Two concatenated xz streams, as parallel xz writes them (#708).
+        let split = 512 * 2;
+        let mut concatenated = Vec::new();
+        for half in [&bytes[..split], &bytes[split..]] {
+            let mut encoder = liblzma::write::XzEncoder::new(Vec::new(), 6);
+            encoder.write_all(half).unwrap();
+            concatenated.extend(encoder.finish().unwrap());
+        }
+        let multi = temp.0.join("multi.tar.xz");
+        fs::write(&multi, &concatenated).unwrap();
+        assert_eq!(list(&multi, Compression::Xz).unwrap(), expected);
+        let out = temp.0.join("multi-xz");
+        fs::create_dir(&out).unwrap();
+        extract(&multi, &out, 1, Compression::Xz).unwrap();
+        assert!(out.join("bin/tool").is_file());
+    }
+
+    /// pbzip2 writes one bzip2 stream per block, which `tar -j` reads
+    /// whole and a single-stream decoder would stop after the first (#708).
+    #[test]
+    fn a_multi_stream_bzip2_lists_identically_to_the_plain_tar() {
+        let temp = temp_dir("bzip2-inproc");
+        let bytes = joined(&sample_members());
+        let plain = temp.0.join("pkg.tar");
+        fs::write(&plain, &bytes).unwrap();
+        let expected = list(&plain, Compression::None).unwrap();
+
+        let split = 512 * 2;
+        let mut concatenated = Vec::new();
+        for half in [&bytes[..split], &bytes[split..]] {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            encoder.write_all(half).unwrap();
+            concatenated.extend(encoder.finish().unwrap());
+        }
+        let multi = temp.0.join("multi.tar.bz2");
+        fs::write(&multi, &concatenated).unwrap();
+        assert_eq!(list(&multi, Compression::Bzip2).unwrap(), expected);
+        let out = temp.0.join("multi-bz2");
+        fs::create_dir(&out).unwrap();
+        extract(&multi, &out, 1, Compression::Bzip2).unwrap();
+        assert!(out.join("bin/tool").is_file());
     }
 
     // ---- end to end with the real tar ------------------------------------

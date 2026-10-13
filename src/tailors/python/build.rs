@@ -18,6 +18,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod source;
+use source::{pip_wheel_argv, SdistSource};
+
 pub(crate) const BUILD_TOOLCHAIN: &[(&str, &str, &str, &str, &str)] = &[
     (
         "pip",
@@ -197,15 +200,15 @@ fn wrap_sandbox_build_error_with_tail(
             "\nbuild stderr was relayed by the sandbox API and was not available for inclusion"
                 .into()
         });
-    io::Error::new(
-        error.kind(),
-        format!(
-            "sandboxed build of {}=={} failed: {error}\n\
-             (network is denied during builds; setup_requires in legacy setup.py \
-             is not handled){diagnostics}",
-            pkg.name, pkg.version
-        ),
-    )
+    let message = format!(
+        "sandboxed build of {}=={} failed: {error}\n\
+         (network is denied during builds; setup_requires in legacy setup.py \
+         is not handled){diagnostics}",
+        pkg.name, pkg.version
+    );
+    // The original stays inside, so a sandbox that could not be set up is
+    // still one to the fallback (#679).
+    crate::kernel::error::describe(error, message)
 }
 
 fn build_toolchain_plan(python_version: &str) -> Plan {
@@ -215,6 +218,7 @@ fn build_toolchain_plan(python_version: &str) -> Plan {
         packages: BUILD_TOOLCHAIN
             .iter()
             .map(|(name, version, filename, url, sha)| LockedPackage {
+                index: None,
                 name: (*name).into(),
                 version: (*version).into(),
                 filename: (*filename).into(),
@@ -361,6 +365,7 @@ pub(crate) fn local_native_sdist_for_test(store: &Store, name: &str) -> LockedPa
     fs::write(&archive, &bytes).expect("write local native sdist");
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     LockedPackage {
+        index: None,
         name: name.into(),
         version: "1.0".into(),
         filename: format!("{name}-1.0.tar.gz"),
@@ -396,6 +401,7 @@ pub(crate) fn local_rust_sdist_for_test(store: &Store, name: &str) -> LockedPack
     fs::write(&archive, &bytes).expect("write local Rust sdist");
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     LockedPackage {
+        index: None,
         name: name.into(),
         version: "1.0".into(),
         filename: format!("{name}-1.0.tar.gz"),
@@ -824,9 +830,9 @@ fn prepare_rust(
 }
 
 /// For a Rust sdist, the source unpacked under `work` and the Rust inputs
-/// planned from it; `(None, None)` for any other. The archive's lease is
-/// released once it is unpacked: toolchain realization can fetch more
-/// cache entries.
+/// planned from it; any other stays the held archive, unpacked once the
+/// wheel cache has missed. The archive's lease is released once it is
+/// unpacked: toolchain realization can fetch more cache entries.
 fn unpack_rust_source(
     door: &mut ResolutionDoor<'_>,
     sdist: crate::kernel::fetch::CacheLease,
@@ -835,9 +841,9 @@ fn unpack_rust_source(
     rust: Option<&Selected>,
     info: &ArchiveInfo,
     work: &Path,
-) -> io::Result<(Option<PathBuf>, Option<RustPlanInputs>)> {
+) -> io::Result<(SdistSource, Option<RustPlanInputs>)> {
     if !info.rust_build {
-        return Ok((None, None));
+        return Ok((SdistSource::Held(sdist), None));
     }
     let source =
         build_requires::extract_sdist_for(door.lease(), &sdist, &work.join("source"), info)?;
@@ -850,7 +856,7 @@ fn unpack_rust_source(
         &source,
         info,
     )?;
-    Ok((Some(source), Some(inputs)))
+    Ok((SdistSource::Unpacked(source), Some(inputs)))
 }
 
 /// What a build mounts besides its environment and interpreter: the native
@@ -913,20 +919,7 @@ fn run_sdist_build(
 ) -> io::Result<()> {
     let py = build_env.join("bin/python");
     let log = work.join("pip-build.log");
-    let argv = vec![
-        py.to_string_lossy().into_owned(),
-        "-m".into(),
-        "pip".into(),
-        "--log".into(),
-        log.to_string_lossy().into_owned(),
-        "wheel".into(),
-        "--no-deps".into(),
-        "--no-build-isolation".into(),
-        "--no-index".into(),
-        "-w".into(),
-        outdir.to_string_lossy().into_owned(),
-        input.to_string_lossy().into_owned(),
-    ];
+    let argv = pip_wheel_argv(&py, &log, outdir, input)?;
     let mut envs = sdist_build_env(platform);
     let cores = std::thread::available_parallelism()
         .map(|value| value.get())
@@ -1055,6 +1048,7 @@ pub(crate) fn git_sdist_package(
         &pkg.version,
     )?;
     Ok(LockedPackage {
+        index: None,
         name: pkg.name.clone(),
         version: pkg.version.clone(),
         filename,
@@ -1122,7 +1116,6 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let work = store.stage_with_activity(activity)?;
     let outdir = work.join("out");
     fs::create_dir_all(&outdir)?;
-    let sdist_named = stage_sdist_copy(&sdist, &work, pkg)?;
 
     let (source, rust_inputs) = unpack_rust_source(door, sdist, pkg, selected, rust, &info, &work)?;
     let identity = sdist_build_identity(
@@ -1146,6 +1139,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
             });
         }
     }
+    let source = source.unpacked(activity, &info, &work)?;
 
     let Toolchains {
         native_libs,
@@ -1163,7 +1157,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
     )?;
 
     let cpython_obj = crate::tailors::python::realize_runtime(store, activity, platform, selected)?;
-    let input = source.as_deref().unwrap_or(&sdist_named);
+    let input = source.as_path();
     let build = |host_view: HostView| {
         run_sdist_build(
             activity,
@@ -1190,7 +1184,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
             &info,
             &work,
             &outdir,
-            source.as_deref(),
+            Some(input),
             rust_inputs
                 .as_ref()
                 .and_then(RustPlanInputs::generated_lock_text),
@@ -1227,23 +1221,6 @@ fn admit_sdist_build(platform: Platform, pkg: &LockedPackage, depth: usize) -> i
         ));
     }
     crate::kernel::platform::require_host(platform, "sdist build")
-}
-
-/// Copy the verified archive into the work tree under its locked filename.
-fn stage_sdist_copy(sdist: &Path, work: &Path, pkg: &LockedPackage) -> io::Result<PathBuf> {
-    if pkg.filename.contains('/')
-        || pkg.filename.contains('\\')
-        || pkg.filename.contains("..")
-        || pkg.filename.is_empty()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsafe sdist filename: {:?}", pkg.filename),
-        ));
-    }
-    let sdist_named = work.join(&pkg.filename);
-    fs::copy(sdist, &sdist_named)?;
-    Ok(sdist_named)
 }
 
 /// The identity of the wheel this build will produce. A Rust source adds
@@ -1291,6 +1268,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let pin = crate::tailors::python::lookup(platform, "3.12.14")
         .expect("pinned CPython for test platform");
     let pkg = LockedPackage {
+        index: None,
         name: "example".into(),
         version: "1.0.0".into(),
         filename: "example-1.0.0.tar.gz".into(),
@@ -1423,6 +1401,8 @@ fn single_built_wheel(outdir: &Path, pkg: &LockedPackage) -> io::Result<PathBuf>
             ),
         ));
     }
+    // The build may only produce the package it was asked for (#688).
+    crate::tailors::python::pypi::check_built_wheel(&wheels[0], pkg)?;
     Ok(wheels[0].clone())
 }
 
@@ -1493,6 +1473,117 @@ mod isolation_tests;
 
 #[cfg(test)]
 mod tests {
+    /// Sol's review of #675: pip re-read the original zip sdist with its own
+    /// parser, which can see other sizes and names than ward inspected.
+    /// Every sdist build now hands pip ward's unpacked tree, and the argv
+    /// refuses anything else.
+    #[test]
+    fn pip_builds_a_plain_sdist_from_the_tree_ward_unpacked() {
+        use sha2::Digest as _;
+        use std::io::Write as _;
+        let dir = crate::kernel::testutil::TempDir::named("plain-sdist-tree");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(dir.0.join(sub)).unwrap();
+        }
+        let store = crate::kernel::store::Store::for_test(dir.0.clone());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let archive = dir.0.join("plain-1.0.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        for (name, mode, bytes) in [
+            (
+                "plain-1.0/pyproject.toml",
+                0o644,
+                &b"[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n"[..],
+            ),
+            ("plain-1.0/run.sh", 0o700, b"#!/bin/sh\n"),
+        ] {
+            let options = zip::write::SimpleFileOptions::default().unix_permissions(mode);
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        let sha256 = hex::encode(sha2::Sha256::digest(std::fs::read(&archive).unwrap()));
+        let url = format!("file://{}", archive.display());
+        let lease = super::download_verified_held(&store, &activity, &url, &sha256).unwrap();
+        let info = super::build_requires::inspect_sdist(&lease).unwrap();
+        assert!(!info.rust_build);
+        let work = store.stage_with_activity(&activity).unwrap();
+        let tree = super::SdistSource::Held(lease)
+            .unpacked(&activity, &info, &work)
+            .unwrap();
+        assert!(tree.join("pyproject.toml").is_file(), "{}", tree.display());
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(tree.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
+
+        let (py, log, out) = (work.join("py"), work.join("log"), work.join("out"));
+        let argv = super::pip_wheel_argv(&py, &log, &out, &tree).unwrap();
+        assert_eq!(argv.last().map(String::as_str), tree.to_str());
+        let refused = super::pip_wheel_argv(&py, &log, &out, &archive).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("pip builds from the tree ward unpacked"),
+            "{refused}"
+        );
+    }
+
+    /// #688: a build of `foo==1.0` that leaves another project's wheel, or
+    /// another release's, is refused; a git package is held to its name.
+    #[test]
+    fn a_built_wheel_must_be_the_locked_package() {
+        use crate::kernel::types::{ArtifactKind, LockedPackage};
+        let pkg = |name: &str, version: &str, url: &str| LockedPackage {
+            index: None,
+            name: name.into(),
+            version: version.into(),
+            filename: format!("{name}-{version}.tar.gz"),
+            url: url.into(),
+            sha256: "a".repeat(64),
+            kind: ArtifactKind::Sdist,
+            git: None,
+        };
+        let built = |wheel: &str, locked: &LockedPackage| {
+            let dir = crate::kernel::testutil::TempDir::named("built-wheel-name");
+            std::fs::write(dir.0.join(wheel), b"").unwrap();
+            super::single_built_wheel(&dir.0, locked).map(|_| ())
+        };
+        let foo = pkg(
+            "foo",
+            "1.0",
+            "https://files.pythonhosted.org/foo-1.0.tar.gz",
+        );
+        built("foo-1.0-py3-none-any.whl", &foo).unwrap();
+        built("Foo-1.0.0-py3-none-any.whl", &foo).unwrap();
+        let other = built("bar-9.9-py3-none-any.whl", &foo)
+            .unwrap_err()
+            .to_string();
+        assert!(other.starts_with("foo==1.0: built wheel file"), "{other}");
+        assert!(
+            other.contains("is bar 9.9, but the lock names foo 1.0"),
+            "{other}"
+        );
+        let release = built("foo-2.0-py3-none-any.whl", &foo)
+            .unwrap_err()
+            .to_string();
+        assert!(release.contains("is foo 2.0"), "{release}");
+        let git = pkg(
+            "foo",
+            "0+git.0123456789ab",
+            "git+https://example.com/foo.tar.gz",
+        );
+        built("foo-3.1-py3-none-any.whl", &git).unwrap();
+        let git = built("bar-3.1-py3-none-any.whl", &git)
+            .unwrap_err()
+            .to_string();
+        assert!(git.contains("the lock names foo;"), "{git}");
+    }
+
     /// tokenizers 0.13.3's real error sat above rustc's command line and
     /// pip's traceback, so the 40-line tail showed only warnings. The
     /// excerpt leads with the first compiler error.
@@ -1797,6 +1888,7 @@ mod tests {
     #[test]
     fn darwin_sdist_identity_unchanged() {
         let pkg = LockedPackage {
+            index: None,
             name: "docopt".into(),
             version: "0.6.2".into(),
             filename: "docopt-0.6.2.tar.gz".into(),
@@ -1858,6 +1950,7 @@ mod tests {
     #[test]
     fn isolated_identity_has_schema_four_and_build_env() {
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -1948,11 +2041,21 @@ mod tests {
         )
         .unwrap();
         let key = format!("pkg:{}", pkg.name);
-        assert_eq!(current.inputs[&key], planned.input);
+        assert_eq!(
+            current.inputs[&key],
+            format!("{}|{}|{}", planned.input, pkg.version, pkg.filename)
+        );
         let mut old_parent = current.clone();
-        old_parent
-            .inputs
-            .insert(key, format!("Sdist:{}:{}", pkg.sha256, legacy.object_id()));
+        old_parent.inputs.insert(
+            key,
+            format!(
+                "Sdist:{}:{}|{}|{}",
+                pkg.sha256,
+                legacy.object_id(),
+                pkg.version,
+                pkg.filename
+            ),
+        );
         let digest = crate::tailors::python::env::package_digest_of_inputs(&old_parent.inputs);
         old_parent.inputs.insert("package_digest".into(), digest);
         assert_eq!(
@@ -1972,6 +2075,7 @@ mod tests {
     fn isolated_identity_goldens_and_dropped_pairs() {
         crate::tailors::install_kinds();
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -2051,6 +2155,7 @@ mod tests {
     #[test]
     fn recursion_cap_is_loud() {
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -2089,6 +2194,7 @@ mod tests {
             Platform::Aarch64AppleDarwin
         };
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -2123,6 +2229,7 @@ mod tests {
     #[test]
     fn build_sdist_preserves_unsupported_kind() {
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),

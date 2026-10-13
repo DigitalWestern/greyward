@@ -186,7 +186,7 @@ pub(super) fn yarn_integrity(
         resolved,
         integrity,
         path,
-        &mut crate::kernel::policy::record,
+        &mut crate::kernel::policy::record_plan_time,
     )
 }
 
@@ -464,7 +464,7 @@ pub fn plan_yarn(
     project: &ProjectRoot,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
-    let record = &mut crate::kernel::policy::record;
+    let record = &mut crate::kernel::policy::record_plan_time;
     plan_yarn_recording(platform, lock, package_json, project, node_version, record)
 }
 
@@ -480,7 +480,7 @@ pub(super) fn plan_yarn_with_policy(
     policy: &crate::kernel::policy::Policy,
 ) -> io::Result<NpmPlan> {
     let mut record = |kind: &str, subject: &str, detail: &str| {
-        crate::kernel::policy::record_with(policy, kind, subject, detail)
+        crate::kernel::policy::record_plan_time_with(policy, kind, subject, detail)
     };
     plan_yarn_recording(
         platform,

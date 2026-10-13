@@ -316,6 +316,11 @@ struct Frame {
     owner: std::thread::ThreadId,
     ecosystem: String,
     exceptions: Vec<Exception>,
+    /// The members of `exceptions` recorded only through
+    /// [`record_plan_time`]: facts about the project's lock or resolution
+    /// that a sync records again every time, which no object is built
+    /// from, so [`object_exceptions`] leaves them out whatever their kind.
+    plan_time: Vec<Exception>,
     optional_groups_skipped: Vec<OptionalGroupSkipped>,
     claimed: bool,
     published: bool,
@@ -921,6 +926,27 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
     record_with_fix(policy, kind, subject, detail, None)
 }
 
+/// [`record`] for a fact the planner or the resolution join finds in the
+/// project's lock, not in bytes being built: an optional git dependency
+/// the plan skips is a `git-dependency` exception of the project, while a
+/// git dependency realized into an environment is one of the object. The
+/// policy judges both alike. Only [`object_exceptions`] tells them apart:
+/// it leaves this one out, since every sync records it again from the lock
+/// and an object shared with another project must not carry it there.
+pub fn record_plan_time(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
+    record_plan_time_with(&current(), kind, subject, detail)
+}
+
+/// [`record_plan_time`] under `policy`.
+pub fn record_plan_time_with(
+    policy: &Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+) -> io::Result<()> {
+    record_into(policy, kind, subject, detail, None, true)
+}
+
 /// `record_with`, with the kind's own way out in place of the generic one
 /// when `policy` refuses it: `fix` replaces the text after the last `;` of
 /// `refusal`. A kind whose refusal has a better remedy than "allow the
@@ -933,6 +959,18 @@ pub fn record_with_fix(
     subject: &str,
     detail: &str,
     fix: Option<&str>,
+) -> io::Result<()> {
+    record_into(policy, kind, subject, detail, fix, false)
+}
+
+/// The one recorder. `plan_time`: recorded through [`record_plan_time`].
+fn record_into(
+    policy: &Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+    fix: Option<&str>,
+    plan_time: bool,
 ) -> io::Result<()> {
     with_frames(|frames| {
         let Some(frame) = frames.last_mut() else {
@@ -975,6 +1013,11 @@ pub fn record_with_fix(
         // the first, and it is said once: each exception in a closure is
         // narrated once, when the frame first holds it.
         if frame.exceptions.contains(&exception) {
+            // The same fact recorded while bytes were built is the
+            // object's as well, whichever came first.
+            if !plan_time {
+                frame.plan_time.retain(|marked| marked != &exception);
+            }
             return Ok(());
         }
         // The record itself is progress: what to do about it depends on
@@ -984,6 +1027,9 @@ pub fn record_with_fix(
             "exception {}: {}: {}",
             exception.kind, exception.subject, exception.detail
         ));
+        if plan_time {
+            frame.plan_time.push(exception.clone());
+        }
         frame.exceptions.push(exception);
         Ok(())
     })
@@ -1097,6 +1143,7 @@ impl Attribution {
                 owner,
                 ecosystem: ecosystem.to_string(),
                 exceptions: Vec::new(),
+                plan_time: Vec::new(),
                 optional_groups_skipped: Vec::new(),
                 claimed: false,
                 published: false,
@@ -1159,6 +1206,7 @@ impl Attribution {
                 owner,
                 ecosystem: ecosystem.to_string(),
                 exceptions: Vec::new(),
+                plan_time: Vec::new(),
                 optional_groups_skipped: Vec::new(),
                 claimed: false,
                 published: false,
@@ -1217,6 +1265,7 @@ impl Attribution {
             frame.claimed = true;
             // `record_with_fix` keeps each exact exception once, so the
             // frame already holds what the closure records.
+            frame.plan_time.clear();
             Ok(std::mem::take(&mut frame.exceptions))
         })
     }
@@ -1331,7 +1380,10 @@ pub(crate) fn drain() -> Vec<Exception> {
     with_frames(|frames| {
         frames
             .last_mut()
-            .map(|frame| std::mem::take(&mut frame.exceptions))
+            .map(|frame| {
+                frame.plan_time.clear();
+                std::mem::take(&mut frame.exceptions)
+            })
             .unwrap_or_default()
     })
 }
@@ -1341,13 +1393,15 @@ pub(crate) fn clear() {
     with_frames(|frames| {
         if let Some(frame) = frames.last_mut() {
             frame.exceptions.clear();
+            frame.plan_time.clear();
         }
     });
 }
 
 /// The exceptions the object being built carries in its metadata: every
 /// kind recorded in the current frame except the plan-time kinds the sync
-/// records again each time (`PLAN_TIME_KINDS`). A warm sync skips the
+/// records again each time (`PLAN_TIME_KINDS`), and except what was
+/// recorded through [`record_plan_time`] alone. A warm sync skips the
 /// realization that recorded the rest, so the stored list is all a cache
 /// hit can judge; a kind left out here would pass a policy that refuses the
 /// same object built cold.
@@ -1358,6 +1412,7 @@ pub fn object_exceptions() -> Vec<Exception> {
                 .exceptions
                 .iter()
                 .filter(|e| !PLAN_TIME_KINDS.contains(&canonical_kind(&e.kind)))
+                .filter(|e| !frame.plan_time.contains(e))
                 .cloned()
                 .collect()
         })
@@ -1603,10 +1658,14 @@ deny = ["git-dependency"]"#,
     /// Every kind is either stored with the object it was recorded beside
     /// or listed as plan-time, and the choice is made here, by name: a kind
     /// added to `KINDS` fails this test until it is placed in one list.
-    /// Object kinds are recorded only while bytes are realized, so a warm
-    /// sync that skips the realization learns them from the object alone
+    /// An object kind recorded while bytes are realized is stored, so a warm
+    /// sync that skips the realization learns it from the object alone
     /// (#670: the three artifact kinds were once dropped at commit, and a
-    /// cache hit passed a policy that refused the cold build).
+    /// cache hit passed a policy that refused the cold build). An object
+    /// kind can also be a lock fact (`git-dependency` for an optional git
+    /// dependency the planner skips): that record goes through
+    /// `record_plan_time`, which `a_plan_time_record_is_not_stored_with_the_object`
+    /// covers, and every record below is a realization-time one.
     #[test]
     fn every_kind_is_an_object_kind_or_a_plan_time_kind() {
         const OBJECT_KINDS: &[&str] = &[
@@ -1656,6 +1715,59 @@ deny = ["git-dependency"]"#,
             .filter(|kind| !STORED_BY_META_2.contains(kind))
             .collect();
         assert_eq!(lacking, KINDS_NOT_IN_META_2);
+    }
+
+    /// The same kind is an object fact or a project fact by where it was
+    /// recorded. A git dependency realized into the environment is stored
+    /// with it. An optional one the planner skipped is not: nothing of it
+    /// is in the object, and another project sharing the object must not
+    /// inherit the exception. Both still reach the closure, and the policy
+    /// refuses both. A realization-time record of a fact first recorded at
+    /// plan time makes it the object's too.
+    #[test]
+    fn a_plan_time_record_is_not_stored_with_the_object() {
+        let _guard = exception_guard();
+        let permissive = Policy::default();
+        let mut attribution = Attribution::open("node").unwrap();
+        record_plan_time_with(
+            &permissive,
+            GIT_DEPENDENCY,
+            "node_modules/skipped",
+            "npm_git_dep: skipped: repo https://example.invalid/s, commit main",
+        )
+        .unwrap();
+        record_with(
+            &permissive,
+            GIT_DEPENDENCY,
+            "realized@1.0.0",
+            "https://example.invalid/r at abc",
+        )
+        .unwrap();
+        let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.subject).collect();
+        assert_eq!(stored, ["realized@1.0.0"]);
+        assert_eq!(pending().len(), 2, "{:?}", pending());
+
+        // A later realization-time record of the plan-time fact.
+        record_with(
+            &permissive,
+            GIT_DEPENDENCY,
+            "node_modules/skipped",
+            "npm_git_dep: skipped: repo https://example.invalid/s, commit main",
+        )
+        .unwrap();
+        assert_eq!(object_exceptions().len(), 2);
+        let claimed = attribution.claim("node").unwrap();
+        assert_eq!(claimed.len(), 2, "{claimed:?}");
+        attribution.discard();
+
+        let denying = Policy {
+            deny: [GIT_DEPENDENCY.to_string()].into(),
+            ..Policy::default()
+        };
+        let attribution = Attribution::open("node").unwrap();
+        let error = record_plan_time_with(&denying, GIT_DEPENDENCY, "s", "d").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        attribution.discard();
     }
 
     #[test]

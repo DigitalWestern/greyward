@@ -10,7 +10,7 @@ use crate::kernel::error;
 use crate::kernel::store::{self, Store};
 use crate::kernel::toolchain::SourcePolicy;
 use sha1::Sha1;
-use sha2::{Digest as _, Sha256, Sha512};
+use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -1297,6 +1297,7 @@ fn cache_or_download_narrated(
         .open(&tmp)
         .map_err(|e| io::Error::new(e.kind(), format!("create {}: {e}", tmp.display())))?;
     let mut h256 = Sha256::new();
+    let mut h384 = Sha384::new();
     let mut h512 = Sha512::new();
     let mut h1 = Sha1::new();
     let mut buf = [0u8; 65536];
@@ -1321,6 +1322,7 @@ fn cache_or_download_narrated(
         match digest.algo {
             Algo::Sha1 => h1.update(&buf[..n]),
             Algo::Sha256 => h256.update(&buf[..n]),
+            Algo::Sha384 => h384.update(&buf[..n]),
             Algo::Sha512 => h512.update(&buf[..n]),
         }
         if let Err(e) = file.write_all(&buf[..n]) {
@@ -1338,6 +1340,7 @@ fn cache_or_download_narrated(
     let got = match digest.algo {
         Algo::Sha1 => hex::encode(h1.finalize()),
         Algo::Sha256 => hex::encode(h256.finalize()),
+        Algo::Sha384 => hex::encode(h384.finalize()),
         Algo::Sha512 => hex::encode(h512.finalize()),
     };
     let Some(matched) = candidates.iter().find(|candidate| candidate.hex() == got) else {
@@ -1567,6 +1570,35 @@ mod tests {
         assert!(download_verified_digest(&store, activity, &url, &expected).is_ok());
 
         let wrong = Digest::from_sri("sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=").unwrap();
+        let error = download_verified_digest(&store, activity, &url, &wrong).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A sha384 integrity (npm's ssri accepts it by default) is verified
+    /// against the downloaded bytes and cached under its own algorithm.
+    #[test]
+    fn sha384_integrity_accepts_and_rejects_at_verification() {
+        let scratch = TempDir::named("fetch-sha384");
+        for sub in ["objects", "meta", "cache/sha384", "tmp"] {
+            fs::create_dir_all(scratch.0.join(sub)).unwrap();
+        }
+        let store = Store::for_test(scratch.0.clone());
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let input = scratch.0.join("artifact");
+        fs::write(&input, b"hello").unwrap();
+        let url = format!("file://{}", input.display());
+        let sri = |bytes: &[u8]| {
+            format!(
+                "sha384-{}",
+                crate::kernel::base64::encode(&Sha384::digest(bytes))
+            )
+        };
+        let expected = Digest::from_sri(&sri(b"hello")).unwrap();
+        download_verified_digest(&store, activity, &url, &expected).unwrap();
+        assert!(store.cache_path("sha384", expected.hex()).is_file());
+        let wrong = Digest::from_sri(&sri(b"other")).unwrap();
         let error = download_verified_digest(&store, activity, &url, &wrong).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }

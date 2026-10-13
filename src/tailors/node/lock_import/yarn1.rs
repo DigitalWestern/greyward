@@ -1048,7 +1048,7 @@ mod lock_shape_tests {
     fn an_integrity_with_no_supported_digest_is_malformed() {
         for integrity in [
             "md5-AAAAAAAAAAAAAAAAAAAAAA==",
-            "sha384-AAAA",
+            "sha224-AAAA",
             "",
             "sha5120-x",
         ] {

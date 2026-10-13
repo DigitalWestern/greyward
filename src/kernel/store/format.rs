@@ -28,6 +28,7 @@ pub(super) const NAMESPACES: &[&str] = &[
     "meta",
     "cache/sha1",
     "cache/sha256",
+    "cache/sha384",
     "cache/sha512",
     "tmp",
     "roots",

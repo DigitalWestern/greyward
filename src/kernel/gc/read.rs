@@ -287,8 +287,8 @@ pub struct Snapshot {
     pub(super) dirs: Dirs,
 }
 
-pub(super) const CACHE_ALGORITHMS: [(&str, usize); 3] =
-    [("sha1", 40), ("sha256", 64), ("sha512", 128)];
+pub(super) const CACHE_ALGORITHMS: [(&str, usize); 4] =
+    [("sha1", 40), ("sha256", 64), ("sha384", 96), ("sha512", 128)];
 /// Enumerate `objects/`, pairing every object with the record it must have.
 /// Both stats come from the held descriptors, so what is measured here is
 /// the inode the removal will later be relative to.

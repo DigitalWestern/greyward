@@ -338,7 +338,7 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
 }
 
 pub(crate) fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
-    if !matches!(algo, "sha1" | "sha256" | "sha512") {
+    if !matches!(algo, "sha1" | "sha256" | "sha384" | "sha512") {
         return Err(format!("unsupported cache algorithm {algo}"));
     }
     Digest::from_parts(algo, hex).map_err(|error| error.to_string())

@@ -1510,9 +1510,9 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
-        // Three bubblewrap arguments each (`--setenv K V`): well past the
+        // One argument each (`K=V`, for /usr/bin/env): past the
         // limit bubblewrap accepts.
-        let envs: Vec<(String, String)> = (0..4000)
+        let envs: Vec<(String, String)> = (0..9000)
             .map(|i| (format!("GREYWARD_FILL_{i}"), "x".to_string()))
             .collect();
         let tmp_snapshot = temp.0.join("tmp-snapshot");

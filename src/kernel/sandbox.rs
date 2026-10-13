@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 
 mod held;
 pub(crate) use held::pass_fds;
-use held::{args_file, refuse_nul, HeldRoots, ARGS_FD};
+use held::{args_file, refuse_unpassable, HeldRoots, ARGS_FD};
 
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
@@ -438,12 +438,14 @@ impl Sandbox<'_> {
             .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
             .map_err(setup)?;
         let mut command = bwrap_command(bwrap).map_err(setup)?;
-        // Every argument ward generates reaches bubblewrap through a
-        // descriptor, so only the build's own command counts toward the
-        // kernel's argument limits: a spawn that fails with E2BIG is the
-        // build's failure in either view (#679, `error::sandbox_spawn`).
-        // Unmarked: a NUL in a value the build supplied is its own failure.
-        refuse_nul(&invocation.args)?;
+        // Unmarked: a value the build supplied that cannot be passed is its
+        // own failure.
+        refuse_unpassable(&invocation.args, envs)?;
+        // bubblewrap's own options (mounts, flags) reach it through a
+        // descriptor, and only the command and its environment stay on
+        // argv, so only they count toward the kernel's argument limits: a
+        // spawn that fails with E2BIG is the build's failure in either view
+        // (#679, `error::sandbox_spawn`).
         let (options, own) = invocation.args.split_at(invocation.command_start);
         let options = args_file(options).map_err(setup)?;
         command.arg("--args").arg(ARGS_FD.to_string()).args(own);
@@ -619,25 +621,28 @@ impl Sandbox<'_> {
         }
         push_root_binds(&mut args, &read_binds, &write_binds);
 
-        push_setenv(&mut args, "PATH", env_path);
-        push_setenv(&mut args, "HOME", &scratch);
-        push_setenv(&mut args, "TMPDIR", &scratch);
-        push_setenv(&mut args, "LANG", "en_US.UTF-8");
-        push_setenv(&mut args, "SOURCE_DATE_EPOCH", "315532800");
+        // The command's environment goes on argv, as `NAME=VALUE` operands
+        // of `/usr/bin/env` below, never through bubblewrap's `--args`: then
+        // only the build's command and environment count toward the kernel's
+        // limits, and a spawn that exceeds them is the build's failure (#679).
+        let mut assignments = vec![
+            assignment("PATH", env_path),
+            assignment("HOME", &scratch),
+            assignment("TMPDIR", &scratch),
+            assignment("LANG", "en_US.UTF-8"),
+            assignment("SOURCE_DATE_EPOCH", "315532800"),
+        ];
         if self.host_view == HostView::RuntimeOnly
             && !envs.iter().any(|(key, _)| key == "PKG_CONFIG_LIBDIR")
         {
             // See `hostview::PKG_CONFIG_LIBDIR`. PKG_CONFIG_PATH is unset by
             // --clearenv unless the caller sets it.
-            push_setenv(
-                &mut args,
+            assignments.push(assignment(
                 "PKG_CONFIG_LIBDIR",
                 crate::kernel::hostview::PKG_CONFIG_LIBDIR,
-            );
+            ));
         }
-        for (key, value) in envs {
-            push_setenv(&mut args, key, value);
-        }
+        assignments.extend(envs.iter().map(|(key, value)| assignment(key, value)));
         push_arg(&mut args, "--chdir");
         args.push(cwd.into_os_string());
         push_arg(&mut args, "--unsetenv");
@@ -660,6 +665,7 @@ impl Sandbox<'_> {
         push_arg(&mut args, "-u");
         push_arg(&mut args, "PWD");
         push_arg(&mut args, "--");
+        args.extend(assignments);
         args.extend(cmd.iter().map(OsString::from));
         if args.len() > BWRAP_MAX_ARGS {
             return Err(io::Error::new(
@@ -1468,10 +1474,12 @@ pub(crate) fn push_bind_path(args: &mut Vec<OsString>, flag: &str, path: &Path) 
     args.push(path.as_os_str().to_os_string());
 }
 
-pub(crate) fn push_setenv(args: &mut Vec<OsString>, key: &str, value: impl AsRef<OsStr>) {
-    push_arg(args, "--setenv");
-    push_arg(args, key);
-    args.push(value.as_ref().to_os_string());
+/// `key=value`, a variable `/usr/bin/env` sets for the command.
+fn assignment(key: &str, value: impl AsRef<OsStr>) -> OsString {
+    let mut assignment = OsString::from(key);
+    assignment.push("=");
+    assignment.push(value);
+    assignment
 }
 
 /// `tests::linux_ready`, for a test outside this module that starts a
@@ -2612,6 +2620,53 @@ mod tests {
         let error = result.expect_err("a value holding a NUL starts nothing");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
         assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+        // `/usr/bin/env` would read a name holding `=` as another variable.
+        for key in ["PATH=/host/bin:", ""] {
+            let envs = [(key.to_string(), "x".to_string())];
+            let error = sandbox
+                .run_bwrap_capture(
+                    &["/usr/bin/true"],
+                    "/usr/bin:/bin",
+                    &scratch,
+                    &scratch,
+                    &envs,
+                )
+                .expect_err("a name env cannot pass starts nothing");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+            assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+        }
+    }
+
+    /// The build's environment stays on argv, so an oversized value fails
+    /// the spawn with E2BIG, the build's own failure, rather than bubblewrap's
+    /// exec of the command, which reads as a sandbox that could not start.
+    #[test]
+    fn linux_an_oversized_build_environment_is_the_builds_failure() {
+        if !linux_ready("linux_an_oversized_build_environment_is_the_builds_failure") {
+            return;
+        }
+        let root = temp_dir("big-env");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let envs = [("BIG".to_string(), "x".repeat(200 * 1024))];
+        let error = sandbox
+            .run_in_status_on(
+                Platform::X86_64UnknownLinuxGnu,
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &envs,
+                None,
+            )
+            .expect_err("a value past the kernel's limit starts nothing");
+        assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
     }
 
     /// bubblewrap's helper is the sandbox's pid 1, readable by the build,
@@ -2644,8 +2699,8 @@ mod tests {
             !environ.contains("GREYWARD_TEST_PID_ONE_CANARY"),
             "{environ}"
         );
-        // Older bubblewrap applies --setenv in its own process before the
-        // fork, so pid 1 may hold the sandbox's own variables, never more.
+        // `/usr/bin/env` sets the sandbox's variables after pid 1 forked,
+        // so pid 1 holds at most these (PWD from bubblewrap's --chdir).
         let own = ["PATH", "HOME", "TMPDIR", "LANG", "SOURCE_DATE_EPOCH", "PWD"];
         for line in environ.lines().filter(|line| !line.is_empty()) {
             let key = line.split('=').next().unwrap();
@@ -3185,7 +3240,7 @@ mod tests {
             "{after_system:?}"
         );
         assert!(
-            !full.iter().any(|arg| arg == "PKG_CONFIG_LIBDIR"),
+            !full.iter().any(|arg| arg.starts_with("PKG_CONFIG_LIBDIR")),
             "{full:?}"
         );
 
@@ -3196,7 +3251,7 @@ mod tests {
             runtime_only[..start + system.len()],
             full[..start + system.len()]
         );
-        let view_len = runtime_only.len() - full.len() - 3;
+        let view_len = runtime_only.len() - full.len() - 1;
         let view = &runtime_only[start + system.len()..start + system.len() + view_len];
         assert!(
             view.iter()
@@ -3206,11 +3261,11 @@ mod tests {
         let tail = &runtime_only[start + system.len() + view_len..];
         let full_tail = &full[start + system.len()..];
         let env = tail
-            .windows(3)
-            .position(|window| window == ["--setenv", "PKG_CONFIG_LIBDIR", "/dev/null"])
+            .iter()
+            .position(|arg| arg == "PKG_CONFIG_LIBDIR=/dev/null")
             .expect("RuntimeOnly sets PKG_CONFIG_LIBDIR");
         let mut without_env = tail.to_vec();
-        without_env.drain(env..env + 3);
+        without_env.remove(env);
         // The loader cache is the view's own, which names the libraries
         // it moved out of the linker's reach (#332), and no
         // LD_LIBRARY_PATH outranks a program's RUNPATH.
@@ -3251,12 +3306,12 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            own.iter().filter(|arg| *arg == "PKG_CONFIG_LIBDIR").count(),
+            own.iter()
+                .filter(|arg| arg.starts_with("PKG_CONFIG_LIBDIR"))
+                .count(),
             1
         );
-        assert!(own
-            .windows(3)
-            .any(|w| w == ["--setenv", "PKG_CONFIG_LIBDIR", "/mine"]));
+        assert!(own.iter().any(|arg| arg == "PKG_CONFIG_LIBDIR=/mine"));
     }
 
     /// The first host library directory (Fedora's or Debian's) that has
@@ -3725,17 +3780,14 @@ esac
         );
         assert!(argv.contains(&"--unshare-net"), "{rendered}");
         assert!(argv.contains(&"--clearenv"), "{rendered}");
-        assert!(has(&["--setenv", "CHECK", "ok"]), "{rendered}");
+        // The environment is set by `/usr/bin/env`, on argv, after the
+        // sandbox's own variables.
         assert!(
-            argv.ends_with(&[
-                "/usr/bin/env",
-                "-u",
-                "PWD",
-                "--",
-                "/usr/bin/sh",
-                "-c",
-                "printf sample"
-            ]),
+            has(&["/usr/bin/env", "-u", "PWD", "--", "PATH=/usr/bin:/bin"]),
+            "{rendered}"
+        );
+        assert!(
+            argv.ends_with(&["CHECK=ok", "/usr/bin/sh", "-c", "printf sample"]),
             "{rendered}"
         );
     }

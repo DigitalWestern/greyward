@@ -334,7 +334,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   second tar child. Zip archives (wheels, zip sdists, the Elixir release zip, Hex's own
   `.ez` archive and the outer zip of a `.conda` package) are read in process by one kernel
   reader under the tarball's name rules: no unsafe, invisible or twice-written name, no
-  symlink or special file, no encrypted entry. Each member must inflate to exactly the size
+  symlink or special file, no encrypted entry, and no ZIP64 or Unicode-name extra field
+  that two zip readers would read differently. An sdist is built by pip from the tree ward
+  unpacked, never from the archive. Each member must inflate to exactly the size
   it declares, and the declared sizes count against a budget (4 GiB for a wheel, 1 GiB for
   the rest) before anything is written. Modes follow pip: a file with any execute bit is
   0755, every other file 0644, and directory modes are ignored.

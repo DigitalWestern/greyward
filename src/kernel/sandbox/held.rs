@@ -235,6 +235,18 @@ pub(super) fn refuse_unpassable(
     }
 }
 
+/// Whether bubblewrap's `stderr` is only its exec of the command after
+/// `--` failing with E2BIG: the build's own failure, as an E2BIG at the
+/// spawn is. Every argument ward generates is in the `--args` data and
+/// bubblewrap's own environment is only PWD, so the command and its
+/// environment are what is too long.
+pub(super) fn exec_too_long(stderr: &[u8]) -> bool {
+    let line = stderr.strip_suffix(b"\n").unwrap_or(stderr);
+    line.starts_with(b"bwrap: execvp ")
+        && line.ends_with(b": Argument list too long")
+        && !line.contains(&b'\n')
+}
+
 /// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
 /// anonymous file read from its start. Its descriptor is numbered at or
 /// above `ARGS_FD_FLOOR`, where nothing is moved onto it in the child.

@@ -199,62 +199,80 @@ run_version() {
 }
 probe_version() { run_version "$1" || true; }
 
+# >>> semver (tests/install.sh reads this block out of the script)
 # SemVer 2.0 precedence of version $1 against version $2: prints -1, 0 or 1,
-# or `bad` when either is not a version. A leading `v` and build metadata
-# (`+build.7`, which precedence ignores) are dropped first. Then
-# major.minor.patch compare as numbers, a release sorts above its
-# pre-releases, and pre-release identifiers compare dot by dot: numbers as
-# numbers, a number below a word, words in ASCII order, and a shorter list
-# below a longer one it is a prefix of. So 0.3.0-alpha < 0.3.0-alpha.1 <
-# 0.3.0-alpha.beta < 0.3.0-beta < 0.3.0-rc.9 < 0.3.0-rc.10 < 0.3.0.
-semver_cmp() {
-    LC_ALL=C awk -v a="$1" -v b="$2" '
-        function norm(v) { sub(/^v/, "", v); sub(/\+.*$/, "", v); return v }
-        function isnum(s) { return s ~ /^[0-9]+$/ }
-        # Fills core[1..3] and pre[1..pre[0]]; 0 when v is no version.
-        function parse(v, core, pre,    i, c, p, n, k) {
-            i = index(v, "-")
-            if (i) { c = substr(v, 1, i - 1); p = substr(v, i + 1) } else { c = v; p = "" }
-            if (c !~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) return 0
-            split(c, core, ".")
-            n = 0
-            if (i) {
-                if (p !~ /^[0-9A-Za-z.-]+$/ || p ~ /^\./ || p ~ /\.$/ || p ~ /\.\./) return 0
-                n = split(p, pre, ".")
-                for (k = 1; k <= n; k++) if (pre[k] ~ /^0[0-9]+$/) return 0
-            }
-            pre[0] = n
-            return 1
-        }
-        function cmpid(x, y) {
-            if (isnum(x) && isnum(y)) {
-                if (x + 0 < y + 0) return -1
-                return (x + 0 > y + 0) ? 1 : 0
-            }
-            if (isnum(x)) return -1
-            if (isnum(y)) return 1
-            if (x < y) return -1
-            return (x > y) ? 1 : 0
-        }
-        function order(    k, c) {
-            if (!parse(norm(a), ca, pa) || !parse(norm(b), cb, pb)) return "bad"
-            for (k = 1; k <= 3; k++) {
-                if (ca[k] + 0 < cb[k] + 0) return -1
-                if (ca[k] + 0 > cb[k] + 0) return 1
-            }
-            if (pa[0] == 0 || pb[0] == 0) {
-                if (pa[0] == pb[0]) return 0
-                return (pa[0] == 0) ? 1 : -1
-            }
-            for (k = 1; k <= pa[0] && k <= pb[0]; k++) {
-                c = cmpid(pa[k], pb[k])
-                if (c != 0) return c
-            }
-            if (pa[0] < pb[0]) return -1
-            return (pa[0] > pb[0]) ? 1 : 0
-        }
-        BEGIN { r = order(); print r }'
+# or `bad` when either is not a version. Both are first held to the full
+# SemVer 2.0 grammar (semver.org's regular expression, plus an optional
+# leading `v`): no leading zeros in a number, no empty identifier, build
+# metadata well formed when present. Then the `v` and the build metadata
+# (which precedence ignores) are dropped, major.minor.patch compare, a
+# release sorts above its pre-releases, and pre-release identifiers compare
+# dot by dot: an all-digit identifier below any other, two all-digit ones
+# by length and then digit by digit (so any size compares exactly), others
+# in ASCII order, and a shorter list below a longer one it is a prefix of.
+# No arithmetic anywhere: 0.3.0-alpha < 0.3.0-alpha.1 < 0.3.0-alpha.beta <
+# 0.3.0-beta < 0.3.0-rc.9 < 0.3.0-rc.10 < 0.3.0, and 1.0.0--1 < 1.0.0--2.
+SEMVER_ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+SEMVER_RE="^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-$SEMVER_ID(\\.$SEMVER_ID)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\$"
+semver_valid() {
+    case "$1" in
+        "" | *"
+"*) return 1 ;;
+    esac
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq "$SEMVER_RE"
 }
+# Two identifiers (never empty): -1, 0 or 1.
+semver_id_cmp() {
+    case "$1" in *[!0-9]*) _si_kind=w ;; *) _si_kind=n ;; esac
+    case "$2" in *[!0-9]*) _si_kind="${_si_kind}w" ;; *) _si_kind="${_si_kind}n" ;; esac
+    case "$_si_kind" in
+        nw) echo -1; return ;;
+        wn) echo 1; return ;;
+        nn)
+            # No leading zeros, so the longer number is the larger one.
+            if [ "${#1}" -lt "${#2}" ]; then echo -1; return; fi
+            if [ "${#1}" -gt "${#2}" ]; then echo 1; return; fi
+            ;;
+    esac
+    if [ "$1" = "$2" ]; then
+        echo 0
+    elif LC_ALL=C expr "x$1" \< "x$2" >/dev/null; then
+        echo -1
+    else
+        echo 1
+    fi
+}
+# Two dot-separated identifier lists, left to right: -1, 0 or 1.
+semver_list_cmp() {
+    _sl_a="$1"; _sl_b="$2"
+    while [ -n "$_sl_a" ] && [ -n "$_sl_b" ]; do
+        _sl_x="${_sl_a%%.*}"; _sl_y="${_sl_b%%.*}"
+        case "$_sl_a" in *.*) _sl_a="${_sl_a#*.}" ;; *) _sl_a="" ;; esac
+        case "$_sl_b" in *.*) _sl_b="${_sl_b#*.}" ;; *) _sl_b="" ;; esac
+        _sl_c="$(semver_id_cmp "$_sl_x" "$_sl_y")"
+        if [ "$_sl_c" != 0 ]; then echo "$_sl_c"; return; fi
+    done
+    if [ -n "$_sl_a" ]; then echo 1
+    elif [ -n "$_sl_b" ]; then echo -1
+    else echo 0
+    fi
+}
+semver_cmp() {
+    if ! semver_valid "$1" || ! semver_valid "$2"; then echo bad; return; fi
+    _sc_a="${1#v}"; _sc_a="${_sc_a%%+*}"
+    _sc_b="${2#v}"; _sc_b="${_sc_b%%+*}"
+    # The core holds no `-`; everything after the first one is the pre-release.
+    _sc_c="$(semver_list_cmp "${_sc_a%%-*}" "${_sc_b%%-*}")"
+    if [ "$_sc_c" != 0 ]; then echo "$_sc_c"; return; fi
+    case "$_sc_a" in *-*) _sc_ap="${_sc_a#*-}" ;; *) _sc_ap="" ;; esac
+    case "$_sc_b" in *-*) _sc_bp="${_sc_b#*-}" ;; *) _sc_bp="" ;; esac
+    if [ -z "$_sc_ap" ] && [ -z "$_sc_bp" ]; then echo 0
+    elif [ -z "$_sc_ap" ]; then echo 1
+    elif [ -z "$_sc_bp" ]; then echo -1
+    else semver_list_cmp "$_sc_ap" "$_sc_bp"
+    fi
+}
+# <<< semver
 
 # --- uninstall --------------------------------------------------------------
 # Removes exactly what the header says this script writes, and nothing else.
@@ -431,14 +449,65 @@ if command -v curl >/dev/null 2>&1; then
     final_url() { curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q -O "$2" "$1"; }
+    # The redirect targets in wget's -S output, in order. GNU wget 1.x and
+    # busybox print the server's Location header (its name in any case);
+    # GNU wget then echoes it as `Location: <url> [following]`, and that
+    # suffix and CR are dropped. wget2 prints no headers, only
+    # `URL '<absolute url>' not followed (max redirections exceeded)`.
+    locations() {
+        tr -d '\r' | sed -n \
+            -e 's/^ *[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]: *\(.*[^ ]\) *$/\1/p' \
+            -e "s/^URL '\\(.*\\)' not followed.*\$/\\1/p" \
+            | sed 's/ \[following\]$//'
+    }
+    # URL $2 as a Location sent from URL $1 (RFC 9110 10.2.2): absolute,
+    # scheme-relative, absolute-path or relative to $1's directory.
+    url_join() {
+        _uj_scheme="${1%%://*}"
+        _uj_rest="${1#*://}"
+        _uj_host="${_uj_rest%%/*}"
+        case "$2" in
+            *://*) printf '%s' "$2" ;;
+            //*) printf '%s:%s' "$_uj_scheme" "$2" ;;
+            /*) printf '%s://%s%s' "$_uj_scheme" "$_uj_host" "$2" ;;
+            *)
+                _uj_path="${_uj_rest%%[?#]*}"
+                case "$_uj_path" in
+                    */*) _uj_dir="${_uj_path%/*}" ;;
+                    *) _uj_dir="$_uj_path" ;;
+                esac
+                printf '%s://%s/%s' "$_uj_scheme" "$_uj_dir" "$2"
+                ;;
+        esac
+    }
+    # Follows $1's redirects one hop at a time, at most 10, and prints the
+    # first URL that is a release tag page (or the last one reached).
+    # wget that knows --max-redirect (GNU wget, wget2) is asked one hop per
+    # call; busybox wget, which follows on its own, prints every hop's
+    # headers in one run, and those are walked the same way.
     final_url() {
-        # The first Location header the server sent. GNU wget echoes it as
-        # `Location: <url> [following]` too, and busybox wget sends only the
-        # header; either way the first one is the server's.
-        _fu_to="$(wget -S --spider -O /dev/null "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' \
-            | head -n 1 | tr -d '\r' | sed 's/ \[following\]$//')" \
-            || return 1
-        printf '%s' "${_fu_to:-$1}"
+        _fu_url="$1"
+        _fu_hops=0
+        if wget --help 2>&1 | grep -q -- '--max-redirect'; then
+            _fu_one_hop=1
+        else
+            _fu_one_hop=0
+            _fu_all="$(wget -S -O /dev/null "$1" 2>&1 | locations)"
+        fi
+        while :; do
+            case "$_fu_url" in
+                */releases/tag/?*) printf '%s' "$_fu_url"; return 0 ;;
+            esac
+            if [ "$_fu_one_hop" = 1 ]; then
+                _fu_next="$(wget --max-redirect=0 -S -O /dev/null "$_fu_url" 2>&1 | locations | head -n 1)"
+            else
+                _fu_next="$(printf '%s\n' "$_fu_all" | sed -n "$((_fu_hops + 1))p")"
+            fi
+            [ -n "$_fu_next" ] || { printf '%s' "$_fu_url"; return 0; }
+            [ "$_fu_hops" -lt 10 ] || return 1
+            _fu_url="$(url_join "$_fu_url" "$_fu_next")"
+            _fu_hops=$((_fu_hops + 1))
+        done
     }
 else
     fail "need curl or wget to download the $asset release asset"
@@ -460,7 +529,7 @@ case "$VERSION" in
             latest_url="${GREYWARD_LATEST_URL:-https://github.com/$REPO/releases/latest}"
             resolved="$(final_url "$latest_url")" \
                 || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
-            tag="${resolved##*/tag/}"
+            tag="${resolved##*/releases/tag/}"
             [ "$tag" != "$resolved" ] \
                 || fail "$latest_url led to $resolved, not a release tag; name one with --version=<tag>"
         fi
@@ -537,19 +606,34 @@ tar -xzf "$tmp/$asset" -C "$tmp" || fail "cannot extract $asset"
 # --- install ----------------------------------------------------------------
 # What is being replaced, if anything: read it before the file is overwritten.
 previous=""
+existing=0
+probed=""
 if [ -x "$INSTALL_DIR/ward" ]; then
-    previous="$(probe_version "$INSTALL_DIR/ward")"
+    existing=1
+    # A --version that fails or times out tells nothing, like no output.
+    probed="$(run_version "$INSTALL_DIR/ward")" || probed=""
     # Only a ward version belongs in an "upgraded X -> Y" line.
-    case "$previous" in
-        "ward "*) ;;
-        *) previous="" ;;
+    case "$probed" in
+        "ward "*) previous="$probed" ;;
     esac
 fi
 # `ward 0.3.0 (abc1234 2026-10-13)`: the version is the second word.
 previous_version="$(printf '%s\n' "$previous" | sed -n '1s/^ward \([^ ]*\).*$/\1/p')"
 downgrade=0
-if [ -n "$previous" ]; then
-    order="$(semver_cmp "$want" "$previous_version")"
+if [ "$existing" = 1 ]; then
+    # An installed ward whose version cannot be read might be newer, so it
+    # counts as unreadable: latest leaves it alone, a named version does not.
+    if [ -n "$previous" ]; then
+        order="$(semver_cmp "$want" "$previous_version")"
+        seen="it says '$previous'"
+    else
+        order=bad
+        if [ -n "$probed" ]; then
+            seen="its '--version' printed '$(printf '%s' "$probed" | head -n 1)'"
+        else
+            seen="its '--version' printed nothing, failed or timed out"
+        fi
+    fi
     case "$order" in
         -1)
             [ "$named" = 1 ] || fail "$INSTALL_DIR/ward is $previous, newer than the latest release ($tag); it is untouched.
@@ -559,7 +643,7 @@ if [ -n "$previous" ]; then
         0 | 1) ;;
         *)
             # Unreadable, so it might be newer: latest leaves it alone.
-            [ "$named" = 1 ] || fail "cannot tell whether $INSTALL_DIR/ward ('$previous') is older than the latest release ($tag): one of the two is no SemVer version. It is untouched.
+            [ "$named" = 1 ] || fail "cannot tell whether $INSTALL_DIR/ward is older than the latest release ($tag): $seen, and that is no SemVer 2.0 version (or $tag is not). It is untouched.
   To replace it anyway, name the release:  --version=$tag"
             ;;
     esac

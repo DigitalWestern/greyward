@@ -210,8 +210,15 @@ runs in the sandbox's whole-host view (`HostView::WholeHost`: the host
 read-only, no network, only scratch writable, the held project bound from
 its descriptor) on the root's `workspaces` list, and its answer is the
 member set every npm check uses (lock freshness, the resolution record's
-inputs, which root a member's edit writes to). It runs again for each of
-them, and an answer that changes within one command refuses it. Before planning, `plan` and `sync`
+inputs, which root a member's edit writes to). Its answer is `[name,
+directory]` pairs written to a file, or a fixed error code; npm's own
+output is discarded, so no text from a file it read is relayed. It runs
+again for each of them, and an answer that changes within one command
+(names, directories or order) refuses it. A lock is fresh only if it links
+each member as `node_modules/<name>` to its directory. A planted workspace
+link registers a check with `comforter::publication`, which the closure
+writer runs right before publishing: the link must still reach, inside the
+held project, the directory it reached when planted. Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's, `peerDependencies` included), the

@@ -27,10 +27,14 @@ impl RegistryTool for PythonTool {
         python::runtime_object_id(platform, toolchain)
     }
 
+    fn environment_schema(&self) -> &'static str {
+        super::env::PYTHON_ENV_SCHEMA
+    }
+
     /// The Rust a Rust-extension sdist builds on: inside a project that
-    /// locks Rust, the locked one, so its object is part of the key
-    /// (`x/4`). Outside one, the sdist's own toolchain file decides and the
-    /// key stays `x/3`.
+    /// locks Rust, the locked one, so its object is part of the key.
+    /// Outside one, the sdist's own toolchain file decides and the key has
+    /// no helper field.
     fn helpers(&self) -> &'static [&'static str] {
         &["rust"]
     }

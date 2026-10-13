@@ -732,6 +732,13 @@ pub trait RegistryTool: Sync {
     /// without touching the store. It is part of the cache key.
     fn runtime_object_id(&self, platform: Platform, toolchain: &Selected) -> io::Result<String>;
 
+    /// The identity schema of the environment object this tool realizes
+    /// (`node-env/6`, `python-env/3`). It is part of the cache key, so a
+    /// schema bump moves every cached tool to a new directory and rebuilds
+    /// it, and a cached projection whose object has another schema is
+    /// realized again.
+    fn environment_schema(&self) -> &'static str;
+
     /// The word that names this registry on the command line: the
     /// `py:`/`npm:` tool prefix and the `--py`/`--npm` flag.
     fn spelling(&self) -> &'static str;
@@ -776,7 +783,7 @@ pub trait RegistryTool: Sync {
 
     /// The helper toolchains a realization builds with, a subset of the
     /// tailor's `helpers`. Each one's runtime object id is part of the
-    /// cache key, and a tool with none keeps the `x/3` key.
+    /// cache key.
     fn helpers(&self) -> &'static [&'static str] {
         &[]
     }

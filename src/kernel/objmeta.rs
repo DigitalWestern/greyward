@@ -1,4 +1,4 @@
-//! Object metadata: the `object-meta/2` record, its read-only index, and the
+//! Object metadata: the `object-meta/3` record, its read-only index, and the
 //! per-kind identity grammar every publication is checked against.
 //!
 //! A record says for itself what its object needs: the realization caller
@@ -8,6 +8,13 @@
 //! store format marker (`store::format`) keeps a store written before
 //! `object-meta/2` from being opened at all, so a record this module cannot
 //! read is a damaged record, never an old one.
+//!
+//! `object-meta/3` is `/2` with one promise more: its `exceptions` are every
+//! realization-time exception the build recorded. A `/2` record stored only
+//! a fixed few kinds, so its list is a lower bound ([`Record::exceptions_complete`]
+//! is false), and `policy::cached_reusable` decides whether it may still be
+//! reused. A `/2` record is upgraded to `/3` in place when the object is
+//! realized again.
 //!
 //! Each kind also has a row (`ObjectKind`) describing the identity inputs
 //! its producer writes. Debug builds check every commit against its row.
@@ -34,6 +41,10 @@ pub struct Record {
     /// The policy exceptions recorded at commit. A record without the
     /// field carries none: producers that allow nothing write no field.
     pub exceptions: Vec<crate::kernel::policy::Exception>,
+    /// Whether `exceptions` is the whole set: true for `object-meta/3`.
+    /// An `object-meta/2` record kept only the kinds its producer then
+    /// stored (`policy::KINDS_NOT_IN_META_2` lists the ones it could lack).
+    pub exceptions_complete: bool,
 }
 
 /// The `schema` input an identity dispatches on, if it wrote one. Every
@@ -168,6 +179,16 @@ pub fn read_store_record(store: &store::Store, id: &str) -> io::Result<Record> {
     read_record_value(&id, value)
 }
 
+/// [`read_store_record`] and the record's raw body, for the one writer that
+/// rewrites a record in place (`Store::complete_exceptions`).
+pub(crate) fn read_store_record_and_body(
+    store: &store::Store,
+    id: &str,
+) -> io::Result<(Record, serde_json::Value)> {
+    let (id, value) = read_store_body(store, id)?;
+    Ok((read_record_value(&id, value.clone())?, value))
+}
+
 /// The parsed body of `id`'s record in `store`, opened and parsed the way
 /// [`read_store_record`] does, before the record's own fields are checked.
 fn read_store_body(store: &store::Store, id: &str) -> io::Result<(String, serde_json::Value)> {
@@ -232,8 +253,9 @@ fn read_opened_value(
 
 /// Validate an already-parsed record body against its id.
 ///
-/// `object-meta/2` with explicit evidence is the only record there is. One
-/// with no schema, another schema or another evidence marker is refused,
+/// `object-meta/3`, or the older `object-meta/2`, with explicit evidence is
+/// the only record there is. One with no schema, another schema or another
+/// evidence marker is refused,
 /// which is what keeps the sweep closed over it: a record whose
 /// dependencies this ward cannot read is never treated as having none.
 pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Record> {
@@ -263,11 +285,15 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
         .ok_or_else(|| bad(format!("object {id} metadata has no schema")))?
         .as_str()
         .ok_or_else(|| bad(format!("object {id} has an invalid metadata schema")))?;
-    if schema != "object-meta/2" {
-        return Err(bad(format!(
-            "object {id} has unknown metadata schema {schema}"
-        )));
-    }
+    let exceptions_complete = match schema {
+        META_SCHEMA => true,
+        "object-meta/2" => false,
+        _ => {
+            return Err(bad(format!(
+                "object {id} has unknown metadata schema {schema}"
+            )))
+        }
+    };
     let mut dependencies = BTreeSet::new();
     for dependency in value
         .get("dependencies")
@@ -334,8 +360,12 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
         dependencies,
         cache,
         exceptions,
+        exceptions_complete,
     })
 }
+
+/// The schema every commit writes.
+pub const META_SCHEMA: &str = "object-meta/3";
 
 pub(crate) fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
     if !matches!(algo, "sha1" | "sha256" | "sha512") {
@@ -807,12 +837,12 @@ mod tests {
             "BEAM relocation relation",
         );
 
-        let node_empty = case_with_input(&linux, "node-env", Some("node-env/5"), "layout");
+        let node_empty = case_with_input(&linux, "node-env", Some("node-env/6"), "layout");
         assert_relation_breaks(&node_empty, &["layout"], "Node layout/package relation");
         let node_packages = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/5"),
+            Some("node-env/6"),
             "pkg:node_modules/example",
         );
         assert_relation_breaks(
@@ -820,7 +850,7 @@ mod tests {
             &["pkg:node_modules/example"],
             "Node layout/package relation",
         );
-        let node_native = case_with_input(&linux, "node-env", Some("node-env/5"), "native_libs");
+        let node_native = case_with_input(&linux, "node-env", Some("node-env/6"), "native_libs");
         assert_relation_breaks(
             &node_native,
             &["pkg:node_modules/example"],
@@ -829,7 +859,7 @@ mod tests {
         let node_provisioned = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/5"),
+            Some("node-env/6"),
             "provisioned:node_modules/electron",
         );
         assert_relation_breaks(
@@ -847,7 +877,7 @@ mod tests {
         let mut node_darwin_native = case_with_input(
             &darwin,
             "node-env",
-            Some("node-env/5"),
+            Some("node-env/6"),
             "pkg:node_modules/example",
         );
         node_darwin_native
@@ -1016,7 +1046,7 @@ mod tests {
             .iter()
             .find(|identity| {
                 identity.kind == "node-env"
-                    && schema_input_of(identity) == Some("node-env/5")
+                    && schema_input_of(identity) == Some("node-env/6")
                     && identity
                         .inputs
                         .keys()
@@ -1048,7 +1078,7 @@ mod tests {
         let declared = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/5"),
+            Some("node-env/6"),
             "artifact:.npm/tool.tar.gz",
         );
         let mut dropped = declared.clone();
@@ -1066,7 +1096,7 @@ mod tests {
             let provisioned = case_with_input(
                 &cases,
                 "node-env",
-                Some("node-env/5"),
+                Some("node-env/6"),
                 "provisioned:node_modules/electron",
             );
             let mut dropped = provisioned.clone();
@@ -1089,7 +1119,7 @@ mod tests {
     #[test]
     fn node_env_native_libs_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let native = case_with_input(&linux, "node-env", Some("node-env/5"), "native_libs");
+        let native = case_with_input(&linux, "node-env", Some("node-env/6"), "native_libs");
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
 
@@ -1403,8 +1433,8 @@ mod record_value_tests {
                 format!("object {id} has an invalid metadata schema"),
             ),
             (
-                with(&id, |v| v["schema"] = json!("object-meta/3")),
-                format!("object {id} has unknown metadata schema object-meta/3"),
+                with(&id, |v| v["schema"] = json!("object-meta/4")),
+                format!("object {id} has unknown metadata schema object-meta/4"),
             ),
             (
                 with(&id, |v| {

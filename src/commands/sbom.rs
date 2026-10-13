@@ -73,25 +73,14 @@ pub fn generate(project_dir: &Path) -> io::Result<Value> {
             )));
         }
         let body = &closure.body;
-        if let Some(exceptions) = body.get("exceptions").and_then(Value::as_array) {
-            for exception in exceptions {
-                let kind = exception
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| err(format!("{eco} closure: exception missing 'kind'")))?;
-                let subject = exception
-                    .get("subject")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| err(format!("{eco} closure: exception missing 'subject'")))?;
-                let detail = exception
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| err(format!("{eco} closure: exception missing 'detail'")))?;
-                exception_properties.push(json!({
-                    "name": format!("greyward:exception:{kind}"),
-                    "value": format!("{subject}: {detail}"),
-                }));
-            }
+        // Every exception the record carries, as `ward status` and `ward
+        // audit` read them: the closure's own list and the joined resolution
+        // record's, each kind under the name this binary prints.
+        for exception in crate::comforter::records::exceptions(closure)?.exceptions {
+            exception_properties.push(json!({
+                "name": format!("greyward:exception:{}", exception.kind),
+                "value": format!("{}: {}", exception.subject, exception.detail),
+            }));
         }
         // What the user chose not to install, kept apart from the
         // exceptions so a reader never counts it as one (#71).
@@ -164,14 +153,31 @@ mod tests {
                 "plan": {
                     "python_version": "3.13.1",
                     "packages": [
-                        {"name": "Flask_Login", "version": "0.6.3", "sha256": "aa".repeat(32)},
+                        {"name": "Flask_Login", "version": "0.6.3", "sha256": "aa".repeat(32),
+                         "url": "https://files.pythonhosted.org/packages/f/flask_login.whl"},
+                        {"name": "internal", "version": "1.0", "sha256": "bb".repeat(32),
+                         "url": "https://user:token@pypi.corp.example:8443/files/internal-1.0.whl"},
+                        {"name": "fromgit", "version": "0.1", "sha256": "cc".repeat(32),
+                         "url": "", "git": {"url": "https://github.com/o/fromgit",
+                                            "commit": "ab".repeat(20), "subdirectory": null}},
                     ],
                 },
                 "exceptions": [{
                     "kind": "requirement-skipped",
                     "subject": ".",
                     "detail": "project-local requirement",
+                }, {
+                    "kind": "unattested_index",
+                    "subject": "pypi.corp.example",
+                    "detail": "private index",
                 }],
+                "resolution": {
+                    "exceptions": [{
+                        "kind": "unconfined-resolution",
+                        "subject": "uv",
+                        "detail": "network not fenced",
+                    }],
+                },
                 "optional_groups_skipped": [{
                     "group": "docs",
                     "detail": "extra, not requested",
@@ -186,9 +192,9 @@ mod tests {
                 "node_version": "24.20.0",
                 "packages": [
                     {"path": "node_modules/@types/node", "version": "22.0.0",
-                     "integrity": "sha512-xyz"},
+                     "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
                     {"path": "node_modules/a/node_modules/b", "version": "1.0.0",
-                    "integrity": "sha512-abc"},
+                    "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
                 ],
                 "exceptions": [{
                     "kind": "install-script-failed",
@@ -216,10 +222,23 @@ mod tests {
             .unwrap()
             .starts_with("urn:uuid:"));
         let comps = doc["components"].as_array().unwrap();
-        // 1 pypi + 2 npm + 2 dependency environments
-        assert_eq!(comps.len(), 5);
+        // 3 pypi + 2 npm + 2 dependency environments
+        assert_eq!(comps.len(), 7);
         let purls: Vec<&str> = comps.iter().filter_map(|c| c["purl"].as_str()).collect();
         assert!(purls.contains(&"pkg:pypi/flask-login@0.6.3"));
+        // Another index is named by its origin, without the credentials
+        // the file URL carried; a git package by its repository and commit.
+        assert!(
+            purls.contains(
+                &"pkg:pypi/internal@1.0?repository_url=https%3A%2F%2Fpypi.corp.example%3A8443"
+            ),
+            "{purls:?}"
+        );
+        let vcs = format!(
+            "pkg:pypi/fromgit@0.1?vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2Fo%2Ffromgit%40{}",
+            "ab".repeat(20)
+        );
+        assert!(purls.contains(&vcs.as_str()), "{purls:?}");
         assert!(purls.contains(&"pkg:npm/%40types/node@22.0.0"));
         assert!(purls.contains(&"pkg:npm/b@1.0.0"));
         let ids: Vec<&str> = comps
@@ -245,6 +264,16 @@ mod tests {
         assert!(properties.iter().any(|p| {
             p["name"] == "greyward:exception:install-script-failed"
                 && p["value"] == "node_modules/a: postinstall: network-denied"
+        }));
+        // A legacy spelling is printed as the kind it is, and the joined
+        // resolution record's exceptions are the closure's too.
+        assert!(properties.iter().any(|p| {
+            p["name"] == "greyward:exception:unattested-index"
+                && p["value"] == "pypi.corp.example: private index"
+        }));
+        assert!(properties.iter().any(|p| {
+            p["name"] == "greyward:exception:unconfined-resolution"
+                && p["value"] == "uv: network not fenced"
         }));
         assert!(properties.iter().any(|p| {
             p["name"] == "greyward:optional-group-skipped"

@@ -593,21 +593,24 @@ manifest so the default applies, is `changed` naming "the <helper>
 toolchain <ecosystem> builds with". A closure written before the record
 existed counts as `null`, which is what it was built on.
 
-Cached `ward x` environments key on `x/3`: store root, ecosystem, package
-request, platform, the primary runtime version, the selected `bundle_id`
-and the realized runtime object, so a changed bundle component gives a
+Cached `ward x` environments key on `x/5`: store root, ecosystem, package
+request, platform, the primary runtime version, the selected `bundle_id`,
+the realized runtime object, the environment's identity schema
+(`node-env/6`, `python-env/3`) and the object record schema
+(`object-meta/3`), so a changed bundle component or a schema bump gives a
 fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python, a `py:` tool's Rust for
-sdists with a Rust extension) keys on `x/4` instead: the `x/3` fields plus
+sdists with a Rust extension) appends
 `<helper>=<build identity>` for each, decided as above for the project `x`
 runs in and written to the request record's `helpers`. Python's Rust helper
 identity includes both its base runtime object id and its full selection
 fingerprint, covering channel manifests and extension components. Python has
-no default Rust, so a `py:` tool outside a project that locks Rust has no helper,
-keeps its `x/3` name, and its sdists build on what their own toolchain
+no default Rust, so a `py:` tool outside a project that locks Rust has no helper
+field, and its sdists build on what their own toolchain
 file picks; inside one they build on the locked Rust. The key only names the
 directory. A run reuses it only when the request record it wrote there
-(`.greyward/x.json`) says `ready`, so a directory left without one, as a Greyward
+(`.greyward/x.json`) says `ready` and its environment has the identity
+schema this Greyward builds, so a directory left without one, as a Greyward
 before `x/4` left them, is realized again in place. Only the bare
 `ward x --clean` removes it, since nothing records what it was made for,
 and it does so under the store its closure's objects live in, so that
@@ -918,8 +921,18 @@ the `(dev, ino)` the plan recorded. A dry run stops after `plan` and prints
 it, so preview and sweep are the same phases over the same snapshot.
 
 Whether an object may be deleted is decided by `meta/<id>.json`
-(`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
-digests, and the `evidence` marker `"explicit"`.
+(`object-meta/3`, or the older `object-meta/2`): explicit dependency object
+ids, algorithm-qualified cache digests, and the `evidence` marker
+`"explicit"`.
+The record also holds the policy exceptions the realization recorded. `/3`
+holds every realization-time one. `/2` kept only five kinds and dropped the
+artifact and toolchain kinds (`policy::KINDS_NOT_IN_META_2`), so a `/2`
+record's list may be short. A producer that can build the object again
+(the Node, Python and Ruby environments, sdist wheels, `ward x`) reuses a
+`/2` object only while the policy denies none of those kinds
+(`policy::check_cached_reusable`). Otherwise it builds the object again:
+the build refuses a denied exception as it records it, and an allowed build
+commits the same id, which rewrites the record as `/3` with the whole set.
 Explicit evidence names what the realization actually read, which can be
 less than its identity names: a node env's identity carries every declared
 artifact and provisioned download the plan could use, but only the ones an
@@ -1005,6 +1018,20 @@ unchanged, and the test goldens check that dropping `gyp_python` gives back the
 `/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the
 `rust` input was already the Rust object id, so honoring the project's
 selection changes the value and never the shape.
+
+`node-env/6` changes no input. Extraction now checks that each registry
+tarball's `package.json` names the package and version its lock entry gives,
+and refuses a mismatch. An environment built before that check could hold a
+tarball the lock mislabeled, and the closure rows and the SBOM would name the
+wrong package. The schema string alone moves, so every such environment is
+rebuilt once, under the check. The goldens check that spelling the schema
+`/5` gives back the `/5` ids byte for byte. A `/6` environment also records,
+in `.greyward/archives.json` at its root, which integrity candidate each
+registry package's tarball matched when it was fetched and verified. The
+closure rows and the SBOM name that digest. The environment's cache set
+cannot say it, since it also holds the declared artifacts lifecycle scripts
+were given, and one of those can be another candidate of a package's
+integrity.
 
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes
@@ -1140,7 +1167,7 @@ and build inputs tailors share, so no tailor reaches into another):
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, drop.rs --drop-object,
                     reset.rs --reset
-    objmeta.rs      object-meta/2 records; kind rows are installed by
+    objmeta.rs      object-meta/3 (and /2) records; kind rows are installed by
                     commands::dispatch or public tailor entry points
     activity.rs     store activity leases
     pep440.rs       PEP 440 versions and specifiers: Python interpreter
@@ -1201,7 +1228,7 @@ directory prefix (`py`, `npm`), the runtime object id in the cache key, the
 command-line word and message labels, the executable directory,
 resolve-realize-project for one package, the launch environment, and
 whether a cached projection still points at its environment.
-`commands/x/` keeps the `~/.greyward/x` directory, the `x/3`/`x/4` key,
+`commands/x/` keeps the `~/.greyward/x` directory, the `x/5` key,
 the request record, gc root registration, and the policy checks on a
 cached hit (`mod.rs`), the lifecycle lock (`lock.rs`), and
 `ward x --clean` (`cleanup.rs`). It owns the one package-name and version

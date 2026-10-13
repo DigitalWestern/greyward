@@ -668,6 +668,20 @@ The next sync rebuilds affected environments or wheels once instead of reusing
 objects built under the older view. See [host-view limitations](LIMITATIONS.md)
 for the plugin allowlist and the remaining explicitly reachable host paths.
 
+A Node sync runs the install scripts of dependencies in the sandbox, but not
+the project's own. For the root npm runs `preinstall`, `install`,
+`postinstall`, `prepublish`, `preprepare`, `prepare` and `postprepare`, in
+that order. For each workspace member or linked directory it runs
+`preinstall`, `prepare`, `install` and `postinstall`. A directory with a
+`binding.gyp` and no `install` or `preinstall` script gets npm's default
+`install`, `node-gyp rebuild`. These would write the project's source,
+which no store object may hold. npm runs them on install,
+so each one the sync skips is recorded as a `project-script-skipped`
+exception (subject the directory, `.` for the root; detail the phase and its
+command). A policy that denies the kind refuses the sync, and `ward audit`
+counts it. To run one, run it after the sync: `ward run postinstall` runs
+the root's `postinstall` with the npm lifecycle environment.
+
 Debug builds that use the `GREYWARD_TEST_HOST_DEV_FILES` test fixture now refuse
 symlinked directories, including a symlinked fixture root, with refusal
 status 3. Copy those directories into the fixture. File symlinks remain

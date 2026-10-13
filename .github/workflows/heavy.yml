@@ -178,6 +178,36 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
 
+  # Pull requests only: a catalog the PR changes is checked against the
+  # base branch it merges into (#699). No release the base ships may be
+  # removed or changed, and every checked-in row, the added ones too, is
+  # verified against its upstream by tools/catalog.py, the way it was when
+  # it was generated. catalog_upstream in the e2e job re-checks only a
+  # sample of rows. A catalog the PR leaves alone costs no request, so this
+  # runs on every push rather than through `gate`.
+  catalog:
+    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The base commit the checked-out merge commit was made from.
+      - name: Fetch the base branch's catalogs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+      # tomllib needs Python 3.11; the runner has 3.10.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      # GH_TOKEN lifts the GitHub API rate limit for the release listings
+      # Ruby, Elixir and Python's catalogs are verified against.
+      - name: Changed catalogs, append-only and verified upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 tools/catalog.py --against "$BASE_SHA"
+
   # The ignored tests, in four shards on four runners at once: one runner
   # took about 50 minutes for them all. Within a shard, one test at a
   # time: tests that realize through a child hold

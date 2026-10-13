@@ -340,6 +340,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   it declares, and the declared sizes count against a budget (4 GiB for a wheel, 1 GiB for
   the rest) before anything is written. Modes follow pip: a file with any execute bit is
   0755, every other file 0644, and directory modes are ignored.
+- When a store path holds a space, tab or newline, or puts an environment's interpreter
+  past Linux's 256-byte `#!` limit, a wheel's own `#!python` script is installed unchanged
+  under its own name in a private `bin/.ward-scripts/` directory, and `bin/<name>` is a
+  `/bin/sh` wrapper that runs the interpreter on it. Its name in `sys.argv[0]` and
+  `__file__` is the shipped one, but `__file__`'s directory is the private one, so such a
+  script does not see data files placed beside it in `bin/`. Under an ordinary store path
+  the script is installed in `bin/` with its `#!` line rewritten, as pip does.
 
 ## Python
 

@@ -59,6 +59,14 @@ pub enum HostView {
     /// another does not. Programs keep every shared library they load at
     /// run time.
     RuntimeOnly,
+    /// The whole host filesystem, read-only, `/tmp` included, so a tool
+    /// sees every path an unconfined run of it would. Only for a tool from
+    /// the store that reads the project as data and runs none of its code
+    /// (npm's workspace member reader): no host socket scan can cover `/`,
+    /// so the trust is in the tool, and ward's signing keys are hidden.
+    /// Network, writes outside the declared roots, and the environment
+    /// stay confined as in every view.
+    WholeHost,
 }
 
 /// A sandboxed build, ecosystem-agnostic: tailors construct the spec — argv,
@@ -276,6 +284,15 @@ impl Sandbox<'_> {
              (allow file-read-metadata)\n\
              (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n",
         );
+        if self.host_view == HostView::WholeHost {
+            p.push_str("(allow file-read*)\n");
+            for key in hidden_keys() {
+                p.push_str(&format!(
+                    "(deny file-read* (literal {:?}))\n",
+                    key.display().to_string()
+                ));
+            }
+        }
         for r in &self.read {
             p.push_str(&format!(
                 "(allow file-read* (subpath {:?}))\n",
@@ -424,7 +441,12 @@ impl Sandbox<'_> {
         activity: Option<&StoreActivity>,
     ) -> io::Result<(Command, BwrapInvocation)> {
         let held = HeldRoots::resolve(self, cwd)?;
-        self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)?;
+        // The whole-host view shows every host socket through `/`, which
+        // no scan covers, so scanning the declared roots would protect
+        // nothing; that view's trust is in the tool (`HostView::WholeHost`).
+        if self.host_view != HostView::WholeHost {
+            self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)?;
+        }
         let bwrap = bwrap_preflight_with_activity(activity)?;
         let mut invocation = self.bwrap_args(cmd, env_path, tmp, cwd, envs, &held)?;
         let mut command = bwrap_command(bwrap)?;
@@ -552,9 +574,14 @@ impl Sandbox<'_> {
             OsString::from("--new-session"),
             OsString::from("--clearenv"),
         ];
-        args.extend(system_root_args(Path::new("/"))?);
+        let whole_host = self.host_view == HostView::WholeHost;
+        if whole_host {
+            push_bind(&mut args, "--ro-bind", "/", "/");
+        } else {
+            args.extend(system_root_args(Path::new("/"))?);
+        }
         let (skeleton, ld_cache) = match self.host_view {
-            HostView::Full => (None, None),
+            HostView::Full | HostView::WholeHost => (None, None),
             HostView::RuntimeOnly => {
                 let view = crate::kernel::hostview::runtime_only_mounts(&write)?;
                 args.extend(view.mounts);
@@ -571,6 +598,7 @@ impl Sandbox<'_> {
                     args.push(ld_cache.clone().into_os_string());
                     push_arg(&mut args, item);
                 }
+                _ if whole_host => {}
                 _ if Path::new(item).exists() => push_bind(&mut args, "--ro-bind", item, item),
                 _ => {}
             }
@@ -579,8 +607,10 @@ impl Sandbox<'_> {
         push_arg(&mut args, "/dev");
         push_arg(&mut args, "--proc");
         push_arg(&mut args, "/proc");
-        push_arg(&mut args, "--tmpfs");
-        push_arg(&mut args, "/tmp");
+        if !whole_host {
+            push_arg(&mut args, "--tmpfs");
+            push_arg(&mut args, "/tmp");
+        }
 
         let cwd_is_declared = read
             .iter()
@@ -601,6 +631,13 @@ impl Sandbox<'_> {
                 push_arg(&mut args, flag);
                 args.push(source.clone().into_os_string());
                 args.push(dest.clone().into_os_string());
+            }
+        }
+        if whole_host {
+            for key in hidden_keys() {
+                push_arg(&mut args, "--ro-bind");
+                push_arg(&mut args, "/dev/null");
+                args.push(key.into_os_string());
             }
         }
 
@@ -1391,6 +1428,23 @@ pub(crate) fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<Pat
         }
     }
     Ok(resolved)
+}
+
+/// Ward's signing keys as they really are on disk, for `HostView::WholeHost`
+/// to cover: each existing one, by its symlink-free path.
+fn hidden_keys() -> Vec<PathBuf> {
+    existing_keys(&crate::kernel::resolve::confine::signing_key_paths())
+}
+
+fn existing_keys(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut keys: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|key| fs::canonicalize(key).ok())
+        .filter(|key| key.is_file())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 pub(crate) fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
@@ -2760,6 +2814,57 @@ mod tests {
     /// root, then the fixed `/etc` entries, and no pkg-config override.
     /// `RuntimeOnly` is the same command line with the view mounted right
     /// after the system root and pkg-config's default directories cut off.
+    /// `WholeHost` binds `/` read-only first and keeps `/tmp` the host's;
+    /// scratch stays the only writable bind. A signing key is covered at
+    /// its symlink-free path, and only one that exists.
+    #[test]
+    fn whole_host_view_binds_the_root_read_only_and_hides_the_key() {
+        let root = temp_dir("whole-host-args");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let key = root.0.join("signing.key");
+        fs::write(&key, "secret").unwrap();
+        let link = root.0.join("key-link");
+        std::os::unix::fs::symlink(&key, &link).unwrap();
+        let canonical = fs::canonicalize(&key).unwrap();
+        assert_eq!(
+            existing_keys(&[link, key.clone(), root.0.join("missing.key")]),
+            [canonical]
+        );
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::WholeHost,
+        };
+        let args: Vec<String> = sandbox
+            .bwrap_args(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[],
+                &HeldRoots::default(),
+            )
+            .unwrap()
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let start = args.iter().position(|arg| arg == "--clearenv").unwrap() + 1;
+        assert_eq!(args[start..start + 3], ["--ro-bind", "/", "/"], "{args:?}");
+        assert!(
+            !args.windows(2).any(|pair| pair == ["--tmpfs", "/tmp"]),
+            "{args:?}"
+        );
+        let writable: Vec<&String> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--bind")
+            .map(|pair| &pair[1])
+            .collect();
+        let scratch = fs::canonicalize(&scratch).unwrap().display().to_string();
+        assert_eq!(writable, [&scratch], "{args:?}");
+    }
+
     #[test]
     fn full_view_args_are_unchanged_and_runtime_only_adds_the_view() {
         let root = temp_dir("view-args");

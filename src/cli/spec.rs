@@ -879,6 +879,8 @@ const ENVIRONMENT: &str = "\
 ENVIRONMENT:
   GREYWARD_STORE           store root (default ~/.greyward/store)
   GREYWARD_STRICT=1        refuse every policy exception, like 'ward --strict'
+                           (1, true, yes; 0, false, no or empty for none;
+                           any other value exits 2)
   GREYWARD_POLICY          policy file used instead of ~/.greyward/policy.toml
   GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color

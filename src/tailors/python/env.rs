@@ -26,6 +26,9 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+/// The schema `environment_identity` writes.
+pub(crate) const PYTHON_ENV_SCHEMA: &str = "python-env/3";
+
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
@@ -209,7 +212,7 @@ fn environment_identity_inner(
     agreeing(plan, selected)?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
-    inputs.insert("schema".to_string(), "python-env/3".to_string());
+    inputs.insert("schema".to_string(), PYTHON_ENV_SCHEMA.to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),
@@ -357,8 +360,11 @@ pub(crate) fn realize_env_at_depth(
     if let Some(cached) =
         ENV_FALLBACK_RECORDS.cached_object(store, activity, &identity, lookup_inputs)?
     {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
-        return Ok(store.object_path(&cached.id));
+        // An `object-meta/2` record a stricter policy cannot judge is
+        // realized again under the same id.
+        if crate::kernel::policy::check_cached_reusable(store, activity, &cached.id)? {
+            return Ok(store.object_path(&cached.id));
+        }
     }
 
     // Canonical package order + duplicate rejection: identity uses the same

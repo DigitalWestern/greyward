@@ -395,6 +395,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
+- **Two Node packages that claim one bin name: the first keeps it.** Each package's bins are
+  linked into the `.bin` of the `node_modules` that holds it, a nested package's into its
+  parent's, as npm links them, and an install script's PATH lists every `.bin` from its own
+  package outwards. When two packages in one `node_modules` claim the same name (playwright and
+  @playwright/test both ship `playwright`), the first in lock order keeps it, as with npm, and
+  the closure records `file-collision` for the link with both package paths.
 - **An optional Node dependency Greyward cannot verify is left out, and recorded.** An
   optional package with no integrity, a non-https tarball, or a local reference the lock cannot
   place is not installed, whichever of `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock`

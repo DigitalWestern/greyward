@@ -582,27 +582,43 @@ pub(crate) fn env_package_path(staged: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn env_node_modules_path(staged: &Path, path: &str) -> PathBuf {
-    match workspace_path(path) {
-        Some((workspace, _)) => staged
-            .join("workspaces")
-            .join(encode_workspace_path(workspace))
-            .join("node_modules"),
-        None => staged.join("node_modules"),
-    }
-}
-
 fn importer_relative_path(path: &str) -> &str {
     workspace_path(path)
         .map(|(_, relative)| relative)
         .unwrap_or(path)
 }
 
-fn is_importer_top_level(path: &str) -> bool {
-    importer_relative_path(path)
-        .matches("node_modules/")
-        .count()
-        == 1
+/// The regular files under a `directories.bin` folder, relative to it,
+/// in path order, as npm's `**` glob finds them: every depth, and no name
+/// that starts with a dot (a `.gitkeep`, a `.hidden/` folder) at any
+/// level. Symlinks are not followed. npm keys each by its basename, the
+/// last one it meets winning; its glob order is the filesystem's, so ward
+/// takes path order, the same on every machine.
+fn bin_directory_files(bin_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(relative) = stack.pop() {
+        let entries = match fs::read_dir(bin_dir.join(&relative)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_name().as_encoded_bytes().starts_with(b".") {
+                continue;
+            }
+            let path = relative.join(entry.file_name());
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn normalized_bin_path(path: &str) -> io::Result<PathBuf> {
@@ -625,6 +641,30 @@ fn normalized_bin_path(path: &str) -> io::Result<PathBuf> {
         return Err(err(format!("unsafe bin target {path:?}")));
     }
     Ok(normalized)
+}
+
+/// The package directory inside the realized git checkout `object`: the
+/// subdirectory `source` names, or the checkout itself. One rule for the
+/// placement and for the native classification, so a `binding.gyp` is
+/// looked for where the package is. The subdirectory must be plain names.
+pub(super) fn git_package_root(
+    object: &Path,
+    source: &crate::kernel::gitsrc::GitSource,
+) -> io::Result<PathBuf> {
+    let Some(subdir) = &source.subdirectory else {
+        return Ok(object.to_path_buf());
+    };
+    let relative = Path::new(subdir);
+    let plain = !subdir.is_empty()
+        && relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !plain {
+        return Err(err(format!(
+            "git subdirectory {subdir:?} is not a plain path inside the repository"
+        )));
+    }
+    Ok(object.join(relative))
 }
 
 /// Read npm's normalized bin forms from an extracted package. Lockfile bin
@@ -656,39 +696,21 @@ pub(crate) fn discover_package_bins(
                 return Ok(bins);
             };
             let directory = normalized_bin_path(directory)?;
-            let bin_dir = package_dir.join(&directory);
-            let entries = match fs::read_dir(&bin_dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(bins),
-                Err(error) => return Err(error),
-            };
-            let mut names = Vec::new();
-            for entry in entries {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    names.push((name, directory.join(entry.file_name())));
-                }
+            let mut found = BTreeMap::new();
+            for file in bin_directory_files(&package_dir.join(&directory))? {
+                let name = file
+                    .file_name()
+                    .expect("a walked file has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                let path = directory.join(&file).to_string_lossy().replace('\\', "/");
+                found.insert(name, path);
             }
-            names.sort_by(|a, b| a.0.cmp(&b.0));
-            bins.extend(
-                names
-                    .into_iter()
-                    .map(|(name, path)| (name, path.to_string_lossy().replace('\\', "/"))),
-            );
+            bins.extend(found);
         }
     }
     bins.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(bins)
-}
-
-fn bin_link_target(path: &str, bin: &str) -> PathBuf {
-    Path::new("..").join(
-        Path::new(importer_relative_path(path))
-            .strip_prefix("node_modules/")
-            .unwrap_or_else(|_| Path::new(importer_relative_path(path)))
-            .join(bin),
-    )
 }
 
 /// A project-declared build input: a URL + sha256 that ward prefetches
@@ -2221,6 +2243,46 @@ mod tests {
             discover_package_bins(r#"{"directories":{"bin":"cli"}}"#, "tool", &dir).unwrap(),
             vec![("a".into(), "cli/a".into()), ("b".into(), "cli/b".into())]
         );
+
+        // npm's `**` glob (#695): a dotfile is skipped, not refused, at any
+        // depth, and a file in a subdirectory is a bin keyed by its name.
+        fs::write(dir.join("cli/.gitkeep"), "").unwrap();
+        fs::create_dir_all(dir.join("cli/sub")).unwrap();
+        fs::write(dir.join("cli/sub/c"), "c").unwrap();
+        fs::create_dir_all(dir.join("cli/.hidden")).unwrap();
+        fs::write(dir.join("cli/.hidden/d"), "d").unwrap();
+        assert_eq!(
+            discover_package_bins(r#"{"directories":{"bin":"./cli"}}"#, "tool", &dir).unwrap(),
+            vec![
+                ("a".into(), "cli/a".into()),
+                ("b".into(), "cli/b".into()),
+                ("c".into(), "cli/sub/c".into()),
+            ]
+        );
+    }
+
+    /// A git dependency's package is the subdirectory its source names:
+    /// the placement and the native classification both look there.
+    #[test]
+    fn a_git_package_root_is_the_named_subdirectory_and_only_a_plain_one() {
+        let object = Path::new("/store/objects/abc");
+        let source = |subdirectory: Option<&str>| crate::kernel::gitsrc::GitSource {
+            url: "https://example.invalid/repo.git".into(),
+            commit: "a".repeat(40),
+            subdirectory: subdirectory.map(str::to_string),
+        };
+        assert_eq!(git_package_root(object, &source(None)).unwrap(), object);
+        assert_eq!(
+            git_package_root(object, &source(Some("packages/addon"))).unwrap(),
+            object.join("packages/addon")
+        );
+        for bad in ["", "../x", "/abs", "a/../../b", "./a"] {
+            let error = git_package_root(object, &source(Some(bad))).unwrap_err();
+            assert!(
+                error.to_string().contains("not a plain path"),
+                "{bad}: {error}"
+            );
+        }
     }
 
     #[test]

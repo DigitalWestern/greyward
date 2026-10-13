@@ -1142,17 +1142,32 @@ pub fn isolation_doctor(store: DoctorStore) -> io::Result<Vec<Check>> {
 
 /// Which policy sources are in force, in the order they are consulted.
 fn policy_check(project: Option<&ProjectRoot>, checks: &mut Vec<Check>) {
-    let strict = std::env::var("GREYWARD_STRICT").as_deref() == Ok("1");
-    let policy_file = std::env::var_os("GREYWARD_POLICY")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| Path::new(&home).join(".greyward/policy.toml"))
-                .filter(|path| path.is_file())
-        });
+    // What a load would refuse is a failed check, not a permissive policy:
+    // an unknown GREYWARD_STRICT value, or a HOME the default machine
+    // policy cannot be found under (#681).
+    let strict = match crate::kernel::policy::env_strict() {
+        Ok(strict) => strict,
+        Err(message) => {
+            checks.push(check("policy", Level::Fail, message));
+            return;
+        }
+    };
+    let policy_file = match std::env::var_os("GREYWARD_POLICY") {
+        Some(path) => Some(PathBuf::from(path)),
+        None => match crate::kernel::policy::machine_policy_path() {
+            Ok(path) => fs::symlink_metadata(&path).is_ok().then_some(path),
+            Err(error) => {
+                checks.push(check("policy", Level::Fail, error.to_string()));
+                return;
+            }
+        },
+    };
     let mut policy = Vec::new();
     if strict {
-        policy.push("GREYWARD_STRICT=1".to_string());
+        policy.push(format!(
+            "GREYWARD_STRICT={}",
+            std::env::var("GREYWARD_STRICT").unwrap_or_default().trim()
+        ));
     }
     if let Some(path) = policy_file {
         policy.push(path.display().to_string());
@@ -2366,6 +2381,7 @@ mod tests {
         let temp = TempDir::named("doctor-refused");
         let root = temp.0.join("store");
         fs::create_dir_all(root.join("objects")).unwrap();
+        fs::write(root.join("activity.lock"), b"").unwrap();
         let error = Store::open_at(&root).unwrap_err();
         let mut checks = Vec::new();
         store_checks(Err(&error), &mut checks);

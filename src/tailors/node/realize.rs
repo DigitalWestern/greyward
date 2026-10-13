@@ -964,7 +964,11 @@ pub(super) enum LifecycleFailure {
 pub(super) fn classify_lifecycle_result(result: io::Result<()>) -> Result<(), LifecycleFailure> {
     match result {
         Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+        // A sandbox that could not be set up ran no script (#679).
+        Err(error)
+            if error.kind() == io::ErrorKind::Unsupported
+                || crate::kernel::error::is_sandbox_setup(&error) =>
+        {
             Err(LifecycleFailure::SandboxUnavailable(error))
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -1588,9 +1592,9 @@ mod tests {
             workspaces: Vec::new(),
             lock_source: "package-lock.json".into(),
         };
-        // Three bubblewrap arguments each (`--setenv K V`): well past the
+        // One argument each (`K=V`, for /usr/bin/env): past the
         // limit bubblewrap accepts.
-        let envs: Vec<(String, String)> = (0..4000)
+        let envs: Vec<(String, String)> = (0..9000)
             .map(|i| (format!("GREYWARD_FILL_{i}"), "x".to_string()))
             .collect();
         let tmp_snapshot = temp.0.join("tmp-snapshot");

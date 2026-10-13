@@ -32,8 +32,10 @@
 //! `local_output`, which refuse a dependency tool (it goes through
 //! `kernel::resolve`'s door).
 
+mod capture;
 mod cleanup;
 mod pipes;
+pub(crate) use capture::Capture;
 pub(crate) use cleanup::during_cleanup;
 
 use crate::kernel::activity::StoreActivity;
@@ -1019,14 +1021,21 @@ fn status_relayed(
     secrets: &[Vec<u8>],
 ) -> io::Result<(ExitStatus, Vec<u8>)> {
     let _ = activity.mode();
-    let session = Session::new()?;
+    // A session or engine that could not be started ran nothing: for the
+    // sandbox engines this form starts, a sandbox that could not be set
+    // up, never a failed build (#679). A spawn the command's own arguments
+    // made fail (`error::sandbox_spawn`), and every error once the child
+    // runs, stay unmarked.
+    let session = Session::new().map_err(crate::kernel::error::sandbox_setup)?;
     session.reject_pending_before_spawn()?;
     session.prepare_child(command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut child = command
+        .spawn()
+        .map_err(crate::kernel::error::sandbox_spawn)?;
     if let Err(error) = session.publish_child(&child) {
         reap_after_error(&mut child);
         return Err(error);
@@ -1274,10 +1283,9 @@ fn relay(
     keep: usize,
     deadline: &std::sync::OnceLock<std::time::Instant>,
 ) -> io::Result<(Vec<u8>, bool)> {
-    let mut kept = Vec::new();
+    let mut kept = Capture::new(keep);
     let mut pass_on = |bytes: Vec<u8>| {
-        let room = keep.saturating_sub(kept.len()).min(bytes.len());
-        kept.extend_from_slice(&bytes[..room]);
+        kept.push(&bytes);
         sink.write(&bytes);
     };
     let mut buffer = [0u8; 16 * 1024];
@@ -1304,7 +1312,7 @@ fn relay(
         }
     };
     pass_on(scrubber.finish());
-    result.map(|stopped| (kept, stopped))
+    result.map(|stopped| (kept.finish(), stopped))
 }
 
 /// Spawn a command, drain captured stdout/stderr without waiting on a full
@@ -1668,8 +1676,9 @@ mod tests {
         let (status, stdout, stderr, prefix) = receiver
             .recv_timeout(limit)
             .expect("the relayed child did not finish in time");
-        assert_eq!(prefix.len(), stderr.len().min(CLASSIFIER_PREFIX));
-        assert_eq!(prefix, stderr[..prefix.len()]);
+        let head = stderr.len().min(CLASSIFIER_PREFIX);
+        assert_eq!(prefix[..head], stderr[..head]);
+        assert_eq!(prefix.len() == head, stderr.len() == head);
         (status, stdout, stderr)
     }
 

@@ -18,27 +18,29 @@
 #      the repository's tag names);
 #   3. signs each archive (Ed25519 over its bytes, one line of base64 in
 #      <archive>.sig) and checks the signature;
-#   4. when the release is to be the latest one, writes LATEST, the one
-#      line <tag>, and signs it the same way;
-#   5. uploads the .sig files, and LATEST and LATEST.sig when written;
-#   6. publishes the release when it is still a draft, marked latest only
-#      when it is to be the latest one.
+#   4. uploads the .sig files, and publishes the release when it is still
+#      a draft, never marked latest;
+#   5. reconciles the latest release (below).
+#
+#   tools/release-sign.sh --reconcile-latest   step 5 alone
 #
 # LATEST is how install.sh finds the latest release: it downloads
 # releases/latest/download/LATEST, which GitHub redirects to the LATEST of
 # whichever release is latest, checks LATEST.sig, and installs that tag.
-# A release is to be the latest one when it is no pre-release and its tag
-# is the highest SemVer 2.0 version among the published releases that are
-# no pre-release (install.sh's own comparison). Only that release gets a
-# LATEST and GitHub's latest mark, so signing an older release (v0.1.0 after
-# v0.2.0) moves nothing back. A latest release without LATEST is one
-# install.sh refuses to resolve.
+# Reconciling makes the latest release the one with the highest SemVer 2.0
+# tag (install.sh's own comparison) among every release that is published,
+# no pre-release and signed, whatever order they were created or signed in,
+# and makes it the only release that carries LATEST and LATEST.sig (the
+# one line <tag>, signed like the archives). It runs under a lock and is
+# idempotent: signing v0.1.0 after v0.2.0, or both at once, leaves v0.2.0
+# the latest. A latest release without LATEST is one install.sh refuses to
+# resolve.
 #
 # A release published before signing existed (v0.1.0, v0.2.0) has no
 # attestation: `--without-attestation` signs it on its .sha256 alone, after
-# its archives were checked some other way. A release that already carries a
-# .sig, or a LATEST, is refused: nothing is ever replaced. It gets a
-# LATEST like any other release that is to be the latest one.
+# its archives were checked some other way, and then reconciles like any
+# other run. A release that already carries a .sig, or a LATEST, is
+# refused: nothing is ever replaced.
 #
 #   tools/release-sign.sh --sign <file>...   write <file>.sig only, offline
 #                                            (tests/install.sh uses it)
@@ -71,9 +73,10 @@ mode=release
 case "${1:-}" in
     --sign) mode=sign; shift ;;
     --without-attestation) attest=0; shift ;;
+    --reconcile-latest) mode=reconcile; shift ;;
     -h | --help | "") usage ;;
 esac
-[ "$#" -ge 1 ] || usage
+[ "$#" -ge 1 ] || [ "$mode" = reconcile ] || usage
 command -v openssl >/dev/null || die "needs openssl (3.0 or newer)"
 
 # --- the key ----------------------------------------------------------------
@@ -113,6 +116,93 @@ sign_file() {
     say "signed $(basename "$1")"
 }
 
+# The same grammar and precedence install.sh holds a LATEST to, read out
+# of install.sh.
+eval "$(sed -n '/^# >>> semver/,/^# <<< semver/p' "$ROOT/install.sh")"
+
+# --- the latest release -------------------------------------------------------
+# Make GitHub's latest release, and its LATEST, the highest SemVer 2.0 tag
+# among the releases that are published, no pre-release, and signed (they
+# carry a greyward-*.tar.gz.sig: install.sh installs nothing else). Every
+# release is listed through the API, page by page, so neither a count nor
+# the order releases were created in decides anything. That release gets
+# LATEST and LATEST.sig (written again only when they are not already its
+# tag under a valid signature) and GitHub's latest mark; every other
+# release loses any LATEST it carries. A lock under the user's runtime (or
+# cache) directory keeps two runs from interleaving, and running it again
+# changes nothing, so a run cut short is finished by
+# `tools/release-sign.sh --reconcile-latest`.
+reconcile_latest() {
+    local lock_dir="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}"
+    mkdir -p "$lock_dir"
+    exec 9>"$lock_dir/greyward-release-sign.lock"
+    if command -v flock >/dev/null; then
+        flock 9
+    else
+        # No flock (macOS): a directory is created atomically or not at all.
+        until mkdir "$lock_dir/greyward-release-sign.lock.d" 2>/dev/null; do sleep 1; done
+        trap 'rm -rf "$work"; rmdir "$lock_dir/greyward-release-sign.lock.d" 2>/dev/null' EXIT
+    fi
+    # One line per release, `release <tag> <draft> <prerelease> <signed>`,
+    # and one per LATEST asset, `asset <tag> <name>`.
+    local listing
+    listing="$(gh api --paginate "repos/$REPO/releases?per_page=100" --jq '.[] |
+        ("release \(.tag_name) \(.draft) \(.prerelease) \([.assets[].name | select(startswith("greyward-") and endswith(".tar.gz.sig"))] | length > 0)"),
+        (.tag_name as $t | .assets[] | select(.name == "LATEST" or .name == "LATEST.sig") | "asset \($t) \(.name)")')" \
+        || die "cannot list the releases of $REPO"
+    local top="" kind name draft prerelease signed
+    while read -r kind name draft prerelease signed; do
+        [ "$kind" = release ] && [ "$draft" = false ] && [ "$prerelease" = false ] || continue
+        if [ "$signed" != true ]; then
+            say "release $name carries no signature, so it is never the latest one"
+            continue
+        fi
+        if ! [[ "$name" == v* ]] || ! semver_valid "$name"; then
+            say "ignoring release $name: its tag is no v<SemVer 2.0 version>"
+            continue
+        fi
+        if [ -z "$top" ] || [ "$(semver_cmp "$name" "$top")" = 1 ]; then top="$name"; fi
+    done <<<"$listing"
+    [ -n "$top" ] || { say "no published, signed release yet: nothing is the latest one"; return 0; }
+
+    # LATEST on the latest release: kept when it already says $top under a
+    # valid signature, written otherwise.
+    mkdir -p "$work/latest"
+    rm -f "$work/latest/"*
+    if grep -qx "asset $top LATEST" <<<"$listing" && grep -qx "asset $top LATEST.sig" <<<"$listing"; then
+        gh release download "$top" --repo "$REPO" --dir "$work/latest" --pattern LATEST --pattern LATEST.sig
+    fi
+    if [ -f "$work/latest/LATEST" ] && [ "$(cat "$work/latest/LATEST")" = "$top" ] \
+        && [ "$(wc -l <"$work/latest/LATEST")" = 1 ] \
+        && openssl base64 -d -A -in "$work/latest/LATEST.sig" -out "$work/latest/sig.bin" 2>/dev/null \
+        && openssl pkeyutl -verify -pubin -keyform DER -inkey "$work/public.der" -rawin \
+            -in "$work/latest/LATEST" -sigfile "$work/latest/sig.bin" >/dev/null 2>&1; then
+        say "$top already carries its LATEST"
+    else
+        rm -f "$work/latest/"*
+        printf '%s\n' "$top" >"$work/latest/LATEST"
+        sign_file "$work/latest/LATEST"
+        gh release upload "$top" --repo "$REPO" --clobber "$work/latest/LATEST" "$work/latest/LATEST.sig"
+    fi
+    if [ "$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || true)" != "$top" ]; then
+        gh release edit "$top" --repo "$REPO" --latest
+    fi
+    # Then, and only then, no other release names itself the latest.
+    local tag_of
+    while read -r kind tag_of name _; do
+        [ "$kind" = asset ] && [ "$tag_of" != "$top" ] || continue
+        gh release delete-asset "$tag_of" "$name" --repo "$REPO" --yes
+        say "removed $name from $tag_of"
+    done <<<"$listing"
+    say "$top is the latest release, and the only one with a LATEST"
+}
+
+if [ "$mode" = reconcile ]; then
+    command -v gh >/dev/null || die "needs gh, signed in with write access to $REPO"
+    reconcile_latest
+    exit 0
+fi
+
 if [ "$mode" = sign ]; then
     for file in "$@"; do
         [ -f "$file" ] || die "$file is not a file"
@@ -125,8 +215,6 @@ fi
 # --- a release ----------------------------------------------------------------
 [ "$#" = 1 ] || usage
 tag="$1"
-# The same grammar install.sh holds a LATEST to, read out of install.sh.
-eval "$(sed -n '/^# >>> semver/,/^# <<< semver/p' "$ROOT/install.sh")"
 [[ "$tag" == v* ]] && semver_valid "$tag" \
     || die "'$tag' is not a release tag (v<SemVer 2.0 version>)"
 command -v gh >/dev/null || die "needs gh, signed in with write access to $REPO"
@@ -171,45 +259,13 @@ while read -r archive; do
     sign_file "$file"
 done <<<"$archives"
 
-# Whether this release is to be the latest one: no pre-release, and no
-# published release that is no pre-release has a tag as high or higher.
-latest=1
-if [ "$(gh release view "$tag" --repo "$REPO" --json isPrerelease -q .isPrerelease)" = true ]; then
-    latest=0
-    say "$tag is a pre-release: it gets no LATEST and is not marked latest"
-fi
-published="$(gh release list --repo "$REPO" --limit 1000 --json tagName,isDraft,isPrerelease \
-    -q '.[] | select((.isDraft | not) and (.isPrerelease | not)) | .tagName')" \
-    || die "cannot list the releases of $REPO"
-while read -r other; do
-    [ -n "$other" ] && [ "$other" != "$tag" ] || continue
-    order="$(semver_cmp "$tag" "$other")"
-    case "$order" in
-        1) ;;
-        bad) say "ignoring release $other: its tag is no SemVer 2.0 version" ;;
-        *)
-            [ "$latest" = 0 ] || say "$other is as new or newer: $tag gets no LATEST and is not marked latest"
-            latest=0
-            ;;
-    esac
-done <<<"$published"
 
-uploads=("$work"/assets/*.sig)
-if [ "$latest" = 1 ]; then
-    printf '%s\n' "$tag" >"$work/assets/LATEST"
-    sign_file "$work/assets/LATEST"
-    uploads+=("$work/assets/LATEST" "$work/assets/LATEST.sig")
-fi
-gh release upload "$tag" --repo "$REPO" "${uploads[@]}"
-if [ "$latest" = 1 ]; then mark=--latest; else mark=--latest=false; fi
+# Published, and never marked latest here: which release is the latest one
+# is decided once every signing run is done, by reconcile_latest.
+gh release upload "$tag" --repo "$REPO" "$work"/assets/*.sig
 if [ "$(gh release view "$tag" --repo "$REPO" --json isDraft -q .isDraft)" = true ]; then
-    gh release edit "$tag" --repo "$REPO" --draft=false "$mark"
-    say "published $tag ($mark)"
-elif [ "$latest" = 1 ]; then
-    gh release edit "$tag" --repo "$REPO" --latest
+    gh release edit "$tag" --repo "$REPO" --draft=false --latest=false
+    say "published $tag"
 fi
-if [ "$latest" = 1 ]; then
-    say "done: every archive of $tag, and its LATEST, is signed by $public; $tag is the latest release"
-else
-    say "done: every archive of $tag is signed by $public"
-fi
+say "every archive of $tag is signed by $public"
+reconcile_latest

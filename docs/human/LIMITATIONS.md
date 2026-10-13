@@ -139,8 +139,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the commit the repository's tag points at, so an older release's archive uploaded into a
   new draft is not signed. Each installer also requires the binary to report the release's
   own version, and only a named version replaces a newer ward. `install.sh` finds the
-  latest release in the signed `LATEST` asset that `tools/release-sign.sh` uploads with
-  every release (one line, the tag), so a writer of releases can point it only at a
+  latest release in the signed `LATEST` asset (one line, the tag) that
+  `tools/release-sign.sh` keeps on the highest signed stable release only, and marks
+  that release GitHub's latest. A writer of releases can point it only at a
   release the key signed: an older one installs on a machine with no ward, and the
   downgrade check refuses it over a newer one. Without curl, `install.sh` leaves the
   redirect to wget: busybox wget reads a relative `Location` as a host name, so behind a

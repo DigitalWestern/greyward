@@ -199,21 +199,27 @@ run_version() {
     fi
 }
 probe_version() { run_version "$1" || true; }
-# version_of <path>: its --version output, every byte, in version_out (a
-# command substitution alone drops trailing newlines, so a sentinel byte
-# keeps them), and its exit status. Then, when that output is exactly one
-# version line and its newline, the line in version_seen; else it is empty.
+# version_of <path>: its --version output in version_out, and its exit
+# status. The output goes to a file first, every byte of it: a command
+# substitution would drop trailing newlines and NUL bytes. Over 512 bytes,
+# or holding a NUL, it is no version. Otherwise, when it is exactly one
+# version line and its newline, the line goes in version_seen; else that is
+# empty. Needs $tmp.
 NL='
 '
 version_of() {
-    version_out="$(
-        run_version "$1"
-        _vo_status=$?
-        printf x
-        exit "$_vo_status"
-    )" && _vo_status=0 || _vo_status=$?
-    version_out="${version_out%x}"
+    _vo_file="$tmp/version-output"
+    _vo_status=0
+    run_version "$1" >"$_vo_file" || _vo_status=$?
     version_seen=""
+    _vo_bytes="$(wc -c <"$_vo_file")"
+    if [ "$((_vo_bytes))" -gt 512 ] || ! tr -d '\000' <"$_vo_file" | cmp -s - "$_vo_file"; then
+        # Shown, never read: its first bytes without the NULs.
+        version_out="$(dd if="$_vo_file" bs=80 count=1 2>/dev/null | tr -d '\000')"
+        return "$_vo_status"
+    fi
+    version_out="$(cat "$_vo_file"; printf x)"
+    version_out="${version_out%x}"
     case "$version_out" in
         *"$NL") version_line "${version_out%"$NL"}" && version_seen="${version_out%"$NL"}" ;;
     esac

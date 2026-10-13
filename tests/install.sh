@@ -457,9 +457,10 @@ check "says --version failed"             grep -Fq "'--version' failed" <<<"$out
 check "the old ward is untouched"         test "$("$H/.local/bin/ward" --version)" = "ward 0.0.1-old"
 # The tag's version line, then a second line or a blank one: the release's
 # binary is held to the same one line as an installed ward.
-for extra in 'ward 99.0.0 (2222222 2026-10-14)' ''; do
+# Or a NUL byte, which a command substitution would drop.
+for extra in 'ward 99.0.0 (2222222 2026-10-14)\n' '\n' '\000'; do
     mkdir -p "$WORK/extra"
-    printf '#!/bin/sh\nprintf "ward %s (abc1234 2026-10-13)\\n%s\\n"\n' "$TEST_VERSION" "$extra" > "$WORK/extra/ward"
+    printf '#!/bin/sh\nprintf "ward %s (abc1234 2026-10-13)\\n%s"\n' "$TEST_VERSION" "$extra" > "$WORK/extra/ward"
     chmod 755 "$WORK/extra/ward"
     publish_asset "$WORK/extra"
     out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
@@ -564,7 +565,7 @@ n=0
 for body in 'echo "ward banana"' 'echo "ward 0.2.0+build..7"' 'echo "ward 0.2.0+"' \
     'exit 0' 'exit 1' 'echo "ward 0.2.0"; exit 1' 'echo "something else 9.9.9"' 'exec sleep 30' \
     'echo "ward 0.0.1"; echo "ward 99.0.0"' 'echo "ward 0.0.1 and more"' "echo \"ward 1.0.0-$long\"" \
-    'printf "ward 0.0.1\n\n"' 'printf "ward 0.0.1"'; do
+    'printf "ward 0.0.1\n\n"' 'printf "ward 0.0.1"' 'printf "ward 0.0.1\n\000"' 'printf "\000ward 0.0.1\n"'; do
     n=$((n+1))
     label="${body:0:60}"
     H="$WORK/h-unparseable-$n"
@@ -656,31 +657,76 @@ latest_case nosig "$TEST_TAG\n"
 rm -f "$WORK/release/l-nosig/LATEST.sig"
 latest_refused "a LATEST with no .sig" nosig "has no signature next to it"
 
-echo "== 28. release-sign.sh signs only what the tag's own commit built"
-# A stand-in for gh: the release's assets in a directory, and an attestation
-# that records the ref and commit the archive was built from. Like gh, it
-# checks --source-ref and --source-digest only when they are passed.
+echo "== 28. release-sign.sh signs only what the tag's own commit built, and reconciles latest"
+# A stand-in for gh. Each release is a directory under rel/<tag>/ (draft,
+# prerelease, assets/), listed newest first in `order`; `latest` is
+# GitHub's latest mark; `extra-drafts` puts that many drafts before them in
+# the API listing. `api --paginate` serves the listing 100 to a page and
+# runs the caller's --jq on each, as gh does (with jq). The attestation
+# records the ref and commit the archive was built from, and like gh it is
+# checked against --source-ref and --source-digest only when they are passed.
 FAKE="$WORK/fake-gh"
-mkdir -p "$FAKE/bin" "$FAKE/assets" "$FAKE/uploaded"
+mkdir -p "$FAKE/bin"
 cat > "$FAKE/bin/gh" <<'GH'
 #!/bin/bash
 set -euo pipefail
 state="$FAKE_GH"
 echo "$*" >> "$state/calls"
+flag() { local want="$1" prev=""; shift; for a in "$@"; do [ "$prev" = "$want" ] && { printf '%s' "$a"; return; }; prev="$a"; done; }
 case "$1 $2" in
     "release view")
         case "$*" in
-            *"--json assets"*) command ls "$state/assets" ;;
-            *"--json isDraft"*) cat "$state/draft" 2>/dev/null || echo true ;;
-            *"--json isPrerelease"*) cat "$state/prerelease" 2>/dev/null || echo false ;;
+            *"--json assets"*) command ls "$state/rel/$3/assets" ;;
+            *"--json isDraft"*) cat "$state/rel/$3/draft" ;;
         esac ;;
-    "release list") cat "$state/published" 2>/dev/null || true ;;
     "release download")
-        dir=""; prev=""
-        for arg in "$@"; do [ "$prev" = --dir ] && dir="$arg"; prev="$arg"; done
-        cp "$state"/assets/* "$dir"/ ;;
-    "release upload") shift 5; cp "$@" "$state/uploaded/" ;;
-    "release edit") ;;
+        rel="$3"; dir="$(flag --dir "$@")"; patterns=(); prev=""
+        for a in "$@"; do [ "$prev" = --pattern ] && patterns+=("$a"); prev="$a"; done
+        for f in "$state/rel/$rel/assets"/*; do
+            for p in "${patterns[@]}"; do
+                # shellcheck disable=SC2053 # the pattern is a glob on purpose
+                [[ "${f##*/}" == $p ]] && cp "$f" "$dir/"
+            done
+        done ;;
+    "release upload")
+        rel="$3"; clobber=0; shift 5
+        for f in "$@"; do
+            [ "$f" = --clobber ] && { clobber=1; continue; }
+            if [ -e "$state/rel/$rel/assets/${f##*/}" ] && [ "$clobber" = 0 ]; then
+                echo "asset ${f##*/} exists" >&2; exit 1
+            fi
+            cp "$f" "$state/rel/$rel/assets/"
+        done ;;
+    "release edit")
+        for a in "$@"; do
+            case "$a" in
+                --draft=false) echo false > "$state/rel/$3/draft" ;;
+                --latest) echo "$3" > "$state/latest" ;;
+            esac
+        done ;;
+    "release delete-asset") rm "$state/rel/$3/assets/$4" ;;
+    "api "*)
+        case "$*" in
+            *"releases/latest"*) cat "$state/latest" 2>/dev/null || exit 1 ;;
+            *--paginate*)
+                filter="$(flag --jq "$@")"
+                {
+                    for _ in $(seq 1 "$(cat "$state/extra-drafts" 2>/dev/null || echo 0)"); do
+                        echo '{"tag_name":"untitled","draft":true,"prerelease":false,"assets":[]}'
+                    done
+                    while read -r rel; do
+                        jq -cn --arg t "$rel" --arg d "$(cat "$state/rel/$rel/draft")" \
+                            --arg p "$(cat "$state/rel/$rel/prerelease")" \
+                            --args '{tag_name:$t, draft:($d=="true"), prerelease:($p=="true"),
+                                     assets:[$ARGS.positional[] | {name:.}]}' \
+                            $(command ls "$state/rel/$rel/assets")
+                    done < "$state/order"
+                } > "$state/listing"
+                split -l 100 "$state/listing" "$state/page."
+                for page in "$state"/page.*; do jq -s -r "$filter" "$page"; done
+                rm -f "$state"/page.* ;;
+            *) echo "fake gh: unexpected: $*" >&2; exit 1 ;;
+        esac ;;
     "attestation verify")
         read -r built_ref built_commit < "$state/provenance"
         prev=""
@@ -703,94 +749,135 @@ old_commit="$(git -C "$REMOTE" rev-parse HEAD)"
 gitc commit -q --allow-empty -m new
 gitc tag -a -m "release" v0.1.0
 new_commit="$(git -C "$REMOTE" rev-parse HEAD)"
-cp "$WORK/release/$asset" "$WORK/release/$asset.sha256" "$FAKE/assets/"
-sign_release() { # [--without-attestation] TAG
-    PATH="$FAKE/bin:$PATH" FAKE_GH="$FAKE" GREYWARD_RELEASE_REMOTE="$REMOTE" \
+gitc tag v0.2.0
+sign_release() { # [--without-attestation | --reconcile-latest] [TAG]
+    PATH="$FAKE/bin:$PATH" FAKE_GH="$FAKE" GREYWARD_RELEASE_REMOTE="$REMOTE" XDG_RUNTIME_DIR="$FAKE/run" \
         GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
         "$ROOT/tools/release-sign.sh" "$@"
 }
+# fake_reset, then release TAG DRAFT PRERELEASE [signed] [latest]: each
+# release carries the archive and its .sha256; `signed` adds a .sig, and
+# `latest` a validly signed LATEST naming it and GitHub's latest mark.
+fake_reset() { rm -rf "$FAKE/rel" "$FAKE/run" "$FAKE"/{order,latest,calls,extra-drafts}; mkdir -p "$FAKE/rel" "$FAKE/run"; : > "$FAKE/order"; }
+release() {
+    local tag="$1" dir="$FAKE/rel/$1"
+    mkdir -p "$dir/assets"
+    echo "$2" > "$dir/draft"; echo "$3" > "$dir/prerelease"
+    cp "$WORK/release/$asset" "$WORK/release/$asset.sha256" "$dir/assets/"
+    case " ${*:4} " in *" signed "*) cp "$WORK/release/$asset.sig" "$dir/assets/" ;; esac
+    case " ${*:4} " in *" latest "*)
+        printf '%s\n' "$tag" > "$dir/assets/LATEST"
+        GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
+            "$ROOT/tools/release-sign.sh" --sign "$dir/assets/LATEST" 2>/dev/null
+        echo "$tag" > "$FAKE/latest" ;;
+    esac
+    { echo "$tag"; cat "$FAKE/order"; } > "$FAKE/order.new"; mv "$FAKE/order.new" "$FAKE/order"
+}
+has_latest() { test "$(cat "$FAKE/rel/$1/assets/LATEST" 2>/dev/null)" = "$1" -a -s "$FAKE/rel/$1/assets/LATEST.sig"; }
+no_latest() { test ! -e "$FAKE/rel/$1/assets/LATEST" -a ! -e "$FAKE/rel/$1/assets/LATEST.sig"; }
+is_latest() { test "$(cat "$FAKE/latest" 2>/dev/null)" = "$1"; }
+if ! command -v jq >/dev/null 2>&1; then
+    echo "  skip: no jq here for the stand-in gh"
+else
 # An older tag's attested archive, uploaded into the new release.
+fake_reset; release v0.1.0 true false
 echo "refs/tags/v0.0.9 $old_commit" > "$FAKE/provenance"
 out="$(sign_release v0.1.0 2>&1)" \
     && bad "release-sign.sh signed another tag's build" || ok "release-sign.sh refused another tag's build"
 check "says which tag and commit it wanted" grep -Fq "for tag v0.1.0 at $new_commit" <<<"$out"
-check "nothing uploaded (another build)"  test -z "$(command ls "$FAKE/uploaded")"
+check "nothing uploaded (another build)"  test ! -e "$FAKE/rel/v0.1.0/assets/$asset.sig"
 # A tag the repository does not have.
-out="$(sign_release v0.2.0 2>&1)" \
+fake_reset; release v0.3.0 true false
+out="$(sign_release v0.3.0 2>&1)" \
     && bad "release-sign.sh signed a release with no tag" || ok "release-sign.sh refused a release with no tag"
-check "says the tag is missing"           grep -Fq "has no tag v0.2.0" <<<"$out"
-# The tag's own build: the annotated tag peels to its commit.
-echo "refs/tags/v0.1.0 $new_commit" > "$FAKE/provenance"
-out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused the tag's own build"; }
-check "the archive's .sig is uploaded"    test -s "$FAKE/uploaded/$asset.sig"
-check "the attestation was held to the tag" grep -Fq -- "--source-ref refs/tags/v0.1.0 --source-digest $new_commit" "$FAKE/calls"
-check "LATEST is uploaded, naming the tag" test "$(cat "$FAKE/uploaded/LATEST")" = v0.1.0
-check "LATEST is one line"                 test "$(wc -l < "$FAKE/uploaded/LATEST")" = 1
-check "a draft that is the newest is published as latest" grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest" "$FAKE/calls"
-# The uploaded LATEST is one install.sh trusts: it reads v0.1.0 from it and
-# then holds the binary (the one under test, not 0.1.0) to that tag.
-mkdir -p "$WORK/release/l-signed"
-cp "$FAKE/uploaded/LATEST" "$FAKE/uploaded/LATEST.sig" "$WORK/release/l-signed/"
-H="$WORK/h-latest-signed"
-out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$(latest_url signed)" run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || true
-check "install.sh reads the signed LATEST" grep -Fq "'ward 0.1.0'" <<<"$out"
-# A release published before signing existed gets its LATEST too.
-rm -f "$FAKE/uploaded"/* "$FAKE/calls"
-echo false > "$FAKE/draft"
-out="$(sign_release --without-attestation v0.0.9 2>&1)" || { echo "$out"; bad "release-sign.sh --without-attestation failed"; }
-check "--without-attestation signs the archive" test -s "$FAKE/uploaded/$asset.sig"
-check "--without-attestation uploads LATEST" test "$(cat "$FAKE/uploaded/LATEST")" = v0.0.9
-check "--without-attestation signs LATEST" test -s "$FAKE/uploaded/LATEST.sig"
-check "--without-attestation asks for no attestation" absent "attestation verify" "$(cat "$FAKE/calls")"
-# A release that already carries a LATEST is not touched.
-rm -f "$FAKE/uploaded"/*
-printf 'v0.1.0\n' > "$FAKE/assets/LATEST"
-out="$(sign_release v0.1.0 2>&1)" \
-    && bad "release-sign.sh replaced a LATEST" || ok "release-sign.sh refused a release with a LATEST"
-check "says LATEST is there"               grep -Fq "already carries a LATEST" <<<"$out"
-check "nothing uploaded (LATEST there)"    test -z "$(command ls "$FAKE/uploaded")"
-rm -f "$FAKE/assets/LATEST"
+check "says the tag is missing"           grep -Fq "has no tag v0.3.0" <<<"$out"
 # A tag LATEST could not carry.
 out="$(sign_release v1.2 2>&1)" \
     && bad "release-sign.sh took tag v1.2" || ok "release-sign.sh refused tag v1.2"
 check "says it is no release tag"          grep -Fq "'v1.2' is not a release tag" <<<"$out"
-# Only the release with the highest tag among the published ones (no
-# pre-releases) gets LATEST and the latest mark. fake_release DRAFT
-# PRERELEASE PUBLISHED-TAGS... sets what gh reports.
-fake_release() {
-    echo "$1" > "$FAKE/draft"; echo "$2" > "$FAKE/prerelease"; shift 2
-    printf '%s\n' "$@" > "$FAKE/published"
-    rm -f "$FAKE/uploaded"/* "$FAKE/calls"
-}
-gitc tag v0.2.0
-# v0.2.0, then v0.1.0, both published before signing existed: the order
-# the maintainer signs them in. v0.1.0 must not take latest back.
-fake_release false false v0.1.0 v0.2.0
-out="$(sign_release --without-attestation v0.2.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused v0.2.0"; }
-check "v0.2.0 gets LATEST"                 test "$(cat "$FAKE/uploaded/LATEST" 2>/dev/null)" = v0.2.0
-check "v0.2.0 is marked latest"            grep -Fxq "release edit v0.2.0 --repo DigitalWestern/greyward --latest" "$FAKE/calls"
-fake_release false false v0.1.0 v0.2.0
-out="$(sign_release --without-attestation v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused v0.1.0"; }
-check "v0.1.0 after v0.2.0 is signed"      test -s "$FAKE/uploaded/$asset.sig"
-check "v0.1.0 after v0.2.0 gets no LATEST" test ! -e "$FAKE/uploaded/LATEST" -a ! -e "$FAKE/uploaded/LATEST.sig"
-check "v0.1.0 after v0.2.0 is not marked"  absent "release edit" "$(cat "$FAKE/calls")"
-check "says v0.2.0 is newer"               grep -Fq "v0.2.0 is as new or newer" <<<"$out"
-# An older draft is published, and not as latest.
+# A release that already carries a LATEST is not touched.
+fake_reset; release v0.1.0 true false
+printf 'v0.1.0\n' > "$FAKE/rel/v0.1.0/assets/LATEST"
+out="$(sign_release v0.1.0 2>&1)" \
+    && bad "release-sign.sh replaced a LATEST" || ok "release-sign.sh refused a release with a LATEST"
+check "says LATEST is there"               grep -Fq "already carries a LATEST" <<<"$out"
+# The tag's own build: the annotated tag peels to its commit. The draft is
+# published unmarked, then reconciled into the latest release.
+fake_reset; release v0.1.0 true false
 echo "refs/tags/v0.1.0 $new_commit" > "$FAKE/provenance"
-fake_release true false v0.2.0
-out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused an older draft"; }
-check "an older draft gets no LATEST"      test ! -e "$FAKE/uploaded/LATEST"
-check "an older draft is published, not latest" grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest=false" "$FAKE/calls"
-# A pre-release is never the latest one.
-fake_release true true
-out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused a pre-release"; }
-check "a pre-release gets no LATEST"       test ! -e "$FAKE/uploaded/LATEST"
-check "a pre-release is not marked latest" grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest=false" "$FAKE/calls"
-# A published tag that is no version does not block the newest one.
-fake_release true false nightly v0.0.9
-out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused next to a nightly tag"; }
-check "a tag that is no version is ignored" test "$(cat "$FAKE/uploaded/LATEST" 2>/dev/null)" = v0.1.0
-
+out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused the tag's own build"; }
+check "the archive's .sig is uploaded"    test -s "$FAKE/rel/v0.1.0/assets/$asset.sig"
+check "the attestation was held to the tag" grep -Fq -- "--source-ref refs/tags/v0.1.0 --source-digest $new_commit" "$FAKE/calls"
+check "the draft is published unmarked"   grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest=false" "$FAKE/calls"
+check "then reconciled to latest"         is_latest v0.1.0
+check "LATEST is uploaded, naming the tag" has_latest v0.1.0
+check "LATEST is one line"                 test "$(wc -l < "$FAKE/rel/v0.1.0/assets/LATEST")" = 1
+# That LATEST is one install.sh trusts: it reads v0.1.0 from it and then
+# holds the binary (the one under test, not 0.1.0) to that tag.
+mkdir -p "$WORK/release/l-signed"
+cp "$FAKE/rel/v0.1.0/assets/LATEST" "$FAKE/rel/v0.1.0/assets/LATEST.sig" "$WORK/release/l-signed/"
+H="$WORK/h-latest-signed"
+out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$(latest_url signed)" run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || true
+check "install.sh reads the signed LATEST" grep -Fq "'ward 0.1.0'" <<<"$out"
+# v0.2.0, then v0.1.0, both published before signing existed: the order the
+# maintainer signs them in. v0.1.0 must not take latest back.
+fake_reset; release v0.1.0 false false; release v0.2.0 false false
+sign_release --without-attestation v0.2.0 >/dev/null 2>&1 || bad "release-sign.sh refused v0.2.0"
+check "v0.2.0 gets LATEST"                 has_latest v0.2.0
+check "v0.2.0 is marked latest"            is_latest v0.2.0
+out="$(sign_release --without-attestation v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused v0.1.0"; }
+check "v0.1.0 after v0.2.0 is signed"      test -s "$FAKE/rel/v0.1.0/assets/$asset.sig"
+check "v0.1.0 after v0.2.0 gets no LATEST" no_latest v0.1.0
+check "v0.2.0 is still latest"             is_latest v0.2.0
+check "v0.2.0 keeps its LATEST"            has_latest v0.2.0
+check "--without-attestation asks for no attestation" absent "attestation verify" "$(cat "$FAKE/calls")"
+# The reverse order: v0.1.0 is latest for a while, then hands it over.
+fake_reset; release v0.1.0 false false; release v0.2.0 false false
+sign_release --without-attestation v0.1.0 >/dev/null 2>&1 || bad "release-sign.sh refused v0.1.0 first"
+check "v0.1.0 alone is latest"             is_latest v0.1.0
+sign_release --without-attestation v0.2.0 >/dev/null 2>&1 || bad "release-sign.sh refused v0.2.0 second"
+check "v0.2.0 second is latest"            is_latest v0.2.0
+check "v0.2.0 second has LATEST"           has_latest v0.2.0
+check "v0.1.0 lost its LATEST"             no_latest v0.1.0
+# Two drafts signed at once, over a signed v0.0.9: the lock serializes the
+# reconciling, and whichever finishes last, v0.2.0 is the latest.
+fake_reset; release v0.0.9 false false signed latest; release v0.1.0 true false; release v0.2.0 true false
+sign_release --without-attestation v0.1.0 > "$FAKE/one.log" 2>&1 &
+first=$!
+sign_release --without-attestation v0.2.0 > "$FAKE/two.log" 2>&1 &
+second=$!
+wait "$first" || bad "the parallel v0.1.0 run failed"
+wait "$second" || bad "the parallel v0.2.0 run failed"
+check "parallel: v0.2.0 is latest"         is_latest v0.2.0
+check "parallel: v0.2.0 has LATEST"        has_latest v0.2.0
+check "parallel: v0.1.0 has no LATEST"     no_latest v0.1.0
+check "parallel: v0.0.9 lost its LATEST"   no_latest v0.0.9
+# v0.2.0, published, signed and latest, listed behind 1,001 newer drafts.
+fake_reset; release v0.2.0 false false signed latest; release v0.1.0 false false
+echo 1001 > "$FAKE/extra-drafts"
+out="$(sign_release --without-attestation v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused v0.1.0 behind 1,001 drafts"; }
+check "behind 1,001 drafts: v0.2.0 is still latest" is_latest v0.2.0
+check "behind 1,001 drafts: v0.1.0 gets no LATEST" no_latest v0.1.0
+check "behind 1,001 drafts: v0.2.0's LATEST kept, not rewritten" absent "release upload v0.2.0" "$(cat "$FAKE/calls")"
+# A run cut short (v0.2.0 signed and published, latest still v0.1.0):
+# --reconcile-latest alone finishes it, and a second time changes nothing.
+fake_reset; release v0.1.0 false false signed latest; release v0.2.0 false false signed
+sign_release --reconcile-latest >/dev/null 2>&1 || bad "--reconcile-latest failed"
+check "--reconcile-latest moves latest"   is_latest v0.2.0
+check "--reconcile-latest moves LATEST"   has_latest v0.2.0
+check "--reconcile-latest clears the old" no_latest v0.1.0
+rm -f "$FAKE/calls"
+sign_release --reconcile-latest >/dev/null 2>&1 || bad "--reconcile-latest failed the second time"
+check "a second --reconcile-latest changes nothing" absent "release upload" "$(grep -v '^api\|^release download' "$FAKE/calls")"
+check "a second --reconcile-latest edits nothing" absent "release edit" "$(cat "$FAKE/calls")"
+check "a second --reconcile-latest deletes nothing" absent "delete-asset" "$(cat "$FAKE/calls")"
+# A pre-release, and an unsigned release, are never the latest one.
+fake_reset; release v0.1.0 false false signed latest; release v0.3.0-rc.1 false true signed; release v0.4.0 false false
+sign_release --reconcile-latest >/dev/null 2>&1 || bad "--reconcile-latest failed next to a pre-release"
+check "a pre-release does not take latest" is_latest v0.1.0
+check "an unsigned release does not take latest" has_latest v0.1.0
+check "neither gets a LATEST"              sh -c "test ! -e '$FAKE/rel/v0.3.0-rc.1/assets/LATEST' -a ! -e '$FAKE/rel/v0.4.0/assets/LATEST'"
+fi
 echo
 echo "install.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

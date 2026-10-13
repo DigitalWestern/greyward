@@ -1129,8 +1129,11 @@ mod tests {
             let again = catalog.select(&Request::newest()).unwrap().bundle_id();
             assert_eq!(first, again);
         }
-        // Every shipped publisher serves some tailor's rows: a catalog that
-        // drops out of the registry leaves its publisher unused and fails here.
+        // Every shipped publisher serves some tailor's rows, or the pinned
+        // native-library closure (conda-forge, `kernel::provider::nativelibs`,
+        // whose own test authorizes each of its URLs): a catalog that drops
+        // out of the registry leaves its publisher unused and fails here.
+        providers.insert("conda-forge".to_string());
         let shipped: std::collections::BTreeSet<String> = policy
             .publishers()
             .iter()

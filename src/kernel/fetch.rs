@@ -994,36 +994,51 @@ pub(crate) fn open_authorized(
         .https_only(true)
         .redirects(0)
         .build();
-    follow_redirects(
-        url,
-        |next| policy.authorize(publisher, next).map(drop),
-        |hop| {
-            // With redirects off, ureq hands a 3xx back as a response.
-            let resp = agent
-                .get(hop)
-                .call()
-                .map_err(|e| network_error("download", hop, e))?;
-            // Spelled as a path call: the architecture scan reads a bare
-            // `.status()` as a child process.
-            let status = ureq::Response::status(&resp);
-            if (300..400).contains(&status) {
-                let location = resp.header("Location").ok_or_else(|| {
-                    io::Error::other(format!(
-                        "download {}: redirect {status} names no Location",
-                        shown_url(hop)
-                    ))
-                })?;
-                return Ok(Hop::Redirect(location.to_string()));
-            }
-            let declared = resp
-                .header("Content-Length")
-                .and_then(|value| value.trim().parse::<u64>().ok());
-            Ok(Hop::Body((
-                Box::new(resp.into_reader()) as Box<dyn Read>,
-                declared,
-            )))
-        },
-    )
+    follow_redirects(url, hop_authorizer(policy, publisher), |hop| {
+        // With redirects off, ureq hands a 3xx back as a response.
+        let resp = agent
+            .get(hop)
+            .call()
+            .map_err(|e| network_error("download", hop, e))?;
+        // Spelled as a path call: the architecture scan reads a bare
+        // `.status()` as a child process.
+        let status = ureq::Response::status(&resp);
+        if (300..400).contains(&status) {
+            let location = resp.header("Location").ok_or_else(|| {
+                io::Error::other(format!(
+                    "download {}: redirect {status} names no Location",
+                    shown_url(hop)
+                ))
+            })?;
+            return Ok(Hop::Redirect(location.to_string()));
+        }
+        let declared = resp
+            .header("Content-Length")
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        Ok(Hop::Body((
+            Box::new(resp.into_reader()) as Box<dyn Read>,
+            declared,
+        )))
+    })
+}
+
+/// The authorization [`follow_redirects`] runs on each hop for `publisher`:
+/// the first URL as a row or lock names it ([`SourcePolicy::authorize`]),
+/// every later one as a redirect ([`SourcePolicy::authorize_redirect`]), so
+/// a redirect-only endpoint such as GitHub's asset CDN is reached only
+/// through the publisher's own release URL.
+fn hop_authorizer<'a>(
+    policy: &'a SourcePolicy,
+    publisher: &'a str,
+) -> impl Fn(&str) -> io::Result<()> + 'a {
+    let first = std::cell::Cell::new(true);
+    move |url| {
+        if first.replace(false) {
+            policy.authorize(publisher, url).map(drop)
+        } else {
+            policy.authorize_redirect(publisher, url).map(drop)
+        }
+    }
 }
 
 /// Request `url`, and each redirect after it, through `request` until one
@@ -1714,7 +1729,7 @@ mod tests {
     }
 
     fn as_uv(policy: &SourcePolicy) -> impl Fn(&str) -> io::Result<()> + '_ {
-        |url| policy.authorize("uv", url).map(drop)
+        hop_authorizer(policy, "uv")
     }
 
     #[test]
@@ -1729,6 +1744,27 @@ mod tests {
         );
         assert_eq!(outcome.unwrap(), assets);
         assert_eq!(requested, [UV_RELEASE, cdn, assets]);
+    }
+
+    /// Issue #699. The asset CDN is reached only by a redirect from the
+    /// publisher's own release URL: a download that names a CDN URL as its
+    /// first hop is refused before anything is requested.
+    #[test]
+    fn the_asset_cdn_is_never_a_first_hop() {
+        let policy = SourcePolicy::shipped();
+        for cdn in [
+            "https://objects.githubusercontent.com/release/1",
+            "https://release-assets.githubusercontent.com/release/2",
+        ] {
+            let (outcome, requested) = walk(cdn, &[], as_uv(&policy));
+            let error = outcome.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+            assert!(
+                error.to_string().contains("only a redirect target"),
+                "{error}"
+            );
+            assert!(requested.is_empty(), "{cdn} was requested");
+        }
     }
 
     #[test]

@@ -142,7 +142,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   latest release in the signed `LATEST` asset that `tools/release-sign.sh` uploads with
   every release (one line, the tag), so a writer of releases can point it only at a
   release the key signed: an older one installs on a machine with no ward, and the
-  downgrade check refuses it over a newer one. Whoever holds the
+  downgrade check refuses it over a newer one. Without curl, `install.sh` leaves the
+  redirect to wget: busybox wget reads a relative `Location` as a host name, so behind a
+  mirror that sends relative redirects, install curl or a full wget (GitHub's own
+  redirect is absolute). Whoever holds the
   key can, and a lost key means a new one ships in a new `install.sh` and a new ward,
   which every existing ward must reach by `install.sh` once. The installer needs OpenSSL
   3.0 or newer to check the signature, and refuses without it. The `.sha256` beside each

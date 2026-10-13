@@ -18,22 +18,27 @@
 #      the repository's tag names);
 #   3. signs each archive (Ed25519 over its bytes, one line of base64 in
 #      <archive>.sig) and checks the signature;
-#   4. writes LATEST, the one line <tag>, and signs it the same way;
-#   5. uploads the .sig files, LATEST and LATEST.sig;
-#   6. publishes the release when it is still a draft.
+#   4. when the release is to be the latest one, writes LATEST, the one
+#      line <tag>, and signs it the same way;
+#   5. uploads the .sig files, and LATEST and LATEST.sig when written;
+#   6. publishes the release when it is still a draft, marked latest only
+#      when it is to be the latest one.
 #
 # LATEST is how install.sh finds the latest release: it downloads
 # releases/latest/download/LATEST, which GitHub redirects to the LATEST of
 # whichever release is latest, checks LATEST.sig, and installs that tag.
-# Every release carries its own, naming itself, so only the latest one is
-# ever read; signing an older release (v0.1.0 after v0.2.0) changes nothing.
-# A latest release without LATEST is one install.sh refuses to resolve.
+# A release is to be the latest one when it is no pre-release and its tag
+# is the highest SemVer 2.0 version among the published releases that are
+# no pre-release (install.sh's own comparison). Only that release gets a
+# LATEST and GitHub's latest mark, so signing an older release (v0.1.0 after
+# v0.2.0) moves nothing back. A latest release without LATEST is one
+# install.sh refuses to resolve.
 #
 # A release published before signing existed (v0.1.0, v0.2.0) has no
 # attestation: `--without-attestation` signs it on its .sha256 alone, after
 # its archives were checked some other way. A release that already carries a
-# .sig, or a LATEST, is refused: nothing is ever replaced. It still gets
-# LATEST like any other.
+# .sig, or a LATEST, is refused: nothing is ever replaced. It gets a
+# LATEST like any other release that is to be the latest one.
 #
 #   tools/release-sign.sh --sign <file>...   write <file>.sig only, offline
 #                                            (tests/install.sh uses it)
@@ -165,12 +170,46 @@ while read -r archive; do
     fi
     sign_file "$file"
 done <<<"$archives"
-printf '%s\n' "$tag" >"$work/assets/LATEST"
-sign_file "$work/assets/LATEST"
 
-gh release upload "$tag" --repo "$REPO" "$work"/assets/*.sig "$work/assets/LATEST"
-if [ "$(gh release view "$tag" --repo "$REPO" --json isDraft -q .isDraft)" = true ]; then
-    gh release edit "$tag" --repo "$REPO" --draft=false --latest
-    say "published $tag"
+# Whether this release is to be the latest one: no pre-release, and no
+# published release that is no pre-release has a tag as high or higher.
+latest=1
+if [ "$(gh release view "$tag" --repo "$REPO" --json isPrerelease -q .isPrerelease)" = true ]; then
+    latest=0
+    say "$tag is a pre-release: it gets no LATEST and is not marked latest"
 fi
-say "done: every archive of $tag, and its LATEST, is signed by $public"
+published="$(gh release list --repo "$REPO" --limit 1000 --json tagName,isDraft,isPrerelease \
+    -q '.[] | select((.isDraft | not) and (.isPrerelease | not)) | .tagName')" \
+    || die "cannot list the releases of $REPO"
+while read -r other; do
+    [ -n "$other" ] && [ "$other" != "$tag" ] || continue
+    order="$(semver_cmp "$tag" "$other")"
+    case "$order" in
+        1) ;;
+        bad) say "ignoring release $other: its tag is no SemVer 2.0 version" ;;
+        *)
+            [ "$latest" = 0 ] || say "$other is as new or newer: $tag gets no LATEST and is not marked latest"
+            latest=0
+            ;;
+    esac
+done <<<"$published"
+
+uploads=("$work"/assets/*.sig)
+if [ "$latest" = 1 ]; then
+    printf '%s\n' "$tag" >"$work/assets/LATEST"
+    sign_file "$work/assets/LATEST"
+    uploads+=("$work/assets/LATEST" "$work/assets/LATEST.sig")
+fi
+gh release upload "$tag" --repo "$REPO" "${uploads[@]}"
+if [ "$latest" = 1 ]; then mark=--latest; else mark=--latest=false; fi
+if [ "$(gh release view "$tag" --repo "$REPO" --json isDraft -q .isDraft)" = true ]; then
+    gh release edit "$tag" --repo "$REPO" --draft=false "$mark"
+    say "published $tag ($mark)"
+elif [ "$latest" = 1 ]; then
+    gh release edit "$tag" --repo "$REPO" --latest
+fi
+if [ "$latest" = 1 ]; then
+    say "done: every archive of $tag, and its LATEST, is signed by $public; $tag is the latest release"
+else
+    say "done: every archive of $tag is signed by $public"
+fi

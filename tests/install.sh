@@ -436,7 +436,7 @@ publish_asset "$WORK/replayed"
 H="$WORK/h31"
 out="$(run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
     && bad "installer accepted another version's binary" || ok "installer refused another version's binary"
-check "names both versions (replayed)"    grep -Fq "says 'ward 0.0.9 (0000000 2026-01-01)', not ward $TEST_VERSION" <<<"$out"
+check "names both versions (replayed)"    grep -Fq "says 'ward 0.0.9 (0000000 2026-01-01)', not the one line 'ward $TEST_VERSION'" <<<"$out"
 check "nothing installed (replayed)"      test ! -e "$H/.local/bin/ward"
 # The same, when that version was named: it must be the named one.
 out="$(run_installer "$H" /bin/bash "$BASE_PATH" "--version=$TEST_TAG" 2>&1)" \
@@ -455,6 +455,18 @@ out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
     && bad "installer accepted a binary whose --version fails" || ok "installer refused a binary whose --version fails"
 check "says --version failed"             grep -Fq "'--version' failed" <<<"$out"
 check "the old ward is untouched"         test "$("$H/.local/bin/ward" --version)" = "ward 0.0.1-old"
+# The tag's version line, then a second line or a blank one: the release's
+# binary is held to the same one line as an installed ward.
+for extra in 'ward 99.0.0 (2222222 2026-10-14)' ''; do
+    mkdir -p "$WORK/extra"
+    printf '#!/bin/sh\nprintf "ward %s (abc1234 2026-10-13)\\n%s\\n"\n' "$TEST_VERSION" "$extra" > "$WORK/extra/ward"
+    chmod 755 "$WORK/extra/ward"
+    publish_asset "$WORK/extra"
+    out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
+        && bad "installer took a binary printing a second line '$extra'" || ok "installer refused a binary printing a second line '$extra'"
+    check "says it is not one line ('$extra')" grep -Fq "not the one line 'ward $TEST_VERSION'" <<<"$out"
+    check "the old ward is untouched ('$extra')" test "$("$H/.local/bin/ward" --version)" = "ward 0.0.1-old"
+done
 cp -f "$WORK/good.tar.gz" "$WORK/release/$asset"
 publish_sidecars
 # A ward newer than the latest release stays, unless a version is named.
@@ -551,7 +563,8 @@ check "upgrades a ward built outside git"  grep -Fq "upgraded ward 0.0.1 (unknow
 n=0
 for body in 'echo "ward banana"' 'echo "ward 0.2.0+build..7"' 'echo "ward 0.2.0+"' \
     'exit 0' 'exit 1' 'echo "ward 0.2.0"; exit 1' 'echo "something else 9.9.9"' 'exec sleep 30' \
-    'echo "ward 0.0.1"; echo "ward 99.0.0"' 'echo "ward 0.0.1 and more"' "echo \"ward 1.0.0-$long\""; do
+    'echo "ward 0.0.1"; echo "ward 99.0.0"' 'echo "ward 0.0.1 and more"' "echo \"ward 1.0.0-$long\"" \
+    'printf "ward 0.0.1\n\n"' 'printf "ward 0.0.1"'; do
     n=$((n+1))
     label="${body:0:60}"
     H="$WORK/h-unparseable-$n"
@@ -658,8 +671,10 @@ case "$1 $2" in
     "release view")
         case "$*" in
             *"--json assets"*) command ls "$state/assets" ;;
-            *"--json isDraft"*) echo true ;;
+            *"--json isDraft"*) cat "$state/draft" 2>/dev/null || echo true ;;
+            *"--json isPrerelease"*) cat "$state/prerelease" 2>/dev/null || echo false ;;
         esac ;;
+    "release list") cat "$state/published" 2>/dev/null || true ;;
     "release download")
         dir=""; prev=""
         for arg in "$@"; do [ "$prev" = --dir ] && dir="$arg"; prev="$arg"; done
@@ -689,7 +704,7 @@ gitc commit -q --allow-empty -m new
 gitc tag -a -m "release" v0.1.0
 new_commit="$(git -C "$REMOTE" rev-parse HEAD)"
 cp "$WORK/release/$asset" "$WORK/release/$asset.sha256" "$FAKE/assets/"
-sign_release() { # TAG
+sign_release() { # [--without-attestation] TAG
     PATH="$FAKE/bin:$PATH" FAKE_GH="$FAKE" GREYWARD_RELEASE_REMOTE="$REMOTE" \
         GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
         "$ROOT/tools/release-sign.sh" "$@"
@@ -711,15 +726,17 @@ check "the archive's .sig is uploaded"    test -s "$FAKE/uploaded/$asset.sig"
 check "the attestation was held to the tag" grep -Fq -- "--source-ref refs/tags/v0.1.0 --source-digest $new_commit" "$FAKE/calls"
 check "LATEST is uploaded, naming the tag" test "$(cat "$FAKE/uploaded/LATEST")" = v0.1.0
 check "LATEST is one line"                 test "$(wc -l < "$FAKE/uploaded/LATEST")" = 1
+check "a draft that is the newest is published as latest" grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest" "$FAKE/calls"
 # The uploaded LATEST is one install.sh trusts: it reads v0.1.0 from it and
 # then holds the binary (the one under test, not 0.1.0) to that tag.
 mkdir -p "$WORK/release/l-signed"
 cp "$FAKE/uploaded/LATEST" "$FAKE/uploaded/LATEST.sig" "$WORK/release/l-signed/"
 H="$WORK/h-latest-signed"
 out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$(latest_url signed)" run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || true
-check "install.sh reads the signed LATEST" grep -Fq "not ward 0.1.0" <<<"$out"
+check "install.sh reads the signed LATEST" grep -Fq "'ward 0.1.0'" <<<"$out"
 # A release published before signing existed gets its LATEST too.
 rm -f "$FAKE/uploaded"/* "$FAKE/calls"
+echo false > "$FAKE/draft"
 out="$(sign_release --without-attestation v0.0.9 2>&1)" || { echo "$out"; bad "release-sign.sh --without-attestation failed"; }
 check "--without-attestation signs the archive" test -s "$FAKE/uploaded/$asset.sig"
 check "--without-attestation uploads LATEST" test "$(cat "$FAKE/uploaded/LATEST")" = v0.0.9
@@ -737,6 +754,42 @@ rm -f "$FAKE/assets/LATEST"
 out="$(sign_release v1.2 2>&1)" \
     && bad "release-sign.sh took tag v1.2" || ok "release-sign.sh refused tag v1.2"
 check "says it is no release tag"          grep -Fq "'v1.2' is not a release tag" <<<"$out"
+# Only the release with the highest tag among the published ones (no
+# pre-releases) gets LATEST and the latest mark. fake_release DRAFT
+# PRERELEASE PUBLISHED-TAGS... sets what gh reports.
+fake_release() {
+    echo "$1" > "$FAKE/draft"; echo "$2" > "$FAKE/prerelease"; shift 2
+    printf '%s\n' "$@" > "$FAKE/published"
+    rm -f "$FAKE/uploaded"/* "$FAKE/calls"
+}
+gitc tag v0.2.0
+# v0.2.0, then v0.1.0, both published before signing existed: the order
+# the maintainer signs them in. v0.1.0 must not take latest back.
+fake_release false false v0.1.0 v0.2.0
+out="$(sign_release --without-attestation v0.2.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused v0.2.0"; }
+check "v0.2.0 gets LATEST"                 test "$(cat "$FAKE/uploaded/LATEST" 2>/dev/null)" = v0.2.0
+check "v0.2.0 is marked latest"            grep -Fxq "release edit v0.2.0 --repo DigitalWestern/greyward --latest" "$FAKE/calls"
+fake_release false false v0.1.0 v0.2.0
+out="$(sign_release --without-attestation v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused v0.1.0"; }
+check "v0.1.0 after v0.2.0 is signed"      test -s "$FAKE/uploaded/$asset.sig"
+check "v0.1.0 after v0.2.0 gets no LATEST" test ! -e "$FAKE/uploaded/LATEST" -a ! -e "$FAKE/uploaded/LATEST.sig"
+check "v0.1.0 after v0.2.0 is not marked"  absent "release edit" "$(cat "$FAKE/calls")"
+check "says v0.2.0 is newer"               grep -Fq "v0.2.0 is as new or newer" <<<"$out"
+# An older draft is published, and not as latest.
+echo "refs/tags/v0.1.0 $new_commit" > "$FAKE/provenance"
+fake_release true false v0.2.0
+out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused an older draft"; }
+check "an older draft gets no LATEST"      test ! -e "$FAKE/uploaded/LATEST"
+check "an older draft is published, not latest" grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest=false" "$FAKE/calls"
+# A pre-release is never the latest one.
+fake_release true true
+out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused a pre-release"; }
+check "a pre-release gets no LATEST"       test ! -e "$FAKE/uploaded/LATEST"
+check "a pre-release is not marked latest" grep -Fxq "release edit v0.1.0 --repo DigitalWestern/greyward --draft=false --latest=false" "$FAKE/calls"
+# A published tag that is no version does not block the newest one.
+fake_release true false nightly v0.0.9
+out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused next to a nightly tag"; }
+check "a tag that is no version is ignored" test "$(cat "$FAKE/uploaded/LATEST" 2>/dev/null)" = v0.1.0
 
 echo
 echo "install.sh: $pass passed, $fail failed"

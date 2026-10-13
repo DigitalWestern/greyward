@@ -209,12 +209,29 @@ fn git_relative_submodule_is_pinned_and_raw() {
         commit,
         subdirectory: None,
     };
+    // The file submodule records host-git-transport, into the sync's
+    // attribution, before it is fetched.
+    let attribution = policy::Attribution::open("node").expect("test attribution");
     let object = ensure_git_source(&store, activity, &source).expect("realize relative submodule");
+    let recorded = attribution.recorded();
+    attribution.discard();
     assert_eq!(
         std::fs::read_to_string(object.join("sub/sub.txt")).unwrap(),
         "submodule\n"
     );
     assert!(!object.join("sub/.git").exists());
+    let subrepo = std::fs::canonicalize(&root.0).unwrap().join("subrepo");
+    assert!(
+        recorded
+            .iter()
+            .any(|exception| exception.kind == policy::HOST_GIT_TRANSPORT
+                && Path::new(exception.subject.trim_start_matches("file://"))
+                    .canonicalize()
+                    .ok()
+                    .as_deref()
+                    == Some(subrepo.as_path())),
+        "{recorded:?}"
+    );
 
     let (url, commit) = relative_submodule_fixture(&root.0, true);
     let transformed = GitSource {
@@ -222,9 +239,11 @@ fn git_relative_submodule_is_pinned_and_raw() {
         commit,
         subdirectory: None,
     };
+    let attribution = policy::Attribution::open("node").expect("test attribution");
     let error = ensure_git_source(&store, activity, &transformed)
         .expect_err("attribute-transformed submodule must be rejected")
         .to_string();
+    attribution.discard();
     assert!(error.contains("transformed"), "{error}");
 }
 

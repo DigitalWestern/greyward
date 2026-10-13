@@ -388,8 +388,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   cargo, not Greyward. Git sources are fetched on the host, not through the sandbox: an
   `ssh://` source offers the user's ssh agent keys to the host the lock names, and a `file://`
   source reads a path on the machine. Both record `host-git-transport` before the fetch, which
-  a policy can deny. A submodule's own URL is not checked: an `https://` source whose
-  submodule names an `ssh://` host fetches it over ssh without recording the kind.
+  a policy can deny, and so does each `ssh://` or `file://` submodule, at any depth, before its
+  level is fetched.
 - **A required package for another platform is installed only from a pnpm lock.** pnpm
   installs a non-optional package whose `os`/`cpu`/`libc` excludes the host (with a warning);
   npm refuses the same lock with `EBADPLATFORM`, and Greyward follows whichever tool wrote the

@@ -784,15 +784,22 @@ fn link_workspace_sources(
 /// The planted link at `link`, opened through itself: a directory on the
 /// way to its target swapped for a symlink out of the project between the
 /// check and the plant carries it outside, and it is removed and refused
-/// rather than left for the package to use (#692).
+/// rather than left for the package to use. A target that is not there is
+/// refused too: a directory on the way could be one a writer points
+/// outside, so that the target appears there later (#692).
 fn refuse_link_leading_out(project: &ProjectRoot, link: &Path, name: &str) -> io::Result<()> {
-    if project.path_leads_inside(link)? != Some(false) {
-        return Ok(());
-    }
+    let why = match project.path_leads_inside(link)? {
+        Some(true) => return Ok(()),
+        Some(false) => {
+            "leads outside the project once planted: a directory on the way to its target was \
+             replaced while the sync ran"
+        }
+        None => "has no target: a workspace link target must exist when the link is planted",
+    };
     fs::remove_file(link)?;
     Err(err(format!(
-        "workspace link {name} leads outside the project once planted: a directory on the way \
-         to its target was replaced while the sync ran; the link was removed, run it again"
+        "workspace link {name} {why}; the link was removed, so check the project and run the \
+         sync again"
     )))
 }
 
@@ -1290,6 +1297,19 @@ mod tests {
         assert!(forest.join("lib").symlink_metadata().is_err());
         refuse_link_leading_out(&held, &forest.join("kept"), "node_modules/kept").unwrap();
         assert!(forest.join("kept").symlink_metadata().is_ok());
+        // Swapped for a symlink to a directory with no target in it yet:
+        // the link dangles now and would lead outside once the target is
+        // created there, so it is refused as well.
+        fs::create_dir_all(project.join("tools/cli")).unwrap();
+        let relative = relative_path(&forest, &project.join("tools/cli")).unwrap();
+        std::os::unix::fs::symlink(relative, forest.join("cli")).unwrap();
+        fs::rename(project.join("tools"), project.join("tools.moved")).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
+        std::os::unix::fs::symlink(root.join("empty"), project.join("tools")).unwrap();
+        let error =
+            refuse_link_leading_out(&held, &forest.join("cli"), "node_modules/cli").unwrap_err();
+        assert!(error.to_string().contains("has no target"), "{error}");
+        assert!(forest.join("cli").symlink_metadata().is_err());
     }
 
     /// vite commits a fixture `node_modules` inside a workspace member

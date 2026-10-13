@@ -72,8 +72,18 @@ fn archive_kind(path: &Path) -> io::Result<ArchiveKind> {
     }
 }
 
+/// The name inspection compares: `./` prefixes and a trailing `/` dropped,
+/// nothing else changed. A name with leading or trailing whitespace is
+/// refused rather than trimmed: `pkg/pyproject.toml ` is another file to
+/// the build, so reading it as `pkg/pyproject.toml` would plan from bytes
+/// the build never sees (#675).
 fn clean_entry(raw: &str) -> io::Result<Option<String>> {
-    let raw = raw.trim().trim_start_matches("./").trim_end_matches('/');
+    if raw.trim() != raw {
+        return Err(invalid(format!(
+            "sdist archive entry {raw:?} has leading or trailing whitespace"
+        )));
+    }
+    let raw = raw.trim_start_matches("./").trim_end_matches('/');
     if raw.is_empty() {
         return Ok(None);
     }
@@ -182,19 +192,16 @@ fn root_relative(entry: &str, root: &str) -> Option<String> {
 }
 
 fn archive_file(path: &Path, kind: ArchiveKind, member: &str) -> io::Result<Vec<u8>> {
+    // One manifest read, not an extraction: the bytes come from the
+    // validated in-process stream, never from a second tar child. 16 MiB
+    // covers any real manifest; anything larger is refused rather than
+    // buffered, from a tar and a zip alike.
+    const MEMBER_CAP: u64 = 16 << 20;
     match kind {
-        ArchiveKind::TarGz => {
-            // One manifest read, not an extraction: the bytes come from the
-            // validated in-process stream, never from a second tar child.
-            // 16 MiB covers any real manifest; anything larger is refused
-            // rather than buffered.
-            const MEMBER_CAP: u64 = 16 << 20;
-            let bytes = super::unpack::read_sdist_member(path, member, MEMBER_CAP)
-                .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))?;
-            Ok(bytes)
-        }
-        ArchiveKind::Zip => super::unpack::read_zip_sdist_member(path, member),
+        ArchiveKind::TarGz => super::unpack::read_sdist_member(path, member, MEMBER_CAP),
+        ArchiveKind::Zip => super::unpack::read_zip_sdist_member(path, member, MEMBER_CAP),
     }
+    .map_err(|e| invalid(format!("read {member} from {}: {e}", path.display())))
 }
 
 fn parse_pyproject(
@@ -893,6 +900,7 @@ build-backend = "hatchling.build"
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
             packages: vec![crate::kernel::types::LockedPackage {
+                index: None,
                 name: "NumPy".into(),
                 version: "1.26.4".into(),
                 filename: "numpy.whl".into(),
@@ -1116,14 +1124,123 @@ mod link_guard_tests {
         zip.add_symlink("example-1.0/passwd", "/etc/passwd", options)
             .unwrap();
         zip.finish().unwrap();
-        let info = inspect_sdist(&path).unwrap();
-        let destination = dir.0.join("source");
-        let error = extract_sdist(&path, &destination, &info).unwrap_err();
+        let error = inspect_sdist(&path).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(
-            error.to_string(),
-            "sdist archive contains a symlink entry: example-1.0/passwd"
+        assert!(
+            error
+                .to_string()
+                .contains("entry \"example-1.0/passwd\" is a symlink"),
+            "{error}"
         );
-        assert!(!destination.join("passwd").exists());
+        // A direct extraction refuses it too, before writing anything.
+        let destination = dir.0.join("source");
+        let error = extract_sdist(&path, &destination, &zip_info()).unwrap_err();
+        assert!(error.to_string().contains("is a symlink"), "{error}");
+        assert!(!destination.join("pyproject.toml").exists());
+    }
+
+    /// What inspection reports for a plain `example-1.0` zip sdist.
+    fn zip_info() -> ArchiveInfo {
+        ArchiveInfo {
+            archive_root: "example-1.0".into(),
+            build_requires: vec!["setuptools".into()],
+            build_backend: DEFAULT_BACKEND.into(),
+            cargo_manifest: None,
+            rust_build: false,
+            native_build: false,
+        }
+    }
+
+    fn write_zip_sdist(path: &Path, members: &[(&str, u32, &[u8])]) {
+        let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+        for (name, mode, bytes) in members {
+            let options = zip::write::SimpleFileOptions::default().unix_permissions(*mode);
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// The pyproject inspection would read and the one the build would see
+    /// must be one file: a second spelling of the name refuses the sdist
+    /// (#675), as it does for a `.tar.gz` (#613).
+    #[test]
+    fn a_zip_sdist_that_spells_pyproject_twice_is_refused() {
+        let dir = TempDir::named("build-requires-zip-twice");
+        let setuptools: &[u8] = b"[build-system]\nrequires = [\"setuptools\"]\n";
+        let maturin: &[u8] = b"[build-system]\nrequires = [\"maturin\"]\nbackend-path = [\".\"]\n";
+        for (second, needle) in [
+            ("example-1.0/./pyproject.toml", "written more than once"),
+            (
+                "example-1.0/pyproject.toml ",
+                "leading or trailing whitespace",
+            ),
+            (
+                " example-1.0/pyproject.toml",
+                "leading or trailing whitespace",
+            ),
+        ] {
+            let path = dir.0.join("example-1.0.zip");
+            write_zip_sdist(
+                &path,
+                &[
+                    ("example-1.0/pyproject.toml", 0o644, setuptools),
+                    (second, 0o644, maturin),
+                ],
+            );
+            let error = inspect_sdist(&path).unwrap_err();
+            assert!(error.to_string().contains(needle), "{second:?}: {error}");
+            let destination = dir.0.join("source");
+            assert!(extract_sdist(&path, &destination, &zip_info()).is_err());
+            let _ = fs::remove_dir_all(&destination);
+        }
+    }
+
+    #[test]
+    fn a_zip_sdist_keeps_its_execute_bits() {
+        let dir = TempDir::named("build-requires-zip-modes");
+        let path = dir.0.join("example-1.0.zip");
+        write_zip_sdist(
+            &path,
+            &[
+                ("example-1.0/setup.py", 0o600, b"pass\n"),
+                ("example-1.0/configure", 0o755, b"#!/bin/sh\n"),
+            ],
+        );
+        let info = inspect_sdist(&path).unwrap();
+        let source = extract_sdist(&path, &dir.0.join("source"), &info).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |name: &str| {
+            fs::metadata(source.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("configure"), 0o755);
+        assert_eq!(mode("setup.py"), 0o644);
+    }
+
+    #[test]
+    fn a_zip_sdist_member_that_inflates_past_its_size_is_refused() {
+        let dir = TempDir::named("build-requires-zip-overrun");
+        let path = dir.0.join("example-1.0.zip");
+        write_zip_sdist(
+            &path,
+            &[
+                (
+                    "example-1.0/pyproject.toml",
+                    0o644,
+                    b"[project]\nname = \"x\"\n",
+                ),
+                ("example-1.0/big.bin", 0o644, &vec![0u8; 1 << 20]),
+            ],
+        );
+        let mut bytes = fs::read(&path).unwrap();
+        crate::kernel::archive::zip_testing::claim_size(&mut bytes, "example-1.0/big.bin", 1);
+        fs::write(&path, bytes).unwrap();
+        let info = inspect_sdist(&path).unwrap();
+        let error = extract_sdist(&path, &dir.0.join("source"), &info).unwrap_err();
+        assert!(error.to_string().contains("inflates past"), "{error}");
     }
 }

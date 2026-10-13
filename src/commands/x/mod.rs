@@ -1077,7 +1077,7 @@ mod tests {
                 &[],
             )
             .unwrap(),
-            "py-ruff-4f120f51a24abfc3"
+            "py-ruff-fb8a490d15e08986"
         );
         assert_eq!(registry_tool("python").unwrap().helpers(), ["rust"]);
         let py = |rust: &str| {
@@ -1093,7 +1093,7 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(py("rust-object"), "py-ruff-89f5921383668166");
+        assert_eq!(py("rust-object"), "py-ruff-0bb9d4a2d774638c");
         assert_ne!(py("other-rust-object"), py("rust-object"));
         assert_eq!(
             x_root_name(
@@ -1802,7 +1802,7 @@ mod tests {
     /// cache check demands: the id the `test` identity named `test` at
     /// version `env` (`node-env`), with the identity schema its ecosystem
     /// builds, hashes to, which [`test_record`] checks.
-    const TEST_ENV: &str = "2f46023346de4990b814cdd74914709fff68a190-test-env";
+    const TEST_ENV: &str = "98ad2f451df11ea8e093d9d859d9a431d459b61f-test-env";
     const TEST_NODE_ENV: &str = "b89d5780495c953341c1778be9d93959af74c524-test-node-env";
 
     /// The whole metadata record of the placeholder object `id`, carrying
@@ -2007,6 +2007,7 @@ mod tests {
         for (schema, ready) in [
             (registry_tool("python").unwrap().environment_schema(), true),
             ("python-env/2", false),
+            ("python-env/3", false),
         ] {
             let temp = TempDir::named("x-old-schema");
             let base = &temp.0;

@@ -48,7 +48,7 @@ The toolchain lock shipped on Linux on 2026-09-21: exact selection, the
 shipped-table adapter and catalogs, the lock core, runtime propagation, and
 activation with `ward update --toolchain`. Its behavior is documented in
 `docs/human/ARCHITECTURE.md` "Toolchain lock" (file, staleness rule,
-selection order, catalogs, `x/3` keys) and "Store
+selection order, catalogs, `x/5` keys) and "Store
 concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `ward update
 --toolchain`), and `docs/human/LIMITATIONS.md` (one toolchain per lock
 root). The full reviewed design, with its reasoning, is in git history:
@@ -4279,10 +4279,13 @@ Two writers, built in this order.
    with Greyward's existing realization code on the server side.
 
 Exceptions: an object whose realization records an object exception
-(`object_exceptions()`: install-script-failed, git-dependency, ...) still
-records it in `meta/<id>.json` as today. A user's Greyward checks a system
-object's recorded exceptions against *that user's* policy chain through
-`check_cached_with_activity`, the same check a cached object gets now, so a
+(`object_exceptions()`: every kind but `PLAN_TIME_KINDS`, and no lock fact
+recorded through `record_plan_time`, all of which a sync records again each
+time) still records it in `meta/<id>.json` as today. A user's
+Greyward checks a system object's recorded exceptions against *that user's*
+policy chain through `check_cached_with_activity` (or
+`check_cached_reusable`, which rebuilds an `object-meta/2` object whose
+exceptions it cannot trust), the same check a cached object gets now, so a
 shared object never smuggles a waived exception past a stricter user.
 
 ### Reading it: the trust check

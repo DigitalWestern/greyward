@@ -313,13 +313,10 @@ fn path_resolved_locked_packages(
 /// git source, as the one cargo resolved the package from: a file-backed
 /// registry (`registry+file://`, `sparse+file://`) is extracted into
 /// `registry/src` like a download, though no network registry served it.
-/// Git sources are checked as git dependencies are (`gitsrc`).
+/// The door's lock check reads the same rule
+/// ([`cargo_door::network_lock_source`]).
 fn network_source(source: &str) -> bool {
-    source.starts_with("git+")
-        || source
-            .strip_prefix("registry+")
-            .is_some_and(cargo_door::network_url)
-        || (source.starts_with("sparse+") && cargo_door::network_url(source))
+    cargo_door::network_lock_source(source)
 }
 
 /// Whether a lock's `source` and a metadata source id name the same

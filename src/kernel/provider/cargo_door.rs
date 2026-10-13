@@ -27,7 +27,7 @@
 use super::crates_index;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::confine;
-use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
+use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Staged, Target, Wire, Wiring};
 use crate::kernel::resolve::session::Intercept;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
@@ -472,8 +472,8 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
 }
 
 pub use super::cargo_settings::{
-    forced_env_names, index_transports, network_url, record_index_transports,
-    refuse_unneutralized_settings,
+    forced_env_names, index_transports, network_lock_source, network_url, record_index_transports,
+    refuse_lock_sources, refuse_unneutralized_settings,
 };
 
 /// [`refuse_unneutralized_settings`] for cargo's configuration in each of
@@ -713,60 +713,42 @@ fn dependency_entries(value: &toml::Table) -> Vec<(&str, &toml::Table)> {
             let Some(entries) = table.get(name).and_then(|d| d.as_table()) else {
                 continue;
             };
-            // `[patch.<source>]` nests one level deeper than the others.
-            let mut stack: Vec<(&str, &toml::Value)> = entries
-                .iter()
-                .map(|(key, entry)| (key.as_str(), entry))
-                .collect();
-            while let Some((key, entry)) = stack.pop() {
-                let Some(entry) = entry.as_table() else {
-                    continue;
-                };
-                if name == "patch" && !entry.contains_key("path") && !is_dependency(entry) {
-                    stack.extend(entry.iter().map(|(key, entry)| (key.as_str(), entry)));
-                } else {
-                    found.push((key, entry));
-                }
+            // `[patch.<source>]` nests one level deeper than the others:
+            // each source's table maps crate names, any name (`version`,
+            // `git`, `path` included), to dependencies, as cargo's schema
+            // reads it.
+            let groups: Vec<&toml::Table> = if name == "patch" {
+                entries
+                    .values()
+                    .filter_map(|source| source.as_table())
+                    .collect()
+            } else {
+                vec![entries]
+            };
+            for group in groups {
+                found.extend(
+                    group
+                        .iter()
+                        .filter_map(|(key, entry)| Some((key.as_str(), entry.as_table()?))),
+                );
             }
         }
     }
     found
 }
 
-/// Whether a table under `[patch.<source>]` is a dependency rather than
-/// the source's table of them.
-fn is_dependency(entry: &toml::Table) -> bool {
-    [
-        "version",
-        "git",
-        "registry",
-        "registry-index",
-        "package",
-        "branch",
-        "tag",
-        "rev",
-    ]
-    .iter()
-    .any(|key| entry.contains_key(*key))
-}
-
 /// Refuse a dependency's `registry-index` that is not a network index
-/// ([`network_url`]) in any manifest a cargo starting at `lock_root` reads:
-/// every `Cargo.toml` under it ([`manifests_under`]) and under each path
-/// dependency or member outside it ([`path_dependency_roots`]), in every
-/// dependency table ([`dependency_entries`]). A manifest names one with no
-/// config at all, and cargo would read a file index and the archives its
-/// `config.json` names during lock generation or an update, with no proxy
-/// check, before attest could refuse the lock. Checked before cargo
-/// starts, as the config files are.
+/// ([`network_url`]) in a manifest of the workspace ([`workspace_manifests`]),
+/// in every dependency table ([`dependency_entries`]), before cargo starts.
+/// A manifest names one with no config at all.
+///
+/// This is the early, clearer refusal, not the guarantee: a git
+/// dependency's manifest is fetched by cargo after any scan, so the door
+/// checks the lock cargo leaves ([`refuse_lock_sources`]) before anything
+/// is published.
 fn refuse_manifest_registry_indexes(lock_root: &Path) -> io::Result<()> {
-    let mut manifests = manifests_under(lock_root)?;
-    for root in path_dependency_roots(lock_root)? {
-        manifests.extend(manifests_under(&root)?);
-    }
     let keys = Bound::new(lock_root)?;
-    for manifest in manifests {
-        keys.refuse_if_key(&manifest)?;
+    for manifest in workspace_manifests(lock_root, &keys)? {
         let text = std::fs::read_to_string(&manifest)?;
         let Ok(value) = toml::from_str::<toml::Table>(&text) else {
             continue;
@@ -790,6 +772,48 @@ fn refuse_manifest_registry_indexes(lock_root: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The manifests a cargo starting at `lock_root` reads from the project:
+/// the root's, each member's as cargo's member discovery finds them
+/// ([`member_dirs`], hidden directories included), every `Cargo.toml` the
+/// tree walk finds ([`manifests_under`]), those under each path
+/// dependency or member outside the root ([`path_dependency_roots`],
+/// which bounds them), and, followed from each of these, every path
+/// dependency's. Canonical, each once; the signing key refused.
+fn workspace_manifests(lock_root: &Path, keys: &Bound) -> io::Result<Vec<PathBuf>> {
+    let mut queue = manifests_under(lock_root)?;
+    queue.push(lock_root.join("Cargo.toml"));
+    // A members list cargo cannot read is cargo's to report; the lock
+    // check still holds for what it then resolves.
+    if let Ok(members) = ProjectRoot::open(lock_root).and_then(|root| member_dirs(&root)) {
+        queue.extend(
+            members
+                .listed
+                .iter()
+                .map(|dir| lock_root.join(dir).join("Cargo.toml")),
+        );
+    }
+    for root in path_dependency_roots(lock_root)? {
+        queue.extend(manifests_under(&root)?);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(manifest) = queue.pop() {
+        let Ok(real) = std::fs::canonicalize(&manifest) else {
+            continue;
+        };
+        if !real.is_file() || seen.contains(&real) {
+            continue;
+        }
+        let dir = real.parent().unwrap_or(Path::new("/")).to_path_buf();
+        queue.extend(
+            path_dependencies(&real, keys)?
+                .into_iter()
+                .map(|path| dir.join(path).join("Cargo.toml")),
+        );
+        seen.insert(real);
+    }
+    Ok(seen.into_iter().collect())
 }
 
 /// A workspace's members inside its root, as cargo 1.98 finds them.
@@ -1282,6 +1306,14 @@ pub fn cargo_confined<'a>(
     confined.routes = vec![crates_index::route()?];
     confined.intercept = Intercept::Tls;
     confined.wire = Some(Box::new(|wire: &Wire<'_>| wiring(wire)));
+    // Every run (lock generation, an update, attest's metadata) is judged
+    // by the lock it leaves, before anything is published.
+    confined.check = Some(Box::new(|staged: &Staged<'_>| {
+        match staged.read(Path::new("Cargo.lock"))? {
+            Some(lock) => refuse_lock_sources(&lock),
+            None => Ok(()),
+        }
+    }));
     match publish {
         CargoPublish::Project { outputs, receipt } => {
             // A record names files inside the workspace only, so it cannot
@@ -2485,6 +2517,221 @@ mod tests {
         )
         .unwrap();
         assert!(!run(&root).contains("registry-index"));
+    }
+
+    /// The guarantee: the lock a cargo run leaves is refused when a package
+    /// in it comes from a registry that is not a network index, whatever
+    /// manifest named it. Each lock here is what cargo writes for one of
+    /// three manifests the pre-scan cannot (or once could not) see: a
+    /// member under a hidden directory, a `[patch]` entry for a crate named
+    /// `version`, and a git dependency's own manifest, fetched after any
+    /// pre-scan.
+    #[test]
+    fn a_lock_from_a_file_registry_is_refused() {
+        let lock = |source: &str| {
+            format!(
+                "version = 4\n\
+                 [[package]]\nname = \"ws\"\nversion = \"0.1.0\"\n\
+                 [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 [[package]]\nname = \"bad\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
+            )
+        };
+        for source in [
+            // `.hidden/member/Cargo.toml`'s registry-index.
+            "registry+file:///ws/index",
+            // `[patch.crates-io] version = { registry-index = ... }`.
+            "sparse+file:///ws/index",
+            // A fetched git dependency's manifest.
+            "registry+file:///ws/.git-dep-index",
+            "registry+http://mirror.test/index",
+            "sparse+http://mirror.test/",
+            "registry+ssh://-oProxyCommand=x/index",
+            "directory+file:///ws/vendor",
+            "git+ext::sh -c x",
+            "unknown",
+        ] {
+            let error = refuse_lock_sources(lock(source).as_bytes()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{source}");
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Refused),
+                "{source}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("bad@1.0.0") && text.contains(source),
+                "{text}"
+            );
+            assert!(!text.contains("itoa"), "{text}");
+            assert!(text.contains("nothing was published"), "{text}");
+        }
+        for source in [
+            "registry+https://github.com/rust-lang/crates.io-index",
+            "sparse+https://index.crates.io/",
+            "registry+ssh://git@git.test/index",
+            "registry+git://git.test/index",
+            "git+https://github.com/a/b?branch=main#0123456789abcdef0123456789abcdef01234567",
+            "git+ssh://git@git.test/a/b#0123456789abcdef0123456789abcdef01234567",
+            "git+file:///srv/repo#0123456789abcdef0123456789abcdef01234567",
+        ] {
+            refuse_lock_sources(lock(source).as_bytes()).unwrap();
+        }
+        // Path packages carry no source; a lock that is not TOML is refused.
+        refuse_lock_sources(b"version = 4\n[[package]]\nname = \"m\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        assert!(refuse_lock_sources(b"[[package").is_err());
+    }
+
+    /// The check runs inside the door on every cargo run: lock
+    /// generation, an update, attest's metadata run. Its refusal leaves
+    /// the project as it was, no record written (the door's own test,
+    /// `a_result_check_refusal_publishes_nothing`, shows the order).
+    #[test]
+    fn every_cargo_run_checks_the_lock_it_leaves() {
+        let temp = TempDir::named("cargo-door-result-check");
+        std::fs::write(
+            temp.0.join("Cargo.toml"),
+            "[package]\nname = \"ws\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let run = CargoRun {
+            rust_obj: Path::new("/nonexistent/rust"),
+            lock_root: &temp.0,
+            args: &["generate-lockfile"],
+            publish: CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+        };
+        for publish in [
+            CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+            CargoPublish::Project {
+                outputs: Vec::new(),
+                receipt: None,
+            },
+        ] {
+            let confined = cargo_confined(&run, publish, &[]).unwrap();
+            assert!(confined.check.is_some());
+        }
+    }
+
+    /// The pre-scan reads the manifests cargo reads, as member discovery
+    /// finds them: a member under a hidden directory (which a walk of the
+    /// tree skips) and a path dependency of one are checked too. And every
+    /// `[patch.<source>]` entry is a dependency, whatever the crate's name:
+    /// a crate named `version` does not hide its source's table.
+    #[test]
+    fn the_registry_index_pre_scan_reads_hidden_members_and_every_patch() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-door-registry-index-members");
+        let store = crate::kernel::store::Store::for_test(temp.0.join("absent-store"));
+        let run = |root: &Path| {
+            let mut scope = crate::kernel::testutil::DoorScope::new();
+            let mut door = scope.door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::MissingLock,
+            );
+            run_cargo(
+                &mut door,
+                CargoRun {
+                    rust_obj: Path::new("/nonexistent/rust"),
+                    lock_root: root,
+                    args: &["generate-lockfile"],
+                    publish: CargoPublish::Detached {
+                        outputs: Vec::new(),
+                    },
+                },
+            )
+            .map(drop)
+            .unwrap_err()
+            .to_string()
+        };
+        let bad = "x = { version = \"1\", registry-index = \"file:///ws/index\" }\n";
+        let package = "[package]\nname = \"m\"\nversion = \"0.1.0\"\n";
+        let cases: [(&str, Vec<(&str, String)>, &str); 4] = [
+            (
+                "hidden-member",
+                vec![
+                    ("Cargo.toml", "[workspace]\nmembers = [\".hidden/*\"]\n".into()),
+                    (
+                        ".hidden/m/Cargo.toml",
+                        format!("{package}[dependencies]\n{bad}"),
+                    ),
+                ],
+                ".hidden/m/Cargo.toml",
+            ),
+            (
+                "hidden-path-dependency",
+                vec![
+                    (
+                        "Cargo.toml",
+                        format!("{package}[dependencies]\nd = {{ path = \".deps/d\" }}\n"),
+                    ),
+                    (
+                        ".deps/d/Cargo.toml",
+                        format!(
+                            "[package]\nname = \"d\"\nversion = \"0.1.0\"\n[build-dependencies]\n{bad}"
+                        ),
+                    ),
+                ],
+                ".deps/d/Cargo.toml",
+            ),
+            (
+                "patch-named-version",
+                vec![(
+                    "Cargo.toml",
+                    format!(
+                        "{package}[patch.crates-io]\n\
+                         version = {{ version = \"1\", registry-index = \"file:///ws/index\" }}\n"
+                    ),
+                )],
+                "Cargo.toml",
+            ),
+            (
+                "patch-beside-git",
+                vec![(
+                    "Cargo.toml",
+                    format!(
+                        "{package}[patch.crates-io]\n\
+                         git = {{ git = \"https://g.test/git\" }}\n{bad}"
+                    ),
+                )],
+                "Cargo.toml",
+            ),
+        ];
+        for (name, files, manifest) in cases {
+            let root = temp.0.join(name);
+            for (path, text) in files {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            }
+            let error = run(&root);
+            assert!(
+                error.contains("registry-index") && error.contains("file:///ws/index"),
+                "{name}: {error}"
+            );
+            assert!(error.contains(manifest), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_patch_entry_named_like_a_field_still_yields_its_path() {
+        let table: toml::Table = toml::from_str(
+            "[patch.crates-io]\nversion = { path = \"v\" }\npath = { path = \"p\" }\n\
+             other = { path = \"o\" }\n",
+        )
+        .unwrap();
+        let mut names: Vec<&str> = dependency_entries(&table)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["other", "path", "version"]);
     }
 
     #[test]

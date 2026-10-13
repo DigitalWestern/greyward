@@ -15,6 +15,7 @@ pub mod fetch;
 pub mod fsroot;
 pub mod gc;
 pub mod gitsrc;
+pub mod home;
 pub mod hostfallback;
 pub mod hostview;
 pub(crate) mod ldcache;

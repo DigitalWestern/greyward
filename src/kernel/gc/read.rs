@@ -541,8 +541,10 @@ pub(super) const TMP_LEFTOVERS: &[(&str, libc::mode_t)] = &[
     ("meta-", libc::S_IFREG),
     // kernel::resolve::ledger
     ("diag-", libc::S_IFREG),
-    // tailors::node::realize
+    // tailors::node::classify
     ("npm-archive-classification-", libc::S_IFREG),
+    // tailors::node::local_package: a local package being packed
+    ("local-", libc::S_IFREG),
     // Store record writes
     ("record-", libc::S_IFREG),
     // `ward doctor`'s writability probe

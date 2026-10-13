@@ -453,6 +453,9 @@ const GIT_UNSET: &[&str] = &[
     "GIT_EXEC_PATH",
     "GIT_CONFIG",
     "GIT_CONFIG_SYSTEM",
+    // Read after the forced GIT_CONFIG_COUNT entries, so an inherited one
+    // would outrank them.
+    "GIT_CONFIG_PARAMETERS",
 ];
 
 #[cfg(test)]
@@ -1821,7 +1824,12 @@ mod tests {
                 env_value(&forced, "GIT_CONFIG_NOSYSTEM"),
                 Some(OsStr::new("1"))
             );
-            for unset in ["GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS"] {
+            for unset in [
+                "GIT_SSH_COMMAND",
+                "GIT_ASKPASS",
+                "SSH_ASKPASS",
+                "GIT_CONFIG_PARAMETERS",
+            ] {
                 assert!(forced.unset.contains(&unset), "{tool}: {unset}");
             }
         }

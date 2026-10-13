@@ -69,12 +69,19 @@ for _ in $(seq 1 50); do
 done
 export GREYWARD_DOWNLOAD_BASE="http://127.0.0.1:$port"
 BASE_PATH="/usr/bin:/bin"
+# The release served here is the binary under test, so "latest" is its tag.
+TEST_VERSION="$("$BIN" --version | sed -n '1s/^ward \([^ ]*\).*$/\1/p')"
+[ -n "$TEST_VERSION" ] || { echo "$BIN --version printed no version" >&2; exit 1; }
+TEST_TAG="v$TEST_VERSION"
+# LATEST_TAG_OVERRIDE="" makes the installer resolve latest from LATEST_URL.
 run_installer() { # HOME SHELL PATH [args...]
     local home="$1" shell="$2" path="$3"; shift 3
     mkdir -p "$home"
     env -i HOME="$home" SHELL="$shell" PATH="$path" TERM=dumb \
         GREYWARD_DOWNLOAD_BASE="$GREYWARD_DOWNLOAD_BASE" \
         GREYWARD_RELEASE_PUBLIC_KEY="${RELEASE_KEY_OVERRIDE-$TEST_RELEASE_KEY}" \
+        GREYWARD_LATEST_TAG="${LATEST_TAG_OVERRIDE-$TEST_TAG}" \
+        GREYWARD_LATEST_URL="${LATEST_URL-}" \
         sh "$ROOT/install.sh" "$@"
 }
 
@@ -396,6 +403,132 @@ check "downloaded nothing without openssl" absent 'downloading' "$out"
 H="$WORK/h30"
 run_installer "$H" /bin/bash "$BASE_PATH" >/dev/null 2>&1 || bad "installer refused the signed release"
 check "the signed release installs"       "$H/.local/bin/ward" --version
+
+echo "== 25. the new binary must be the tag's version, and exit 0 saying so"
+cp -f "$WORK/release/$asset" "$WORK/good.tar.gz"
+# An older release's binary, validly signed, served as the latest release:
+# what a writer of release assets could replay.
+mkdir -p "$WORK/replayed"
+printf '#!/bin/sh\necho "ward 0.0.9 (0000000 2026-01-01)"\n' > "$WORK/replayed/ward"
+chmod 755 "$WORK/replayed/ward"
+publish_asset "$WORK/replayed"
+H="$WORK/h31"
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
+    && bad "installer accepted another version's binary" || ok "installer refused another version's binary"
+check "names both versions (replayed)"    grep -Fq "says 'ward 0.0.9 (0000000 2026-01-01)', not ward $TEST_VERSION" <<<"$out"
+check "nothing installed (replayed)"      test ! -e "$H/.local/bin/ward"
+# The same, when that version was named: it must be the named one.
+out="$(run_installer "$H" /bin/bash "$BASE_PATH" "--version=$TEST_TAG" 2>&1)" \
+    && bad "installer accepted another version's binary for --version" || ok "installer refused another version's binary for --version"
+# The right version line, but --version fails.
+mkdir -p "$WORK/failing"
+printf '#!/bin/sh\necho "ward %s"\nexit 1\n' "$TEST_VERSION" > "$WORK/failing/ward"
+chmod 755 "$WORK/failing/ward"
+publish_asset "$WORK/failing"
+H="$WORK/h32"
+run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" >/dev/null 2>&1 || true
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "ward 0.0.1-old"\n' > "$H/.local/bin/ward"
+chmod 755 "$H/.local/bin/ward"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
+    && bad "installer accepted a binary whose --version fails" || ok "installer refused a binary whose --version fails"
+check "says --version failed"             grep -Fq "'--version' failed" <<<"$out"
+check "the old ward is untouched"         test "$("$H/.local/bin/ward" --version)" = "ward 0.0.1-old"
+cp -f "$WORK/good.tar.gz" "$WORK/release/$asset"
+publish_sidecars
+# A ward newer than the latest release stays, unless a version is named.
+H="$WORK/h33"
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "ward 99.0.0 (1111111 2026-12-01)"\n' > "$H/.local/bin/ward"
+chmod 755 "$H/.local/bin/ward"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
+    && bad "latest replaced a newer ward" || ok "latest refused to replace a newer ward"
+check "says the installed ward is newer"  grep -Fq "newer than the latest release ($TEST_TAG)" <<<"$out"
+check "the newer ward is untouched"       test "$("$H/.local/bin/ward" --version)" = "ward 99.0.0 (1111111 2026-12-01)"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" "--version=$TEST_VERSION" 2>&1)" \
+    || { echo "$out"; bad "a named older version was refused"; }
+check "a named older version is a downgrade" grep -Fq "downgraded ward 99.0.0 (1111111 2026-12-01) -> ward $TEST_VERSION" <<<"$out"
+check "the named version is installed"    sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
+# latest is resolved from where the releases/latest page leads.
+mkdir -p "$WORK/release/tag"
+: > "$WORK/release/tag/$TEST_TAG"
+H="$WORK/h34"
+out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$GREYWARD_DOWNLOAD_BASE/tag/$TEST_TAG" \
+    run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || { echo "$out"; bad "latest from the releases page failed"; }
+check "latest resolved from the releases page" "$H/.local/bin/ward" --version
+H="$WORK/h35"
+out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$GREYWARD_DOWNLOAD_BASE/$asset.sha256" \
+    run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
+    && bad "installer took a page that is no release tag" || ok "installer refused a page that is no release tag"
+check "says it is not a release tag"      grep -Fq "not a release tag" <<<"$out"
+check "downloaded nothing without a tag"  absent 'downloading' "$out"
+
+echo "== 26. release-sign.sh signs only what the tag's own commit built"
+# A stand-in for gh: the release's assets in a directory, and an attestation
+# that records the ref and commit the archive was built from. Like gh, it
+# checks --source-ref and --source-digest only when they are passed.
+FAKE="$WORK/fake-gh"
+mkdir -p "$FAKE/bin" "$FAKE/assets" "$FAKE/uploaded"
+cat > "$FAKE/bin/gh" <<'GH'
+#!/bin/bash
+set -euo pipefail
+state="$FAKE_GH"
+echo "$*" >> "$state/calls"
+case "$1 $2" in
+    "release view")
+        case "$*" in
+            *"--json assets"*) command ls "$state/assets" ;;
+            *"--json isDraft"*) echo true ;;
+        esac ;;
+    "release download")
+        dir=""; prev=""
+        for arg in "$@"; do [ "$prev" = --dir ] && dir="$arg"; prev="$arg"; done
+        cp "$state"/assets/* "$dir"/ ;;
+    "release upload") shift 5; cp "$@" "$state/uploaded/" ;;
+    "release edit") ;;
+    "attestation verify")
+        read -r built_ref built_commit < "$state/provenance"
+        prev=""
+        for arg in "$@"; do
+            [ "$prev" = --source-ref ] && [ "$arg" != "$built_ref" ] && exit 1
+            [ "$prev" = --source-digest ] && [ "$arg" != "$built_commit" ] && exit 1
+            prev="$arg"
+        done
+        exit 0 ;;
+    *) echo "fake gh: unexpected: $*" >&2; exit 1 ;;
+esac
+GH
+chmod 755 "$FAKE/bin/gh"
+REMOTE="$WORK/remote"
+git init -q "$REMOTE"
+gitc() { git -C "$REMOTE" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false -c tag.gpgsign=false "$@"; }
+gitc commit -q --allow-empty -m old
+gitc tag v0.0.9
+old_commit="$(git -C "$REMOTE" rev-parse HEAD)"
+gitc commit -q --allow-empty -m new
+gitc tag -a -m "release" v0.1.0
+new_commit="$(git -C "$REMOTE" rev-parse HEAD)"
+cp "$WORK/release/$asset" "$WORK/release/$asset.sha256" "$FAKE/assets/"
+sign_release() { # TAG
+    PATH="$FAKE/bin:$PATH" FAKE_GH="$FAKE" GREYWARD_RELEASE_REMOTE="$REMOTE" \
+        GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
+        "$ROOT/tools/release-sign.sh" "$1"
+}
+# An older tag's attested archive, uploaded into the new release.
+echo "refs/tags/v0.0.9 $old_commit" > "$FAKE/provenance"
+out="$(sign_release v0.1.0 2>&1)" \
+    && bad "release-sign.sh signed another tag's build" || ok "release-sign.sh refused another tag's build"
+check "says which tag and commit it wanted" grep -Fq "for tag v0.1.0 at $new_commit" <<<"$out"
+check "nothing uploaded (another build)"  test -z "$(command ls "$FAKE/uploaded")"
+# A tag the repository does not have.
+out="$(sign_release v0.2.0 2>&1)" \
+    && bad "release-sign.sh signed a release with no tag" || ok "release-sign.sh refused a release with no tag"
+check "says the tag is missing"           grep -Fq "has no tag v0.2.0" <<<"$out"
+# The tag's own build: the annotated tag peels to its commit.
+echo "refs/tags/v0.1.0 $new_commit" > "$FAKE/provenance"
+out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused the tag's own build"; }
+check "the archive's .sig is uploaded"    test -s "$FAKE/uploaded/$asset.sig"
+check "the attestation was held to the tag" grep -Fq -- "--source-ref refs/tags/v0.1.0 --source-digest $new_commit" "$FAKE/calls"
 
 echo
 echo "install.sh: $pass passed, $fail failed"

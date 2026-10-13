@@ -134,7 +134,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Ed25519 signature by the release key, whose public half is compiled into ward and
   written into `install.sh`. The private half never reaches CI: release.yml makes a draft,
   and `tools/release-sign.sh` signs and publishes it on the maintainer's machine, so a
-  token that can write releases cannot ship a binary those three accept. Whoever holds the
+  token that can write releases cannot ship a binary those three accept. Before signing,
+  it checks each archive's provenance attestation names the release workflow, the tag and
+  the commit the repository's tag points at, so an older release's archive uploaded into a
+  new draft is not signed. Each installer also requires the binary to report the release's
+  own version, and only a named version replaces a newer ward. Whoever holds the
   key can, and a lost key means a new one ships in a new `install.sh` and a new ward,
   which every existing ward must reach by `install.sh` once. The installer needs OpenSSL
   3.0 or newer to check the signature, and refuses without it. The `.sha256` beside each

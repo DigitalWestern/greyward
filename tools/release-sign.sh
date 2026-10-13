@@ -14,7 +14,8 @@
 #   1. downloads the release's archives and their .sha256 files;
 #   2. checks each archive against its .sha256 and against its build
 #      provenance attestation (`gh attestation verify`: built by this
-#      repository's release workflow);
+#      repository's release workflow, from refs/tags/<tag> at the commit
+#      the repository's tag names);
 #   3. signs each archive (Ed25519 over its bytes, one line of base64 in
 #      <archive>.sig), checks the signature, and uploads the .sig files;
 #   4. publishes the release when it is still a draft.
@@ -117,6 +118,18 @@ if grep -q '\.sig$' <<<"$names"; then
 fi
 archives="$(grep -E '^greyward-[A-Za-z0-9_.-]+\.tar\.gz$' <<<"$names" || true)"
 [ -n "$archives" ] || die "release $tag has no greyward-<triple>.tar.gz"
+# The commit the tag names, read from the repository, never from the draft:
+# whoever can write releases can point a draft at any commit, or upload an
+# older release's attested archive into it. The attestation must say the
+# archive was built from this tag at this commit. GREYWARD_RELEASE_REMOTE
+# names another repository for tests/install.sh.
+remote="${GREYWARD_RELEASE_REMOTE:-https://github.com/$REPO.git}"
+refs="$(git ls-remote --tags "$remote" "refs/tags/$tag" "refs/tags/$tag^{}")" \
+    || die "cannot read the tags of $remote"
+# An annotated tag lists its object and, as <tag>^{}, the commit it peels to.
+commit="$(awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1 }' <<<"$refs")"
+[ -n "$commit" ] || commit="$(awk -v ref="refs/tags/$tag" '$2 == ref { print $1 }' <<<"$refs")"
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "$remote has no tag $tag"
 
 mkdir "$work/assets"
 gh release download "$tag" --repo "$REPO" --dir "$work/assets" \
@@ -129,8 +142,9 @@ while read -r archive; do
     [ "$want" = "$got" ] || die "$archive does not match its .sha256 ($want, got $got)"
     if [ "$attest" = 1 ]; then
         gh attestation verify "$file" --repo "$REPO" \
-            --signer-workflow "$REPO/.github/workflows/release.yml" >/dev/null \
-            || die "$archive has no build provenance attestation from $REPO's release workflow"
+            --signer-workflow "$REPO/.github/workflows/release.yml" \
+            --source-ref "refs/tags/$tag" --source-digest "$commit" >/dev/null \
+            || die "$archive has no build provenance attestation from $REPO's release workflow for tag $tag at $commit"
     fi
     sign_file "$file"
 done <<<"$archives"

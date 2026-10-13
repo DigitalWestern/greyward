@@ -129,6 +129,30 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the
   declarative file to add. Reading those sources means running project code, which is
   exactly what frozen promises not to do.
+- **A Python `requirements.lock.txt` is compiled for one platform and interpreter.**
+  Greyward runs `uv pip compile` without `--universal`, so uv resolves for the machine it
+  runs on, and the header names that platform, the Python version, and a digest of the
+  requirements it came from. The platform is part of the check because the lock really
+  is that platform's: a different machine can need different packages. `--frozen` never
+  compiles the lock: on another platform, under another Python, or after the
+  requirements changed (removing the last one included), it is refused as stale, exit 4,
+  naming which of the three differs. A team that syncs on macOS and Linux commits the
+  lock from the platform CI runs on. A `uv.lock` is universal and has no such limit. For
+  a setup.py that computes its requirements, the digest covers the files that declare
+  them: setup.py, setup.cfg, pyproject.toml, the files setup.cfg names with `file:`, and
+  the requirements file the probe falls back on. `--frozen` checks it without running
+  setup.py, and plans from a matching lock with no probe at all. A file setup.py opens by
+  a path of its own is not covered: change it, and the lock is not stale until one of
+  those files changes too. When the probe fails and the lock is compiled from the
+  requirements file it falls back on, the header names that file (`source=`), and a
+  reused lock reads its hash pins from it. setup.py still runs, confined and in memory,
+  when there is no lock (it alone says whether there is anything to lock) and when the
+  lock has no header. A direct reference in a matching lock is recorded from setup.py's
+  metadata cache when `prepare` wrote one, and from the lock as it is otherwise (a
+  fresh checkout under `--frozen`), so its wording can be uv's. A lock compiled before ward wrote that header names no source, so `--frozen`
+  holds it to the requirements instead: every package they need here must be in it at
+  a version they allow. An edit the locked version still satisfies (`six>=1.16` to
+  `six>=1.15`) passes that check. One `ward` without `--frozen` writes the header.
 - **`add` / `remove` / `update` run the ecosystem's tool in the resolution sandbox**, with
   no network of its own, through Greyward's resolution proxy: Go, Cargo, Node (npm and the pinned
   pnpm), Python (uv), Ruby (Bundler) and Elixir `update` (Mix). There is no unsandboxed fallback: a host where
@@ -339,6 +363,13 @@ Selection covers every patch of each maintained CPython minor that python-build-
   No bytecode precompilation — slower cold starts.
 - **macOS deployment-target wheel tags are not compared** — theoretical silent wrong-wheel
   risk. Markers/extras in a pinned file trigger a full uv re-lock; versions can shift.
+  Every `--hash` the requirements write, in any file of their include tree and beside
+  unpinned lines too, must still be in the lock for that package, or the plan is refused
+  naming the file and line, and the plan uses only the files those hashes name. A line
+  pins the versions its specifier allows as PEP 440 reads it (`==1.*`, `==1.17` for
+  1.17.0), and only where its marker is true: another platform's line pins nothing here,
+  and a marker Greyward cannot evaluate is refused by line. A hash that is not a
+  well-formed sha256 (`md5:`, a short hex) is refused by line before any re-lock.
   **Resolving can build a source distribution that has no wheel** (its build backend runs,
   confined, through the resolution door): it is recorded as `resolution-build`, which a
   policy can deny to refuse it. This also covers metadata preparation by

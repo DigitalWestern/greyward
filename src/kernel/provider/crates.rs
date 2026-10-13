@@ -394,6 +394,7 @@ fn realize_vendor_inner(
 ) -> io::Result<PathBuf> {
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
+    let recorded = record_git_crates(&crates)?;
     if store.has_with_activity(activity, &id)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
@@ -405,8 +406,6 @@ fn realize_vendor_inner(
     let mut git_roots = Vec::new();
     for krate in &crates {
         if let Some(git) = &krate.git {
-            let subject = format!("{}@{}", krate.name, krate.version);
-            crate::kernel::gitsrc::record_git_dependency(&subject, &git.inner)?;
             let object = crate::kernel::gitsrc::ensure_git_source(store, activity, &git.inner)
                 .map_err(|e| {
                     io::Error::new(
@@ -537,10 +536,49 @@ fn realize_vendor_inner(
             deps.cache_digest(Digest::sha256(&krate.sha256)?);
         }
     }
+    let exceptions = vendor_exceptions(store, recorded, &git_roots)?;
     store
-        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
+        .commit_with_activity_and_deps(activity, &identity, &staged, &exceptions, &deps)
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
+}
+
+/// Record `git-dependency` and the transport of each git crate, before
+/// anything is fetched or a cached vendor object is reused: a policy
+/// denying either kind refuses here, a vendor object made before these
+/// were kept with it included.
+fn record_git_crates(crates: &[CargoCrate]) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    let mut recorded = Vec::new();
+    for krate in crates {
+        if let Some(git) = &krate.git {
+            let subject = format!("{}@{}", krate.name, krate.version);
+            recorded.extend(crate::kernel::gitsrc::record_git_dependency_kept(
+                &subject, &git.inner,
+            )?);
+        }
+    }
+    Ok(recorded)
+}
+
+/// What the vendor object keeps, so a cached copy replays it
+/// (`policy::check_cached_with_activity`): each git crate's `recorded`
+/// exceptions and those its git checkout keeps (a submodule's transport).
+fn vendor_exceptions(
+    store: &Store,
+    mut recorded: Vec<crate::kernel::policy::Exception>,
+    git_roots: &[(CargoCrate, PathBuf)],
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    for (_, object) in git_roots {
+        let id = crate::kernel::store::object_id_from_path(object)?;
+        recorded.extend(store.exceptions(&id)?);
+    }
+    let mut kept = Vec::new();
+    for exception in recorded {
+        if !kept.contains(&exception) {
+            kept.push(exception);
+        }
+    }
+    Ok(kept)
 }
 
 pub fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> {

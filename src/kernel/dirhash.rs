@@ -29,10 +29,12 @@ pub fn hash_zip(zip_path: &Path, module: &str, version: &str) -> io::Result<Stri
         let mut entry = archive
             .by_index(i)
             .map_err(|e| err(format!("{}: zip entry {i}: {e}", zip_path.display())))?;
+        // Every entry is a line, directory entries (`name/`, no bytes)
+        // included, as Go's HashZip lists every name in the zip (#708).
+        // A name the zip holds twice is one entry here, the last, where Go
+        // writes two lines for it: the hashes then differ and the zip is
+        // refused, as Go's own module extraction refuses it.
         let name = entry.name().to_string();
-        if name.ends_with('/') {
-            continue; // directory entry
-        }
         if !name.starts_with(&prefix) || name.contains('\\') || name.contains('\n') {
             return Err(err(format!(
                 "{}: zip entry {name:?} escapes module prefix {prefix:?}",
@@ -117,5 +119,34 @@ mod tests {
         fs::write(&tampered, content).unwrap();
         let h = hash_gomod(&tampered).unwrap();
         assert_ne!(h, "h1:LzX7hefJvL54yjefDEDHNONDjII0t9xZLPXsUe+TKr0=");
+    }
+
+    /// A module zip may carry directory entries, which Go's HashZip lists
+    /// like any other name, with the hash of no bytes (#708).
+    #[test]
+    fn directory_entries_are_hashed_as_go_hashes_them() {
+        let scratch = TempDir::named("dirhash-dir-entry");
+        let path = scratch.0.join("m.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.add_directory("example.com/m@v1.0.0/sub/", options)
+            .unwrap();
+        zip.start_file("example.com/m@v1.0.0/sub/a.go", options)
+            .unwrap();
+        std::io::Write::write_all(&mut zip, b"package sub\n").unwrap();
+        zip.finish().unwrap();
+
+        let empty = hex::encode(Sha256::digest(b""));
+        let file = hex::encode(Sha256::digest(b"package sub\n"));
+        let summary =
+            format!("{empty}  example.com/m@v1.0.0/sub/\n{file}  example.com/m@v1.0.0/sub/a.go\n");
+        let expected = format!(
+            "h1:{}",
+            crate::kernel::base64::encode(&Sha256::digest(summary.as_bytes()))
+        );
+        assert_eq!(
+            hash_zip(&path, "example.com/m", "v1.0.0").unwrap(),
+            expected
+        );
     }
 }

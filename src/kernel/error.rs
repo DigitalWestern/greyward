@@ -146,7 +146,60 @@ pub(crate) fn inner(error: &io::Error) -> Option<&io::Error> {
     payload
         .downcast_ref::<Contextual>()
         .map(|context| &context.original)
+        .or_else(|| payload.downcast_ref::<SandboxSetup>().map(|setup| &setup.0))
         .or_else(|| payload.downcast_ref::<io::Error>())
+}
+
+/// A sandbox that could not be set up, so nothing ran in it: its host view
+/// could not be built (a full or unwritable TMPDIR, an unreadable host
+/// directory, a host socket in a bound tree) or a declared root could not
+/// be held. The error's kind, message and payload are the original's.
+#[derive(Debug)]
+struct SandboxSetup(io::Error);
+
+impl fmt::Display for SandboxSetup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SandboxSetup {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// `error`, marked as a sandbox that could not be set up. A caller that
+/// would count a failed build against the build (a hermetic attempt, an
+/// install script) passes such an error on instead: no build ran (#679).
+pub(crate) fn sandbox_setup(error: io::Error) -> io::Error {
+    if is_sandbox_setup(&error) {
+        return error;
+    }
+    io::Error::new(error.kind(), SandboxSetup(error))
+}
+
+/// A sandbox engine's failed spawn, marked as [`sandbox_setup`] when the
+/// backend could not start it (the engine missing or not executable, out
+/// of descriptors, processes or memory). A failure the build's own
+/// command caused stays unmarked, because the same command fails the same
+/// way in any view: an argument list or environment too large (`E2BIG`,
+/// an npm script past the kernel's 128 KiB argument limit) or one holding
+/// a NUL byte (`InvalidInput`).
+pub(crate) fn sandbox_spawn(error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(libc::E2BIG) || error.kind() == io::ErrorKind::InvalidInput {
+        return error;
+    }
+    sandbox_setup(error)
+}
+
+/// Whether `error` is, or wraps through [`context`], a [`sandbox_setup`]
+/// error.
+pub(crate) fn is_sandbox_setup(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|payload| payload.is::<SandboxSetup>())
+        || inner(error).is_some_and(is_sandbox_setup)
 }
 
 /// `error` with `what` in front of its message (`what: message`), keeping
@@ -191,6 +244,18 @@ mod tests {
         assert_eq!(class_of(&wrapped), Some(Class::Stale));
         let plain = context(io::Error::other("boom"), "sync");
         assert_eq!(class_of(&plain), None);
+    }
+
+    #[test]
+    fn a_sandbox_setup_error_keeps_its_kind_message_and_class() {
+        let setup = sandbox_setup(stale(io::ErrorKind::StorageFull, "no space"));
+        assert_eq!(setup.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(setup.to_string(), "no space");
+        assert!(is_sandbox_setup(&setup));
+        let wrapped = context(setup, "build");
+        assert!(is_sandbox_setup(&wrapped));
+        assert_eq!(class_of(&wrapped), Some(Class::Stale));
+        assert!(!is_sandbox_setup(&io::Error::other("build failed")));
     }
 
     #[test]

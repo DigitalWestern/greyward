@@ -56,8 +56,10 @@ pub(super) fn extract_npm_package(
     // (macOS) descends into them anyway; GNU tar creates the
     // directory 0666 and then cannot open its children unless
     // directory modes are applied after extraction. The caller's
-    // normalize_modes rewrites every mode afterwards, so the store
-    // content is identical either way.
+    // normalize_modes then adds the minimum modes npm adds (0o755 on
+    // directories, 0o644 on files), so the tree is traversable on both
+    // tars. It only adds bits: the setuid, setgid and sticky bits are
+    // cleared at commit (`make_read_only`), not here.
     let options = crate::kernel::archive::ExtractOptions {
         delay_directory_restore: !platform.is_macos(),
         ..crate::kernel::archive::ExtractOptions::stripped(1)

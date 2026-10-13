@@ -28,6 +28,7 @@ pub(crate) mod sync;
 pub(crate) mod toolchain;
 pub(crate) mod x;
 
+pub use crate::commands::completions::script_names;
 pub use crate::commands::x::environment_name as x_environment_name;
 pub use crate::kernel::context::Context;
 
@@ -52,7 +53,7 @@ pub enum Pending {
     /// governs the sync `run` performs first.
     Script {
         name: String,
-        args: Vec<String>,
+        args: Vec<std::ffi::OsString>,
         message: String,
     },
 }
@@ -78,7 +79,7 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
     match pending {
         Pending::Command(command) => Ok(Resolved::Command(command)),
         Pending::Implicit => {
-            let cwd = project_dir();
+            let cwd = project_dir()?;
             if project_for(&cwd)?.is_some_and(|location| !location.detected.is_empty()) {
                 ui::trace("no command given inside a project: running sync");
                 return Ok(Resolved::Command(cli::Command::Sync {
@@ -101,11 +102,11 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
             args,
             message,
         } => {
-            let cwd = project_dir();
+            let cwd = project_dir()?;
             let root = project_root(&cwd)?;
             if package_script(&root, &name, &[])?.is_some() {
                 ui::trace(&format!("'{name}' is a package.json script: running it"));
-                let mut command = vec![name];
+                let mut command = vec![name.into()];
                 command.extend(args);
                 return Ok(Resolved::Command(cli::Command::Run { command }));
             }
@@ -132,7 +133,11 @@ pub fn resolve(pending: Pending) -> io::Result<Resolved> {
 /// package.json script of the same name was already taken by the caller,
 /// so an explicit script wins over a file. `None`: the word is not an
 /// existing file.
-fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Resolved>> {
+fn source_file(
+    cwd: &Path,
+    name: &str,
+    args: &[std::ffi::OsString],
+) -> io::Result<Option<Resolved>> {
     let path = Path::new(name);
     if !path.is_file() {
         return Ok(None);
@@ -198,12 +203,13 @@ fn source_file(cwd: &Path, name: &str, args: &[String]) -> io::Result<Option<Res
         }
         FileRunner::Built(_) => unreachable!("refused above"),
     };
-    let mut command: Vec<String> = program.iter().map(|word| word.to_string()).collect();
-    command.push(name.to_string());
+    let mut command: Vec<std::ffi::OsString> = program.iter().map(Into::into).collect();
+    command.push(name.into());
     command.extend(args.iter().cloned());
+    let shown: Vec<_> = command.iter().map(|word| word.to_string_lossy()).collect();
     ui::trace(&format!(
         "'{name}' is a {id} file: running '{}'",
-        command.join(" ")
+        shown.join(" ")
     ));
     Ok(Some(Resolved::Command(cli::Command::Run { command })))
 }
@@ -269,6 +275,27 @@ fn writes_closures(command: &cli::Command) -> bool {
     )
 }
 
+/// Hold `--strict` (`cli_strict`) for one dispatch. A `GREYWARD_STRICT` value
+/// ward does not know is a usage error before any verb runs (#681), printed
+/// here, and `None` is returned; `doctor` runs anyway and reports it as a
+/// failed check. Anything that reads the policy regardless counts it strict.
+fn strict_scope(
+    command: &cli::Command,
+    cli_strict: bool,
+) -> Option<crate::kernel::policy::StrictScope> {
+    if !matches!(command, cli::Command::Doctor { .. }) {
+        if let Err(message) = crate::kernel::policy::env_strict() {
+            if command.json_output() {
+                ui::error_json(&message);
+            } else {
+                ui::error(&message);
+            }
+            return None;
+        }
+    }
+    Some(crate::kernel::policy::request_strict(cli_strict))
+}
+
 /// Dispatch one parsed command to the verb's file. `sync` holds `--frozen`
 /// and `--strict`; the parser has already refused them for a verb that
 /// never syncs. `--frozen` is handed to the verbs that skip lock writes.
@@ -276,7 +303,9 @@ fn writes_closures(command: &cli::Command) -> bool {
 /// here snapshot it, while a nested dispatch holds and restores its own flag.
 pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> {
     use cli::Command::*;
-    let _strict = crate::kernel::policy::request_strict(sync.strict);
+    let Some(_strict) = strict_scope(&command, sync.strict) else {
+        return Ok(cli::EXIT_USAGE);
+    };
     install_tailor_tables(&command);
     // Maintenance commands need no host-platform validation here: GC must
     // stay usable on a copied store from a host that cannot realize its
@@ -349,10 +378,9 @@ pub fn dispatch(command: cli::Command, sync: cli::SyncFlags) -> io::Result<i32> 
         .transpose()?;
     let ctx = Context::open(platform)?;
     match command {
-        // `json` is not read here: plan's output is JSON either way, and
-        // the flag only tells `main` which error renderer to use.
-        Plan { .. } => plan::run(&ctx, sync.frozen).map(|_| 0),
-        Build { args } => build::run(&ctx, &args, sync.frozen).map(|_| 0),
+        // Plan's output is JSON either way: `json` makes it one array.
+        Plan { json } => plan::run(&ctx, sync.frozen, json).map(|_| 0),
+        Build { ecosystem, args } => build::run(&ctx, ecosystem, &args, sync.frozen).map(|_| 0),
         Run { command } => run::run(&ctx, &command, sync.frozen),
         File(request) => file::run(&ctx, &request),
         // Like `run`, `env` needs the store open: a recorded runtime is a

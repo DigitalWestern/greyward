@@ -145,8 +145,19 @@ fn admit(
             ),
         )
     };
-    let real = fs::canonicalize(&path)
-        .map_err(|_| refused(format!("{}, which does not exist", path.display())))?;
+    // Only a target that does not exist is the refusal: a permission or
+    // I/O error resolving it is that error, with its cause, and running
+    // the command again may well succeed.
+    let real = fs::canonicalize(&path).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => refused(format!("{}, which does not exist", path.display())),
+        _ => io::Error::new(
+            error.kind(),
+            format!(
+                "object {id}: cannot resolve {entry} at {}: {error}",
+                path.display()
+            ),
+        ),
+    })?;
     for dep in deps {
         if let Ok(object) = fs::canonicalize(store.object_path(dep)) {
             if real.starts_with(&object) {
@@ -301,6 +312,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("host-tool"), "{error}");
+    }
+
+    /// A target that cannot be resolved for another reason than being
+    /// absent (here EACCES) is reported as that error, not as a target
+    /// "which does not exist" refused by rule.
+    #[test]
+    fn a_target_that_cannot_be_read_keeps_its_cause() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = store("bin-links-eacces");
+        let locked = store.root.join("locked");
+        fs::create_dir_all(locked.join("inner")).unwrap();
+        fs::write(locked.join("inner/tool"), "x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads through a mode-0 directory, so there is nothing to see.
+        let readable = fs::read_dir(&locked).is_ok();
+        let result = check(&store, &[("tool", &locked.join("inner/tool"))], &[]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return;
+        }
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        let text = error.to_string();
+        assert!(!text.contains("does not exist"), "{text}");
+        assert!(text.contains("cannot resolve bin/tool"), "{text}");
     }
 
     /// The directories a closure puts on PATH besides `bin/`: the root's

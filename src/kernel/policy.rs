@@ -346,7 +346,27 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
 fn open_policy(path: &Path, required: bool) -> io::Result<Option<(fs::File, PathIdentity)>> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => return Ok(None),
+        // An optional file that is not there is no policy. A symlink whose
+        // target is gone (an unmounted share, a removed checkout) is a
+        // policy someone set up that cannot be read, and is refused rather
+        // than dropping its deny list and `[signing]` table (#681).
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                && !required
+                && fs::symlink_metadata(path).is_err() =>
+        {
+            return Ok(None)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !required => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "read {}: it is a symlink to a file that does not exist; restore its \
+                     target, or remove the symlink to run without a machine policy",
+                    path.display()
+                ),
+            ))
+        }
         Err(e) => {
             return Err(io::Error::new(
                 e.kind(),
@@ -562,8 +582,7 @@ pub(crate) fn load_with_sources_from(
     let machine_file = if let Some(path) = std::env::var_os("GREYWARD_POLICY") {
         Some((PathBuf::from(path), true))
     } else {
-        std::env::var_os("HOME")
-            .map(|home| (PathBuf::from(home).join(".greyward/policy.toml"), false))
+        Some((machine_policy_path()?, false))
     };
     // The open file is kept to the end of the load. While it is open its
     // device and inode cannot be given to another file, so a project
@@ -661,15 +680,69 @@ pub(crate) fn load_with_sources_from(
     Ok((policy, sources))
 }
 
-/// Apply the strictness requested outside the policy files: `GREYWARD_STRICT=1`
+/// The default machine policy, `~/.greyward/policy.toml`, read when
+/// `GREYWARD_POLICY` is unset. `HOME` must be set and absolute: an empty one
+/// would name `./.greyward/policy.toml`, a file the project in the working
+/// directory can commit, as the machine policy (#681).
+pub(crate) fn machine_policy_path() -> io::Result<PathBuf> {
+    let home = crate::kernel::home::home().map_err(|error| {
+        io::Error::other(format!(
+            "the machine policy is ~/.greyward/policy.toml: {error}, or set GREYWARD_POLICY \
+             to name the policy file"
+        ))
+    })?;
+    Ok(home.join(".greyward/policy.toml"))
+}
+
+/// The values `GREYWARD_STRICT` takes, as its refusal names them.
+pub const STRICT_VALUES: &str = "1, true or yes to refuse every policy exception; 0, false, no \
+or empty for none (any case)";
+
+/// What `GREYWARD_STRICT` asks for: `1`, `true` or `yes` is strict, and
+/// unset, empty, `0`, `false` or `no` is not, in any case and with
+/// surrounding blanks ignored, the set `CI` is read with. Any other value is
+/// an error: a typo in a setting that only ever tightens policy must not
+/// read as permissive (#681).
+pub fn env_strict() -> Result<bool, String> {
+    parse_strict(std::env::var_os("GREYWARD_STRICT").as_deref())
+}
+
+fn parse_strict(value: Option<&std::ffi::OsStr>) -> Result<bool, String> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    let text = value.to_string_lossy();
+    let word = text.trim();
+    if word.is_empty()
+        || ["0", "false", "no"]
+            .iter()
+            .any(|v| word.eq_ignore_ascii_case(v))
+    {
+        return Ok(false);
+    }
+    if ["1", "true", "yes"]
+        .iter()
+        .any(|v| word.eq_ignore_ascii_case(v))
+    {
+        return Ok(true);
+    }
+    Err(format!(
+        "GREYWARD_STRICT={text:?} is not a value ward knows: use {STRICT_VALUES}"
+    ))
+}
+
+/// Apply the strictness requested outside the policy files: `GREYWARD_STRICT`
 /// and `--strict` (`cli_strict`). Shared by every loader and by the
-/// fallback in `current`, so a policy is never built without them.
+/// fallback in `current`, so a policy is never built without them. A value
+/// `env_strict` refuses counts as strict here: `commands::dispatch` refuses
+/// it before any verb runs, and anything that reads the policy without
+/// passing through there fails closed.
 fn apply_requested_strictness(
     policy: &mut Policy,
     sources: &mut Vec<PolicySource>,
     cli_strict: bool,
 ) {
-    let env_strict = std::env::var("GREYWARD_STRICT").as_deref() == Ok("1");
+    let env_strict = env_strict().unwrap_or(true);
     // A file that already set `strict = true` keeps the attribution: it is
     // the source that outlives the command, so dropping --strict or
     // unsetting GREYWARD_STRICT would not lift the refusal and a message that
@@ -820,7 +893,7 @@ fn strict_trace(policy: &Policy) -> Option<String> {
     }
     Some(match policy.strict_source.as_ref() {
         Some(StrictSource::Flag) => "policy: strict (--strict)".to_string(),
-        Some(StrictSource::Env) => "policy: strict (GREYWARD_STRICT=1)".to_string(),
+        Some(StrictSource::Env) => "policy: strict (GREYWARD_STRICT)".to_string(),
         Some(StrictSource::File(path)) => format!("policy: strict ({})", path.display()),
         None => "policy: strict".to_string(),
     })
@@ -2566,6 +2639,28 @@ deny = ["git-dependency"]"#,
         drop(second);
     }
 
+    /// `GREYWARD_STRICT` reads the true-like and false-like words `CI` reads,
+    /// and an unknown value is an error that, where nothing can refuse it,
+    /// counts as strict (#681).
+    #[test]
+    fn strict_variable_takes_true_like_words_and_fails_closed_on_others() {
+        use std::ffi::OsStr;
+        assert_eq!(parse_strict(None), Ok(false));
+        for word in ["", " ", "0", "false", "FALSE", "no", "No"] {
+            assert_eq!(parse_strict(Some(OsStr::new(word))), Ok(false), "{word:?}");
+        }
+        for word in ["1", "true", "True", "yes", "YES", " 1 "] {
+            assert_eq!(parse_strict(Some(OsStr::new(word))), Ok(true), "{word:?}");
+        }
+        for word in ["maybe", "on", "2", "truee"] {
+            let error = parse_strict(Some(OsStr::new(word))).unwrap_err();
+            assert!(error.contains(&format!("{word:?}")), "{error}");
+        }
+        let _env = test_env_lock();
+        let _strict = EnvVarGuard::set("GREYWARD_STRICT", "maybe");
+        assert!(current().strict, "an unknown value read as permissive");
+    }
+
     #[test]
     fn requested_strictness_on_the_default_policy_matches_a_load() {
         let scratch = TempDir::named("policy-requested");
@@ -2607,7 +2702,7 @@ deny = ["git-dependency"]"#,
         policy.strict_source = Some(StrictSource::Env);
         assert_eq!(
             strict_trace(&policy).as_deref(),
-            Some("policy: strict (GREYWARD_STRICT=1)")
+            Some("policy: strict (GREYWARD_STRICT)")
         );
         policy.strict_source = Some(StrictSource::File(PathBuf::from(
             "/co/.greyward/policy.toml",

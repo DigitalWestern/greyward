@@ -623,13 +623,15 @@ ships as docs/human/policy-company.toml.",
         description: "\
 Prints one JSON document per ecosystem found here, exactly what 'ward
 sync' would realize. Planning may resolve missing lockfiles with the store's
-own uv/npm/cargo and cache the result under .greyward/.
-The output is JSON either way; --json adds nothing but the promise every
---json command makes: stdout is JSON and a failure is a JSON object on
-stderr.",
+own uv/npm/cargo and cache the result under .greyward/; what those tools
+print goes to stderr. The output is JSON either way; --json prints one
+array of the plans, a single document whatever the number of ecosystems,
+and makes the promise every --json command makes: stdout is JSON and a
+failure is a JSON object on stderr.",
         examples: &[
             ("ward plan", "the locked plan for every ecosystem, as JSON"),
             ("ward plan | jq .", "read it with jq"),
+            ("ward plan --json", "every plan as one JSON array"),
         ],
         options: &[JSON_OPTION, HELP_OPTION],
         words: &[],
@@ -877,6 +879,8 @@ const ENVIRONMENT: &str = "\
 ENVIRONMENT:
   GREYWARD_STORE           store root (default ~/.greyward/store)
   GREYWARD_STRICT=1        refuse every policy exception, like 'ward --strict'
+                           (1, true, yes; 0, false, no or empty for none;
+                           any other value exits 2)
   GREYWARD_POLICY          policy file used instead of ~/.greyward/policy.toml
   GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
@@ -1007,9 +1011,11 @@ pub fn usage() -> String {
     text.push('\n');
     text.push_str(ENVIRONMENT);
     text.push_str(
-        "\nExit status: 0 success, 1 failure, 2 usage error; 'run', 'x' and 'fmt' pass\n\
-         the program's status through. Which files ward reads per ecosystem:\n\
-         'ward help inputs'. Full reference: docs/human/CLI.md.\n",
+        "\nExit status: 0 success, 1 failure, 2 usage error, 3 refused by rule, 4 stale\n\
+         lock, 5 unsupported here, 6 network, 128+n stopped by signal n; 'run', 'x' and\n\
+         'fmt' pass the program's status through ('run' exits 127 when it cannot find\n\
+         the program). Which files ward reads per ecosystem: 'ward help inputs'. Full\n\
+         reference: docs/human/CLI.md.\n",
     );
     text
 }
@@ -1201,6 +1207,16 @@ mod tests {
         assert!(text.contains("ward <script> [<args>...]"));
         assert!(text.contains("ward <file> [<args>...]"));
         assert!(text.contains("Exit status: 0 success, 1 failure, 2 usage error"));
+        // Every status the classes and signals produce, not only 0 to 2.
+        for status in [
+            "3 refused",
+            "4 stale",
+            "5 unsupported",
+            "6 network",
+            "128+n",
+        ] {
+            assert!(words(&text).contains(status), "usage lacks {status}");
+        }
     }
 
     fn words(text: &str) -> String {

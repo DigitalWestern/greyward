@@ -63,8 +63,9 @@ pub(crate) struct ProjectLocation {
 pub(crate) fn project_for(cwd: &Path) -> io::Result<Option<ProjectLocation>> {
     // `cwd` comes from `getcwd`, which resolves symlinks, so a `$HOME`
     // that is itself a symlink is resolved before the two are compared.
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    // A HOME `kernel::home` refuses is no directory to compare against.
+    let home = crate::kernel::home::home()
+        .ok()
         .map(|home| home.canonicalize().unwrap_or(home));
     project_for_in(cwd, home.as_deref())
 }
@@ -127,8 +128,8 @@ pub(crate) fn project_root(cwd: &Path) -> io::Result<PathBuf> {
 pub(crate) fn package_script(
     root: &Path,
     name: &str,
-    args: &[String],
-) -> io::Result<Option<Vec<(String, String)>>> {
+    args: &[std::ffi::OsString],
+) -> io::Result<Option<Vec<(String, std::ffi::OsString)>>> {
     for tailor in crate::tailors::registry() {
         if let Some(steps) = tailor.project_script(root, name, args)? {
             return Ok(Some(steps));

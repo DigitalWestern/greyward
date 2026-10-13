@@ -432,11 +432,10 @@ fn ruby_tool_spec(
     let mut spec = DelegateSpec::new(ruby_obj.join(format!("bin/{}", args[0])));
     spec.args(&args[1..]).lock_root(cwd);
     // Ruby FIRST on PATH: a gem executable named ruby/gem must never shadow.
-    let path = format!(
-        "{}:{}",
-        ruby_obj.join("bin").display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    // A store path holds no ':' (`Store::open` refuses one), so the join
+    // cannot fail; an unset host PATH adds no current-directory entry.
+    let path = crate::kernel::platform::child_path(&[ruby_obj.join("bin")])
+        .expect("a store path holds no ':'");
     spec.env("PATH", path);
     spec.force_env(ENV_REMOVE_PREFIXES, ENV_REMOVE, environment);
     spec.capture();

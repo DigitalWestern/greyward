@@ -90,8 +90,28 @@ pub fn install_wheel(
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        write_wheel_entry(reader, member, &destination, executable, python_exe)?;
+        let script = write_wheel_entry(
+            reader,
+            member,
+            &destination,
+            executable,
+            python_exe,
+            bin_dir,
+            &|real| match real.symlink_metadata() {
+                Ok(_) => resolve_file_collision(
+                    real,
+                    env_root,
+                    installed,
+                    &distribution_id,
+                    &distribution_name,
+                ),
+                Err(_) => Ok(()),
+            },
+        )?;
         installed.insert(destination, distribution_id.clone());
+        if let Some(real) = script {
+            installed.insert(real, distribution_id.clone());
+        }
         Ok(())
     })?;
 
@@ -290,19 +310,40 @@ fn supersede(
 /// Unpack one file entry and set its mode: 0o755 for a script or a file
 /// with any execute bit, else 0o644 (pip's rule). Scripts are buffered so a
 /// `#!python` shebang can be pointed at the environment's interpreter.
+///
+/// When `#!<python>` cannot exec the interpreter (see [`needs_trampoline`]),
+/// the script's body is never rewritten: Python reads a module docstring,
+/// a `from __future__` import and a line-two coding declaration by their
+/// position, and a line put in front of them moves all three. The script is
+/// installed as shipped beside `destination` as `.<name>.real`, after
+/// `claim` has cleared that path, and `destination` becomes a `/bin/sh`
+/// wrapper that runs the interpreter on it ([`script_wrapper`]). Returns
+/// that hidden file's path, for the caller to record.
 fn write_wheel_entry(
     entry: &mut dyn Read,
     member: &ZipMember,
     destination: &Path,
     executable: bool,
     python_exe: &Path,
-) -> io::Result<()> {
+    bin_dir: &Path,
+    claim: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<Option<PathBuf>> {
+    let mut real = None;
     if executable {
         // Scripts are small; buffer them for shebang rewriting.
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
         if contents.starts_with(b"#!python") {
-            contents = rewrite_shebang(&contents, python_exe)?;
+            if needs_trampoline(python_exe) {
+                let hidden = hidden_script(destination)?;
+                claim(&hidden)?;
+                fs::write(&hidden, &contents)?;
+                set_mode(&hidden, 0o644)?;
+                contents = script_wrapper(python_exe, &final_path(&hidden, bin_dir, python_exe)?);
+                real = Some(hidden);
+            } else {
+                contents = rewrite_shebang(&contents, python_exe)?;
+            }
         }
         fs::write(destination, contents)?;
     } else {
@@ -314,7 +355,60 @@ fn write_wheel_entry(
     } else {
         member.file_mode()
     };
-    set_mode(destination, mode)
+    set_mode(destination, mode)?;
+    Ok(real)
+}
+
+/// `.<name>.real`, beside the script `destination` names.
+fn hidden_script(destination: &Path) -> io::Result<PathBuf> {
+    let name = destination
+        .file_name()
+        .ok_or_else(|| invalid_data(format!("script {} has no name", destination.display())))?;
+    let mut hidden = std::ffi::OsString::from(".");
+    hidden.push(name);
+    hidden.push(".real");
+    Ok(destination.with_file_name(hidden))
+}
+
+/// Where `hidden`, written under `bin_dir` in the environment being
+/// assembled, will be once it is committed: `python_exe` is the committed
+/// environment's interpreter, in its `bin`, so the committed path is that
+/// directory joined with the script's path below `bin_dir`.
+fn final_path(hidden: &Path, bin_dir: &Path, python_exe: &Path) -> io::Result<PathBuf> {
+    let unplaced = || {
+        invalid_data(format!(
+            "script {} is not under {}, beside {}",
+            hidden.display(),
+            bin_dir.display(),
+            python_exe.display()
+        ))
+    };
+    let final_bin = python_exe.parent().ok_or_else(unplaced)?;
+    let below = hidden.strip_prefix(bin_dir).map_err(|_| unplaced())?;
+    Ok(final_bin.join(below))
+}
+
+/// The `/bin/sh` wrapper a shipped script runs through when its shebang
+/// cannot hold the interpreter: `exec '<python>' '<script>' "$@"`. Each path
+/// is one sh single-quoted word, `'` written as `'\''`, so no byte of either
+/// path is ever read by the shell as syntax.
+fn script_wrapper(python_exe: &Path, script: &Path) -> Vec<u8> {
+    fn quoted(path: &Path, out: &mut Vec<u8>) {
+        out.push(b'\'');
+        for &byte in path.as_os_str().as_encoded_bytes() {
+            match byte {
+                b'\'' => out.extend_from_slice(b"'\\''"),
+                byte => out.push(byte),
+            }
+        }
+        out.push(b'\'');
+    }
+    let mut wrapper = b"#!/bin/sh\nexec ".to_vec();
+    quoted(python_exe, &mut wrapper);
+    wrapper.push(b' ');
+    quoted(script, &mut wrapper);
+    wrapper.extend_from_slice(b" \"$@\"\n");
+    wrapper
 }
 
 /// Generate `console_scripts`/`gui_scripts` launchers into `bin_dir`.
@@ -517,16 +611,17 @@ fn safe_destination(
     Ok(destination)
 }
 
-/// Point a `#!python` script at `python_exe`: its first line becomes
-/// [`shebang`]'s, keeping a CRLF or a missing final newline as written when
-/// the line is a plain `#!`.
+/// Point a `#!python` script at `python_exe` when a `#!` line can hold it
+/// (the caller checks [`needs_trampoline`]): its first line becomes
+/// `#!<python_exe>`, keeping a CRLF or a missing final newline as written.
 fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> io::Result<Vec<u8>> {
     let newline = contents.iter().position(|byte| *byte == b'\n');
     let line_end = newline.map(|index| index + 1).unwrap_or(contents.len());
     if needs_trampoline(python_exe) {
-        let mut rewritten = shebang(python_exe)?;
-        rewritten.extend_from_slice(&contents[line_end..]);
-        return Ok(rewritten);
+        return Err(invalid_data(format!(
+            "a #! line cannot hold {}",
+            python_exe.display()
+        )));
     }
     let has_crlf = line_end > 1 && contents[line_end - 2] == b'\r';
     let mut rewritten = b"#!".to_vec();
@@ -1556,10 +1651,11 @@ mod shebang_tests {
     }
 
     /// Install a wheel with one console script and one `#!python` script
-    /// against `python`, and return the environment's `bin`.
+    /// against `python`, in the environment whose `bin` holds it, and
+    /// return that `bin`.
     fn install_against(temp: &TempDir, python: &Path) -> PathBuf {
-        let site = temp.0.join("env/lib/python3.12/site-packages");
-        let bin = temp.0.join("env/bin");
+        let bin = python.parent().unwrap().to_path_buf();
+        let site = bin.parent().unwrap().join("lib/python3.12/site-packages");
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
         let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
@@ -1622,31 +1718,89 @@ mod shebang_tests {
             assert!(needs_trampoline(&python));
             fake_python(&python);
             let bin = install_against(&temp, &python);
-            for script in ["tool", "raw"] {
+            // A launcher ward writes runs itself; a shipped script runs as
+            // shipped, from its hidden sibling.
+            for (script, runs) in [("tool", "tool"), ("raw", ".raw.real")] {
                 let path = bin.join(script);
                 assert_eq!(
                     run(&path, &["one arg", "$two"]),
-                    [path.display().to_string(), "one arg".into(), "$two".into()],
+                    [
+                        bin.join(runs).display().to_string(),
+                        "one arg".into(),
+                        "$two".into()
+                    ],
                     "{script} via {}",
                     python.display()
                 );
             }
+            assert_eq!(
+                fs::read(bin.join(".raw.real")).unwrap(),
+                b"#!python\r\nprint('raw')\n"
+            );
             // Python reads the trampoline as a string literal, without a
             // warning, and goes on to the script's own code.
             if Path::new("/usr/bin/python3").is_file() {
-                for script in ["tool", "raw"] {
-                    let output = Command::new("/usr/bin/python3")
-                        .args(["-W", "error", "-c"])
-                        .arg(
-                            "import sys; compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')",
-                        )
-                        .arg(bin.join(script))
-                        .output()
-                        .unwrap();
-                    assert!(output.status.success(), "{script}: {output:?}");
-                }
+                let output = Command::new("/usr/bin/python3")
+                    .args(["-W", "error", "-c"])
+                    .arg("import sys; compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')")
+                    .arg(bin.join("tool"))
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "tool: {output:?}");
             }
-            fs::remove_dir_all(temp.0.join("env")).unwrap();
         }
+    }
+
+    /// Sol's review of #691: a shipped script whose header Python reads by
+    /// position still runs when the shebang cannot hold the interpreter. A
+    /// module docstring must come before `from __future__`, and a coding
+    /// declaration must be on line one or two; a line put in front of the
+    /// body broke both.
+    #[test]
+    fn a_shipped_script_runs_unchanged_from_a_path_a_shebang_cannot_hold() {
+        let host = Path::new("/usr/bin/python3");
+        if !host.is_file() {
+            return;
+        }
+        let temp = TempDir::named("wheel-script-header");
+        // The environment itself sits under a path with a space and a quote,
+        // and its interpreter is the host's.
+        let env = temp.0.join("ci data/it's/env");
+        let site = env.join("lib/python3.12/site-packages");
+        let bin = env.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python");
+        std::os::unix::fs::symlink(host, &python).unwrap();
+        assert!(needs_trampoline(&python));
+        let docstring: &[u8] =
+            b"#!python\n\"\"\"Doc.\"\"\"\nfrom __future__ import annotations\nimport sys\nprint('doc', sys.argv[1:])\n";
+        let latin: &[u8] = b"#!python\n# coding: latin-1\nprint('caf\xe9'.encode('utf-8').hex())\n";
+        let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
+        let mut writer = ZipWriter::new(fs::File::create(&wheel).unwrap());
+        for (name, bytes) in [
+            ("demo-1.0.dist-info/RECORD", &b""[..]),
+            ("demo-1.0.data/scripts/doc", docstring),
+            ("demo-1.0.data/scripts/latin", latin),
+        ] {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        install_wheel(&wheel, &site, &bin, "3.12", &python, &mut BTreeMap::new()).unwrap();
+
+        // Each body is installed byte for byte, beside its wrapper.
+        assert_eq!(fs::read(bin.join(".doc.real")).unwrap(), docstring);
+        assert_eq!(fs::read(bin.join(".latin.real")).unwrap(), latin);
+        let output = |script: &str, args: &[&str]| {
+            let output = Command::new(bin.join(script)).args(args).output().unwrap();
+            assert!(output.status.success(), "{script}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert_eq!(output("doc", &["a b", "$c"]), "doc ['a b', '$c']\n");
+        // Read as latin-1, `é` is one character, which is `c3a9` in UTF-8.
+        assert_eq!(output("latin", &[]), "636166c3a9\n");
     }
 }

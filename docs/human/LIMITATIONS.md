@@ -386,8 +386,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   script; Greyward does not. Python and Cargo git deps work the same way, but Cargo's are not
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
   cargo, not Greyward.
-- **The project's own lifecycle scripts do not run.** npm runs the root's and every workspace
-  member's `preinstall`, `install`, `postinstall` and `prepare` on install. Greyward runs only
+- **The project's own lifecycle scripts do not run.** npm runs the root's `preinstall`,
+  `install`, `postinstall`, `prepublish`, `preprepare`, `prepare` and `postprepare` on install,
+  and every workspace member's or linked directory's `preinstall`, `prepare`, `install` and
+  `postinstall` (with `node-gyp rebuild` as the default `install` beside a `binding.gyp`). Greyward runs only
   dependencies' scripts, because these write the project's source and the sandbox has no
   writable view of it yet. A `"postinstall": "patch-package"` leaves `patches/` unapplied, and a
   member's `prepare` that builds `dist/` leaves it unbuilt. Each skipped script is recorded as

@@ -128,16 +128,12 @@ fn sdk_fingerprint_of(spec: &SdkSpec) -> String {
     hex::encode(&Sha256::digest(spec.sha512.as_bytes())[..8])
 }
 
-/// The global-packages object's identity: the SDK that restores it and, per
-/// package, the lock's contentHash. Everything here is known before a byte
-/// is downloaded, so a sync whose packages object is already in the store
-/// never touches the network, and a package nuget.org re-signs (a new
-/// repository signature over the same content: a new raw sha256, the same
-/// contentHash) keeps its object. The raw sha256 of each downloaded nupkg
-/// is evidence only, recorded as the object's cache dependency.
-/// `nuget-packages/1` also keyed on those raw hashes, so its cache check
-/// could only run after every download; its objects are not reused (one
-/// restore per project after the upgrade, then GC reclaims them).
+/// The global-packages object's identity: the restoring SDK and each
+/// package's lock contentHash, all known before any download, so a stored
+/// object syncs offline and a nuget.org re-sign (new raw sha256, same
+/// contentHash) keeps it. Raw sha256s are evidence only (cache_digest).
+/// `nuget-packages/1` keyed on them and checked the store only after every
+/// download; its objects are not reused (one restore each, then GC).
 fn nuget_identity(plan: &DotnetPlan, sdk_id: &str) -> Identity {
     let mut inputs = BTreeMap::from([
         ("schema".to_string(), "nuget-packages/2".to_string()),

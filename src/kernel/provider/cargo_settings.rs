@@ -61,7 +61,17 @@ use std::path::Path;
 ///   cargo sets `[env]` for every program it starts, the `rustc -vV`
 ///   probe during resolution included, so `LD_PRELOAD` loads a project
 ///   library into the forced compiler. Also any variable ward forces or
-///   removes for cargo ([`forced_env_names`]).
+///   removes for cargo ([`forced_env_names`]), and `RUSTC_BOOTSTRAP`
+///   (`RUSTC_BOOTSTRAP_*` too), which turns on the stable compiler's
+///   unstable flags.
+/// - Compiler flags that load project code into the forced compiler:
+///   `build.rustflags`, `build.rustdocflags`, `host.rustflags` and
+///   `target.<triple or cfg>.rustflags` or `rustdocflags`, and the
+///   `RUSTFLAGS`, `RUSTDOCFLAGS` and `CARGO_ENCODED_*` entries of `[env]`,
+///   holding a `-Z` flag, a `codegen-backend` (a library rustc loads, its
+///   initializer run, during the metadata probe), or an `@file` argument
+///   file (rustc reads more flags from it). Cargo passes these flags to
+///   the `rustc --print` probe resolution runs.
 pub fn refuse_unneutralized_settings(files: &[ConfigFile]) -> io::Result<()> {
     let sources = SourceGraph::of(files);
     for file in files {
@@ -76,8 +86,9 @@ pub fn refuse_unneutralized_settings(files: &[ConfigFile]) -> io::Result<()> {
                  replaces a locked crate with files the project chose (`paths`, a directory \
                  or local-registry source, a registry or index that is not an https, ssh or \
                  git URL, a change to ward's {} source), names a credential provider, adds \
-                 `--config` or `-Z` through an alias, or sets a dynamic-loader or \
-                 ward-forced variable in `[env]`, since no setting of ward's can undo any of these. \
+                 `--config` or `-Z` through an alias, passes the compiler `-Z`, a codegen \
+                 backend or an `@file`, or sets a dynamic-loader, bootstrap or ward-forced \
+                 variable in `[env]`, since no setting of ward's can undo any of these. \
                  Remove {} (a `[patch]` table in Cargo.toml overrides a crate where the \
                  lock records it, a registry mirror over https stays allowed, and \
                  credential providers belong in your own ~/.cargo/config.toml)",
@@ -151,16 +162,69 @@ fn unneutralized_keys(table: &toml::Table, sources: &SourceGraph) -> Vec<String>
             found.push(key);
         }
     }
+    let flag_tables = section("build")
+        .map(|build| ("build".to_string(), build))
+        .into_iter()
+        .chain(section("host").map(|host| ("host".to_string(), host)))
+        .chain(
+            section("target")
+                .into_iter()
+                .flatten()
+                .filter_map(|(name, row)| Some((format!("target.{name}"), row.as_table()?))),
+        );
+    for (prefix, row) in flag_tables {
+        for key in ["rustflags", "rustdocflags"] {
+            if row
+                .get(key)
+                .is_some_and(|flags| loads_project_code(&words(flags, ' ')))
+            {
+                found.push(format!("{prefix}.{key}"));
+            }
+        }
+    }
     let forced = forced_env_names();
-    for name in section("env").into_iter().flatten().map(|(name, _)| name) {
+    for (name, value) in section("env").into_iter().flatten() {
+        let value = value
+            .as_table()
+            .and_then(|row| row.get("value"))
+            .unwrap_or(value);
+        let flags = match name.as_str() {
+            "RUSTFLAGS" | "RUSTDOCFLAGS" => words(value, ' '),
+            "CARGO_ENCODED_RUSTFLAGS" | "CARGO_ENCODED_RUSTDOCFLAGS" => words(value, '\x1f'),
+            _ => Vec::new(),
+        };
         if name.starts_with("LD_")
             || name.starts_with("DYLD_")
+            || name == "RUSTC_BOOTSTRAP"
+            || name.starts_with("RUSTC_BOOTSTRAP_")
             || forced.iter().any(|forced| forced == name)
+            || loads_project_code(&flags)
         {
             found.push(format!("env.{name}"));
         }
     }
     found
+}
+
+/// The words of a flags setting: a string split at `separator` (spaces
+/// and tabs too, for a space), or an array's strings.
+fn words(value: &toml::Value, separator: char) -> Vec<&str> {
+    match value {
+        toml::Value::String(text) if separator == ' ' => text.split_whitespace().collect(),
+        toml::Value::String(text) => text.split(separator).collect(),
+        toml::Value::Array(items) => items.iter().filter_map(|item| item.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether compiler flags can load project code into rustc: an unstable
+/// `-Z` flag in any spelling (`-Zcodegen-backend=`, `-Z` then its value),
+/// a `codegen-backend` however it is passed, or an `@file` argument file
+/// rustc reads further flags from.
+fn loads_project_code(flags: &[&str]) -> bool {
+    flags.iter().any(|flag| {
+        flag.starts_with("-Z") || flag.contains("codegen-backend") || flag.starts_with('@')
+    })
 }
 
 /// Every registry, index and source URL a config table sets, with its key

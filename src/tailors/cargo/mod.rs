@@ -222,14 +222,23 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
 /// workspace `root`, every file it includes too: cargo reads its
 /// configuration from where it starts and every ancestor, and the
 /// project's files end at the workspace. `dir` outside `root` checks
-/// `root` alone. Each file is followed wherever it leads, as the cargo
-/// that reads it follows it; only the signing key is refused.
+/// `root` alone. `home` is the `CARGO_HOME` cargo runs with when it is the
+/// project's own (`.greyward/cargo-home`, under `ward run`): cargo reads
+/// `config.toml` and `config` there as well, so they are checked the same
+/// way. Each file is followed wherever it leads, as the cargo that reads
+/// it follows it; only the signing key is refused.
 ///
 /// [`cargo_door::refuse_unneutralized_settings`]: crate::kernel::provider::cargo_door::refuse_unneutralized_settings
-pub(crate) fn refuse_project_cargo_config(root: &Path, dir: &Path) -> io::Result<()> {
+pub(crate) fn refuse_project_cargo_config(
+    root: &Path,
+    dir: &Path,
+    home: Option<&Path>,
+) -> io::Result<()> {
     use crate::kernel::provider::cargo_door;
     let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (root, dir) = (real(root), real(dir));
+    let mut files = Vec::new();
+    let bound = cargo_door::Bound::new(Path::new("/"))?;
     let dirs: Vec<&Path> = if dir.starts_with(&root) {
         dir.ancestors()
             .take_while(|ancestor| ancestor.starts_with(&root))
@@ -237,7 +246,13 @@ pub(crate) fn refuse_project_cargo_config(root: &Path, dir: &Path) -> io::Result
     } else {
         vec![root.as_path()]
     };
-    cargo_door::refuse_project_config(dirs, &cargo_door::Bound::new(Path::new("/"))?)
+    for dir in dirs {
+        files.extend(cargo_door::config_files(dir, &bound)?);
+    }
+    if let Some(home) = home {
+        files.extend(cargo_door::cargo_home_config_files(home, &bound)?);
+    }
+    cargo_door::refuse_unneutralized_settings(&files)
 }
 
 /// Project Cargo with a writable home, forced directory-source replacement,
@@ -354,7 +369,7 @@ pub fn build_sandboxed(
     reject_user_config(args)?;
     // The build starts in the workspace root: the configuration there is
     // what this cargo reads.
-    refuse_project_cargo_config(project.path(), project.path())?;
+    refuse_project_cargo_config(project.path(), project.path(), None)?;
     let store = Store::open()?;
     store.require_activity(activity, "cargo build")?;
     let project_dir = project.path().to_path_buf();
@@ -1848,13 +1863,13 @@ checksum = "{hash_b}"
         fs::create_dir_all(temp.0.join(".cargo")).unwrap();
         // Above the workspace: the user's own, not the project's.
         fs::write(temp.0.join(".cargo/config.toml"), "paths = [\"x\"]\n").unwrap();
-        refuse_project_cargo_config(&root, &member).unwrap();
+        refuse_project_cargo_config(&root, &member, None).unwrap();
         fs::write(
             member.join(".cargo/config.toml"),
             "registry.credential-provider = \"/bin/false\"\n",
         )
         .unwrap();
-        let error = refuse_project_cargo_config(&root, &member)
+        let error = refuse_project_cargo_config(&root, &member, None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1862,10 +1877,10 @@ checksum = "{hash_b}"
             "{error}"
         );
         // A start outside the workspace checks the workspace alone.
-        refuse_project_cargo_config(&root, &temp.0).unwrap();
+        refuse_project_cargo_config(&root, &temp.0, None).unwrap();
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::write(root.join(".cargo/config.toml"), "paths = [\"x\"]\n").unwrap();
-        let error = refuse_project_cargo_config(&root, &temp.0)
+        let error = refuse_project_cargo_config(&root, &temp.0, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("sets paths"), "{error}");

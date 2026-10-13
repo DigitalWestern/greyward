@@ -967,17 +967,6 @@ impl ProjectRoot {
         }))
     }
 
-    /// This root, registered as held like one [`ProjectRoot::open`] returns
-    /// (a [`ProjectRoot::parent`] is not), so a sandbox or a child started
-    /// at its path gets the directory this descriptor holds, never what
-    /// the path names by then.
-    pub(crate) fn registered(mut self) -> Self {
-        if self._held.is_none() {
-            self._held = Some(HeldEntry::register(&self.path, &self.dir));
-        }
-        self
-    }
-
     /// This root, then each directory above it (`parent`), up to `/`. Opened
     /// one at a time as the walk reaches it, so a walk that stops early
     /// holds nothing more.

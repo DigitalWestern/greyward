@@ -10,7 +10,7 @@ mod common;
 
 use common::{
     assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, fixture, temp_entries,
-    ward, ward_at, TempDir,
+    ward, ward_at, ward_offline, TempDir,
 };
 
 fn copy_dotnet_hello(project: &Path) {
@@ -215,6 +215,33 @@ fn dotnet_sync_sandboxed_build_and_run() {
         "run rebuilt app",
     );
     assert!(out.contains("{\"dotnet\":\"ok\"}"), "{out}");
+
+    // #696: an unchanged project re-syncs and builds with the network cut.
+    // The packages object is keyed on the lock's contentHashes and the SDK,
+    // so the store check runs before any nupkg is fetched, and the same
+    // objects are projected again.
+    let closure = || -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(project.join(".greyward/closures/dotnet.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let before = closure();
+    assert_ok(
+        ward_offline(&project, &temp.0, &["sync"]),
+        "offline re-sync of the unchanged project",
+    );
+    let after = closure();
+    for key in ["sdk_object", "packages_object"] {
+        assert_eq!(
+            after["body"][key], before["body"][key],
+            "the offline re-sync projected a different {key}"
+        );
+    }
+    assert_ok(
+        ward_offline(&project, &temp.0, &["build"]),
+        "offline build of the unchanged project",
+    );
 
     // Build-capable verbs are sandbox-only.
     let refused = ward(&project, &temp.0, &["run", "dotnet", "build"]);

@@ -1255,6 +1255,17 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{}: {error}", row.url));
             }
         }
+        // conda-forge serves no tailor's rows, only the pinned native-library
+        // closure: one of its packages, the same way.
+        let native = crate::kernel::provider::nativelibs::packages(Platform::X86_64UnknownLinuxGnu)
+            .unwrap()[0]
+            .url();
+        let (mut body, _) = crate::kernel::fetch::open_authorized(&policy, "conda-forge", &native)
+            .unwrap_or_else(|error| panic!("conda-forge: {error}"));
+        let mut first = [0u8; 16];
+        body.read_exact(&mut first)
+            .unwrap_or_else(|error| panic!("{native}: {error}"));
+        opened.insert("conda-forge".to_string());
         assert_eq!(opened.len(), policy.publishers().len());
     }
 

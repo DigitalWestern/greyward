@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 
 mod held;
 pub(crate) use held::pass_fds;
-use held::HeldRoots;
+use held::{HeldRoots, ARGS_FD};
 
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
@@ -438,10 +438,19 @@ impl Sandbox<'_> {
             .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
             .map_err(setup)?;
         let mut command = bwrap_command(bwrap).map_err(setup)?;
-        command.args(&invocation.args);
-        pass_fds(&mut command, held.passed());
+        // Every argument ward generates reaches bubblewrap through a
+        // descriptor, so only the build's own command counts toward the
+        // kernel's argument limits: a spawn that fails with E2BIG is the
+        // build's failure in either view (#679, `error::sandbox_spawn`).
+        let (options, own) = invocation.args.split_at(invocation.command_start);
+        let options = args_file(options).map_err(setup)?;
+        command.arg("--args").arg(ARGS_FD.to_string()).args(own);
+        let mut fds = held.passed();
+        fds.push((std::os::fd::AsRawFd::as_raw_fd(&options), ARGS_FD));
+        pass_fds(&mut command, fds);
         // The descriptors are duplicated only when the child is spawned.
         invocation._held = held;
+        invocation._options = Some(options);
         Ok((command, invocation))
     }
 
@@ -632,6 +641,7 @@ impl Sandbox<'_> {
         push_arg(&mut args, "--unsetenv");
         push_arg(&mut args, "PWD");
 
+        let command_start = args.len();
         // The held descriptors bubblewrap bound from reach the command too
         // (its pid 1 closes only its own copies), and a host directory's
         // descriptor leads out of the sandbox through `..`. The system
@@ -662,8 +672,10 @@ impl Sandbox<'_> {
         }
         Ok(BwrapInvocation {
             args,
+            command_start,
             _skeleton: skeleton,
             _held: HeldRoots::default(),
+            _options: None,
         })
     }
 }
@@ -720,9 +732,44 @@ const BWRAP_MAX_ARGS: usize = 9000;
 /// so it must outlive the child.
 struct BwrapInvocation {
     args: Vec<OsString>,
+    /// Where in `args` bubblewrap's own options end and the command starts.
+    command_start: usize,
     _skeleton: Option<crate::kernel::hostview::ViewSkeleton>,
     /// The held roots the command passes to bubblewrap, open until it runs.
     _held: HeldRoots,
+    /// The options bubblewrap reads at `ARGS_FD`, open until it runs.
+    _options: Option<fs::File>,
+}
+
+/// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
+/// anonymous file read from its start.
+#[cfg(target_os = "linux")]
+fn args_file(args: &[OsString]) -> io::Result<fs::File> {
+    use std::io::{Seek as _, Write as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: memfd_create reads only the NUL-terminated name.
+    let fd = unsafe { libc::memfd_create(c"greyward-bwrap-args".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just created and nothing else owns it.
+    let mut file = unsafe { <fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    let mut data = Vec::new();
+    for arg in args {
+        data.extend_from_slice(arg.as_bytes());
+        data.push(0);
+    }
+    file.write_all(&data)?;
+    file.rewind()?;
+    Ok(file)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn args_file(_: &[OsString]) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "bubblewrap runs only on Linux",
+    ))
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own
@@ -2500,6 +2547,60 @@ mod tests {
         assert!(output.status.success(), "{report}");
         // The child ran the test rather than filtering it out.
         assert!(report.contains("1 passed"), "{report}");
+    }
+
+    /// ward's own bubblewrap arguments do not count toward the kernel's
+    /// argument limit, so a build command that fits on its own starts
+    /// however many mounts the sandbox generates: here a few hundred long
+    /// read roots (about 1.8 MB of arguments) and a 1 MB command, past the
+    /// 2 MiB limit together (#679). bubblewrap closes the descriptor it
+    /// read them from, so the build never sees it.
+    #[test]
+    fn linux_generated_arguments_leave_the_argument_limit_to_the_build() {
+        if !linux_ready("linux_generated_arguments_leave_the_argument_limit_to_the_build") {
+            return;
+        }
+        let root = temp_dir("many-roots");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let mut deep = root.0.join("roots");
+        for level in 0..11 {
+            deep.push(format!("{level}{}", "d".repeat(250)));
+        }
+        let roots: Vec<PathBuf> = (0..300).map(|i| deep.join(format!("r{i}"))).collect();
+        for path in &roots {
+            fs::create_dir_all(path).unwrap();
+        }
+        let sandbox = Sandbox {
+            read: roots.iter().map(PathBuf::as_path).collect(),
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let generated: usize = sandbox
+            .bwrap_args(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[],
+                &HeldRoots::default(),
+            )
+            .unwrap()
+            .args
+            .iter()
+            .map(|arg| arg.len() + 1)
+            .sum();
+        assert!(generated > 1_700_000, "{generated}");
+        let chunk = "x".repeat(100 * 1024);
+        let mut cmd = vec!["/bin/sh", "-c", "ls /proc/self/fd", "sh"];
+        cmd.extend(std::iter::repeat_n(chunk.as_str(), 10));
+        let listed = run_capture(&sandbox, &cmd, &scratch, &scratch, &[])
+            .expect("a command that fits the limit on its own starts");
+        let listed = String::from_utf8(listed).unwrap();
+        assert!(
+            !listed.lines().any(|fd| fd == ARGS_FD.to_string()),
+            "the build sees bubblewrap's --args descriptor: {listed}"
+        );
     }
 
     /// bubblewrap's helper is the sandbox's pid 1, readable by the build,

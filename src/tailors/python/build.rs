@@ -2319,8 +2319,42 @@ mod tests {
             &workspace,
         );
         drop(door);
+
+        // A root workspace with a `native/` member, the sdist's manifest:
+        // the lock goes beside the root's manifest.
+        let rooted = work.join("rooted");
+        fs::create_dir_all(rooted.join("native/src")).unwrap();
+        fs::write(
+            rooted.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"native\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            rooted.join("native/Cargo.toml"),
+            "[package]\nname = \"native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(rooted.join("native/src/lib.rs"), "").unwrap();
+        let mut door = scope.door(
+            store,
+            activity,
+            platform,
+            crate::kernel::resolve::DoorKind::Planner,
+        );
+        let root_member = super::generate_cargo_lock(
+            &mut door,
+            &rust_obj,
+            Path::new("native/Cargo.toml"),
+            &rooted,
+        );
+        drop(door);
         PROXY_FOR_TEST.with(|slot| slot.set(None));
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(root_member.unwrap(), Path::new("Cargo.lock"));
+        assert!(!rooted.join("native/Cargo.lock").exists());
+        assert!(fs::read_to_string(rooted.join("Cargo.lock"))
+            .unwrap()
+            .contains("name = \"native\""));
         assert_eq!(member.unwrap(), Path::new("rust/Cargo.lock"));
         assert!(!workspace.join("rust/native/Cargo.lock").exists());
         assert!(fs::read_to_string(workspace.join("rust/Cargo.lock"))

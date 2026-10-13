@@ -4237,8 +4237,9 @@ Two writers, built in this order.
    with Greyward's existing realization code on the server side.
 
 Exceptions: an object whose realization records an object exception
-(`object_exceptions()`: every kind but `PLAN_TIME_KINDS`, which a sync records
-again each time) still records it in `meta/<id>.json` as today. A user's
+(`object_exceptions()`: every kind but `PLAN_TIME_KINDS`, and no lock fact
+recorded through `record_plan_time`, all of which a sync records again each
+time) still records it in `meta/<id>.json` as today. A user's
 Greyward checks a system object's recorded exceptions against *that user's*
 policy chain through `check_cached_with_activity` (or
 `check_cached_reusable`, which rebuilds an `object-meta/2` object whose

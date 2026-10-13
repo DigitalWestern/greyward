@@ -217,8 +217,8 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
 }
 
 /// Refuse the cargo configuration no forced setting undoes
-/// ([`cargo_door::refuse_unneutralized_settings`]: a `paths` override or a
-/// credential provider) in `dir` and each directory above it up to the
+/// ([`cargo_door::refuse_unneutralized_settings`]: a `paths` override, a
+/// credential provider, a directory source, ...) in `dir` and each directory above it up to the
 /// workspace `root`, every file it includes too: cargo reads its
 /// configuration from where it starts and every ancestor, and the
 /// project's files end at the workspace. `dir` outside `root` checks

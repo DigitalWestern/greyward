@@ -500,6 +500,9 @@ fn pnpm_add_update_remove_roundtrip() {
         .unwrap();
     let digest =
         greyward::kernel::fetch::Digest::from_sri(pnpm["integrity"].as_str().unwrap()).unwrap();
+    // The closure names the digest the fetched bytes matched.
+    assert_eq!(pnpm["matched_digest"]["algo"], digest.algo());
+    assert_eq!(pnpm["matched_digest"]["hex"], digest.hex());
     let tarball =
         std::fs::read(store.join("cache").join(digest.algo()).join(digest.hex())).unwrap();
     let corepack_sha224 = hex::encode(Sha224::digest(&tarball));

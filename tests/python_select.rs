@@ -12,7 +12,10 @@ use greyward::kernel::platform::Platform;
 
 mod common;
 
-use common::{assert_ok, command, copy_tree, fixture, text, ward, ward_at, warm_store, TempDir};
+use common::{
+    assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree, fixture, snapshot, text,
+    ward, ward_at, warm_store, TempDir,
+};
 
 #[test]
 #[ignore]
@@ -151,10 +154,16 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
 
     let plan_path = project.join(".greyward/plan.json");
     let lock_path = project.join("requirements.lock.txt");
-    let stamp_path = project.join(".greyward/lock-source.hash");
+    // The lock names what it was compiled from in uv's header (#673).
+    let lock = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        lock.lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with("#    ward # lock-source/1 platform=")),
+        "{lock}"
+    );
     let plan_mtime = std::fs::metadata(&plan_path).unwrap().modified().unwrap();
     let lock_mtime = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
-    let stamp_mtime = std::fs::metadata(&stamp_path).unwrap().modified().unwrap();
 
     let second = signed(&["sync"]);
     assert_ok(second, "warm sync");
@@ -167,11 +176,6 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         std::fs::metadata(&lock_path).unwrap().modified().unwrap(),
         lock_mtime,
         "warm sync re-locked"
-    );
-    assert_eq!(
-        std::fs::metadata(&stamp_path).unwrap().modified().unwrap(),
-        stamp_mtime,
-        "warm sync rewrote lock stamp"
     );
 }
 
@@ -204,6 +208,81 @@ fn unpinned_patch_request_fails_closed_before_opening_store() {
     );
     assert!(stderr.contains("request one of:"), "{stderr}");
     assert!(!store.exists(), "store was opened: {store:?}");
+}
+
+/// The committed files of `project` (its top-level files: no `.greyward`,
+/// no `.venv`), copied into a new directory `clone`, as a fresh checkout on
+/// another machine has them.
+fn fresh_checkout(project: &std::path::Path, clone: &std::path::Path) {
+    std::fs::create_dir_all(clone).unwrap();
+    for entry in std::fs::read_dir(project).unwrap() {
+        let path = entry.unwrap().path();
+        if path.symlink_metadata().unwrap().is_file() {
+            std::fs::copy(&path, clone.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+}
+
+/// `--frozen` only reads the requirements lock (#673): after an edit to
+/// `requirements.txt` the committed lock names other inputs in its header,
+/// and the frozen sync is refused as stale (exit 4) with every project file
+/// left byte for byte as it was, rather than re-locked over the network.
+/// The header is the evidence, so a fresh checkout with no local state, at
+/// another path, reads the same lock and is refused the same way. Without
+/// the lock it is refused by name, and a plain plan compiles it again.
+/// Ignored: the first sync downloads CPython and resolves against PyPI.
+#[test]
+#[ignore]
+fn frozen_python_sync_never_relocks_an_edited_requirements_file() {
+    let temp = TempDir::new("python-frozen");
+    let project = temp.0.join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("requirements.txt"), "six>=1.16\n").unwrap();
+    assert_ok(ward(&project, &temp.0, &[]), "first sync");
+    let lock = std::fs::read(project.join("requirements.lock.txt")).unwrap();
+
+    // A fresh checkout of the unedited project syncs frozen from the lock.
+    let clone = temp.0.join("checkout/proj");
+    fresh_checkout(&project, &clone);
+    assert_ok(
+        ward(&clone, &temp.0, &["--frozen"]),
+        "frozen fresh checkout",
+    );
+    assert_eq!(
+        std::fs::read(clone.join("requirements.lock.txt")).unwrap(),
+        lock
+    );
+    // An edited one is refused, and nothing in it changes.
+    let clone = temp.0.join("edited/proj");
+    fresh_checkout(&project, &clone);
+    std::fs::write(clone.join("requirements.txt"), "six>=1.15\n").unwrap();
+    let before = snapshot(&clone);
+    let frozen = ward(&clone, &temp.0, &["--frozen"]);
+    let stderr = text(&frozen.stderr);
+    assert_eq!(frozen.status.code(), Some(4), "{stderr}");
+    assert!(
+        stderr.contains(
+            "was not compiled from requirements.txt as it is now: the requirements changed"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(snapshot(&clone), before, "--frozen changed the checkout");
+
+    std::fs::write(project.join("requirements.txt"), "six>=1.15\n").unwrap();
+    let before = snapshot(&project);
+    let frozen = ward(&project, &temp.0, &["--frozen"]);
+    let stderr = text(&frozen.stderr);
+    assert_eq!(frozen.status.code(), Some(4), "{stderr}");
+    assert!(
+        stderr.contains("was not compiled from requirements.txt as it is now"),
+        "{stderr}"
+    );
+    assert_eq!(snapshot(&project), before, "--frozen changed the project");
+    assert_eq!(
+        std::fs::read(project.join("requirements.lock.txt")).unwrap(),
+        lock
+    );
+    assert_frozen_never_writes_the_lock(&project, &temp.0, "requirements.lock.txt");
 }
 
 /// `ward run` itself refuses a runtime its project's environment does not

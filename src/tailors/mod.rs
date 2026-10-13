@@ -296,10 +296,10 @@ pub trait Tailor: Sync {
     fn preflight(&self, platform: Platform, project: &ProjectRoot) -> io::Result<()>;
 
     /// Host-side preparation that must precede planning for one ecosystem:
-    /// missing-lock generation with the ecosystem's own tool. Every tailor
-    /// but Python implements it. Python compiles its requirements lock
-    /// inside `plan` instead, so this hook is not the only place a tailor
-    /// writes project inputs. Runs for detected ecosystems only, before
+    /// missing-lock generation with the ecosystem's own tool (Python's
+    /// compiles `requirements.lock.txt` when its stamp no longer matches).
+    /// It is the one place a tailor writes a dependency lock: `plan` and
+    /// `sync` only read one. Runs for detected ecosystems only, before
     /// that ecosystem plans, and never under `--frozen`; a plan that then
     /// finds no lock refuses with [`missing_lock`].
     ///
@@ -317,8 +317,8 @@ pub trait Tailor: Sync {
 
     /// `ward plan`: the plan as pretty-printed JSON text. Planning realizes
     /// no dependency environment, but it may fetch the pinned toolchain
-    /// into the store, and Python's writes its requirements lock and stamp
-    /// into the project. `None` when, after `prepare`, there is nothing of
+    /// into the store and write ward's own caches under `.greyward`
+    /// (Python's writes no dependency lock: `prepare` does). `None` when, after `prepare`, there is nothing of
     /// this ecosystem to plan (the text is produced here, not a `Value`, so
     /// each plan's key order stays exactly what its producer serializes).
     /// A planner that asks the ecosystem's tool (a consistency gate, a lock
@@ -732,6 +732,13 @@ pub trait RegistryTool: Sync {
     /// without touching the store. It is part of the cache key.
     fn runtime_object_id(&self, platform: Platform, toolchain: &Selected) -> io::Result<String>;
 
+    /// The identity schema of the environment object this tool realizes
+    /// (`node-env/6`, `python-env/3`). It is part of the cache key, so a
+    /// schema bump moves every cached tool to a new directory and rebuilds
+    /// it, and a cached projection whose object has another schema is
+    /// realized again.
+    fn environment_schema(&self) -> &'static str;
+
     /// The word that names this registry on the command line: the
     /// `py:`/`npm:` tool prefix and the `--py`/`--npm` flag.
     fn spelling(&self) -> &'static str;
@@ -776,7 +783,7 @@ pub trait RegistryTool: Sync {
 
     /// The helper toolchains a realization builds with, a subset of the
     /// tailor's `helpers`. Each one's runtime object id is part of the
-    /// cache key, and a tool with none keeps the `x/3` key.
+    /// cache key.
     fn helpers(&self) -> &'static [&'static str] {
         &[]
     }
@@ -955,7 +962,7 @@ mod tests {
     #[test]
     fn a_missing_lock_is_refused_by_name_and_nothing_is_written() {
         type RequireLock = fn(&ProjectRoot) -> io::Result<()>;
-        let rows: [(&str, &str, &str, &str, RequireLock); 4] = [
+        let rows: [(&str, &str, &str, &str, RequireLock); 5] = [
             (
                 "node",
                 "package.json",
@@ -983,6 +990,14 @@ mod tests {
                 "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
                 "packages.lock.json",
                 dotnet::require_lock,
+            ),
+            // Unpinned, so planning reads the lock uv compiles from it.
+            (
+                "python",
+                "requirements.txt",
+                "six>=1\n",
+                "requirements.lock.txt",
+                |project| python::inputs::require_lock(project).map(drop),
             ),
         ];
         for (tailor, manifest, text, lock, require_lock) in rows {

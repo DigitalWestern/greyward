@@ -48,7 +48,7 @@ The toolchain lock shipped on Linux on 2026-09-21: exact selection, the
 shipped-table adapter and catalogs, the lock core, runtime propagation, and
 activation with `ward update --toolchain`. Its behavior is documented in
 `docs/human/ARCHITECTURE.md` "Toolchain lock" (file, staleness rule,
-selection order, catalogs, `x/3` keys) and "Store
+selection order, catalogs, `x/5` keys) and "Store
 concurrency" (lock order), `docs/human/CLI.md` (`--frozen`, `ward update
 --toolchain`), and `docs/human/LIMITATIONS.md` (one toolchain per lock
 root). The full reviewed design, with its reasoning, is in git history:
@@ -3621,21 +3621,34 @@ uv rows onto the door:
   command line into the lock, which names the store interpreter (a path
   that differs per machine) and the probe's `--no-build`. Every compile
   passes `--custom-compile-command ward`, so the bytes are the same
-  everywhere and an attest rerun can leave them unchanged. A lock with
+  everywhere and an attest rerun can leave them unchanged. For
+  `requirements.lock.txt` the command also names the lock's source (the
+  platform, the Python version, a digest of the requirements uv
+  compiled; no path), which planning checks the committed lock against
+  under `--frozen` (#673). A lock with
   another header is refused by attest. Retain `requirements.txt` and run
   `ward update` for a pip-compile pair. Delete only `requirements.lock.txt`
   and run `ward` for generated locks.
 - **Attest.** `uv lock --locked` for `uv.lock`. For
   `requirements.lock.txt`, the same compile planning runs, from the
   input planning picks (`inputs::lock_compile_input`, which writes the
-  generated `.greyward` input afresh), with `require_unchanged`. For a
+  generated `.greyward` input afresh), with `require_unchanged`. The
+  header command is `ward # lock-source/1 platform=... python=...
+  inputs=sha256:...` (`inputs::LockSource`) for a lock that names its
+  source, recomputed from the inputs, and bare `ward` for one compiled
+  before the source was written, so the rerun reproduces either. A
+  dynamic setup.py's `inputs` digest is of the files that declare its
+  requirements (`inputs::setup_inputs_digest`), not of what egg_info
+  gave, so planning checks the lock before setup.py runs and plans from
+  a matching one with no probe (`inputs::Reading`). For a
   pip-compile pair, `requirements.in` to `requirements.txt`. A
   hand-pinned `requirements.txt` has no check and is refused.
 - **Resolution files.** Outputs: `pyproject.toml`, `uv.lock`,
   `requirements.in`, `requirements.txt`, `requirements.lock.txt`, and each
   uv workspace member's `pyproject.toml` (`[tool.uv.workspace]` members
-  globs minus `exclude`). Inputs: `setup.cfg`, `setup.py`, and every file
-  a top-level requirements file includes inside the project. An include
+  globs minus `exclude`). Inputs: `setup.cfg`, `setup.py`, every file
+  a top-level requirements file includes inside the project, and every
+  file setup.cfg's requirement lists name with `file:`. An include
   outside the project means the door publishes with no record (the
   missing-lock door already compiles the flattened text then) and attest
   refuses it. The sync takes the basis right after planning.
@@ -4266,10 +4279,13 @@ Two writers, built in this order.
    with Greyward's existing realization code on the server side.
 
 Exceptions: an object whose realization records an object exception
-(`object_exceptions()`: install-script-failed, git-dependency, ...) still
-records it in `meta/<id>.json` as today. A user's Greyward checks a system
-object's recorded exceptions against *that user's* policy chain through
-`check_cached_with_activity`, the same check a cached object gets now, so a
+(`object_exceptions()`: every kind but `PLAN_TIME_KINDS`, and no lock fact
+recorded through `record_plan_time`, all of which a sync records again each
+time) still records it in `meta/<id>.json` as today. A user's
+Greyward checks a system object's recorded exceptions against *that user's*
+policy chain through `check_cached_with_activity` (or
+`check_cached_reusable`, which rebuilds an `object-meta/2` object whose
+exceptions it cannot trust), the same check a cached object gets now, so a
 shared object never smuggles a waived exception past a stricter user.
 
 ### Reading it: the trust check

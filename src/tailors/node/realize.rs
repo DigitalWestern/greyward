@@ -51,7 +51,7 @@ pub fn realize_node_env(
 /// Realize the tree with the Node the project's selection names, running
 /// node-gyp on `gyp_python`: the helper toolchain selection when the
 /// project has one, [`shipped_gyp_python`](crate::tailors::node::shipped_gyp_python)
-/// otherwise. Its object id is an input of the `node-env/5` identity.
+/// otherwise. Its object id is an input of the `node-env/6` identity.
 pub fn realize_node_env_for(
     store: &Store,
     activity: &StoreActivity,
@@ -77,7 +77,11 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
 }
 
 /// The schema the producer writes. `node-env/5` is `/4` plus `gyp_python`.
-pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/5";
+/// `node-env/6` has the `/5` inputs: it marks the environments built since
+/// extraction checks each tarball against the name and version its lock
+/// entry gives (`check_tarball_identity`), so one built before that check
+/// is never reused.
+pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/6";
 
 /// The two spellings of the `node-env/5` native decision. The producer
 /// writes one of them on every commit, so a dropped `native_libs` key is a
@@ -381,7 +385,8 @@ pub(super) fn resolve_native_libs_id<'a>(
 }
 
 /// The byte sources for a cold realization: one held cache lease per distinct
-/// registry tarball, plus the realized object for every git dependency.
+/// registry tarball, plus the realized object for every git dependency, and
+/// for each registry package the integrity candidate its bytes matched.
 ///
 /// Peer snapshots are separate graph nodes that normally share one registry
 /// tarball, so the byte fetch is deduplicated while extraction and placement
@@ -397,11 +402,13 @@ fn fetch_plan_sources(
     Vec<(crate::kernel::fetch::CacheLease, Digest)>,
     Vec<(NpmPackage, PathBuf)>,
     Vec<(NpmPackage, PathBuf)>,
+    BTreeMap<String, Digest>,
 )> {
     let mut leases: Vec<(crate::kernel::fetch::CacheLease, Digest)> = Vec::new();
     let mut tarballs: Vec<(NpmPackage, PathBuf)> = Vec::new();
     let mut git_objects: Vec<(NpmPackage, PathBuf)> = Vec::new();
-    let mut downloaded = BTreeMap::<(String, String), PathBuf>::new();
+    let mut downloaded = BTreeMap::<(String, String), (PathBuf, Digest)>::new();
+    let mut matched = BTreeMap::<String, Digest>::new();
     for p in &plan.packages {
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
@@ -422,18 +429,21 @@ fn fetch_plan_sources(
             continue;
         }
         let cache_key = (p.url.clone(), p.integrity.clone());
-        let t = if let Some(t) = downloaded.get(&cache_key) {
-            t.clone()
+        // `fetch_tarball` verified these bytes against `p`'s integrity and
+        // says which candidate they matched: that is `p`'s archive.
+        let (t, digest) = if let Some(fetched) = downloaded.get(&cache_key) {
+            fetched.clone()
         } else {
             let (lease, digest) = fetch_tarball(store, activity, p)?;
             let path = lease.to_path_buf();
-            leases.push((lease, digest));
-            downloaded.insert(cache_key, path.clone());
-            path
+            leases.push((lease, digest.clone()));
+            downloaded.insert(cache_key, (path.clone(), digest.clone()));
+            (path, digest)
         };
+        matched.insert(p.path.clone(), digest);
         tarballs.push((p.clone(), t));
     }
-    Ok((leases, tarballs, git_objects))
+    Ok((leases, tarballs, git_objects, matched))
 }
 
 /// The staged env skeleton: the root node_modules plus one per workspace.
@@ -617,6 +627,7 @@ fn extract_tarball_packages(
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?;
         normalize_modes(&dest)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: normalize modes: {e}", p.path)))?;
+        check_tarball_identity(p, &dest)?;
         if let Some(patch) = &p.patch {
             let snapshot = snapshot_verified_patch(store, activity, &p.path, patch)?;
             apply_verified_patch(activity, &p.path, &snapshot, &dest)?;
@@ -640,6 +651,70 @@ fn extract_tarball_packages(
         }
     }
     Ok(())
+}
+
+/// Do two versions name the same release as npm reads them? Both sides go
+/// through node-semver's loose `clean`, which npm applies to a
+/// package.json version when it reads one, so `v01.0.0+sha.1` in a
+/// tarball's package.json is the `1.0.0` the registry and the lock name,
+/// and `1.2.3-01` is `1.2.3-1`. A version `clean` refuses is one npm would
+/// refuse to read, so it matches only itself as written.
+fn same_version(a: &str, b: &str) -> bool {
+    match (
+        crate::kernel::semver::clean_loose(a),
+        crate::kernel::semver::clean_loose(b),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.trim() == b.trim(),
+    }
+}
+
+/// The bytes the integrity verified must be the package the lock entry
+/// names: the tarball's own package.json carries the same name and version
+/// (#688). The integrity proves the bytes are the ones the lock recorded,
+/// not which package they are, so a lock edited to pair `left-pad@1.3.0`
+/// with another package's tarball and hash would otherwise install that
+/// package while the closure, the SBOM and name-keyed provisioning all
+/// believe `left-pad`. An npm alias (`"x": "npm:@t/real@2"`) is placed under
+/// its alias but its lock entry's `name` is the real package's, and so is
+/// the tarball's. A `file:` directory package is packed from the project
+/// itself: its identity is its directory, not a registry name, so it is
+/// not checked.
+fn check_tarball_identity(p: &NpmPackage, dest: &Path) -> io::Result<()> {
+    if super::local_package::source_dir(p).is_some() {
+        return Ok(());
+    }
+    let text = match fs::read_to_string(dest.join("package.json")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(err(format!(
+                "{}: the tarball has no package.json, so nothing in it says it is {}@{}; refusing",
+                p.path, p.name, p.version
+            )))
+        }
+        Err(e) => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!("{}: read package.json: {e}", p.path),
+            ))
+        }
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text))
+            .map_err(|e| err(format!("{}: tarball package.json: {e}", p.path)))?;
+    let name = manifest["name"].as_str().unwrap_or_default();
+    let version = manifest["version"].as_str().unwrap_or_default();
+    if name == p.name && same_version(version, &p.version) {
+        return Ok(());
+    }
+    Err(err(format!(
+        "{}: the lock names {}@{} but the tarball it verified is {}@{}; refusing, since every record would name a package that is not installed (an npm alias's lock entry names the real package in its \"name\")",
+        p.path,
+        p.name,
+        p.version,
+        if name.is_empty() { "<no name>" } else { name },
+        if version.is_empty() { "<no version>" } else { version },
+    )))
 }
 
 /// Git packages: the realized commit IS the package content. npm would run
@@ -805,9 +880,12 @@ pub(super) fn realize_node_env_with_node_object(
         native_libs_id.as_deref(),
         &gyp_python_id,
     )?;
+    // An `object-meta/2` environment a stricter policy cannot judge falls
+    // through to a cold realization, which commits the same id again.
     if let Some(cached) = script_view::cached_object(store, activity, &identity)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
-        return Ok(store.object_path(&cached.id));
+        if crate::kernel::policy::check_cached_reusable(store, activity, &cached.id)? {
+            return Ok(store.object_path(&cached.id));
+        }
     }
 
     let workspaces = workspace_set(plan);
@@ -816,7 +894,8 @@ pub(super) fn realize_node_env_with_node_object(
     // cached bytes mid-extraction; `leases` is held to the end of this
     // function for exactly that reason.
     drop(classification_tarballs);
-    let (leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, activity, plan)?;
+    let (leases, mut tarballs, mut git_objects, matched) =
+        fetch_plan_sources(store, activity, plan)?;
     confirm_classified_sources(&classified_from, &tarballs)?;
 
     let native_libs = if native_libs_id.is_some() {
@@ -858,6 +937,9 @@ pub(super) fn realize_node_env_with_node_object(
         &identity,
         &mut deps,
     )?;
+    // Written after the scripts ran, which cannot write outside their own
+    // package directory in any case.
+    super::archives::write_matched_archives(&staged, &matched)?;
 
     let object = commit_env_object(
         store,
@@ -1590,5 +1672,93 @@ mod tests {
             .map(|package| package.path.as_str())
             .collect();
         assert_eq!(paths, ["node_modules/a/node_modules/b", "node_modules/a"]);
+    }
+
+    /// The tarball's package.json must name the package its lock entry
+    /// names (#688). An alias is placed under its alias and names the real
+    /// package; a `v` prefix or build metadata is the same version to npm;
+    /// another name or version, or no package.json at all, is refused; a
+    /// `file:` directory package is the project's own and is not checked.
+    #[test]
+    fn a_tarball_must_be_the_package_its_lock_entry_names() {
+        let temp = crate::kernel::testutil::TempDir::named("npm-tarball-identity");
+        let package = |path: &str, name: &str, version: &str, url: &str| NpmPackage {
+            path: path.into(),
+            name: name.into(),
+            version: version.into(),
+            url: url.into(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            foreign_platform: false,
+            needs_workspace: false,
+            patch: None,
+            git: None,
+        };
+        let check = |manifest: Option<&str>, p: &NpmPackage| {
+            let dest = temp.0.join("dest");
+            let _ = fs::remove_dir_all(&dest);
+            fs::create_dir_all(&dest).unwrap();
+            if let Some(manifest) = manifest {
+                fs::write(dest.join("package.json"), manifest).unwrap();
+            }
+            check_tarball_identity(p, &dest).map_err(|e| e.to_string())
+        };
+        let registry = "https://registry.npmjs.org/x.tgz";
+        let left_pad = package("node_modules/left-pad", "left-pad", "1.3.0", registry);
+        let alias = package("node_modules/@s/alias", "@t/real", "2.0.0", registry);
+
+        check(Some(r#"{"name":"left-pad","version":"1.3.0"}"#), &left_pad).unwrap();
+        check(Some(r#"{"name":"@t/real","version":"2.0.0"}"#), &alias).unwrap();
+        check(
+            Some(r#"{"name":"left-pad","version":"v1.3.0+build.7"}"#),
+            &left_pad,
+        )
+        .unwrap();
+        // npm reads past a byte-order mark, and a Windows-authored package
+        // may ship one.
+        check(
+            Some("\u{feff}{\"name\":\"left-pad\",\"version\":\"1.3.0\"}"),
+            &left_pad,
+        )
+        .unwrap();
+
+        let other = check(
+            Some(r#"{"name":"totally-other","version":"9.9.0"}"#),
+            &left_pad,
+        )
+        .unwrap_err();
+        assert!(
+            other.contains(
+                "the lock names left-pad@1.3.0 but the tarball it verified is totally-other@9.9.0"
+            ),
+            "{other}"
+        );
+        // npm's loose clean: leading zeros in the core and in numeric
+        // prerelease identifiers are numbers, as `@npmcli/package-json`
+        // rewrites them on read.
+        check(Some(r#"{"name":"left-pad","version":"01.3.0"}"#), &left_pad).unwrap();
+        let pre = package("node_modules/left-pad", "left-pad", "1.2.3-1", registry);
+        check(Some(r#"{"name":"left-pad","version":"1.2.3-01"}"#), &pre).unwrap();
+        let next = check(Some(r#"{"name":"left-pad","version":"1.2.3-2"}"#), &pre).unwrap_err();
+        assert!(next.contains("is left-pad@1.2.3-2"), "{next}");
+        // A version npm cannot read matches only itself.
+        let odd = package("node_modules/left-pad", "left-pad", "not-semver", registry);
+        check(Some(r#"{"name":"left-pad","version":"not-semver"}"#), &odd).unwrap();
+        check(Some(r#"{"name":"left-pad","version":"1.3.0"}"#), &odd).unwrap_err();
+
+        let older = check(Some(r#"{"name":"left-pad","version":"1.2.0"}"#), &left_pad).unwrap_err();
+        assert!(older.contains("is left-pad@1.2.0"), "{older}");
+        let unnamed = check(Some(r#"{"version":"1.3.0"}"#), &left_pad).unwrap_err();
+        assert!(unnamed.contains("is <no name>@1.3.0"), "{unnamed}");
+        let empty = check(None, &left_pad).unwrap_err();
+        assert!(empty.contains("the tarball has no package.json"), "{empty}");
+
+        let local = package(
+            "node_modules/scripted",
+            "scripted",
+            "0.0.0",
+            &super::super::local_package::url_for("scripted"),
+        );
+        check(Some(r#"{"name":"renamed"}"#), &local).unwrap();
     }
 }

@@ -470,6 +470,13 @@ impl SpecifierSet {
         self.matches_raw(version)
     }
 
+    /// Whether `version` satisfies the clauses, pre-releases included:
+    /// what a specifier admits once the default pre-release filter is set
+    /// aside, as uv sets it aside when only pre-releases fit.
+    pub fn admits(&self, version: &Version) -> bool {
+        self.matches_raw(version)
+    }
+
     /// True when some alternative admits every version (`*`, an empty set,
     /// `^3.9 || *`): the set then states nothing.
     pub fn admits_everything(&self) -> bool {
@@ -823,6 +830,19 @@ pub fn matches_specifier(specifier: &str, version: &str) -> io::Result<bool> {
         )
     })?;
     Ok(SpecifierSet::parse(specifier, "specifier")?.matches(&candidate))
+}
+
+/// [`matches_specifier`] with no default pre-release filter: whether
+/// `version` satisfies `specifier`'s clauses, a pre-release included
+/// (`==1.2.*` admits `1.2.0rc1`).
+pub fn admits_version(specifier: &str, version: &str) -> io::Result<bool> {
+    let candidate = Version::parse(version).map_err(|why| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("specifier: invalid PEP 440 version `{version}`: {why}"),
+        )
+    })?;
+    Ok(SpecifierSet::parse(specifier, "specifier")?.admits(&candidate))
 }
 
 /// Evaluate one environment-marker comparison `version op target` the way

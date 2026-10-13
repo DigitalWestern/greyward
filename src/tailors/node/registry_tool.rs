@@ -31,8 +31,12 @@ impl RegistryTool for NodeTool {
         node::runtime_object_id(platform, toolchain)
     }
 
+    fn environment_schema(&self) -> &'static str {
+        super::realize::NODE_ENV_SCHEMA
+    }
+
     /// node-gyp's Python: a native npm tool builds on it, so its object is
-    /// part of the key (`x/4`).
+    /// part of the key.
     fn helpers(&self) -> &'static [&'static str] {
         &["python"]
     }

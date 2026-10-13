@@ -439,8 +439,10 @@ pub(crate) fn join(
                     .unwrap_or_else(|| receipt_origin.clone());
                 check_record_basis(&shown, ecosystem, &attested.record, basis)?;
                 let subject = locks.join(", ");
+                // The resolution's facts are the project's, joined again on
+                // every sync, so no object built from it stores them.
                 for exception in attested.record.exceptions() {
-                    policy::record_with(
+                    policy::record_plan_time_with(
                         policy,
                         &exception.kind,
                         &exception.subject,

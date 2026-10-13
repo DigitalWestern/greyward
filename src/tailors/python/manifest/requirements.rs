@@ -234,10 +234,14 @@ fn walk_from(
 /// `-r`/`-c` include closure.  uv follows those includes itself when the
 /// source is handed to it, so the cache key must cover the same files rather
 /// than only the bytes of the top-level file. Each file is read through the
-/// held project descriptor.
+/// held project descriptor, and named by its path in the project, so the
+/// hash is the same in every checkout: it is part of the source a committed
+/// lock names (#673). A file outside the project is named by its path from
+/// the top file's directory, as its include spells it.
 pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<String> {
     let top = canonical_project_path(project, path).map_err(|e| unreadable(path, e))?;
     let root = top.parent().unwrap_or(Path::new("."));
+    let project_root = project.path().canonicalize()?;
     let mut files = BTreeSet::new();
     walk_includes(project, &top, &mut |step| {
         if let IncludeStep::File { file, .. } = step {
@@ -247,13 +251,171 @@ pub fn requirements_tree_hash(project: &ProjectRoot, path: &Path) -> io::Result<
     })?;
     let mut hasher = Sha256::new();
     for file in files {
-        let relative = file.strip_prefix(root).unwrap_or(&file);
+        let relative = match file.strip_prefix(&project_root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => relative_from(root, &file),
+        };
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update([0]);
         hasher.update(read_project_file(project, &file).map_err(|e| unreadable(&file, e))?);
         hasher.update([0]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// Every `--hash` pin of `path`'s `-r`/`-c` include closure, each naming
+/// the file it is in (its path in the project, or its own path when it
+/// lies outside) and its line there: a lock compiled from the tree must
+/// keep all of them, wherever in the tree they are (#689). A hash ward
+/// cannot check is refused here, by file and line.
+pub fn requirements_hash_pins(
+    project: &ProjectRoot,
+    path: &Path,
+) -> io::Result<Vec<pypi::HashPin>> {
+    let project_root = project.path().canonicalize()?;
+    let mut pins = Vec::new();
+    for file in include_closure(project, path)? {
+        let name = file
+            .strip_prefix(&project_root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        pins.extend(pypi::hash_pins(&read_text(project, &file)?, &name)?);
+    }
+    Ok(pins)
+}
+
+/// The `pins` that apply on `platform` under `python_version`: a pin
+/// whose marker is false there pins nothing there, and its hashes must
+/// neither be required of the lock nor widen the files planning may pick
+/// (another platform's line beside this one's). A marker ward cannot
+/// evaluate is refused, by file and line: whether its hashes guard this
+/// environment cannot be told.
+pub(crate) fn active_hash_pins(
+    pins: Vec<pypi::HashPin>,
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<Vec<pypi::HashPin>> {
+    let mut active = Vec::new();
+    for pin in pins {
+        let applies = match &pin.marker {
+            None => true,
+            Some(marker) => {
+                markers::marker_matches(marker, python_version, platform).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} line {}: ward cannot tell whether the marker `{marker}` \
+                             applies here ({error}), so it cannot tell which files its \
+                             hashes pin",
+                            pin.file, pin.line
+                        ),
+                    )
+                })?
+            }
+        };
+        if applies {
+            active.push(pin);
+        }
+    }
+    Ok(active)
+}
+
+/// Why a lock holding `locked` (name, version) does not satisfy
+/// `manifest`, or `None` when it does: every requirement that applies on
+/// `platform` under `python_version` must name a locked package at a
+/// version its specifier allows, and a constraint must allow the version
+/// of a package the lock holds. A direct reference (a URL, a local path) is
+/// no registry package and is not checked. A marker ward cannot evaluate
+/// is a shortfall: the lock cannot be shown to satisfy it. This is the
+/// check of a committed lock whose header names no source (#673).
+pub(crate) fn lock_shortfall(
+    manifest: &Manifest,
+    locked: &[(String, String)],
+    python_version: &str,
+    platform: Platform,
+) -> io::Result<Option<String>> {
+    let entries = manifest
+        .requirements
+        .iter()
+        .map(|line| (line, false))
+        .chain(manifest.constraints.iter().map(|line| (line, true)));
+    for (line, constraint) in entries {
+        // The requirement without its options (`--hash=...`).
+        let spec = line
+            .split_whitespace()
+            .filter(|token| !token.starts_with("--"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if spec.is_empty()
+            || pypi::is_skippable_spec(&spec)
+            || pypi::parse_git_requirement(&spec).is_some()
+            || spec.split(';').next().unwrap_or_default().contains('@')
+        {
+            continue;
+        }
+        let requirement = parse_uv_requirement(&spec)?;
+        if let Some(marker) = &requirement.marker {
+            match markers::marker_matches(marker, python_version, platform) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    return Ok(Some(format!(
+                        "ward cannot tell whether `{spec}` applies here ({error})"
+                    )))
+                }
+            }
+        }
+        let Some((_, version)) = locked.iter().find(|(name, _)| *name == requirement.name) else {
+            if constraint {
+                continue;
+            }
+            return Ok(Some(format!(
+                "it does not have {}, which `{spec}` requires",
+                requirement.name
+            )));
+        };
+        let specifier = requirement
+            .version
+            .as_deref()
+            .map(|version| {
+                version
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .trim()
+            })
+            .filter(|specifier| !specifier.is_empty() && *specifier != "*");
+        if let Some(specifier) = specifier {
+            if !crate::kernel::pep440::matches_specifier(specifier, version)? {
+                return Ok(Some(format!(
+                    "it has {} {version}, which `{spec}` does not allow",
+                    requirement.name
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `file` as a path from the directory `base`, climbing with `..` as far
+/// as their common ancestor. Both are canonical.
+fn relative_from(base: &Path, file: &Path) -> PathBuf {
+    let base: Vec<_> = base.components().collect();
+    let target: Vec<_> = file.components().collect();
+    let common = base
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in common..base.len() {
+        relative.push("..");
+    }
+    for component in &target[common..] {
+        relative.push(component);
+    }
+    relative
 }
 
 /// Every file of `path`'s `-r`/`-c` include closure, `path` first, each

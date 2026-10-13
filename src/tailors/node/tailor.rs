@@ -6,7 +6,8 @@ use crate::comforter::status::{recorded_inputs_state, string, State};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
-    component, list, purl_encode, push_property, required, toolchain_component, version_of,
+    component, list, purl_encode, purl_encode_path, push_property, required, toolchain_component,
+    version_of,
 };
 use crate::kernel::fsroot::{Entry, ProjectRoot};
 use crate::kernel::objmeta::ObjectKind;
@@ -316,10 +317,12 @@ impl Tailor for Node {
         node::freshness::check_lock_freshness(project, &plan)?;
         // package.json is read through the held descriptor; a lock-only
         // project has no "greyward" config to read.
-        let config = match project.read_input_string(Path::new("package.json"))? {
-            Some(pkg) => node::parse_greyward_config(&pkg)?,
+        let package_json = project.read_input_string(Path::new("package.json"))?;
+        let config = match &package_json {
+            Some(pkg) => node::parse_greyward_config(pkg)?,
             None => node::GreywardConfig::default(),
         };
+        record_skipped_project_scripts(project, &plan, package_json.as_deref(), attribution)?;
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
         // node-gyp runs on the helper Python selection when the project has
         // one; a Node-only project gets the shipped default.
@@ -482,10 +485,12 @@ impl Tailor for Node {
             .push(("node".into(), string(&body["node_version"])));
         for package in body["packages"].as_array().unwrap_or(&empty) {
             let path = string(&package["path"]);
-            let name = path
-                .rsplit_once("node_modules/")
-                .map(|(_, name)| name.to_string())
-                .unwrap_or_else(|| path.clone());
+            // A closure written before rows named the package has only the
+            // path, which is the name except under an npm alias.
+            let name = package["name"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| npm_name_from_path(&path).to_string());
             out.packages.push(PackageRow {
                 name,
                 version: string(&package["version"]),
@@ -527,7 +532,12 @@ impl Tailor for Node {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "packages")? {
             let path = required(eco, &p, "path")?;
-            let name = npm_name_from_path(&path).to_string();
+            // The row's `name` is the package the bytes are; a closure
+            // written before rows carried it has only the install path.
+            let name = match p.get("name") {
+                Some(_) => required(eco, &p, "name")?,
+                None => npm_name_from_path(&path).to_string(),
+            };
             let ver = required(eco, &p, "version")?;
             // Scoped names: '@scope/x' -> '%40scope/x' per the purl spec.
             let purl_name = match name.strip_prefix('@') {
@@ -539,19 +549,37 @@ impl Tailor for Node {
                 },
                 None => purl_encode(&name),
             };
-            let mut c = component(
-                &name,
-                &ver,
-                format!("pkg:npm/{}@{}", purl_name, purl_encode(&ver)),
-                eco,
-            );
-            // integrity is an SRI string (base64), not a hex digest;
-            // recorded as a property rather than a malformed hash entry.
-            push_property(
-                &mut c,
-                "greyward:integrity",
-                &required(eco, &p, "integrity")?,
-            );
+            let mut purl = format!("pkg:npm/{}@{}", purl_name, purl_encode(&ver));
+            // A git package is not the registry's: the purl says which
+            // repository and commit it is (`vcs_url`, per the purl spec).
+            if let Some(git) = p.get("git").filter(|git| !git.is_null()) {
+                let git: crate::kernel::gitsrc::GitSource = serde_json::from_value(git.clone())
+                    .map_err(|e| {
+                        crate::kernel::cyclonedx::err(format!("{eco} closure: {path}: git: {e}"))
+                    })?;
+                purl.push_str(&format!(
+                    "?vcs_url={}",
+                    purl_encode(&format!("git+{}@{}", git.url, git.commit))
+                ));
+                if let Some(subdirectory) = &git.subdirectory {
+                    purl.push_str(&format!("#{}", purl_encode_path(subdirectory)));
+                }
+            }
+            let mut c = component(&name, &ver, purl, eco);
+            if npm_name_from_path(&path) != name {
+                push_property(&mut c, "greyward:path", &path);
+            }
+            let integrity = required(eco, &p, "integrity")?;
+            // An SRI is base64 of the digest: each candidate is the same
+            // digest a CycloneDX hash carries in hex. A git package's
+            // `git:<commit>` is not a digest of a file; its commit is in the
+            // purl. An empty integrity names no digest at all.
+            if !integrity.is_empty() && !integrity.starts_with("git:") {
+                push_sri_hashes(&mut c, &integrity, &p["matched_digest"]).map_err(|e| {
+                    crate::kernel::cyclonedx::err(format!("{eco} closure: {path}: integrity: {e}"))
+                })?;
+            }
+            push_property(&mut c, "greyward:integrity", &integrity);
             // A `file:` directory package is packed from the project, not
             // fetched from the registry: a registry purl would name a
             // package that may exist there with other contents. Its
@@ -580,6 +608,119 @@ impl Tailor for Node {
     }
 }
 
+/// The lifecycle scripts `npm install` (and `npm ci`) without package
+/// arguments runs for the project root after the tree is reified, in
+/// npm's order: the explicit list in npm 11's `lib/commands/install.js`
+/// and `ci.js` (docs.npmjs.com/cli/v11/using-npm/scripts, "npm install").
+const ROOT_LIFECYCLE_PHASES: &[&str] = &[
+    "preinstall",
+    "install",
+    "postinstall",
+    "prepublish",
+    "preprepare",
+    "prepare",
+    "postprepare",
+];
+
+/// What arborist runs for each linked package, workspace members
+/// included, in its order: `preinstall`, then `prepare` (links alone run
+/// it, before their bins are linked), then `install` and `postinstall`
+/// (`@npmcli/arborist` `rebuild.js`, `#build` for `type === 'links'`).
+/// Hooks around `prepare` are not run for a link.
+const MEMBER_LIFECYCLE_PHASES: &[&str] = &["preinstall", "prepare", "install", "postinstall"];
+
+/// The `install` command npm supplies for a package with a `binding.gyp`
+/// and neither an `install` nor a `preinstall` script, unless
+/// `"gypfile": false` (`@npmcli/node-gyp`, used by `@npmcli/run-script`
+/// for the root and by arborist for links).
+const DEFAULT_GYP_INSTALL: &str = "node-gyp rebuild";
+
+/// The project's and its workspace members' own lifecycle scripts, each
+/// recorded as the exception it is: npm runs them on install and ward does
+/// not, since they write the project's source rather than an environment
+/// (#693). The root is `.`, then every workspace importer and `link: true`
+/// target the plan names, once each. A directory without a package.json has
+/// nothing to run.
+fn record_skipped_project_scripts(
+    project: &ProjectRoot,
+    plan: &node::NpmPlan,
+    root_package_json: Option<&str>,
+    attribution: &crate::kernel::policy::Attribution,
+) -> io::Result<()> {
+    let has_binding_gyp = |dir: &str| project.is_input_file(&Path::new(dir).join("binding.gyp"));
+    let mut skipped = match root_package_json {
+        Some(text) => {
+            skipped_project_scripts(".", text, ROOT_LIFECYCLE_PHASES, has_binding_gyp("."))?
+        }
+        None => Vec::new(),
+    };
+    let members: std::collections::BTreeSet<&str> = plan
+        .workspaces
+        .iter()
+        .map(String::as_str)
+        .chain(plan.links.iter().map(|link| link.target.as_str()))
+        .filter(|dir| !dir.is_empty() && *dir != ".")
+        .collect();
+    for member in members {
+        let manifest = Path::new(member).join("package.json");
+        if let Some(text) = project.read_input_string(&manifest)? {
+            skipped.extend(skipped_project_scripts(
+                member,
+                &text,
+                MEMBER_LIFECYCLE_PHASES,
+                has_binding_gyp(member),
+            )?);
+        }
+    }
+    for (subject, detail) in skipped {
+        attribution.record(
+            crate::kernel::policy::PROJECT_SCRIPT_SKIPPED,
+            &subject,
+            &detail,
+        )?;
+    }
+    Ok(())
+}
+
+/// The lifecycle scripts in one package.json that npm would run on install,
+/// `phases` in order, as (subject, detail) pairs: the subject is `dir`, the
+/// detail names the phase and its command. `binding_gyp`: `dir` has a
+/// `binding.gyp`, so `install` may be npm's default node-gyp build.
+fn skipped_project_scripts(
+    dir: &str,
+    package_json: &str,
+    phases: &[&str],
+    binding_gyp: bool,
+) -> io::Result<Vec<(String, String)>> {
+    let manifest: Value = serde_json::from_str(package_json).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {e}", Path::new(dir).join("package.json").display()),
+        )
+    })?;
+    let scripts = &manifest["scripts"];
+    let default_gyp = binding_gyp
+        && manifest["gypfile"] != Value::Bool(false)
+        && scripts["install"].as_str().is_none()
+        && scripts["preinstall"].as_str().is_none();
+    Ok(phases
+        .iter()
+        .filter_map(|phase| {
+            let command = match scripts[*phase].as_str() {
+                Some(command) => command,
+                None if *phase == "install" && default_gyp => DEFAULT_GYP_INSTALL,
+                None => return None,
+            };
+            Some((
+                dir.to_string(),
+                format!(
+                    "`{phase}` script ({command}) was not run: ward runs the lifecycle scripts of dependencies, not the project's own"
+                ),
+            ))
+        })
+        .collect())
+}
+
 /// The Node object this project's closure recorded. A closure written
 /// before the toolchain lock has no such reference: it names no bytes to
 /// resolve, so the run stops rather than silently picking today's default.
@@ -596,6 +737,52 @@ fn closure_runtime(
         ));
     }
     comforter::toolchain::runtime_object(store, activity, &closure, "bin/node")
+}
+
+/// The digest the installed bytes matched as a CycloneDX hash: the
+/// algorithm by its CycloneDX name and the digest in hex, the same digest
+/// the SRI spells in base64. `matched` is the closure row's
+/// `matched_digest`, which must be one of the integrity's candidates. A
+/// closure written before rows named it lists every candidate instead and
+/// says so in a `greyward:hash-match` property, since only one of them is
+/// known to be the bytes'.
+fn push_sri_hashes(c: &mut Value, integrity: &str, matched: &Value) -> io::Result<()> {
+    let candidates = crate::kernel::digest::sri_candidates(integrity)?;
+    let digests = if matched.is_null() {
+        push_property(
+            c,
+            "greyward:hash-match",
+            "unrecorded: this closure predates the matched digest, so every integrity \
+             candidate is listed and only one is the installed bytes'; run `ward` to record it",
+        );
+        candidates
+    } else {
+        let algo = matched["algo"].as_str().unwrap_or_default();
+        let hex = matched["hex"].as_str().unwrap_or_default();
+        let digest = crate::kernel::digest::Digest::from_parts(algo, hex).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("matched_digest: {e}"))
+        })?;
+        if !candidates.contains(&digest) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("matched_digest {algo}:{hex} is not one of the integrity's digests"),
+            ));
+        }
+        vec![digest]
+    };
+    let hashes = digests
+        .iter()
+        .map(|digest| {
+            let alg = match digest.algo() {
+                "sha1" => "SHA-1",
+                "sha256" => "SHA-256",
+                _ => "SHA-512",
+            };
+            json!({"alg": alg, "content": digest.hex()})
+        })
+        .collect();
+    c["hashes"] = Value::Array(hashes);
+    Ok(())
 }
 
 /// npm lockfile path ("node_modules/a/node_modules/@s/b") -> package name.
@@ -1271,11 +1458,11 @@ mod tests {
             "env_object": "/store/objects/abc123",
             "node_version": "22.0.0",
             "packages": [
-                {"path": "node_modules/b", "version": "1.0.0", "integrity": "sha512-b"},
+                {"path": "node_modules/b", "version": "1.0.0", "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
                 {
                     "path": "node_modules/local",
                     "version": "2.1.0",
-                    "integrity": "sha256-l",
+                    "integrity": "sha256-rKyGwOYJypBvYysOLazMsrd9IrBiHyDr7OGkg1uT9vA=",
                     "local": "vendor/local",
                 },
             ],
@@ -1302,7 +1489,234 @@ mod tests {
         );
         assert_eq!(
             property(local, "greyward:integrity").as_deref(),
-            Some("sha256-l")
+            Some("sha256-rKyGwOYJypBvYysOLazMsrd9IrBiHyDr7OGkg1uT9vA=")
         );
+    }
+
+    /// A component names the package its bytes are, and says where they
+    /// came from (#688). An alias is the real package, with its install
+    /// path kept as a property; a git package's purl carries its repository
+    /// and commit, and its `git:` integrity is no file hash; an SRI becomes
+    /// CycloneDX hashes in hex, one per candidate. A row written before
+    /// rows named the package still reads its name from the path.
+    #[test]
+    fn sbom_components_name_the_real_package_and_its_source() {
+        let body = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [
+                {"path": "node_modules/@s/alias", "name": "@t/real", "version": "2.0.0",
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==",
+                 "matched_digest": {"algo": "sha512", "hex": "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"}},
+                {"path": "node_modules/gitdep", "name": "gitdep", "version": "1.0.0",
+                 "integrity": "git:0123456789abcdef0123456789abcdef01234567",
+                 "git": {"url": "https://github.com/o/gitdep.git",
+                         "commit": "0123456789abcdef0123456789abcdef01234567",
+                         "subdirectory": "packages/core"}},
+                {"path": "node_modules/a/node_modules/old", "version": "1.0.0",
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
+                {"path": "node_modules/unmatched", "name": "unmatched", "version": "1.0.0",
+                 "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="},
+            ],
+        });
+        let mut out = Vec::new();
+        Node.sbom_components("node", &body, &mut out).unwrap();
+        let property = |c: &Value, name: &str| -> Option<String> {
+            c["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == name)
+                .map(|p| p["value"].as_str().unwrap().to_string())
+        };
+        let alias = &out[0];
+        assert_eq!(alias["name"], "@t/real");
+        assert_eq!(alias["purl"], "pkg:npm/%40t/real@2.0.0");
+        assert_eq!(
+            property(alias, "greyward:path").as_deref(),
+            Some("node_modules/@s/alias")
+        );
+        // Two candidates, and the bytes matched the first: only it is a
+        // hash of the component.
+        let hashes = alias["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 1, "{hashes:?}");
+        assert_eq!(hashes[0]["alg"], "SHA-512");
+        assert_eq!(hashes[0]["content"], "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75");
+        assert_eq!(property(alias, "greyward:hash-match"), None);
+
+        let git = &out[1];
+        assert_eq!(
+            git["purl"],
+            "pkg:npm/gitdep@1.0.0?vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2Fo%2Fgitdep.git%400123456789abcdef0123456789abcdef01234567#packages/core"
+        );
+        assert!(git.get("hashes").is_none(), "{git}");
+        assert_eq!(property(git, "greyward:path"), None);
+
+        let old = &out[2];
+        assert_eq!(old["name"], "old");
+        assert_eq!(old["purl"], "pkg:npm/old@1.0.0");
+        assert_eq!(old["hashes"][0]["content"], "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f5302860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75");
+
+        // A row from a closure written before the matched digest: every
+        // candidate, and a property that says only one is the bytes'.
+        let unmatched = &out[3];
+        let hashes = unmatched["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 2, "{hashes:?}");
+        assert!(property(unmatched, "greyward:hash-match")
+            .unwrap()
+            .starts_with("unrecorded: this closure predates the matched digest"));
+        assert!(property(old, "greyward:hash-match").is_some());
+
+        // A matched digest that is none of the row's candidates is a
+        // damaged closure.
+        let mut out = Vec::new();
+        let stray = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [{"path": "node_modules/x", "version": "1.0.0",
+                          "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ== sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==",
+                          "matched_digest": {"algo": "sha512", "hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"}}],
+        });
+        let error = Node
+            .sbom_components("node", &stray, &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("is not one of the integrity's digests"),
+            "{error}"
+        );
+
+        let mut out = Vec::new();
+        let malformed = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [{"path": "node_modules/x", "version": "1.0.0", "integrity": "sha512-xyz"}],
+        });
+        let error = Node
+            .sbom_components("node", &malformed, &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("node_modules/x: integrity"), "{error}");
+    }
+
+    /// npm runs the root's and each workspace member's install lifecycle
+    /// scripts; ward does not, so each one is recorded where policy and
+    /// `ward audit` see it (#693). Other scripts, and a member directory
+    /// without a package.json, record nothing; a directory named both as a
+    /// workspace and as a link target is read once.
+    #[test]
+    fn the_projects_own_lifecycle_scripts_are_recorded_as_skipped() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let scratch = TempDir::named("node-project-scripts");
+        let project = scratch.0.clone();
+        let root = r#"{"name":"app","scripts":{"postinstall":"patch-package","test":"jest","prepare":"husky","postprepare":"echo done","prepublish":"build","preprepare":"gen"}}"#;
+        fs::write(project.join("package.json"), root).unwrap();
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        fs::write(
+            project.join("packages/lib/package.json"),
+            r#"{"name":"lib","scripts":{"postinstall":"cp","prepare":"tsc","preprepare":"x","postprepare":"y","build":"tsc"}}"#,
+        )
+        .unwrap();
+        // A member with a `binding.gyp` and no install script gets npm's
+        // default node-gyp build; one that opts out with `gypfile: false`
+        // does not.
+        fs::create_dir_all(project.join("packages/addon")).unwrap();
+        fs::write(project.join("packages/addon/binding.gyp"), "{}").unwrap();
+        fs::write(
+            project.join("packages/addon/package.json"),
+            r#"{"name":"addon"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(project.join("packages/optout")).unwrap();
+        fs::write(project.join("packages/optout/binding.gyp"), "{}").unwrap();
+        fs::write(
+            project.join("packages/optout/package.json"),
+            r#"{"name":"optout","gypfile":false}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(project.join("packages/empty")).unwrap();
+        let plan = node::NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: Vec::new(),
+            links: vec![node::NpmLink {
+                path: "node_modules/lib".into(),
+                target: "packages/lib".into(),
+            }],
+            workspaces: vec![
+                "packages/lib".into(),
+                "packages/empty".into(),
+                "packages/addon".into(),
+                "packages/optout".into(),
+            ],
+            lock_source: "package-lock.json".into(),
+        };
+        let held = ProjectRoot::open(&project).unwrap();
+        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        record_skipped_project_scripts(&held, &plan, Some(root), &attribution).unwrap();
+        let recorded: Vec<(String, String)> = attribution
+            .recorded()
+            .into_iter()
+            .map(|exception| {
+                assert_eq!(
+                    exception.kind,
+                    crate::kernel::policy::PROJECT_SCRIPT_SKIPPED
+                );
+                (exception.subject, exception.detail)
+            })
+            .collect();
+        attribution.discard();
+        let not_run =
+            "was not run: ward runs the lifecycle scripts of dependencies, not the project's own";
+        assert_eq!(
+            recorded,
+            [
+                (
+                    ".".to_string(),
+                    format!("`postinstall` script (patch-package) {not_run}")
+                ),
+                (
+                    ".".to_string(),
+                    format!("`prepublish` script (build) {not_run}")
+                ),
+                (
+                    ".".to_string(),
+                    format!("`preprepare` script (gen) {not_run}")
+                ),
+                (
+                    ".".to_string(),
+                    format!("`prepare` script (husky) {not_run}")
+                ),
+                (
+                    ".".to_string(),
+                    format!("`postprepare` script (echo done) {not_run}")
+                ),
+                (
+                    "packages/addon".to_string(),
+                    format!("`install` script (node-gyp rebuild) {not_run}")
+                ),
+                // A link runs `prepare` before `install`, and no hooks
+                // around it.
+                (
+                    "packages/lib".to_string(),
+                    format!("`prepare` script (tsc) {not_run}")
+                ),
+                (
+                    "packages/lib".to_string(),
+                    format!("`postinstall` script (cp) {not_run}")
+                ),
+            ]
+        );
+
+        let denying = crate::kernel::policy::PolicyScope::install(crate::kernel::policy::Policy {
+            deny: [crate::kernel::policy::PROJECT_SCRIPT_SKIPPED.to_string()].into(),
+            ..Default::default()
+        });
+        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let error = record_skipped_project_scripts(&held, &plan, Some(root), &attribution)
+            .unwrap_err()
+            .to_string();
+        attribution.discard();
+        drop(denying);
+        assert!(error.contains("project-script-skipped"), "{error}");
     }
 }

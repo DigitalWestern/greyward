@@ -110,13 +110,13 @@ fn open_error(path: &Path, from_env: bool, error: io::Error) -> io::Error {
     )
 }
 
-/// The whole `object-meta/2` record a commit with no dependencies and no
+/// The whole `object-meta/3` record a commit with no dependencies and no
 /// exceptions writes for `identity`: for fixtures that lay an object out by
 /// hand.
 #[cfg(test)]
 pub(crate) fn bare_record(identity: &crate::kernel::types::Identity) -> serde_json::Value {
     serde_json::json!({
-        "schema": "object-meta/2",
+        "schema": crate::kernel::objmeta::META_SCHEMA,
         "id": identity.object_id(),
         "identity": identity,
         "exceptions": [],
@@ -1277,6 +1277,117 @@ mod tests {
             .unwrap();
         assert_eq!(same_object, object);
         assert_eq!(applied, vec![exception]);
+    }
+
+    /// An `object-meta/2` record stored only some kinds, so its exceptions
+    /// are a lower bound. It is reused while the policy denies none of the
+    /// kinds `/2` never stored. Under one that does, the caller rebuilds it,
+    /// and committing the same id again upgrades the record to `/3` with the
+    /// rebuild's whole set, which later checks then trust.
+    #[test]
+    fn an_object_meta_2_record_is_reused_or_rebuilt_by_policy() {
+        use crate::kernel::policy::{self, Policy, PolicyScope};
+        let _guard = policy::exception_guard();
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let identity = identity();
+        let id = identity.object_id();
+        let collision = Exception {
+            kind: policy::FILE_COLLISION.into(),
+            subject: "content".into(),
+            detail: "first and second".into(),
+        };
+        store
+            .commit_with_deps(
+                &identity,
+                &staged(&store),
+                std::slice::from_ref(&collision),
+                &ObjectDeps::new(),
+            )
+            .unwrap();
+        let meta = store.root.join("meta").join(format!("{id}.json"));
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+        assert_eq!(written["schema"], "object-meta/3");
+
+        // The record an older ward wrote: `/2`, which kept the collision
+        // and could not keep a source build.
+        let mut old = written.clone();
+        old["schema"] = serde_json::json!("object-meta/2");
+        fs::write(&meta, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let record = crate::kernel::objmeta::read_store_record(&store, &id).unwrap();
+        assert!(!record.exceptions_complete);
+        assert_eq!(record.exceptions, vec![collision.clone()]);
+
+        // Reused under a policy that denies only a kind `/2` did store
+        // something about (none here), and its exceptions are replayed.
+        {
+            let _scope = PolicyScope::install(Policy {
+                deny: [policy::WEAK_INTEGRITY.to_string()].into(),
+                ..Default::default()
+            });
+            let attribution = policy::Attribution::open("test").unwrap();
+            assert!(policy::check_cached_reusable(&store, &activity, &id).unwrap());
+            assert_eq!(policy::object_exceptions(), vec![collision.clone()]);
+            attribution.discard();
+        }
+
+        // Rebuilt under one that denies a kind `/2` never stored.
+        let denying = || {
+            PolicyScope::install(Policy {
+                deny: [policy::BUILT_FROM_SOURCE.to_string()].into(),
+                ..Default::default()
+            })
+        };
+        {
+            let _scope = denying();
+            let attribution = policy::Attribution::open("test").unwrap();
+            assert!(!policy::check_cached_reusable(&store, &activity, &id).unwrap());
+            assert!(policy::object_exceptions().is_empty());
+            attribution.discard();
+        }
+
+        // The rebuild records its whole set (here, the collision alone) and
+        // commits the same id: the record becomes `/3` with that set, and
+        // the stricter policy now trusts it.
+        let (_, applied) = store
+            .commit_with_deps(
+                &identity,
+                &staged(&store),
+                std::slice::from_ref(&collision),
+                &ObjectDeps::new(),
+            )
+            .unwrap();
+        assert_eq!(applied, vec![collision.clone()]);
+        let upgraded: serde_json::Value =
+            serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+        assert_eq!(upgraded["schema"], "object-meta/3");
+        assert_eq!(upgraded["created"], written["created"]);
+        assert!(
+            crate::kernel::objmeta::read_store_record(&store, &id)
+                .unwrap()
+                .exceptions_complete
+        );
+        {
+            let _scope = denying();
+            let attribution = policy::Attribution::open("test").unwrap();
+            assert!(policy::check_cached_reusable(&store, &activity, &id).unwrap());
+            attribution.discard();
+        }
+
+        // A `/2` record that carries a kind the policy denies is still
+        // refused outright: what it stored is known.
+        fs::write(&meta, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        let _scope = PolicyScope::install(Policy {
+            deny: [policy::FILE_COLLISION.to_string()].into(),
+            ..Default::default()
+        });
+        let attribution = policy::Attribution::open("test").unwrap();
+        let error = policy::check_cached_reusable(&store, &activity, &id).unwrap_err();
+        assert!(error.to_string().contains("cached object"), "{error}");
+        attribution.discard();
     }
 
     /// A stage that sat in `tmp/` long enough to look abandoned is published

@@ -217,51 +217,56 @@ fn words(value: &toml::Value, separator: char) -> Vec<&str> {
     }
 }
 
-/// Whether compiler flags can load project code into rustc, read as rustc
-/// reads them: an unstable `-Z` flag (`-Zx`, or `-Z` then its value), the
-/// codegen option `codegen-backend` (`-C codegen-backend=`,
-/// `-Ccodegen-backend=`, `--codegen codegen-backend=`,
-/// `--codegen=codegen-backend=`, an underscore for the dash as rustc
-/// allows), or an `@file` argument file rustc reads further flags from
-/// (rustc expands one wherever it stands, so every word is checked for
-/// it). An option that takes its value as the next word consumes it, so
+/// Whether compiler flags can load project code into rustc, read as
+/// rustc's getopts reads them: an unstable `-Z` option, the codegen option
+/// `codegen-backend` (an underscore for the dash too, as rustc allows), or
+/// an `@file` argument file rustc reads further flags from (rustc expands
+/// one wherever it stands, so every word is checked for it).
+///
+/// A long option (`--codegen`, `--cfg`) takes its value after `=` or as
+/// the next word. A single-dash word is a cluster of short options, as
+/// getopts parses it: a flag-only one (`-g`, `-O`, `-h`, `-V`, `-v`)
+/// continues the cluster, and a value-taking one (`-C`, `-Z`, `-L`, `-l`,
+/// `-o`, `-A`, `-W`, `-D`, `-F`, rustc 1.98's whole list) takes the rest of
+/// the word as its value or, when that is empty, the next word. So
+/// `-gZcodegen-backend=x` is `-g` then `-Z codegen-backend=x`, and
 /// `--cfg 'feature="codegen-backend"'` or `-L /x/-Zdir` is no backend and
-/// no `-Z`.
+/// no `-Z`. A short option rustc does not list is refused, so a newer
+/// rustc's option is not read as something it is not.
 fn loads_project_code(flags: &[&str]) -> bool {
-    /// rustc's options whose value may be the next word.
-    const TAKES_VALUE: &[&str] = &[
-        "--cfg",
-        "--check-cfg",
-        "-L",
-        "-l",
-        "--crate-type",
-        "--crate-name",
-        "--edition",
-        "--emit",
-        "--print",
-        "-o",
-        "--out-dir",
-        "--explain",
-        "--target",
-        "-A",
-        "--allow",
-        "-W",
-        "--warn",
-        "--force-warn",
-        "-D",
-        "--deny",
-        "-F",
-        "--forbid",
-        "--cap-lints",
-        "--extern",
-        "--sysroot",
-        "--error-format",
-        "--json",
-        "--color",
-        "--remap-path-prefix",
-        "--diagnostic-width",
-        "--env-set",
+    /// rustc's long options that take a value, given after `=` or as the
+    /// next word (`rustc --help -v`, and the unstable `--env-set`).
+    const LONG_TAKES_VALUE: &[&str] = &[
+        "cfg",
+        "check-cfg",
+        "crate-type",
+        "crate-name",
+        "edition",
+        "emit",
+        "print",
+        "out-dir",
+        "explain",
+        "target",
+        "allow",
+        "warn",
+        "force-warn",
+        "deny",
+        "forbid",
+        "cap-lints",
+        "extern",
+        "sysroot",
+        "error-format",
+        "json",
+        "color",
+        "diagnostic-width",
+        "remap-path-prefix",
+        "remap-path-scope",
+        "env-set",
     ];
+    /// rustc's short options that take no value.
+    const SHORT_FLAGS: &[char] = &['g', 'O', 'h', 'V', 'v'];
+    /// rustc's short options that take a value.
+    const SHORT_TAKES_VALUE: &[char] = &['C', 'Z', 'L', 'l', 'o', 'A', 'W', 'D', 'F'];
     let is_backend = |option: &str| {
         let name = option.split('=').next().unwrap_or(option);
         name.replace('_', "-") == "codegen-backend"
@@ -271,21 +276,41 @@ fn loads_project_code(flags: &[&str]) -> bool {
     }
     let mut words = flags.iter().copied();
     while let Some(word) = words.next() {
-        if word.starts_with("-Z") {
-            return true;
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            if name == "codegen" {
+                if inline.or_else(|| words.next()).is_some_and(is_backend) {
+                    return true;
+                }
+            } else if inline.is_none() && LONG_TAKES_VALUE.contains(&name) {
+                words.next();
+            }
+            continue;
         }
-        let codegen = match word {
-            "-C" | "--codegen" => words.next(),
-            _ => word
-                .strip_prefix("--codegen=")
-                .or_else(|| word.strip_prefix("-C")),
+        let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            // An input file, or `-` for standard input.
+            continue;
         };
-        if let Some(option) = codegen {
-            if is_backend(option) {
+        for (at, short) in cluster.char_indices() {
+            if SHORT_FLAGS.contains(&short) {
+                continue;
+            }
+            if !SHORT_TAKES_VALUE.contains(&short) {
                 return true;
             }
-        } else if TAKES_VALUE.contains(&word) {
-            words.next();
+            let rest = &cluster[at + short.len_utf8()..];
+            let value = if rest.is_empty() {
+                words.next().unwrap_or("")
+            } else {
+                rest
+            };
+            if short == 'Z' || (short == 'C' && is_backend(value)) {
+                return true;
+            }
+            break;
         }
     }
     false

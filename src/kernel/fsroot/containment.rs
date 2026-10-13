@@ -17,6 +17,13 @@ pub(crate) enum Containment {
     Dangling,
 }
 
+/// How a name is opened to judge where it leads: symlinks followed, no
+/// read access needed.
+#[cfg(target_os = "linux")]
+const FOLLOWING: libc::c_int = libc::O_PATH | libc::O_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const FOLLOWING: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC;
+
 /// The walk's end: the deepest existing ancestor, opened with symlinks
 /// followed, and the plain names below it that do not exist yet.
 enum Deepest {
@@ -81,16 +88,24 @@ impl ProjectRoot {
         Ok(resolved)
     }
 
+    /// Whether `path`, a full path anywhere, leads into the project once
+    /// every symlink in it is followed: it is opened, and the descriptor
+    /// the kernel gave back is judged, so no name on the way is read twice.
+    /// `None` when nothing is there to open.
+    pub(crate) fn path_leads_inside(&self, path: &Path) -> io::Result<Option<bool>> {
+        match open_file_at(libc::AT_FDCWD, path.as_os_str().as_bytes(), FOLLOWING, 0) {
+            Ok(file) => self.holds_inside(&file).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn holds_inside(&self, file: &fs::File) -> io::Result<bool> {
         let root = fd_stat(self.dir.as_raw_fd())?;
         Ok(same_inode(&fd_stat(file.as_raw_fd())?, &root) || self.contains_open_file(file)?)
     }
 
     fn deepest_existing(&self, relative: &Path) -> io::Result<Deepest> {
-        #[cfg(target_os = "linux")]
-        const FOLLOWING: libc::c_int = libc::O_PATH | libc::O_CLOEXEC;
-        #[cfg(not(target_os = "linux"))]
-        const FOLLOWING: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC;
         let invalid = || {
             io::Error::new(
                 io::ErrorKind::InvalidInput,

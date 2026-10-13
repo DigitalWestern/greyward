@@ -273,6 +273,7 @@ mod tests {
         let temp = crate::kernel::testutil::TempDir::new();
         let path = temp.0.join("old store");
         std::fs::create_dir_all(path.join("objects")).unwrap();
+        std::fs::write(path.join("activity.lock"), b"").unwrap();
         let original = crate::kernel::store::Store::open_at(&path).unwrap_err();
         let fix = crate::kernel::store::refusal_fix(&original)
             .unwrap()

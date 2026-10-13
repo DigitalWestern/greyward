@@ -110,8 +110,11 @@ impl Store {
     }
 
     /// Exclusive cross-process lock guarding publication and sweeping.
-    /// Held only for the short rename/chmod/meta window, never during
-    /// downloads or builds, so contention is negligible.
+    /// Every lookup and root registration takes it too, so a publication
+    /// holds it only for the rename, the chmod of the object's root, two
+    /// directory fsyncs and the record write: never during a download, a
+    /// build, or the flush of the object's contents, which happens before
+    /// the lock (#677).
     pub(crate) fn publish_lock(&self) -> io::Result<fs::File> {
         let f = open_private_lock(&self.root.join("tmp/.publish.lock"), "publish")?;
         f.lock()?;
@@ -425,30 +428,22 @@ impl Store {
         for entry in fs::read_dir(staged)? {
             make_read_only(&entry?.path())?;
         }
+        // The contents are final and read-only, so they are made durable
+        // now, before the lock: the flush (a whole-filesystem `syncfs` on
+        // Linux) takes seconds for a large tree and can wait on unrelated
+        // writes, and every other ward on this store needs the publish lock
+        // for its lookups (#677). A rename keeps the inodes, so what is
+        // flushed here is what is published.
+        publication_failpoint("before-sync-tree")?;
+        sync_tree(staged)?;
         // Publish under the cross-process lock so a concurrent has() never
         // mistakes the rename->chmod->meta window for a crashed object.
         let _lock = self.publish_lock()?;
         if self.is_complete(&id) == Some(true) {
             return self.cache_hit(&id, &dest, staged, exceptions, deps);
         }
-        // An old record must stop certifying this id before a replacement
-        // becomes visible. Persist that invalidation even when the object
-        // is already gone, as after an interrupted GC.
-        let metadata = open_real_directory(&self.root.join("meta"), "meta")?;
         let meta_name = format!("{id}.json");
-        match stat_at(metadata.as_raw_fd(), meta_name.as_bytes()) {
-            Ok(stat) => {
-                if !unlink_if_same(metadata.as_raw_fd(), meta_name.as_bytes(), &stat, 0)? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Interrupted,
-                        "completion record changed during recovery",
-                    ));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        fsync_directory(metadata.as_raw_fd())?;
+        let metadata = unlink_old_record(self, &meta_name)?;
         // Under the lock, anything at dest is a crashed leftover (a live
         // publication can't be mid-window, and a complete object returned
         // above): sweep it so the rename lands.
@@ -464,21 +459,23 @@ impl Store {
         }
         fs::rename(staged, &dest)
             .map_err(|e| io::Error::new(e.kind(), format!("publish {}: {e}", dest.display())))?;
+        let root = open_real_directory(&dest, "object")?;
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest)?.permissions();
+            let mut perms = root.metadata()?.permissions();
             perms.set_mode(perms.mode() & !COMMIT_CLEARED_MODE);
-            fs::set_permissions(&dest, perms)?;
+            root.set_permissions(perms)?;
         }
         // Meta is the completion marker: write via tmp + atomic rename so a
         // crash mid-write can never leave a partial file that has() would
         // accept as complete.
-        // Durable in order: the object's contents and its name under
-        // `objects/`, then the record's bytes, then its name under `meta/`.
-        // A power loss can then never leave a record whose object or bytes
-        // did not survive.
-        publication_failpoint("before-sync-tree")?;
-        sync_tree(&dest)?;
+        // Durable in order: the object's contents (flushed before the lock),
+        // its root's read-only mode and its name under `objects/`, then the
+        // record's bytes, then its name under `meta/`. A power loss can then
+        // never leave a record whose object or bytes did not survive, nor
+        // one over a root still writable, which has() refuses.
+        publication_failpoint("before-sync-object")?;
+        fsync_directory(root.as_raw_fd())?;
         fsync_directory(objects.as_raw_fd())?;
         publish_completion(self, &metadata, &meta_name, &meta)?;
         // The stage directory may have been built for hours. Refresh the
@@ -518,6 +515,27 @@ impl Store {
     pub fn exceptions(&self, id: &str) -> io::Result<Vec<Exception>> {
         Ok(crate::kernel::objmeta::read_store_record(self, id)?.exceptions)
     }
+}
+
+/// An old record must stop certifying an id before a replacement becomes
+/// visible: remove `meta/<name>` and persist that, even when the object is
+/// already gone, as after an interrupted GC. Returns `meta/`, open.
+fn unlink_old_record(store: &Store, name: &str) -> io::Result<fs::File> {
+    let metadata = open_real_directory(&store.root.join("meta"), "meta")?;
+    match stat_at(metadata.as_raw_fd(), name.as_bytes()) {
+        Ok(stat) => {
+            if !unlink_if_same(metadata.as_raw_fd(), name.as_bytes(), &stat, 0)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "completion record changed during recovery",
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fsync_directory(metadata.as_raw_fd())?;
+    Ok(metadata)
 }
 
 fn publish_completion(

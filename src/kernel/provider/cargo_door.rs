@@ -2054,8 +2054,8 @@ mod tests {
                 "build.rustflags",
             ),
             // Short options cluster as getopts reads them: `-g` then `-Z`,
-            // its value the rest of the word or the next one; an unknown
-            // short option fails closed.
+            // its value the rest of the word or the next one. getopts also
+            // takes `--Z` as the short option.
             (
                 "[build]\nrustflags = [\"-gZcodegen-backend=/p/evil.so\"]\n".to_string(),
                 "build.rustflags",
@@ -2073,8 +2073,16 @@ mod tests {
                 "build.rustflags",
             ),
             (
-                "[build]\nrustflags = [\"-gq\"]\n".to_string(),
+                "[build]\nrustflags = [\"--Z=codegen-backend=/p/evil.so\"]\n".to_string(),
                 "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"--Z\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustdocflags = \"-e extra.css --Z unstable-options\"\n".to_string(),
+                "build.rustdocflags",
             ),
             (
                 "[env]\nRUSTFLAGS = \"-Copt-level=2 -Zcodegen-backend=x\"\n".to_string(),
@@ -2163,11 +2171,47 @@ mod tests {
             "[build]\nrustflags = [\"-gO\", \"-Dwarnings\", \"-L\", \"native=/x/-Zdir\", \
              \"-lstatic=z\", \"-Wunused\", \"-Cdebuginfo=1\"]\n"
                 .to_string(),
+            // rustdoc's own short options, which rustc does not have.
+            "[build]\nrustdocflags = [\"-e\", \"extra.css\", \"-whtml\"]\n\
+             [env]\nRUSTDOCFLAGS = \"-e extra.css -w html --cfg docsrs\"\n"
+                .to_string(),
             "[env]\nMY_SETTING = \"1\"\nOPENSSL_DIR = { value = \"/opt\", force = true }\n"
                 .to_string(),
             String::new(),
         ] {
             check(&allowed).unwrap_or_else(|error| panic!("{allowed}: {error}"));
+        }
+    }
+
+    /// The `-Z` refusal reads a capital `Z` anywhere in a flag's option
+    /// part as `-Z`, which needs no table of rustc's options: no option
+    /// rustc or rustdoc lists but `-Z` itself has one in its name. Checked
+    /// against the help of the toolchain the tests build with.
+    #[test]
+    fn no_rustc_or_rustdoc_option_but_z_names_a_capital_z() {
+        for (tool, args) in [
+            ("rustc", &["--help", "-v"][..]),
+            ("rustdoc", &["--help"][..]),
+        ] {
+            let Ok(output) = std::process::Command::new(tool).args(args).output() else {
+                panic!("{tool} is not on PATH");
+            };
+            let help = String::from_utf8_lossy(&output.stdout);
+            let names: Vec<&str> = help
+                .lines()
+                .flat_map(|line| {
+                    line.split_whitespace()
+                        .map(|word| word.trim_end_matches(','))
+                        .take_while(|word| word.starts_with('-'))
+                })
+                .collect();
+            assert!(names.contains(&"--cfg"), "{tool}: {help}");
+            let with_z: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|name| name.contains('Z') && *name != "-Z")
+                .collect();
+            assert!(with_z.is_empty(), "{tool}: {with_z:?}");
         }
     }
 

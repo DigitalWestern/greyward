@@ -247,24 +247,59 @@ pub struct ConfigFile {
 /// is refused by name. An entry cargo itself would reject (not a list, not
 /// `.toml`, a missing required file) is left for cargo to report.
 pub fn config_files(dir: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
-    let mut queue: Vec<PathBuf> = CONFIG_FILES
-        .iter()
-        .rev()
-        .map(|name| dir.join(name))
-        .collect();
+    config_files_from(
+        CONFIG_FILES.iter().map(|name| dir.join(name)).collect(),
+        bound,
+    )
+}
+
+/// The configuration a `CARGO_HOME` holds: `config.toml` and `config`
+/// (cargo's two names, never another file beside them: ward's own
+/// `greyward-config.toml` lives there too and is passed with `--config`),
+/// with their includes, read as [`config_files`] reads them.
+pub fn cargo_home_config_files(home: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
+    config_files_from(
+        HOME_CONFIG_FILES
+            .iter()
+            .map(|name| home.join(name))
+            .collect(),
+        bound,
+    )
+}
+
+/// cargo's configuration files in a `CARGO_HOME`.
+pub const HOME_CONFIG_FILES: [&str; 2] = ["config.toml", "config"];
+
+/// Where a config file was reached, as cargo resolves what it includes:
+/// the file itself and the directory it was named in, both resolved. One
+/// file reached through symlinks in two directories is two places, since
+/// each resolves its relative includes beside its own name; the same pair
+/// again is the same place (a cycle through a symlinked directory
+/// included), and the set of pairs is finite, so the walk ends.
+type Visit = (PathBuf, PathBuf);
+
+/// [`config_files`] from the files `starts` names, in order.
+fn config_files_from(starts: Vec<PathBuf>, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
+    let mut queue: Vec<PathBuf> = starts.into_iter().rev().collect();
     let mut found: Vec<ConfigFile> = Vec::new();
+    let mut visited: Vec<Visit> = Vec::new();
     while let Some(path) = queue.pop() {
         let Some(real) = bound.resolve(&path)? else {
             continue;
         };
-        if found.iter().any(|file| file.real == real) {
+        let base = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+        let visit = (
+            real.clone(),
+            std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone()),
+        );
+        if visited.contains(&visit) {
             continue;
         }
+        visited.push(visit);
         let Some(text) = bound.read(&path)? else {
             continue;
         };
         let table = parse_toml(&path, &text)?;
-        let base = path.parent().unwrap_or(dir).to_path_buf();
         let entries = table
             .get("include")
             .and_then(|include| include.as_array())
@@ -317,6 +352,7 @@ fn held_config_files_with(
         .map(|name| dir.join(name))
         .collect();
     let mut found: Vec<ConfigFile> = Vec::new();
+    let mut visited: Vec<Visit> = Vec::new();
     while let Some(relative) = queue.pop() {
         let shown = root.path().join(&relative);
         let Some(mut file) = root.open_optional_input_file(&relative)? else {
@@ -347,9 +383,20 @@ fn held_config_files_with(
                 ),
             ));
         }
-        if found.iter().any(|file| file.real == real) {
+        let base = relative.parent().unwrap_or(dir).to_path_buf();
+        let held_base = match root.input_subdir(if base.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            &base
+        })? {
+            Some(held) => held.current_name()?,
+            None => root_real.join(&base),
+        };
+        let visit = (real.clone(), held_base);
+        if visited.contains(&visit) {
             continue;
         }
+        visited.push(visit);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|error| {
             io::Error::new(error.kind(), format!("read {}: {error}", shown.display()))
@@ -362,7 +409,6 @@ fn held_config_files_with(
         })?;
         let table = parse_toml(&shown, &text)?;
         after_read(&relative);
-        let base = relative.parent().unwrap_or(dir).to_path_buf();
         let entries = table
             .get("include")
             .and_then(|include| include.as_array())
@@ -1748,6 +1794,50 @@ mod tests {
         symlink(temp.0.join("outside.toml"), root.join(".cargo/opt.toml")).unwrap();
         let error = configured_registries(&root).unwrap_err().to_string();
         assert!(error.contains("outside"), "{error}");
+    }
+
+    /// Two includes in different directories, each a symlink to one file
+    /// that includes `extra.toml`: cargo reads the file twice, each time
+    /// resolving `extra.toml` beside the symlink it came through, so both
+    /// `extra.toml`s are read. A file that includes itself through a
+    /// symlinked directory ends the walk instead of looping.
+    fn symlinked_include_fixture(root: &Path) {
+        use std::os::unix::fs::symlink;
+        for dir in [".cargo/a", ".cargo/b", ".cargo/shared"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let write = |relative: &str, text: &str| std::fs::write(root.join(relative), text).unwrap();
+        write(
+            ".cargo/config.toml",
+            "include = [\"a/link.toml\", \"b/link.toml\", \"loop/self.toml\"]\n",
+        );
+        write(".cargo/shared/target.toml", "include = [\"extra.toml\"]\n");
+        symlink("../shared/target.toml", root.join(".cargo/a/link.toml")).unwrap();
+        symlink("../shared/target.toml", root.join(".cargo/b/link.toml")).unwrap();
+        write(".cargo/a/extra.toml", "paths = [\"evil/dep\"]\n");
+        write(".cargo/b/extra.toml", "");
+        // `loop -> .`: `loop/self.toml` includes `loop/self.toml` again,
+        // one directory deeper by name, the same place on disk.
+        symlink(".", root.join(".cargo/loop")).unwrap();
+        write(".cargo/self.toml", "include = [\"loop/self.toml\"]\n");
+    }
+
+    #[test]
+    fn a_shared_include_is_read_in_each_place_it_is_included_from() {
+        let temp = TempDir::named("cargo-include-contexts");
+        let root = temp.0.join("ws");
+        symlinked_include_fixture(&root);
+        let error = refuse_project_config([root.as_path()], &Bound::new(&root).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a/extra.toml sets paths"), "{error}");
+
+        let held = ProjectRoot::open(&root).unwrap();
+        let files = held_config_files(&held, Path::new(""), &[]).unwrap();
+        let error = refuse_unneutralized_settings(&files)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a/extra.toml sets paths"), "{error}");
     }
 
     /// A project door keeps its receipt for a self-contained workspace and

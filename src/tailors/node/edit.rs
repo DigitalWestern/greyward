@@ -316,7 +316,7 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
         let relative = project
             .strip_prefix(ancestor)
             .expect("an ancestor is a prefix of the project");
-        if super::resolve::npm_workspace_names(ancestor, relative) {
+        if super::resolve::npm_workspace_names(ancestor, relative)? {
             return Ok(NodeLock::NpmWorkspaceMember {
                 root: ancestor.to_path_buf(),
             });
@@ -721,6 +721,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(member.join("package.json"), r#"{"name":"member"}"#).unwrap();
+        let _npm = super::super::npm_members::tests::fake_npm(&root, |_| {
+            vec!["packages/member".to_string()]
+        });
         let _search_only = match crate::kernel::testutil::SearchOnly::new(&root) {
             Ok(held) => held,
             Err(skip) => return eprintln!("{skip}"),
@@ -1168,6 +1171,21 @@ mod tests {
             r#"{"workspaces":["packages/*","!packages/skipped","apps/**","./tools/cli/"]}"#,
         )
         .unwrap();
+        // npm's answer for that list, faked: the ignored test in
+        // `npm_members` runs npm on lists like it.
+        let _npm = super::super::npm_members::tests::fake_npm(&root, |workspaces| {
+            if workspaces == &serde_json::json!(["apps/*"]) {
+                return Vec::new();
+            }
+            [
+                "packages/app",
+                "packages/util",
+                "apps/nested/deep",
+                "tools/cli",
+            ]
+            .map(String::from)
+            .to_vec()
+        });
 
         let member = |project: &Path| match node_lock_for(project).unwrap() {
             NodeLock::NpmWorkspaceMember { root } => Some(root),
@@ -1343,6 +1361,8 @@ mod tests {
         let member = root.join("packages/a");
         fs::create_dir_all(&member).unwrap();
         fs::write(member.join("package.json"), "{}").unwrap();
+        let _npm =
+            super::super::npm_members::tests::fake_npm(&root, |_| vec!["packages/a".to_string()]);
         let lock = node_lock_for(&member).unwrap();
         assert_eq!(
             lock.workspace().map(|(at, name)| (at.to_path_buf(), name)),

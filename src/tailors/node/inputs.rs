@@ -307,6 +307,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(app.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        let _npm = crate::tailors::node::npm_members::tests::fake_npm(&root, |_| {
+            vec!["packages/app".to_string()]
+        });
         let project = crate::kernel::fsroot::ProjectRoot::open(&app).unwrap();
         let error = super::refuse_member_lock_generation(&project)
             .unwrap_err()

@@ -455,8 +455,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `packages` as a plain list of patterns.
 - **An npm lock's `overrides` are not checked against package.json.** Before planning,
   Greyward refuses a `package-lock.json` or `npm-shrinkwrap.json` whose dependency maps or root
-  `workspaces` disagree with the package.json files, or that misses a workspace member the root
-  `workspaces` patterns find. npm keeps no copy of `overrides` in the lock, so a changed
+  `workspaces` disagree with the package.json files, or that misses a workspace member npm
+  itself finds for the root `workspaces` patterns. npm keeps no copy of `overrides` in the lock, so a changed
   override is not seen until the lock is regenerated, as with `npm ci`.
 - **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
   planning, Greyward refuses a `pnpm-lock.yaml` that is missing a workspace member
@@ -468,16 +468,27 @@ Selection covers every patch of each maintained CPython minor that python-build-
   with no `packages` key (one that only holds settings) is read as naming no members, and a
   `packages` value that is not a plain list (an anchor, an alias) skips the member check with
   a note.
+- **Reading npm workspace members runs Node.** Greyward does not match `workspaces`
+  patterns itself: it asks the npm bundled with the store Node (`@npmcli/map-workspaces`),
+  sandboxed with no network and the project read-only, so the member set is npm's own,
+  extglobs, classes and symlink rules included. Any command that reads a project whose root
+  `package.json` has a `workspaces` list (sync, `ward add`, `inspect`, `audit`, `join`,
+  `attest`) realizes that Node first, a download the first time. The answer is kept for the
+  rest of the command. Directories outside the project that a symlink below a pattern's
+  literal prefix leads to are mounted read-only too, so npm sees what it would see
+  unconfined.
 - **A workspace member reached through a symlink out of the project is left out.** npm takes
   a directory its `workspaces` patterns find through a symlink, wherever the symlink leads.
-  Greyward takes one whose target is inside the project, and leaves out one that leads
-  outside, recording it as a `requirement-skipped` exception, since a resolution record
-  names files inside the project only.
+  Greyward takes, of the members npm returns, the ones whose target is inside the project,
+  and leaves out one that leads outside, recording it as a `requirement-skipped` exception,
+  since a resolution record names files inside the project only. A symlink out of the
+  project that no pattern matches is not recorded.
 - **Workspace links are checked when they are planted, not afterwards.** A `node_modules`
   link to a workspace package is planted to the target's symlink-free path, resolved through
   the held project descriptor, and opened through itself once planted: a directory on the
   way that a concurrent writer swapped for a symlink out of the project is caught, and the
-  link is removed and the sync refused. Edits the project's owner makes to their own tree
+  link is removed and the sync refused. A link whose target no longer exists once planted is
+  removed and refused the same way. Edits the project's owner makes to their own tree
   after the sync (replacing a member directory with a symlink elsewhere) are outside
   Greyward's guarantee: the link points at the project's own source, which its owner
   controls, and the next sync checks it again.

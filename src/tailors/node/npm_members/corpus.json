@@ -761,5 +761,92 @@
       "p[a",
       "q@(a"
     ]
+  },
+  {
+    "name": "a negated extglob of an extglob",
+    "workspaces": [
+      "packages/!(@(a|b))"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ]
+  },
+  {
+    "name": "a doubly negated extglob",
+    "workspaces": [
+      "!(!(a))b"
+    ],
+    "dirs": [
+      "ab",
+      "bb",
+      "cb"
+    ],
+    "expected": []
+  },
+  {
+    "name": "a bracketed dot names a hidden directory",
+    "workspaces": [
+      "packages/[.]hidden"
+    ],
+    "dirs": [
+      "packages/.hidden"
+    ],
+    "expected": [
+      "packages/.hidden"
+    ]
+  },
+  {
+    "name": "a digit class and a non-ASCII digit",
+    "workspaces": [
+      "packages/p[[:digit:]]"
+    ],
+    "dirs": [
+      "packages/p1",
+      "packages/p١"
+    ],
+    "expected": [
+      "packages/p1",
+      "packages/p١"
+    ]
+  },
+  {
+    "name": "an escaped star in an exclusion",
+    "workspaces": [
+      "packages/*",
+      "!packages/a\\*"
+    ],
+    "dirs": [
+      "packages/a*",
+      "packages/ab"
+    ],
+    "expected": [
+      "packages/ab"
+    ]
+  },
+  {
+    "name": "a doubled globstar past a symlink",
+    "workspaces": [
+      "packages/**/**/pkg"
+    ],
+    "dirs": [
+      "packages/a/pkg",
+      "real/x/pkg"
+    ],
+    "links": [
+      [
+        "packages/r",
+        "../real"
+      ]
+    ],
+    "expected": [
+      "packages/a/pkg"
+    ]
   }
 ]

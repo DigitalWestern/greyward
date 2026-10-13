@@ -64,7 +64,25 @@ cp "$BIN" "$WORK/stage/ward"
 publish_asset "$WORK/stage"
 
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-python3 -m http.server "$port" --bind 127.0.0.1 --directory "$WORK/release" >/dev/null 2>&1 &
+# A file server that also answers /redirect/<path> with a 302 to /<path>,
+# the way GitHub's releases/latest/download/<name> redirects to the latest
+# release's asset: curl and wget must follow it on their own.
+cat > "$WORK/serve.py" <<'PY'
+import functools, http.server, sys
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/redirect/"):
+            self.send_response(302)
+            self.send_header("Location", self.path[len("/redirect"):])
+            self.end_headers()
+            return
+        super().do_GET()
+    def log_message(self, *args):
+        pass
+handler = functools.partial(Handler, directory=sys.argv[2])
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), handler).serve_forever()
+PY
+python3 "$WORK/serve.py" "$port" "$WORK/release" >/dev/null 2>&1 &
 SERVER=$!
 for _ in $(seq 1 50); do
     curl -fsS "http://127.0.0.1:$port/$asset.sha256" >/dev/null 2>&1 && break
@@ -314,7 +332,7 @@ for value in 0 1; do
     H="$WORK/h11-$value"; mkdir -p "$H"
     env -i HOME="$H" SHELL=/bin/bash PATH="$BASE_PATH" TERM=dumb \
         GREYWARD_NO_MODIFY_PATH="$value" GREYWARD_DOWNLOAD_BASE="$GREYWARD_DOWNLOAD_BASE" \
-        GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
+        GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" GREYWARD_LATEST_TAG="$TEST_TAG" \
         sh "$ROOT/install.sh" >/dev/null 2>&1 || bad "installer exited non-zero"
     # A bash user's file is .bash_profile on macOS, whose terminals start
     # login shells, and .bashrc elsewhere.
@@ -452,23 +470,11 @@ out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" "--version=$TEST_
     || { echo "$out"; bad "a named older version was refused"; }
 check "a named older version is a downgrade" grep -Fq "downgraded ward 99.0.0 (1111111 2026-12-01) -> ward $TEST_VERSION" <<<"$out"
 check "the named version is installed"    sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
-# latest is resolved from where the releases/latest page leads.
-mkdir -p "$WORK/release/releases/tag"
-: > "$WORK/release/releases/tag/$TEST_TAG"
-H="$WORK/h34"
-out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$GREYWARD_DOWNLOAD_BASE/releases/tag/$TEST_TAG" \
-    run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || { echo "$out"; bad "latest from the releases page failed"; }
-check "latest resolved from the releases page" "$H/.local/bin/ward" --version
-H="$WORK/h35"
-out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$GREYWARD_DOWNLOAD_BASE/$asset.sha256" \
-    run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" \
-    && bad "installer took a page that is no release tag" || ok "installer refused a page that is no release tag"
-check "says it is not a release tag"      grep -Fq "not a release tag" <<<"$out"
-check "downloaded nothing without a tag"  absent 'downloading' "$out"
 
 echo "== 26. versions compare by SemVer 2.0 precedence"
 # install.sh's own functions, read out of the script under test.
 eval "$(sed -n '/^# >>> semver/,/^# <<< semver/p' "$ROOT/install.sh")"
+long="$(head -c 140000 /dev/zero | tr '\0' z)"
 if ! command -v semver_cmp >/dev/null 2>&1; then
     bad "install.sh defines semver_cmp"
 else
@@ -502,6 +508,21 @@ else
         check "'$odd' is no version"           test "$(semver_cmp 0.2.0 "$odd")" = bad
         check "'$odd' is no version (second)"  test "$(semver_cmp "$odd" 0.2.0)" = bad
     done
+    # Nothing past 256 bytes is compared: 140,000 z's are no version (and
+    # never reach a tool with an argument limit), 256 bytes still are.
+    check "a 140,000-byte pre-release is no version"   test "$(semver_cmp 1.0.0-a "1.0.0-$long")" = bad
+    check "a 140,000-byte pre-release is no version (first)" test "$(semver_cmp "1.0.0-$long" 1.0.0-a)" = bad
+    a250="$(head -c 250 /dev/zero | tr '\0' a)"
+    check "a 256-byte version compares"        test "$(semver_cmp "1.0.0-$a250" 1.0.0)" = -1
+    check "a 257-byte version is none"         test "$(semver_cmp "1.0.0-${a250}b" 1.0.0)" = bad
+    # The one line an installed ward's --version must print.
+    for line in "ward 0.2.0" "ward 0.2.0 (abc1234 2026-10-13)" "ward 0.2.0 (unknown unknown)" "ward v1.0.0-rc.1+b.2"; do
+        check "'$line' is a version line"      version_line "$line"
+    done
+    for line in "$(printf 'ward 0.2.0\nward 99.0.0')" "ward 0.2.0 extra" "ward 0.2.0 (abc1234 2026-10-13) x" \
+        "ward  0.2.0" " ward 0.2.0" "ward 0.2.0 (abc1234)" "ward banana" "wardx 0.2.0" "ward 1.0.0-$long"; do
+        if version_line "$line"; then bad "'${line:0:40}' read as a version line"; else ok "'${line:0:40}' is no version line"; fi
+    done
 fi
 # A newer installed ward, its version line spelled the ways the guard must
 # read: with build metadata, and with a v. The metadata one shares the
@@ -518,121 +539,109 @@ for line in "ward $next_patch (abc1234 2026-12-01)" "ward v99.0.0"; do
     check "it is untouched: $line"         test "$("$H/.local/bin/ward" --version)" = "$line"
     check "says it is newer: $line"        grep -Fq "newer than the latest release" <<<"$out"
 done
+# A build outside git says `(unknown unknown)`, and is still read.
+H="$WORK/h-semver-unknown"
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "ward 0.0.1 (unknown unknown)"\n' > "$H/.local/bin/ward"
+chmod 755 "$H/.local/bin/ward"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" || { echo "$out"; bad "latest refused to upgrade a ward built outside git"; }
+check "upgrades a ward built outside git"  grep -Fq "upgraded ward 0.0.1 (unknown unknown) -> ward $TEST_VERSION" <<<"$out"
 # Unreadable: latest cannot tell it is older, so it fails closed, and a
 # named version still replaces it. Each stand-in is a `ward` script body.
 n=0
 for body in 'echo "ward banana"' 'echo "ward 0.2.0+build..7"' 'echo "ward 0.2.0+"' \
-    'exit 0' 'exit 1' 'echo "ward 0.2.0"; exit 1' 'echo "something else 9.9.9"' 'exec sleep 30'; do
+    'exit 0' 'exit 1' 'echo "ward 0.2.0"; exit 1' 'echo "something else 9.9.9"' 'exec sleep 30' \
+    'echo "ward 0.0.1"; echo "ward 99.0.0"' 'echo "ward 0.0.1 and more"' "echo \"ward 1.0.0-$long\""; do
     n=$((n+1))
+    label="${body:0:60}"
     H="$WORK/h-unparseable-$n"
     mkdir -p "$H/.local/bin"
     printf '#!/bin/sh\n%s\n' "$body" > "$H/.local/bin/ward"
     chmod 755 "$H/.local/bin/ward"
     out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
-        && bad "latest replaced an unreadable ward ($body)" || ok "latest left an unreadable ward alone ($body)"
-    check "says it cannot tell ($body)"    grep -Fq "cannot tell whether" <<<"$out"
-    check "it is untouched ($body)"        grep -Fxq "$body" "$H/.local/bin/ward"
+        && bad "latest replaced an unreadable ward ($label)" || ok "latest left an unreadable ward alone ($label)"
+    check "says it cannot tell ($label)"    grep -Fq "cannot tell whether" <<<"$out"
+    # The builtin test: a 140,000-byte body is past the kernel's limit on
+    # one argument to another program.
+    check "it is untouched ($label)"        test "$(sed -n 2p "$H/.local/bin/ward")" = "$body"
     out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" "--version=$TEST_TAG" 2>&1)" \
-        || { echo "$out"; bad "a named version did not replace an unreadable ward ($body)"; }
-    check "a named version replaces it ($body)" sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
+        || { echo "$out"; bad "a named version did not replace an unreadable ward ($label)"; }
+    check "a named version replaces it ($label)" sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
 done
 
-echo "== 27. latest is resolved with wget too, one redirect at a time"
-# A PATH with wget and no curl. The stand-in wget plays GNU wget (and
-# wget2), which knows --max-redirect and is asked one hop per call, or
-# busybox wget, which does not and prints every hop's headers in one run.
-# A hop is a file under wget-hops/ named after the URL it answers, holding
-# what that wget prints to stderr. Anything else it fetches with the real
-# curl.
-NOCURL="$WORK/no-curl"
-mkdir -p "$NOCURL"
-for tool in /usr/bin/* /bin/*; do
-    name="${tool##*/}"
-    case "$name" in curl | wget) continue ;; esac
-    [ -e "$NOCURL/$name" ] || ln -s "$tool" "$NOCURL/$name"
-done
-REAL_CURL="$(command -v curl)"
-HOPS="$WORK/wget-hops"
-cat > "$NOCURL/wget" <<'WGET'
-#!/bin/sh
-hops=@HOPS@
-key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' _; }
-url=""; out=""; prev=""; spider=0; one=0
-for a in "$@"; do
-    case "$a" in
-        --help) if [ -e "$hops/mode-gnu" ]; then echo "  --max-redirect=NUMBER"; else echo "BusyBox wget"; fi; exit 0 ;;
-        --max-redirect=0) one=1 ;;
-        -S) spider=1 ;;
-    esac
-    [ "$prev" = -O ] && out="$a"
-    url="$a"; prev="$a"
-done
-if [ "$spider" = 1 ]; then
-    if [ "$one" = 1 ] && [ -e "$hops/mode-gnu" ]; then
-        if [ -e "$hops/$(key "$url")" ]; then cat "$hops/$(key "$url")" >&2; exit 8; fi
-        printf '  HTTP/1.1 200 OK\n' >&2; exit 0
-    fi
-    [ -e "$hops/mode-gnu" ] && { echo "the installer asked GNU wget without --max-redirect=0" >&2; exit 2; }
-    cat "$hops/dump" >&2; exit 0
-fi
-exec @CURL@ -fsSL -o "$out" "$url"
-WGET
-sed -i -e "s#@HOPS@#'$HOPS'#" -e "s#@CURL@#'$REAL_CURL'#" "$NOCURL/wget"
-chmod 755 "$NOCURL/wget"
-gh="https://github.com/DigitalWestern/greyward"
-key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' _; }
-# GNU hop: URL, then the lines that wget prints for it.
-hop() { local url="$1"; shift; printf '%s\n' "$@" > "$HOPS/$(key "$url")"; }
-wget_case() { # DESC MODE, after the hops are written
-    local desc="$1" mode="$2" home="$WORK/h-wget-$(key "$1")"
-    : > "$HOPS/mode-$mode"
-    out="$(LATEST_TAG_OVERRIDE="" run_installer "$home" /bin/bash "$NOCURL" 2>&1)" \
-        || { echo "$out"; bad "latest with $desc failed"; }
-    check "$desc: latest is the tag" sh -c "'$home/.local/bin/ward' --version 2>/dev/null | grep -q '^ward $TEST_VERSION'"
-    rm -rf "$HOPS"; mkdir -p "$HOPS"
+echo "== 27. latest is the tag in the latest release's signed LATEST"
+# Each LATEST sits in release/l-<name>/ and is read through /redirect/, the
+# way GitHub's releases/latest/download/LATEST redirects to the latest
+# release's own LATEST.
+latest_case() { # NAME CONTENT (printf %b), signed by the test key
+    local dir="$WORK/release/l-$1"
+    rm -rf "$dir"; mkdir -p "$dir"
+    printf '%b' "$2" > "$dir/LATEST"
+    GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
+        "$ROOT/tools/release-sign.sh" --sign "$dir/LATEST" 2>/dev/null
 }
-rm -rf "$HOPS"; mkdir -p "$HOPS"
-# GNU wget 1.x: the server's header, then its own `Location: ... [following]`.
-hop "$gh/releases/latest" "HTTP request sent, awaiting response... " "  HTTP/1.1 302 Found" \
-    "  Location: $gh/releases/tag/$TEST_TAG" "Location: $gh/releases/tag/$TEST_TAG [following]" \
-    "0 redirections exceeded."
-wget_case "GNU wget" gnu
-# A chain through a second releases/latest (a renamed repository), then an
-# absolute-path Location.
-hop "$gh/releases/latest" "  HTTP/1.1 301 Moved Permanently" "  Location: https://github.com/Renamed/greyward/releases/latest"
-hop "https://github.com/Renamed/greyward/releases/latest" "  HTTP/1.1 302 Found" "  Location: /DigitalWestern/greyward/releases/tag/$TEST_TAG"
-wget_case "a chain through a second releases/latest" gnu
-# A relative Location, against the URL's directory.
-hop "$gh/releases/latest" "  HTTP/1.1 302 Found" "  Location: tag/$TEST_TAG"
-wget_case "a relative Location" gnu
-# The header name in capitals, and CRLF line ends.
-printf '  HTTP/1.1 302 Found\r\n  LOCATION: %s\r\n' "$gh/releases/tag/$TEST_TAG" > "$HOPS/$(key "$gh/releases/latest")"
-wget_case "LOCATION in capitals with CRLF" gnu
-# wget2 prints no headers, only the redirect it did not follow.
-hop "$gh/releases/latest" "HTTP response 302  [$gh/releases/latest]" \
-    "URL '$gh/releases/tag/$TEST_TAG' not followed (max redirections exceeded)" \
-    "URL '$gh/releases/tag/$TEST_TAG' not followed (max redirections exceeded)"
-wget_case "wget2" gnu
-# busybox wget: every hop's headers in one run, lower case, CRLF, the
-# second hop relative to the first.
-printf '%s\r\n' "Connecting to github.com (140.82.112.3:443)" "  HTTP/1.1 301 Moved Permanently" \
-    "  location: https://github.com/Renamed/greyward/releases/latest" \
-    "Connecting to github.com (140.82.112.3:443)" "  HTTP/1.1 302 Found" \
-    "  LOCATION: /DigitalWestern/greyward/releases/tag/$TEST_TAG" \
-    "Connecting to github.com (140.82.112.3:443)" "  HTTP/1.1 200 OK" > "$HOPS/dump"
-wget_case "busybox wget" busybox
-# A redirect loop is refused after 10 hops, before anything is downloaded.
-: > "$HOPS/mode-gnu"
-for i in $(seq 0 12); do
-    if [ "$i" = 0 ]; then from="$gh/releases/latest"; else from="$gh/releases/latest?n=$i"; fi
-    hop "$from" "  HTTP/1.1 302 Found" "  Location: latest?n=$((i+1))"
+latest_url() { printf '%s/redirect/l-%s/LATEST' "$GREYWARD_DOWNLOAD_BASE" "$1"; }
+latest_installs() { # DESC NAME PATH
+    local home="$WORK/h-latest-$(printf '%s' "$1" | tr -c 'A-Za-z0-9' _)"
+    out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$(latest_url "$2")" run_installer "$home" /bin/bash "$3" 2>&1)" \
+        || { echo "$out"; bad "latest from LATEST failed ($1)"; }
+    check "$1: latest is the tag LATEST names" sh -c "'$home/.local/bin/ward' --version 2>/dev/null | grep -q '^ward $TEST_VERSION'"
+}
+latest_refused() { # DESC NAME MESSAGE
+    local home="$WORK/h-latest-$2"
+    out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$(latest_url "$2")" run_installer "$home" /bin/bash "$BASE_PATH" 2>&1)" \
+        && bad "latest took $1" || ok "latest refused $1"
+    check "says why ($1)"                  grep -Fq "$3" <<<"$out"
+    check "downloaded nothing ($1)"        absent 'downloading' "$out"
+    check "installed nothing ($1)"         test ! -e "$home/.local/bin/ward"
+}
+latest_case good "$TEST_TAG\n"
+latest_installs "curl" good "$BASE_PATH"
+# wget, and busybox wget when there is one, with no curl on PATH: each
+# follows the redirect on its own.
+for kind in wget busybox; do
+    real="$(command -v "$kind" || true)"
+    if [ -z "$real" ]; then echo "  skip: no $kind here"; continue; fi
+    dir="$WORK/no-curl-$kind"
+    mkdir -p "$dir"
+    for tool in /usr/bin/* /bin/*; do
+        name="${tool##*/}"
+        case "$name" in curl | wget) continue ;; esac
+        [ -e "$dir/$name" ] || ln -s "$tool" "$dir/$name"
+    done
+    ln -s "$real" "$dir/wget"
+    latest_installs "$kind" good "$dir"
 done
-H="$WORK/h-wget-loop"
-out="$(LATEST_TAG_OVERRIDE="" run_installer "$H" /bin/bash "$NOCURL" 2>&1)" \
-    && bad "a redirect loop was followed to an install" || ok "a redirect loop is refused"
-check "says it cannot read the latest release" grep -Fq "cannot read the latest release" <<<"$out"
-check "downloaded nothing (loop)"          absent 'downloading' "$out"
-rm -rf "$HOPS"
+# The bytes changed after signing.
+latest_case tampered "$TEST_TAG\n"
+printf 'v99.0.0\n' > "$WORK/release/l-tampered/LATEST"
+latest_refused "a LATEST changed after signing" tampered "is not signed by ward's release key"
+# Signed by some other key.
+OTHER_KEY_FILE="$WORK/other.key"
+OTHER_KEY="$("$BIN" keygen "$OTHER_KEY_FILE" 2>/dev/null | sed -n 's/^trusted = \["\(.*\)"\]$/\1/p')"
+mkdir -p "$WORK/release/l-otherkey"
+printf '%s\n' "$TEST_TAG" > "$WORK/release/l-otherkey/LATEST"
+GREYWARD_RELEASE_KEY="$OTHER_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$OTHER_KEY" \
+    "$ROOT/tools/release-sign.sh" --sign "$WORK/release/l-otherkey/LATEST" 2>/dev/null
+latest_refused "a LATEST signed by another key" otherkey "is not signed by ward's release key"
+# Validly signed, and still not one release tag.
+latest_case two "$TEST_TAG\nv99.0.0\n"
+latest_refused "a LATEST of two lines" two "not one release tag on one line"
+latest_case blank "$TEST_TAG\n\n"
+latest_refused "a LATEST with a blank line after it" blank "not one release tag on one line"
+latest_case nonewline "$TEST_TAG"
+latest_refused "a LATEST with no newline" nonewline "not one release tag on one line"
+latest_case notsemver "v1.2\n"
+latest_refused "a LATEST that is not SemVer" notsemver "does not name a release tag"
+latest_case noprefix "$TEST_VERSION\n"
+latest_refused "a LATEST without its v" noprefix "does not name a release tag"
+latest_case path "v0.2.0/../../x\n"
+latest_refused "a LATEST holding a path" path "does not name a release tag"
+# Missing, and missing its signature.
+latest_refused "a missing LATEST" missing "cannot read the latest release"
+latest_case nosig "$TEST_TAG\n"
+rm -f "$WORK/release/l-nosig/LATEST.sig"
+latest_refused "a LATEST with no .sig" nosig "has no signature next to it"
 
 echo "== 28. release-sign.sh signs only what the tag's own commit built"
 # A stand-in for gh: the release's assets in a directory, and an attestation
@@ -683,7 +692,7 @@ cp "$WORK/release/$asset" "$WORK/release/$asset.sha256" "$FAKE/assets/"
 sign_release() { # TAG
     PATH="$FAKE/bin:$PATH" FAKE_GH="$FAKE" GREYWARD_RELEASE_REMOTE="$REMOTE" \
         GREYWARD_RELEASE_KEY="$RELEASE_KEY_FILE" GREYWARD_RELEASE_PUBLIC_KEY="$TEST_RELEASE_KEY" \
-        "$ROOT/tools/release-sign.sh" "$1"
+        "$ROOT/tools/release-sign.sh" "$@"
 }
 # An older tag's attested archive, uploaded into the new release.
 echo "refs/tags/v0.0.9 $old_commit" > "$FAKE/provenance"
@@ -700,6 +709,34 @@ echo "refs/tags/v0.1.0 $new_commit" > "$FAKE/provenance"
 out="$(sign_release v0.1.0 2>&1)" || { echo "$out"; bad "release-sign.sh refused the tag's own build"; }
 check "the archive's .sig is uploaded"    test -s "$FAKE/uploaded/$asset.sig"
 check "the attestation was held to the tag" grep -Fq -- "--source-ref refs/tags/v0.1.0 --source-digest $new_commit" "$FAKE/calls"
+check "LATEST is uploaded, naming the tag" test "$(cat "$FAKE/uploaded/LATEST")" = v0.1.0
+check "LATEST is one line"                 test "$(wc -l < "$FAKE/uploaded/LATEST")" = 1
+# The uploaded LATEST is one install.sh trusts: it reads v0.1.0 from it and
+# then holds the binary (the one under test, not 0.1.0) to that tag.
+mkdir -p "$WORK/release/l-signed"
+cp "$FAKE/uploaded/LATEST" "$FAKE/uploaded/LATEST.sig" "$WORK/release/l-signed/"
+H="$WORK/h-latest-signed"
+out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$(latest_url signed)" run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || true
+check "install.sh reads the signed LATEST" grep -Fq "not ward 0.1.0" <<<"$out"
+# A release published before signing existed gets its LATEST too.
+rm -f "$FAKE/uploaded"/* "$FAKE/calls"
+out="$(sign_release --without-attestation v0.0.9 2>&1)" || { echo "$out"; bad "release-sign.sh --without-attestation failed"; }
+check "--without-attestation signs the archive" test -s "$FAKE/uploaded/$asset.sig"
+check "--without-attestation uploads LATEST" test "$(cat "$FAKE/uploaded/LATEST")" = v0.0.9
+check "--without-attestation signs LATEST" test -s "$FAKE/uploaded/LATEST.sig"
+check "--without-attestation asks for no attestation" absent "attestation verify" "$(cat "$FAKE/calls")"
+# A release that already carries a LATEST is not touched.
+rm -f "$FAKE/uploaded"/*
+printf 'v0.1.0\n' > "$FAKE/assets/LATEST"
+out="$(sign_release v0.1.0 2>&1)" \
+    && bad "release-sign.sh replaced a LATEST" || ok "release-sign.sh refused a release with a LATEST"
+check "says LATEST is there"               grep -Fq "already carries a LATEST" <<<"$out"
+check "nothing uploaded (LATEST there)"    test -z "$(command ls "$FAKE/uploaded")"
+rm -f "$FAKE/assets/LATEST"
+# A tag LATEST could not carry.
+out="$(sign_release v1.2 2>&1)" \
+    && bad "release-sign.sh took tag v1.2" || ok "release-sign.sh refused tag v1.2"
+check "says it is no release tag"          grep -Fq "'v1.2' is not a release tag" <<<"$out"
 
 echo
 echo "install.sh: $pass passed, $fail failed"

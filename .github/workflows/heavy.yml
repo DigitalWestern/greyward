@@ -26,6 +26,8 @@
 # would test nothing, or only part of what the change affects.
 # `tests/size_baseline.txt` and `tests/install.sh` do not count: only the
 # offline suite in ci.yml reads them.
+# Every pull request also gets the `catalog` job, outside `gate`: a catalog
+# the PR changes is held append-only against the base and verified upstream.
 # Weekly rather than nightly because the repository is
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.

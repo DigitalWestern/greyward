@@ -2027,6 +2027,32 @@ mod tests {
                 "[build]\nrustflags = [\"@/project/args\"]\n".to_string(),
                 "build.rustflags",
             ),
+            // Each spelling of the codegen option, and `-Z` apart from its
+            // value.
+            (
+                "[build]\nrustflags = [\"-C\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-Ccodegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = \"--codegen codegen-backend=/p/evil.so\"\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"--codegen=codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-C\", \"codegen_backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-Copt-level=2\", \"-Z\", \"x\"]\n".to_string(),
+                "build.rustflags",
+            ),
             (
                 "[env]\nRUSTFLAGS = \"-Copt-level=2 -Zcodegen-backend=x\"\n".to_string(),
                 "env.RUSTFLAGS",
@@ -2100,6 +2126,14 @@ mod tests {
              rustdocflags = \"--cfg docsrs\"\n\
              [target.'cfg(unix)']\nrustflags = \"-Copt-level=2\"\n\
              [env]\nRUSTFLAGS = \"-Copt-level=2\"\n"
+                .to_string(),
+            // `codegen-backend` as the value of another option is no
+            // backend: a feature name, a remapped path.
+            "[build]\nrustflags = [\"--cfg\", 'feature=\"codegen-backend\"']\n\
+             [target.'cfg(unix)']\n\
+             rustflags = \"--remap-path-prefix=/home/x/codegen-backend=/src\"\n\
+             [env]\nRUSTFLAGS = \"--remap-path-prefix /x/codegen-backend=/src -L /x/-Zdir\"\n\
+             CARGO_ENCODED_RUSTFLAGS = \"--cfg\\u001ffeature=\\\"codegen-backend\\\"\"\n"
                 .to_string(),
             "[env]\nMY_SETTING = \"1\"\nOPENSSL_DIR = { value = \"/opt\", force = true }\n"
                 .to_string(),

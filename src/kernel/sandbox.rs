@@ -663,7 +663,7 @@ impl Sandbox<'_> {
         // descriptor leads out of the sandbox through `..`. The system
         // shell closes them before anything of the build runs.
         if let Some(close) = held.close_script() {
-            push_arg(&mut args, held.close_shell()?);
+            args.extend(held.close_shell()?.iter().map(OsString::from));
             push_arg(&mut args, "-c");
             push_arg(&mut args, close);
             push_arg(&mut args, "sh");
@@ -2768,6 +2768,84 @@ mod tests {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
             .env(DISTINCT_HELD_CHILD, &root.0)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
+    const STARTUP_FILE_CHILD: &str = "GREYWARD_TEST_STARTUP_FILE_SCRATCH";
+
+    /// The shell that closes the held descriptors runs no startup file
+    /// first, or a build could plant one in a writable home and reach the
+    /// host through a descriptor not closed yet. Bash sources `~/.bashrc`
+    /// for a `-c` shell whose stdin is a socket: here with the held number
+    /// above 9 (bash closes it) and below (the system shell does), the home
+    /// a writable root. Run in a child of this binary, which starts with
+    /// only the standard descriptors.
+    #[test]
+    fn linux_the_closing_shell_reads_no_startup_file() {
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+        const NAME: &str = "kernel::sandbox::tests::linux_the_closing_shell_reads_no_startup_file";
+        if !linux_ready("linux_the_closing_shell_reads_no_startup_file") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(STARTUP_FILE_CHILD) {
+            let home = PathBuf::from(scratch).join("home");
+            fs::create_dir_all(&home).unwrap();
+            let home = home.canonicalize().unwrap();
+            let marker = home.join("startup-file-ran");
+            let plant = format!("echo ran > {}\n", marker.display());
+            for name in [".bashrc", ".bash_profile", ".profile"] {
+                fs::write(home.join(name), &plant).unwrap();
+            }
+            let work = home.join("work");
+            fs::create_dir(&work).unwrap();
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&home, &work],
+                host_view: HostView::Full,
+            };
+            for busy in [true, false] {
+                let mut low: Vec<OwnedFd> = Vec::new();
+                while busy && low.last().is_none_or(|fd| fd.as_raw_fd() < 9) {
+                    low.push(OwnedFd::from(fs::File::open("/dev/null").unwrap()));
+                }
+                let dir = fs::File::open(&home).unwrap();
+                let mut held = HeldRoots::bound_for_test(vec![(dir, home.clone())]);
+                held.pin().unwrap();
+                assert_eq!(held.numbers()[0] > 9, busy, "{:?}", held.numbers());
+                let cmd = ["/usr/bin/true"];
+                let mut invocation = sandbox
+                    .bwrap_args(&cmd, "/usr/bin:/bin", &work, &work, &[], &held)
+                    .unwrap();
+                let at = invocation.command_start;
+                // The shell's environment is empty: nothing names a file.
+                assert!(!invocation.args[..at].iter().any(|arg| arg == "--setenv"));
+                // HOME as the passwd entry a shell falls back to without one.
+                let home_env = ["--setenv".into(), "HOME".into(), home.clone().into()];
+                invocation.args.splice(at..at, home_env);
+                let (stdin, _peer) = UnixStream::pair().unwrap();
+                let mut command = bwrap_command(&find_bwrap().unwrap()).unwrap();
+                command.args(&invocation.args).stdin(OwnedFd::from(stdin));
+                held::keep_in_place(&mut command, held.numbers());
+                let output = command.output().unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stderr}");
+                assert!(!marker.exists(), "busy {busy}: a startup file ran first");
+                drop((held, low));
+            }
+            return;
+        }
+        let root = temp_dir("startup-file");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(STARTUP_FILE_CHILD, &root.0)
             .output()
             .unwrap();
         let report = format!(

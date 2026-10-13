@@ -805,13 +805,13 @@ mod tests {
         let nuget = case_with_input(
             &linux,
             "nuget-packages",
-            Some("nuget-packages/1"),
+            Some("nuget-packages/2"),
             "pkg:newtonsoft.json@13.0.3",
         );
         assert_relation_breaks(
             &nuget,
-            &["pkg:newtonsoft.json@13.0.3", "raw:newtonsoft.json@13.0.3"],
-            "NuGet pkg/raw relation",
+            &["pkg:newtonsoft.json@13.0.3"],
+            "NuGet package count/version relation",
         );
 
         let go = case_with_input(
@@ -1189,7 +1189,7 @@ mod tests {
             &case_with_input(
                 &linux,
                 "nuget-packages",
-                Some("nuget-packages/1"),
+                Some("nuget-packages/2"),
                 "pkg:newtonsoft.json@13.0.3",
             ),
             "pkg:",

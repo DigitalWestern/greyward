@@ -169,7 +169,7 @@ pub(super) fn discard_failed_attempt(
         }
         if let (Some(lock), Some(manifest)) = (generated_lock, &info.cargo_manifest) {
             fs::write(
-                super::build::generated_cargo_lock_path(&root, Path::new(manifest)),
+                super::cargo_lock::generated_cargo_lock_path(&root, Path::new(manifest)),
                 lock,
             )?;
         }
@@ -364,7 +364,7 @@ mod tests {
         );
         let manifest = fx.info.cargo_manifest.as_deref().unwrap();
         assert_eq!(
-            fs::read_to_string(super::super::build::generated_cargo_lock_path(
+            fs::read_to_string(super::super::cargo_lock::generated_cargo_lock_path(
                 &fx.root, manifest
             ))
             .unwrap(),

@@ -55,6 +55,18 @@ const ANCESTOR_FLAGS: libc::c_int =
 const ANCESTOR_FLAGS: libc::c_int = DIRECTORY_FLAGS;
 const TEMP_ATTEMPTS: usize = 8;
 
+/// Where a project-relative name leads, symlinks followed
+/// ([`ProjectRoot::input_containment`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Containment {
+    /// Inside the project, or not there yet below a directory that is.
+    Inside,
+    /// A symlink on the way carries it outside the project.
+    Outside,
+    /// It passes through a symlink whose target does not exist.
+    Dangling,
+}
+
 /// What a project-relative name resolves to, without following symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entry {
@@ -1014,13 +1026,13 @@ impl ProjectRoot {
         ))
     }
 
-    /// Whether the project input `relative` (plain components only, or `.`
-    /// for the root itself), symlinks followed from the held descriptor,
-    /// stays inside this root. A name that does not exist yet is judged by
-    /// its deepest existing ancestor: the rest is plain names, so whatever
-    /// is created there stays beneath it. A dangling symlink on the way
-    /// could lead anywhere once its target appears, so it is an error.
-    pub(crate) fn input_stays_inside(&self, relative: &Path) -> io::Result<bool> {
+    /// Where the project input `relative` (plain components only, or `.`
+    /// for the root itself) leads, symlinks followed from the held
+    /// descriptor. A name that does not exist yet is judged by its deepest
+    /// existing ancestor: the rest is plain names, so whatever is created
+    /// there stays beneath it. A dangling symlink on the way could lead
+    /// anywhere once its target appears: `Containment::Dangling`.
+    pub(crate) fn input_containment(&self, relative: &Path) -> io::Result<Containment> {
         #[cfg(target_os = "linux")]
         const FOLLOWING: libc::c_int = libc::O_PATH | libc::O_CLOEXEC;
         #[cfg(not(target_os = "linux"))]
@@ -1051,8 +1063,13 @@ impl ProjectRoot {
                 .join(&b'/');
             match open_file_at(self.dir.as_raw_fd(), &name, FOLLOWING, 0) {
                 Ok(file) => {
-                    return Ok(same_inode(&fd_stat(file.as_raw_fd())?, &root)
-                        || self.contains_open_file(&file)?)
+                    let inside = same_inode(&fd_stat(file.as_raw_fd())?, &root)
+                        || self.contains_open_file(&file)?;
+                    return Ok(if inside {
+                        Containment::Inside
+                    } else {
+                        Containment::Outside
+                    });
                 }
                 Err(error)
                     if error.kind() == io::ErrorKind::NotFound
@@ -1061,25 +1078,16 @@ impl ProjectRoot {
                     if stat_at(self.dir.as_raw_fd(), &name)
                         .is_ok_and(|stat| stat.st_mode & libc::S_IFMT == libc::S_IFLNK)
                     {
-                        return Err(refusal(format!(
-                            "{} is a dangling symlink; ward cannot tell whether it stays in the project",
-                            self.path.join(OsStr::from_bytes(&name)).display()
-                        )));
+                        return Ok(Containment::Dangling);
                     }
                     names.pop();
                 }
-                Err(error) => {
-                    return Err(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "open {}: {error}",
-                            self.path.join(OsStr::from_bytes(&name)).display()
-                        ),
-                    ))
-                }
+                // The OS error as it is (a symlink loop): the caller names
+                // the input it asked about.
+                Err(error) => return Err(error),
             }
         }
-        Ok(true)
+        Ok(Containment::Inside)
     }
 
     fn open_input(&self, relative: &Path) -> io::Result<Option<fs::File>> {
@@ -2719,7 +2727,7 @@ mod tests {
     /// exist yet is judged by its deepest existing ancestor; and one that
     /// passes through a dangling symlink is refused.
     #[test]
-    fn input_stays_inside_follows_symlinks_from_the_held_directory() {
+    fn input_containment_follows_symlinks_from_the_held_directory() {
         let temp = TempDir::new();
         let dir = project(&temp);
         let outside = temp.0.join("outside");
@@ -2729,6 +2737,7 @@ mod tests {
         symlink("packages", dir.join("alias")).unwrap();
         symlink(temp.0.join("missing"), dir.join("dangling")).unwrap();
         let root = ProjectRoot::open(&dir).unwrap();
+        let at = |name: &str| root.input_containment(Path::new(name)).unwrap();
         for inside in [
             ".",
             "packages",
@@ -2736,20 +2745,16 @@ mod tests {
             "alias/a",
             "packages/new/deeper",
         ] {
-            assert!(
-                root.input_stays_inside(Path::new(inside)).unwrap(),
-                "{inside}"
-            );
+            assert_eq!(at(inside), Containment::Inside, "{inside}");
         }
         for out in ["vendor", "vendor/lib", "vendor/not-yet"] {
-            assert!(!root.input_stays_inside(Path::new(out)).unwrap(), "{out}");
+            assert_eq!(at(out), Containment::Outside, "{out}");
         }
-        let error = root
-            .input_stays_inside(Path::new("dangling/x"))
-            .unwrap_err();
-        assert!(error.to_string().contains("dangling symlink"), "{error}");
+        for dangling in ["dangling", "dangling/x"] {
+            assert_eq!(at(dangling), Containment::Dangling, "{dangling}");
+        }
         for bad in ["../outside", "packages/../..", "/etc", ""] {
-            let error = root.input_stays_inside(Path::new(bad)).unwrap_err();
+            let error = root.input_containment(Path::new(bad)).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{bad}");
         }
     }

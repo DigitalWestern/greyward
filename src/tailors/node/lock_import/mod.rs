@@ -118,32 +118,104 @@ fn integrity_policy_with(
     Ok(())
 }
 
-/// Refuse a link target (project-relative, plain names only) that a
-/// symlink carries outside `root`. A target that does not exist yet is
-/// judged by its deepest existing ancestor: the rest is plain names, so
-/// whatever is created there stays beneath it. A symlink that resolves
-/// nowhere could lead anywhere once its target appears, so it is refused.
-/// Resolved on the pathname: ProjectRoot has no canonicalize.
-fn contain_link_target(root: &Path, target: &str, raw: &str) -> io::Result<()> {
-    let mut existing = root.join(target);
-    let canonical = loop {
-        match existing.canonicalize() {
-            Ok(canonical) => break canonical,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if existing.is_symlink() {
-                    return Err(err(format!(
-                        "workspace link target {raw:?} passes through a dangling symlink; ward cannot tell whether it stays in the project"
-                    )));
-                }
-                existing.pop();
-            }
-            Err(error) => return Err(err(format!("workspace link target {raw:?}: {error}"))),
-        }
-    };
-    if !canonical.starts_with(root) {
-        return Err(err(format!(
+/// Refuse a link target (project-relative, plain names only, or `.`) that
+/// a symlink carries outside the project. Resolved from the held project
+/// descriptor ([`ProjectRoot::input_containment`]): a target that does not
+/// exist yet is judged by its deepest existing ancestor, and one that
+/// passes through a dangling symlink is refused, since it could lead
+/// anywhere once its target appears.
+fn contain_link_target(project: &ProjectRoot, target: &str, raw: &str) -> io::Result<()> {
+    use crate::kernel::fsroot::Containment;
+    match project.input_containment(Path::new(target)) {
+        Ok(Containment::Inside) => Ok(()),
+        Ok(Containment::Outside) => Err(err(format!(
             "workspace link target {raw:?} is outside the project"
-        )));
+        ))),
+        Ok(Containment::Dangling) => Err(err(format!(
+            "workspace link target {raw:?} passes through a dangling symlink; ward cannot tell whether it stays in the project"
+        ))),
+        Err(error) => Err(err(format!("workspace link target {raw:?}: {error}"))),
+    }
+}
+
+/// Skip an optional dependency ward cannot verify (no integrity, a
+/// non-https tarball, an unpinned git source, a local reference the lock
+/// cannot place), recording why. npm, pnpm and yarn plans share this one
+/// step, so no importer drops an optional package silently: the closure,
+/// `ward audit` and the SBOM all show what is missing. An unpinned git
+/// dependency keeps its own kind; anything else is `requirement-skipped`.
+/// A platform-incompatible optional package is not this: every package
+/// manager leaves it out by design, and nothing is missing that it would
+/// place.
+pub(crate) fn skip_unverifiable_optional(
+    subject: &str,
+    detail: &str,
+    record: &mut impl FnMut(&str, &str, &str) -> io::Result<()>,
+) -> io::Result<()> {
+    if detail.starts_with("npm_git_dep:") {
+        return record(crate::kernel::policy::GIT_DEPENDENCY, subject, detail);
+    }
+    record(
+        crate::kernel::policy::REQUIREMENT_SKIPPED,
+        subject,
+        &format!("optional dependency left out: {detail}"),
+    )
+}
+
+/// The checks every Node plan passes after its importer built it, whatever
+/// the lock format, so npm, pnpm and yarn cannot drift apart: each
+/// workspace is a plain project-relative path, and each link target plain
+/// (or `.`, the root), and a symlink in the project carries neither
+/// outside it (resolved from the held descriptor); and every placed
+/// package carries an integrity ward verifies, or a pinned git commit.
+pub(crate) fn validate_plan(project: &ProjectRoot, plan: &NpmPlan) -> io::Result<()> {
+    for workspace in &plan.workspaces {
+        if !crate::tailors::node::project::safe_workspace_path(workspace) {
+            return Err(err(format!(
+                "{}: workspace path {workspace:?} is not a safe project-relative path",
+                plan.lock_source
+            )));
+        }
+        match project.input_containment(Path::new(workspace)) {
+            Ok(crate::kernel::fsroot::Containment::Inside) => {}
+            Ok(_) => {
+                return Err(err(format!(
+                    "{}: workspace path {workspace:?} resolves outside the project",
+                    plan.lock_source
+                )))
+            }
+            Err(error) => {
+                return Err(err(format!(
+                    "{}: workspace path {workspace:?}: {error}",
+                    plan.lock_source
+                )))
+            }
+        }
+    }
+    for link in &plan.links {
+        let plain =
+            link.target == "." || crate::tailors::node::project::safe_workspace_path(&link.target);
+        if !plain {
+            return Err(err(format!(
+                "{}: unsafe link target {:?}",
+                link.path, link.target
+            )));
+        }
+        contain_link_target(project, &link.target, &link.target)
+            .map_err(|error| err(format!("{}: {error}", link.path)))?;
+    }
+    for package in &plan.packages {
+        if package.git.is_some() {
+            continue;
+        }
+        if package.integrity.is_empty() {
+            return Err(err(format!(
+                "{}: {} entry has no integrity",
+                package.path, plan.lock_source
+            )));
+        }
+        crate::kernel::digest::sri_candidates(&package.integrity)
+            .map_err(|error| err(format!("{}: {error}", package.path)))?;
     }
     Ok(())
 }
@@ -402,8 +474,8 @@ fn existing_ancestor(
 }
 
 /// A dependency the lockfile could not resolve to a package. Returning `Ok`
-/// means the traversal skips it (an optional git dependency is recorded as a
-/// policy exception first); a required one is fatal.
+/// means the traversal skips it, recorded first
+/// ([`skip_unverifiable_optional`]); a required one is fatal.
 fn skip_external_dependency(
     dependency: &Dependency,
     detail: &str,
@@ -412,14 +484,7 @@ fn skip_external_dependency(
     if !dependency.optional {
         return Err(err(format!("{}: {detail}", dependency.name)));
     }
-    if detail.starts_with("npm_git_dep:") {
-        record(
-            crate::kernel::policy::GIT_DEPENDENCY,
-            &dependency.name,
-            detail,
-        )?;
-    }
-    Ok(())
+    skip_unverifiable_optional(&dependency.name, detail, record)
 }
 
 /// What a `foreign-platform-package` exception says about a package.
@@ -439,7 +504,9 @@ fn foreign_platform_detail(platform: Platform, node: &Node) -> String {
 
 /// The graph node this dependency names, once it is known to be realizable on
 /// this host. `Ok(None)` means the traversal skips it: an optional package
-/// that is platform-incompatible, unresolvable, or carries no integrity.
+/// that is platform-incompatible (silently, as every package manager skips
+/// it), or unresolvable or without integrity (recorded,
+/// [`skip_unverifiable_optional`]).
 ///
 /// A required package whose restrictions exclude this host is realizable:
 /// pnpm warns and installs it (a project that cross-compiles lists every
@@ -476,9 +543,12 @@ fn realizable_node<'a>(
     }
     if let Some(detail) = &node.external {
         if dependency.optional || node.optional {
-            if detail.starts_with("npm_git_dep:") {
-                record(crate::kernel::policy::GIT_DEPENDENCY, &node.name, detail)?;
-            }
+            let subject = if detail.starts_with("npm_git_dep:") {
+                node.name.clone()
+            } else {
+                format!("{}@{version}", node.name)
+            };
+            skip_unverifiable_optional(&subject, detail, record)?;
             return Ok(None);
         }
         return Err(err(format!("{}@{version}: {detail}", node.name)));
@@ -488,6 +558,11 @@ fn realizable_node<'a>(
     let node_git = lock_git_source(&node.url, !node.integrity.is_empty());
     if node.integrity.is_empty() && node_git.is_none() {
         if dependency.optional || node.optional {
+            skip_unverifiable_optional(
+                &format!("{}@{version}", node.name),
+                &format!("{lock_source} entry has no integrity"),
+                record,
+            )?;
             return Ok(None);
         }
         // Both importers share this path, so name the lockfile that was
@@ -3575,6 +3650,30 @@ mod pnpm_lock_shape_tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{expected}");
     }
 
+    /// The exceptions recorded since the last drain are one
+    /// `requirement-skipped` per subject, in order: an optional package
+    /// left out is never left out silently (#692).
+    fn assert_skipped(subjects: &[&str]) {
+        let exceptions = crate::kernel::policy::drain();
+        let recorded: Vec<(&str, &str)> = exceptions
+            .iter()
+            .map(|e| (e.kind.as_str(), e.subject.as_str()))
+            .collect();
+        let expected: Vec<(&str, &str)> = subjects
+            .iter()
+            .map(|subject| (crate::kernel::policy::REQUIREMENT_SKIPPED, *subject))
+            .collect();
+        assert_eq!(recorded, expected, "{exceptions:?}");
+        for exception in &exceptions {
+            assert!(
+                exception
+                    .detail
+                    .starts_with("optional dependency left out: "),
+                "{exception:?}"
+            );
+        }
+    }
+
     #[test]
     fn unsupported_pnpm_lockfile_versions_are_refused() {
         let dir = project();
@@ -3641,10 +3740,13 @@ snapshots:
 
     #[test]
     fn an_ambiguous_peer_edge_is_dropped_when_optional() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         let plan = plan(&dir.0, &ambiguous_peer_lock("optionalDependencies")).unwrap();
         let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
         assert_eq!(paths, vec!["node_modules/is-odd"]);
+        assert_skipped(&["is-number"]);
     }
 
     /// With a single peer variant the version-only edge is unambiguous.
@@ -3771,6 +3873,8 @@ snapshots:
 
     #[test]
     fn an_optional_link_outside_the_project_is_dropped() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         let plan = plan(
             &dir.0,
@@ -3778,6 +3882,7 @@ snapshots:
         )
         .unwrap();
         assert!(plan.links.is_empty(), "{:?}", plan.links);
+        assert_skipped(&["evil"]);
     }
 
     /// Inside the project, the same relative spelling is a link.
@@ -4022,13 +4127,17 @@ snapshots:
     /// credentials anywhere is refused whole when it is read.
     #[test]
     fn a_non_https_or_credentialed_tarball_is_refused_or_dropped() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let dir = project();
         for url in ["http://r/x.tgz", "ftp://r/x.tgz"] {
             let error = refused(&dir.0, &tarball_lock(url, "https://r/o.tgz"));
             assert_invalid(error, &format!("a@1.0.0: non-https tarball URL {url}"));
+            crate::kernel::policy::clear();
             let plan = plan(&dir.0, &tarball_lock("https://r/a.tgz", url)).unwrap();
             let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
             assert_eq!(paths, vec!["node_modules/a", "node_modules/b"], "{url}");
+            assert_skipped(&["o@1.0.0"]);
         }
         for url in [
             "https://u:secret@r/x.tgz",
@@ -4184,6 +4293,266 @@ snapshots:
                 ("node_modules/foo", "bar", "1.0.0"),
                 ("node_modules/two", "two", "1.0.0"),
             ]
+        );
+    }
+}
+
+/// The one check every importer's plan passes (`validate_plan`, #692):
+/// npm, pnpm and yarn agree on link containment, workspace keys, required
+/// integrity, and on recording every optional package they leave out.
+#[cfg(test)]
+mod plan_validation_tests {
+    use super::tests::{held, node_version, SRI};
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn npm_lock(packages: &str) -> String {
+        format!(r#"{{"name":"p","lockfileVersion":3,"packages":{{"":{{"name":"p"}},{packages}}}}}"#)
+    }
+
+    /// A project with `package.json` and `lock` as its package-lock.json,
+    /// planned the way sync plans it.
+    fn load(dir: &Path, lock: &str) -> io::Result<NpmPlan> {
+        fs::write(dir.join("package.json"), r#"{"name":"p"}"#).unwrap();
+        fs::write(dir.join("package-lock.json"), lock).unwrap();
+        let selected = crate::tailors::node::shipped_selection().unwrap();
+        crate::tailors::node::inputs::load_npm_plan(
+            Platform::X86_64UnknownLinuxGnu,
+            &held(dir),
+            &selected,
+        )
+        .map(|plan| plan.expect("a lock to plan from"))
+    }
+
+    /// An npm `link: true` target whose text is plain is still refused when
+    /// a symlink in the project carries it outside, as pnpm refuses its own
+    /// link targets; inside the project it plans.
+    #[test]
+    fn an_npm_link_through_a_symlink_out_of_the_project_is_refused() {
+        let temp = TempDir::named("npm-link-escape");
+        let dir = temp.0.join("p");
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(outside.join("lib")).unwrap();
+        fs::create_dir_all(dir.join("src/lib")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("vendor")).unwrap();
+        let link = |target: &str| {
+            npm_lock(&format!(
+                r#""node_modules/lib":{{"resolved":"{target}","link":true}}"#
+            ))
+        };
+        let error = load(&dir, &link("vendor/lib")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "node_modules/lib: workspace link target \"vendor/lib\" is outside the project"
+        );
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let plan = load(&dir, &link("src/lib")).unwrap();
+        assert_eq!(plan.links[0].target, "src/lib");
+    }
+
+    /// A package-lock workspace key that climbs out of the project is
+    /// refused while planning, before freshness reads
+    /// `../outside/package.json` or any install script runs.
+    #[test]
+    fn an_npm_workspace_key_outside_the_project_is_refused() {
+        let temp = TempDir::named("npm-workspace-escape");
+        let dir = temp.0.join("p");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(temp.0.join("outside")).unwrap();
+        fs::write(temp.0.join("outside/package.json"), "{}").unwrap();
+        let error = load(&dir, &npm_lock(r#""../outside":{"name":"o"}"#)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "package-lock.json: workspace path \"../outside\" is not a safe project-relative path"
+        );
+        // A plain workspace whose directory is a symlink out is refused by
+        // the shared check.
+        std::os::unix::fs::symlink(temp.0.join("outside"), dir.join("linked")).unwrap();
+        let error = load(&dir, &npm_lock(r#""linked":{"name":"o"}"#)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "package-lock.json: workspace path \"linked\" resolves outside the project"
+        );
+    }
+
+    /// An optional npm entry ward cannot verify (plain http, no integrity)
+    /// is left out with its subtree and recorded, as pnpm and yarn leave
+    /// theirs out; a required one is still refused.
+    #[test]
+    fn an_unverifiable_optional_npm_entry_is_left_out_and_recorded() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let lock = npm_lock(&format!(
+            r#""node_modules/req":{{"version":"1.0.0","resolved":"https://r/req.tgz","integrity":"{SRI}"}},
+               "node_modules/plainhttp":{{"version":"1.0.0","resolved":"http://r/p.tgz","integrity":"{SRI}","optional":true}},
+               "node_modules/plainhttp/node_modules/inner":{{"version":"1.0.0","resolved":"https://r/i.tgz","integrity":"{SRI}","optional":true}},
+               "node_modules/nohash":{{"version":"1.0.0","resolved":"https://r/n.tgz","optional":true}}"#
+        ));
+        let plan = crate::tailors::node::plan_npm(Platform::X86_64UnknownLinuxGnu, &lock).unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, ["node_modules/req"]);
+        let recorded: Vec<(String, String, String)> = crate::kernel::policy::drain()
+            .into_iter()
+            .map(|e| (e.kind, e.subject, e.detail))
+            .collect();
+        let skipped = |subject: &str, detail: &str| {
+            (
+                crate::kernel::policy::REQUIREMENT_SKIPPED.to_string(),
+                subject.to_string(),
+                format!("optional dependency left out: {detail}"),
+            )
+        };
+        assert_eq!(
+            recorded,
+            [
+                skipped("node_modules/nohash", "missing 'integrity'"),
+                skipped(
+                    "node_modules/plainhttp",
+                    "only https registry tarballs supported (v0), got http://r/p.tgz"
+                ),
+            ]
+        );
+        let required = lock.replace(r#","optional":true},"#, "},");
+        let error =
+            crate::tailors::node::plan_npm(Platform::X86_64UnknownLinuxGnu, &required).unwrap_err();
+        assert!(error.to_string().contains("only https"), "{error}");
+    }
+
+    /// The audit's probe (#692): an optional package with no integrity, an
+    /// optional plain-http one, and a required edge to an entry the lock
+    /// marks optional. Each is left out, and none silently.
+    #[test]
+    fn pnpm_records_every_optional_package_it_leaves_out() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = TempDir::named("pnpm-skips");
+        let lock = format!(
+            "lockfileVersion: '6.0'\n\
+importers:\n  .:\n    dependencies:\n      req:\n        specifier: 1.0.0\n        version: 1.0.0\n\
+\x20   optionalDependencies:\n      nohash:\n        specifier: 1.0.0\n        version: 1.0.0\n\
+\x20     plainhttp:\n        specifier: 1.0.0\n        version: 1.0.0\n\
+packages:\n  /req@1.0.0:\n    resolution: {{tarball: 'https://r/req.tgz'}}\n    optional: true\n\
+\x20 /nohash@1.0.0:\n    resolution: {{tarball: 'https://r/n.tgz'}}\n    optional: true\n\
+\x20 /plainhttp@1.0.0:\n    resolution: {{integrity: {SRI}, tarball: 'http://r/p.tgz'}}\n    optional: true\n"
+        );
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap();
+        assert!(plan.packages.is_empty(), "{:?}", plan.packages);
+        let mut subjects: Vec<(String, String)> = crate::kernel::policy::drain()
+            .into_iter()
+            .map(|e| (e.kind, e.subject))
+            .collect();
+        subjects.sort();
+        let skipped = |subject: &str| {
+            (
+                crate::kernel::policy::REQUIREMENT_SKIPPED.to_string(),
+                subject.to_string(),
+            )
+        };
+        assert_eq!(
+            subjects,
+            [
+                skipped("nohash@1.0.0"),
+                skipped("plainhttp@1.0.0"),
+                skipped("req@1.0.0"),
+            ]
+        );
+    }
+
+    /// pnpm 9 writes `optional: true` on the snapshot, not the package: a
+    /// platform-restricted child of an optional parent is left out, as pnpm
+    /// leaves it out, rather than placed as a foreign-platform package.
+    #[test]
+    fn a_pnpm9_snapshot_optional_flag_leaves_a_foreign_child_out() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let dir = TempDir::named("pnpm9-optional");
+        let lock = format!(
+            "lockfileVersion: '9.0'\n\
+importers:\n  .:\n    optionalDependencies:\n      parent:\n        specifier: 1.0.0\n        version: 1.0.0\n\
+packages:\n  parent@1.0.0:\n    resolution: {{integrity: {SRI}}}\n\
+\x20 child@1.0.0:\n    resolution: {{integrity: {SRI}}}\n    os: [win32]\n\
+snapshots:\n  parent@1.0.0:\n    optional: true\n    dependencies:\n      child: 1.0.0\n\
+\x20 child@1.0.0:\n    optional: true\n"
+        );
+        let plan = plan_pnpm(
+            Platform::X86_64UnknownLinuxGnu,
+            &lock,
+            &held(&dir.0),
+            node_version(),
+        )
+        .unwrap();
+        let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, ["node_modules/parent"]);
+        let exceptions = crate::kernel::policy::drain();
+        assert!(exceptions.is_empty(), "{exceptions:?}");
+    }
+
+    /// A pnpm importer key is a directory the plan writes a node_modules
+    /// into: one that climbs out of the project is refused.
+    #[test]
+    fn a_pnpm_importer_outside_the_project_is_refused() {
+        let dir = TempDir::named("pnpm-importer-escape");
+        for key in ["../outside", "/abs", "packages/../.."] {
+            let lock = format!("lockfileVersion: '9.0'\nimporters:\n  .: {{}}\n  {key}: {{}}\n");
+            let error = plan_pnpm(
+                Platform::X86_64UnknownLinuxGnu,
+                &lock,
+                &held(&dir.0),
+                node_version(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("pnpm-lock.yaml: importer {key:?} is not a safe project-relative path")
+            );
+        }
+    }
+
+    /// The shared check holds whatever importer built the plan: a placed
+    /// package with no integrity and no git commit, or a link target that is
+    /// not a plain path, is refused.
+    #[test]
+    fn validate_plan_refuses_an_unverifiable_package_and_an_unsafe_link() {
+        let dir = TempDir::named("validate-plan");
+        let project = held(&dir.0);
+        let package = NpmPackage {
+            path: "node_modules/a".into(),
+            name: "a".into(),
+            version: "1.0.0".into(),
+            url: "https://r/a.tgz".into(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            foreign_platform: false,
+            needs_workspace: false,
+        };
+        let mut plan = NpmPlan {
+            node_version: node_version().into(),
+            packages: vec![package],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "yarn.lock".into(),
+        };
+        assert_eq!(
+            validate_plan(&project, &plan).unwrap_err().to_string(),
+            "node_modules/a: yarn.lock entry has no integrity"
+        );
+        plan.packages[0].integrity = SRI.into();
+        validate_plan(&project, &plan).unwrap();
+        plan.links.push(NpmLink {
+            path: "node_modules/b".into(),
+            target: "../b".into(),
+        });
+        assert_eq!(
+            validate_plan(&project, &plan).unwrap_err().to_string(),
+            "node_modules/b: unsafe link target \"../b\""
         );
     }
 }

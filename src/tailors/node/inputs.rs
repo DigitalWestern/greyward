@@ -118,7 +118,10 @@ pub fn load_npm_plan_with_basis(
     selected: &Selected,
 ) -> io::Result<Option<Planned>> {
     let node_version = selected.version("node")?;
+    // Whichever importer built the plan, it passes the same checks
+    // (`lock_import::validate_plan`) before anything uses it.
     let planned = |lock_name: &str, lock_text: &str, plan: node::NpmPlan| -> io::Result<Planned> {
+        lock_import::validate_plan(project, &plan)?;
         Ok(Planned {
             plan,
             basis: node::resolve::resolution_basis(project, lock_name, lock_text)?,

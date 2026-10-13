@@ -733,7 +733,7 @@ pub trait RegistryTool: Sync {
     fn runtime_object_id(&self, platform: Platform, toolchain: &Selected) -> io::Result<String>;
 
     /// The identity schema of the environment object this tool realizes
-    /// (`node-env/6`, `python-env/3`). It is part of the cache key, so a
+    /// (`node-env/7`, `python-env/3`). It is part of the cache key, so a
     /// schema bump moves every cached tool to a new directory and rebuilds
     /// it, and a cached projection whose object has another schema is
     /// realized again.

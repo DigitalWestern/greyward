@@ -909,27 +909,44 @@ fn update_submodules(
         "git submodule init",
         activity,
     )?;
-    let listed = |args: &[&str]| -> io::Result<Vec<String>> {
-        let output = run_git_with_activity(args, Some(dir), activity)?;
+    // `(name, value)` of each `submodule.<name>.<suffix>` the config
+    // holds. `-z` ends each record with NUL and puts a newline between key
+    // and value: a name may hold spaces (`x https://innocent`), so the
+    // space git prints between them otherwise is no boundary.
+    let listed = |file: &[&str], suffix: &str| -> io::Result<Vec<(String, String)>> {
+        let pattern = format!(r"^submodule\..*\.{suffix}$");
+        let mut args = vec!["config", "-z"];
+        args.extend_from_slice(file);
+        args.extend(["--get-regexp", &pattern]);
+        let output = run_git_with_activity(&args, Some(dir), activity)?;
         // `--get-regexp` exits 1 when nothing matches.
         if !output.status.success() && output.status.code() != Some(1) {
             return Err(err(format!("git {} failed", args.join(" "))));
         }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_once(' ').map(|(_, value)| value.to_string()))
-            .collect())
+        let suffix = format!(".{suffix}");
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let (key, value) = record.split_once('\n').unwrap_or((record, ""));
+                let name = key
+                    .strip_prefix("submodule.")
+                    .and_then(|rest| rest.strip_suffix(suffix.as_str()))
+                    .ok_or_else(|| err(format!("unexpected git config key {key:?}")))?;
+                Ok((name.to_string(), value.to_string()))
+            })
+            .collect()
     };
-    let urls = listed(&["config", "--local", "--get-regexp", r"^submodule\..*\.url$"])?;
+    let urls = listed(&["--local"], "url")?;
     let mut file_transport = false;
-    for url in &urls {
+    for (name, url) in &urls {
         let source = GitSource {
             url: normalize_url(url),
             commit: "0".repeat(40),
             subdirectory: None,
         };
         validate_source(&source)
-            .map_err(|e| err(format!("submodule of {}: {e}", dir.display())))?;
+            .map_err(|e| err(format!("submodule {name:?} of {}: {e}", dir.display())))?;
         if let Some(exception) = transport_exception(&source) {
             crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
             file_transport |= source.url.starts_with("file://");
@@ -941,17 +958,10 @@ fn update_submodules(
         update.splice(0..0, ["-c", "protocol.file.allow=always"]);
     }
     git_ok_with_activity(&update, Some(dir), "git submodule update", activity)?;
-    let paths = listed(&[
-        "config",
-        "-f",
-        ".gitmodules",
-        "--get-regexp",
-        r"^submodule\..*\.path$",
-    ])?;
-    for path in paths {
-        if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+    for (name, path) in listed(&["--file", ".gitmodules"], "path")? {
+        if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
             return Err(err(format!(
-                "git submodule path {path:?} in {} escapes the checkout",
+                "git submodule {name:?} path {path:?} in {} escapes the checkout",
                 dir.display()
             )));
         }
@@ -1187,6 +1197,16 @@ mod realization_tests {
     /// `submodule` names a URL and a commit, a submodule `sub` at it.
     /// Returns the commit.
     fn repo_with_submodule(root: &Path, name: &str, submodule: Option<(&str, &str)>) -> String {
+        repo_with_named_submodule(root, name, "sub", submodule)
+    }
+
+    /// [`repo_with_submodule`], its submodule (at `sub`) named `sub_name`.
+    fn repo_with_named_submodule(
+        root: &Path,
+        name: &str,
+        sub_name: &str,
+        submodule: Option<(&str, &str)>,
+    ) -> String {
         let repo = root.join(name);
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| git_ok(args, Some(&repo), "fixture git").unwrap();
@@ -1197,7 +1217,7 @@ mod realization_tests {
         if let Some((url, _)) = submodule {
             std::fs::write(
                 repo.join(".gitmodules"),
-                format!("[submodule \"sub\"]\n\tpath = sub\n\turl = {url}\n"),
+                format!("[submodule \"{sub_name}\"]\n\tpath = sub\n\turl = {url}\n"),
             )
             .unwrap();
         }
@@ -1281,6 +1301,33 @@ mod realization_tests {
             &GitSource {
                 url: format!("file://{}", real.join("over-ssh").display()),
                 commit: over_ssh,
+                subdirectory: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        attribution.discard();
+        assert!(
+            error.contains(&format!("policy denies {HOST_GIT_TRANSPORT}: {ssh}")),
+            "{error}"
+        );
+
+        // A name holding a space and a URL: git prints
+        // `submodule.x https://innocent.url ssh://...`, and splitting that
+        // at its first space would check an https URL instead.
+        let crafted = repo_with_named_submodule(
+            &real,
+            "crafted-name",
+            "x https://innocent",
+            Some((ssh, &leaf)),
+        );
+        let attribution = Attribution::open("test").unwrap();
+        let error = ensure_git_source(
+            &store,
+            activity,
+            &GitSource {
+                url: format!("file://{}", real.join("crafted-name").display()),
+                commit: crafted,
                 subdirectory: None,
             },
         )

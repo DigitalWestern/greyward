@@ -1097,6 +1097,18 @@ fn two_fresh_stores_realize_the_same_runtimes_from_a_retired_release() {
     let ecosystems = ["python", "node"];
     let mut lock =
         String::from_utf8(build_lock(fixture.dir(), &ecosystems).canonical_bytes()).unwrap();
+    // A frozen sync only reads requirements.lock.txt, so the project
+    // commits one: compiled by an ordinary sync, in a store of its own,
+    // while the release was still in the catalog.
+    std::fs::write(fixture.dir().join(LOCK_PATH), &lock).unwrap();
+    let prepared = ward_at(
+        fixture.dir(),
+        &fixture.home.0,
+        &fixture.home.0.join("store-prep"),
+        &["sync"],
+    );
+    assert!(prepared.status.success(), "{}", text(&prepared.stderr));
+    assert!(fixture.dir().join("requirements.lock.txt").is_file());
     let mut retired = Vec::new();
     for ecosystem in ecosystems {
         let release = ToolchainLock::parse(lock.as_bytes())

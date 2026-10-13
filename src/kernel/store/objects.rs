@@ -387,14 +387,14 @@ impl Store {
         let id = identity.object_id();
         let dest = self.object_path(&id);
         if self.has_with_activity(activity, &id)? {
-            return self.cache_hit(&id, &dest, staged, exceptions, deps);
+            return self.cache_hit(&id, &dest, staged, exceptions, deps, false);
         }
         publication_failpoint("after-lookup")?;
         // The record is built, and its size checked, before anything is
         // published: one over the cap is refused while the object is still
         // only staged, never left visible without a record.
         let meta = serde_json::json!({
-            "schema": "object-meta/2",
+            "schema": crate::kernel::objmeta::META_SCHEMA,
             "id": id,
             "identity": identity,
             "created": unix_secs(),
@@ -440,7 +440,7 @@ impl Store {
         // mistakes the rename->chmod->meta window for a crashed object.
         let _lock = self.publish_lock()?;
         if self.is_complete(&id) == Some(true) {
-            return self.cache_hit(&id, &dest, staged, exceptions, deps);
+            return self.cache_hit(&id, &dest, staged, exceptions, deps, true);
         }
         let meta_name = format!("{id}.json");
         let metadata = unlink_old_record(self, &meta_name)?;
@@ -492,10 +492,19 @@ impl Store {
         staged: &Path,
         candidate: &[Exception],
         deps: &ObjectDeps,
+        // Whether the caller already holds `publish_lock`: the lock is a
+        // `flock` on a fresh descriptor, so taking it twice deadlocks.
+        locked: bool,
     ) -> io::Result<(PathBuf, Vec<Exception>)> {
         validate_cached_dependency_evidence(self, id, deps)?;
-        let winner = self.exceptions(id)?;
-        let result = crate::kernel::policy::check_exception_set(id, &winner).and_then(|_| {
+        let stored = crate::kernel::objmeta::read_store_record(self, id)?;
+        let winner = if stored.exceptions_complete {
+            Ok(stored.exceptions)
+        } else {
+            self.complete_exceptions(id, candidate, locked)
+        };
+        let result = winner.and_then(|winner| {
+            crate::kernel::policy::check_exception_set(id, &winner)?;
             if winner != candidate {
                 return Err(io::Error::other(format!(
                     "object {id} was published concurrently with different exceptions; winner: {winner:?}; staged: {candidate:?}; re-run 'ward'"
@@ -508,6 +517,45 @@ impl Store {
         }
         let _ = remove_tree(staged);
         result
+    }
+
+    /// Upgrade `id`'s `object-meta/2` record to `/3` with `candidate`, the
+    /// whole exception set the build that just realized the object again
+    /// recorded. The object's bytes are the same (its id is its inputs);
+    /// only the record learns what `/2` never stored. Everything else in the
+    /// record is kept. Returns the exceptions the record now holds, which
+    /// are another process's if it upgraded the record first.
+    fn complete_exceptions(
+        &self,
+        id: &str,
+        candidate: &[Exception],
+        locked: bool,
+    ) -> io::Result<Vec<Exception>> {
+        let _lock = if locked {
+            None
+        } else {
+            Some(self.publish_lock()?)
+        };
+        let (stored, mut body) = crate::kernel::objmeta::read_store_record_and_body(self, id)?;
+        if stored.exceptions_complete {
+            return Ok(stored.exceptions);
+        }
+        body["schema"] = serde_json::json!(crate::kernel::objmeta::META_SCHEMA);
+        body["exceptions"] = serde_json::to_value(candidate)?;
+        let bytes = serde_json::to_vec_pretty(&body)?;
+        if bytes.len() as u64 > META_CAP {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "object {id} metadata would be {} bytes, over the {META_CAP}-byte cap; \
+                     its object-meta/2 record was kept",
+                    bytes.len()
+                ),
+            ));
+        }
+        let metadata = open_real_directory(&self.root.join("meta"), "meta")?;
+        publish_completion(self, &metadata, &format!("{id}.json"), &bytes)?;
+        Ok(candidate.to_vec())
     }
 
     /// The exceptions `id`'s record carries, from the record objmeta's
@@ -1127,8 +1175,8 @@ mod record_check_tests {
             ),
             (
                 "schema",
-                |record| record["schema"] = "object-meta/3".into(),
-                "unknown metadata schema object-meta/3",
+                |record| record["schema"] = "object-meta/4".into(),
+                "unknown metadata schema object-meta/4",
             ),
             (
                 "evidence",

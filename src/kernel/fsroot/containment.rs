@@ -100,65 +100,70 @@ impl ProjectRoot {
         Ok(resolved)
     }
 
-    /// Where the planted symlink `link`, anywhere, leads, judged against
-    /// the project input `target` as the held descriptor resolves it now.
-    /// Three steps, in this order:
+    /// Where the planted symlink `link` leads now, judged by one kernel
+    /// resolution from the held descriptor. `text` is what ward planted the
+    /// link with and `target` the project input it names; the caller
+    /// compares a `LinkEnd::Target` identity with the one recorded when the
+    /// link was planted.
     ///
-    /// 1. `target` is opened from the descriptor with `openat2`
-    ///    (`RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`): every symlink on the
-    ///    way is followed as it is now, and one leading out of the project
-    ///    fails the open (`EXDEV`, `ELOOP`).
-    /// 2. `link` is opened through itself, and must reach the same
-    ///    directory, so a directory on the way swapped for a symlink out of
-    ///    the project between the two opens is caught.
-    /// 3. Last, the directory both reached must still be inside the held
-    ///    project, its `..` chain walked up to the root: a directory on the
-    ///    way moved out of the project and replaced with a symlink to its
-    ///    new place keeps the inode the first two steps compared, and is
-    ///    caught here.
+    /// The link lives in the store's forest, outside the project, so it
+    /// cannot itself be opened beneath the held descriptor: its text climbs
+    /// to the project by the project's path and then names `target` inside
+    /// it. Each of those parts is fixed here instead of being opened twice:
     ///
-    /// The link cannot be opened from the descriptor in one `openat2`: it
-    /// lives in the store's forest, outside the project, and its text
-    /// reaches the target by the project's path. A kernel with no
-    /// `openat2` (and macOS) skips step 1 and judges the directory the link
-    /// reaches by step 3 alone.
-    pub(crate) fn link_leads_to(&self, link: &Path, target: &Path) -> io::Result<LinkEnd> {
-        let open_link =
-            || match open_file_at(libc::AT_FDCWD, link.as_os_str().as_bytes(), FOLLOWING, 0) {
-                Ok(file) => Ok(Some(file)),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error),
-            };
-        let beneath = match open_beneath_following(self.dir.as_raw_fd(), target) {
-            Ok(file) => Some(file),
+    /// 1. The link still holds `text`, the text ward planted.
+    /// 2. The project's path still names the held directory
+    ///    ([`ProjectRoot::check_still_named`]), so the climb ends there.
+    /// 3. `target` is opened once from the descriptor with `openat2`
+    ///    (`RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`): the kernel follows
+    ///    every symlink on the way as it is at that instant and refuses,
+    ///    atomically, one that leads out of the project (`EXDEV`, `ELOOP`).
+    ///    The descriptor's device and inode are the answer.
+    ///
+    /// There is no second open and no walk of the directory's ancestry, so
+    /// nothing can be moved between two looks. A kernel with no `openat2`
+    /// (and macOS) opens `target` by the descriptor walk of
+    /// [`ProjectRoot::input_containment`] instead.
+    pub(crate) fn link_leads_to(
+        &self,
+        link: &Path,
+        text: &Path,
+        target: &Path,
+    ) -> io::Result<LinkEnd> {
+        match fs::read_link(link) {
+            Ok(now) if now == text => {}
+            Ok(_) => return Ok(LinkEnd::Elsewhere),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(LinkEnd::Gone),
+            Err(error) => return Err(error),
+        }
+        self.check_still_named()?;
+        let opened = match open_beneath_following(self.dir.as_raw_fd(), target) {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(LinkEnd::Gone),
             Err(error) if matches!(error.raw_os_error(), Some(libc::EXDEV | libc::ELOOP)) => {
                 return Ok(LinkEnd::Elsewhere)
             }
-            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) => None,
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)) => {
+                return self.target_without_openat2(target)
+            }
             Err(error) => return Err(error),
         };
-        #[cfg(test)]
-        tests::between_opens();
-        let Some(through) = open_link()? else {
-            return Ok(LinkEnd::Gone);
-        };
-        let identity = fd_identity(&through)?;
-        if beneath
-            .as_ref()
-            .map(fd_identity)
-            .transpose()?
-            .is_some_and(|beneath| beneath != identity)
-        {
-            return Ok(LinkEnd::Elsewhere);
-        }
-        #[cfg(test)]
-        tests::between_opens();
-        let reached = beneath.as_ref().unwrap_or(&through);
-        Ok(if self.holds_inside(reached)? {
-            LinkEnd::Target(identity)
-        } else {
-            LinkEnd::Elsewhere
+        Ok(LinkEnd::Target(fd_identity(&opened)?))
+    }
+
+    /// `target` opened by the descriptor walk, for a kernel with no
+    /// `openat2`: inside the project once its symlinks are followed, and
+    /// all of it there.
+    fn target_without_openat2(&self, target: &Path) -> io::Result<LinkEnd> {
+        Ok(match self.deepest_existing(target)? {
+            Deepest::Opened(file, rest) if rest.is_empty() => {
+                if self.holds_inside(&file)? {
+                    LinkEnd::Target(fd_identity(&file)?)
+                } else {
+                    LinkEnd::Elsewhere
+                }
+            }
+            Deepest::Opened(..) | Deepest::Root(_) | Deepest::Dangling => LinkEnd::Gone,
         })
     }
 
@@ -256,23 +261,10 @@ fn open_beneath_following(_dirfd: RawFd, _target: &Path) -> io::Result<fs::File>
 mod tests {
     use super::*;
 
-    thread_local! {
-        static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    /// The test hook `link_leads_to` runs between its two opens.
-    pub(super) fn between_opens() {
-        if let Some(hook) = BETWEEN.with(|slot| slot.borrow_mut().take()) {
-            hook();
-        }
-    }
-
-    /// A planted link is judged by the target the held descriptor reaches
-    /// now and by where the link itself leads, and both must agree: a
-    /// directory on the way swapped for a symlink out of the project,
-    /// before the check or between its two opens, is caught, and a target
-    /// that is gone is `None` (#692).
+    /// A planted link is judged by one beneath-open of its target from the
+    /// held descriptor: a directory on the way swapped for a symlink out of
+    /// the project is `Elsewhere`, a link whose text was changed is
+    /// `Elsewhere`, and a target that is gone is `Gone` (#692).
     #[test]
     fn a_link_must_reach_its_target_through_the_held_project() {
         let scratch = crate::kernel::testutil::TempDir::named("link-leads-to");
@@ -280,71 +272,74 @@ mod tests {
         fs::create_dir_all(project.join("src/lib")).unwrap();
         fs::create_dir_all(scratch.0.join("outside/lib")).unwrap();
         let link = scratch.0.join("forest-link");
-        std::os::unix::fs::symlink(project.join("src/lib"), &link).unwrap();
+        let text = project.join("src/lib");
+        std::os::unix::fs::symlink(&text, &link).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         let target = Path::new("src/lib");
-        let planted = match root.link_leads_to(&link, target).unwrap() {
-            LinkEnd::Target(identity) => identity,
-            other => panic!("{other:?}"),
-        };
+        let planted = fd_identity(&fs::File::open(project.join("src/lib")).unwrap()).unwrap();
         assert_eq!(
-            planted,
-            fd_identity(&fs::File::open(project.join("src/lib")).unwrap()).unwrap()
+            root.link_leads_to(&link, &text, target).unwrap(),
+            LinkEnd::Target(planted)
         );
-
-        let swap = {
-            let project = project.clone();
-            let outside = scratch.0.join("outside");
-            move || {
-                fs::rename(project.join("src"), project.join("src.saved")).unwrap();
-                std::os::unix::fs::symlink(&outside, project.join("src")).unwrap();
-            }
-        };
-        BETWEEN.with(|slot| *slot.borrow_mut() = Some(Box::new(swap)));
         assert_eq!(
-            root.link_leads_to(&link, target).unwrap(),
+            root.link_leads_to(&link, Path::new("other"), target)
+                .unwrap(),
             LinkEnd::Elsewhere
         );
-        // Swapped before the check: the open from the descriptor fails.
+        fs::rename(project.join("src"), project.join("src.saved")).unwrap();
+        std::os::unix::fs::symlink(scratch.0.join("outside"), project.join("src")).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, target).unwrap(),
+            root.link_leads_to(&link, &text, target).unwrap(),
             LinkEnd::Elsewhere
         );
-
         fs::remove_file(project.join("src")).unwrap();
-        assert_eq!(root.link_leads_to(&link, target).unwrap(), LinkEnd::Gone);
+        assert_eq!(
+            root.link_leads_to(&link, &text, target).unwrap(),
+            LinkEnd::Gone
+        );
+        fs::remove_file(&link).unwrap();
+        assert_eq!(
+            root.link_leads_to(&link, &text, target).unwrap(),
+            LinkEnd::Gone
+        );
     }
 
-    /// The target's own directory moved out of the project after it was
-    /// opened, with a symlink to its new place left where it was: the link
-    /// still reaches the same inode, and is caught because that directory
-    /// is no longer inside the held project (#692, Sol round 5).
+    /// Sol's move-out, move-back: the target's directory moved out of the
+    /// project with a symlink to its new place left behind, then moved back
+    /// in under another name with a fresh directory recreated outside. The
+    /// planted link reaches the outside directory throughout, and the one
+    /// beneath-open refuses it at every step; the original directory, back
+    /// inside, is never mistaken for the link's end (#692, Sol round 6).
     #[test]
-    fn a_link_whose_target_was_moved_out_of_the_project_is_refused() {
+    fn a_link_whose_target_was_moved_out_and_back_is_refused() {
         let scratch = crate::kernel::testutil::TempDir::named("link-moved-out");
         let project = scratch.0.join("project");
         fs::create_dir_all(project.join("src/lib")).unwrap();
         fs::create_dir_all(scratch.0.join("outside")).unwrap();
         let link = scratch.0.join("forest-link");
-        std::os::unix::fs::symlink(project.join("src/lib"), &link).unwrap();
+        let text = project.join("src/lib");
+        std::os::unix::fs::symlink(&text, &link).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
         let target = Path::new("src/lib");
-        let move_out = {
-            let project = project.clone();
-            let moved = scratch.0.join("outside/src");
-            move || {
-                fs::rename(project.join("src"), &moved).unwrap();
-                std::os::unix::fs::symlink(&moved, project.join("src")).unwrap();
-            }
+        let LinkEnd::Target(planted) = root.link_leads_to(&link, &text, target).unwrap() else {
+            panic!("the planted link does not reach its target");
         };
-        BETWEEN.with(|slot| *slot.borrow_mut() = Some(Box::new(move_out)));
+        let moved = scratch.0.join("outside/src");
+        fs::rename(project.join("src"), &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, project.join("src")).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, target).unwrap(),
+            root.link_leads_to(&link, &text, target).unwrap(),
             LinkEnd::Elsewhere
         );
-        // Moved before a later check: the open from the descriptor refuses.
+        fs::rename(&moved, project.join("kept")).unwrap();
+        fs::create_dir_all(moved.join("lib")).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, target).unwrap(),
+            fd_identity(&fs::File::open(project.join("kept/lib")).unwrap()).unwrap(),
+            planted,
+            "the original directory is back inside"
+        );
+        assert_eq!(
+            root.link_leads_to(&link, &text, target).unwrap(),
             LinkEnd::Elsewhere
         );
     }

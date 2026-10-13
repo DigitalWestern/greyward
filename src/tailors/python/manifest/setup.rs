@@ -151,6 +151,14 @@ pub(super) fn setup_py_is_provably_trivial(text: &str) -> bool {
     !setup_py_has_setup_call(text) && !code.contains('(')
 }
 
+/// Whether `setup.py` may pass its own `install_requires` to `setup()`,
+/// which setuptools prefers over setup.cfg's: the name anywhere in the
+/// file (a keyword, or a dict key in a string), or a `**` splat that could
+/// carry it. Erring toward yes only costs a confined probe.
+pub(super) fn setup_py_may_pass_install_requires(text: &str) -> bool {
+    text.contains("install_requires") || python_code_without_strings(text).contains("**")
+}
+
 pub(super) fn python_call_named(code: &str, name: &str) -> bool {
     code.match_indices(name).any(|(start, _)| {
         let before = code[..start].chars().next_back();

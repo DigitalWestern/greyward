@@ -749,8 +749,8 @@ time in a network-denied sandbox: writes confined to the package directory
 plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python a
 store CPython: the one the project's `greyward-toolchain.toml` names when the
 project also locks Python, the shipped 3.12 otherwise. Its object id is the
-`gyp_python` input of `node-env/5`, so a different interpreter is a different
-environment. Likewise a Python sdist with a Rust extension compiles with the
+`gyp_python` input of `node-env` (since `/5`), so a different interpreter is a
+different environment. Likewise a Python sdist with a Rust extension compiles with the
 project's locked Rust when the lock has a `rust` section, and with the shipped
 Rust its toolchain file resolves to otherwise (the Python section's pinned Rust
 when the file names no channel); `sdist-build/5` commits
@@ -1003,6 +1003,15 @@ extraction). It becomes a recorded dependency only when an install script
 ran with it: the interpreter is realized only then, and a script handed
 `$PYTHON` can leave a symlink or wrapper to it, so the environment it built
 must keep it alive. A pure-JavaScript environment does not retain a CPython.
+
+`node-env/6` has the `/5` inputs and contract. It renames the environments
+built since #695 changed what realization puts in them: every package's bins
+linked in the `node_modules/.bin` that holds it (not only the root's), each
+ancestor `.bin` on a lifecycle script's `PATH`, an empty script skipped, and
+the default node-gyp build run only for a `binding.gyp` file that
+`gypfile: false` does not turn off. A `/5` environment was built by the old
+rules under the same inputs, so its id must not be reused: the bump gives
+every Node environment a new id and the next sync rebuilds it.
 Every other `/4` input is
 unchanged, and the test goldens check that dropping `gyp_python` gives back the
 `/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the

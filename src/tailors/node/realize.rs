@@ -77,7 +77,12 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
 }
 
 /// The schema the producer writes. `node-env/5` is `/4` plus `gyp_python`.
-pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/5";
+/// `node-env/6` has the `/5` inputs and is built by the #695 rules: every
+/// package's bins linked in its own `node_modules/.bin`, each ancestor
+/// `.bin` on a lifecycle script's `PATH`, and only non-empty scripts (and
+/// a `binding.gyp` file not turned off by `gypfile: false`) run. An
+/// environment `/5` built without them gets a new id, so it is rebuilt.
+pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/6";
 
 /// The two spellings of the `node-env/5` native decision. The producer
 /// writes one of them on every commit, so a dropped `native_libs` key is a

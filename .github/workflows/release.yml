@@ -3,7 +3,8 @@
 # `ward update --self` download exactly these asset names, so keep them
 # stable: greyward-<triple>.tar.gz, greyward-<triple>.tar.gz.sha256, and the
 # greyward-<triple>.tar.gz.sig, LATEST and LATEST.sig that
-# tools/release-sign.sh adds (install.sh reads the latest release's LATEST).
+# tools/release-sign.sh adds (LATEST only on the latest release, which
+# install.sh reads).
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #   # then, where the release key lives, once this workflow is done:

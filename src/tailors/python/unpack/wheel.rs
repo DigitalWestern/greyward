@@ -260,7 +260,7 @@ fn write_wheel_entry(
         let mut contents = Vec::new();
         entry.read_to_end(&mut contents)?;
         if contents.starts_with(b"#!python") {
-            contents = rewrite_shebang(&contents, python_exe);
+            contents = rewrite_shebang(&contents, python_exe)?;
         }
         fs::write(destination, contents)?;
     } else {
@@ -286,7 +286,7 @@ fn install_launchers(
     installed: &mut BTreeMap<PathBuf, String>,
 ) -> io::Result<()> {
     for (name, module, attr) in parse_entry_points(entry_points)? {
-        let launcher = launcher_source(python_exe, &module, &attr);
+        let launcher = launcher_source(python_exe, &module, &attr)?;
         let destination = bin_dir.join(name);
         if destination.symlink_metadata().is_ok() {
             resolve_script_collision(
@@ -306,23 +306,91 @@ fn install_launchers(
 }
 
 /// The launcher script pip would have written for one entry point.
-fn launcher_source(python_exe: &Path, module: &str, attr: &str) -> String {
+fn launcher_source(python_exe: &Path, module: &str, attr: &str) -> io::Result<Vec<u8>> {
     let attr0 = attr.split('.').next().unwrap();
-    format!(
-        concat!(
-            "#!{}\n",
-            "# -*- coding: utf-8 -*-\n",
-            "import re, sys\n",
-            "from {module} import {attr0}\n",
-            "if __name__ == \"__main__\":\n",
-            "    sys.argv[0] = re.sub(r\"(-script\\.pyw?|\\.exe)?$\", \"\", sys.argv[0])\n",
-            "    sys.exit({attr}())\n",
-        ),
-        python_exe.display(),
-        module = module,
-        attr0 = attr0,
-        attr = attr
-    )
+    let mut source = shebang(python_exe)?;
+    source.extend_from_slice(
+        format!(
+            concat!(
+                "# -*- coding: utf-8 -*-\n",
+                "import re, sys\n",
+                "from {module} import {attr0}\n",
+                "if __name__ == \"__main__\":\n",
+                "    sys.argv[0] = re.sub(r\"(-script\\.pyw?|\\.exe)?$\", \"\", sys.argv[0])\n",
+                "    sys.exit({attr}())\n",
+            ),
+            module = module,
+            attr0 = attr0,
+            attr = attr
+        )
+        .as_bytes(),
+    );
+    Ok(source)
+}
+
+/// The longest `#!` line Linux reads whole: `BINPRM_BUF_SIZE`, 256 bytes
+/// since Linux 5.1, the `#!` and the newline included. A longer line is
+/// cut or refused by the kernel.
+const MAX_SHEBANG_LINE: usize = 256;
+
+/// The opening of a script `python_exe` runs, newline included.
+///
+/// Normally `#!<python>`. Linux ends the interpreter at the first space or
+/// tab and reads at most [`MAX_SHEBANG_LINE`] bytes, so a store under
+/// `/srv/ci data/` or a long store root would exec the wrong program or
+/// none (#691). Then this is the `/bin/sh` trampoline pip's distlib
+/// writes: sh runs line two, which execs the interpreter on the script,
+/// and Python reads lines two and three as one string literal and skips
+/// it.
+///
+/// ```text
+/// #!/bin/sh
+/// '''exec' "/srv/ci data/store/.../bin/python" "$0" "$@"
+/// ' '''
+/// ```
+///
+/// The path is in sh double quotes, so `$`, `` ` ``, `"` and `\` are each
+/// written as a single-quoted sh word (`"'$'"`), and a `'` as `'""`, which
+/// sh reads as itself and which never lets three `'` meet and end Python's
+/// string early. No backslash reaches Python except as `\'`, so the
+/// literal compiles without an invalid-escape warning.
+fn shebang(python_exe: &Path) -> io::Result<Vec<u8>> {
+    if !needs_trampoline(python_exe) {
+        let mut line = b"#!".to_vec();
+        line.extend_from_slice(python_exe.as_os_str().as_encoded_bytes());
+        line.push(b'\n');
+        return Ok(line);
+    }
+    // Python reads the trampoline as source, which must be UTF-8.
+    let text = python_exe.to_str().ok_or_else(|| {
+        invalid_data(format!(
+            "interpreter path {} needs a /bin/sh launcher and is not UTF-8",
+            python_exe.display()
+        ))
+    })?;
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        match c {
+            '$' | '`' | '"' | '\\' => {
+                quoted.push_str("\"'");
+                quoted.push(c);
+                quoted.push_str("'\"");
+            }
+            '\'' => quoted.push_str("'\"\""),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    Ok(format!("#!/bin/sh\n'''exec' {quoted} \"$0\" \"$@\"\n' '''\n").into_bytes())
+}
+
+/// Whether `#!<python_exe>` would not exec `python_exe`: a space, tab or
+/// newline in the path, or a line past [`MAX_SHEBANG_LINE`].
+fn needs_trampoline(python_exe: &Path) -> bool {
+    let bytes = python_exe.as_os_str().as_encoded_bytes();
+    bytes.iter().any(|b| matches!(b, b' ' | b'\t' | b'\n'))
+        || "#!".len() + bytes.len() + "\n".len() > MAX_SHEBANG_LINE
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -407,11 +475,20 @@ fn safe_destination(
     Ok(destination)
 }
 
-fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> Vec<u8> {
+/// Point a `#!python` script at `python_exe`: its first line becomes
+/// [`shebang`]'s, keeping a CRLF or a missing final newline as written when
+/// the line is a plain `#!`.
+fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> io::Result<Vec<u8>> {
     let newline = contents.iter().position(|byte| *byte == b'\n');
     let line_end = newline.map(|index| index + 1).unwrap_or(contents.len());
+    if needs_trampoline(python_exe) {
+        let mut rewritten = shebang(python_exe)?;
+        rewritten.extend_from_slice(&contents[line_end..]);
+        return Ok(rewritten);
+    }
     let has_crlf = line_end > 1 && contents[line_end - 2] == b'\r';
-    let mut rewritten = format!("#!{}", python_exe.display()).into_bytes();
+    let mut rewritten = b"#!".to_vec();
+    rewritten.extend_from_slice(python_exe.as_os_str().as_encoded_bytes());
     if newline.is_some() {
         if has_crlf {
             rewritten.extend_from_slice(b"\r\n");
@@ -420,7 +497,7 @@ fn rewrite_shebang(contents: &[u8], python_exe: &Path) -> Vec<u8> {
         }
     }
     rewritten.extend_from_slice(&contents[line_end..]);
-    rewritten
+    Ok(rewritten)
 }
 
 fn parse_entry_points(text: &str) -> io::Result<Vec<(String, String, String)>> {
@@ -1375,5 +1452,123 @@ bad/name = x:y\n";
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod shebang_tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    /// A stand-in interpreter at `path`: it prints each argument it was
+    /// given on its own line.
+    fn fake_python(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Install a wheel with one console script and one `#!python` script
+    /// against `python`, and return the environment's `bin`.
+    fn install_against(temp: &TempDir, python: &Path) -> PathBuf {
+        let site = temp.0.join("env/lib/python3.12/site-packages");
+        let bin = temp.0.join("env/bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
+        let mut writer = ZipWriter::new(fs::File::create(&wheel).unwrap());
+        for (name, bytes) in [
+            (
+                "demo-1.0.dist-info/entry_points.txt",
+                &b"[console_scripts]\ntool = demo:main\n"[..],
+            ),
+            ("demo-1.0.data/scripts/raw", b"#!python\r\nprint('raw')\n"),
+        ] {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        install_wheel(&wheel, &site, &bin, "3.12", python, &mut BTreeMap::new()).unwrap();
+        bin
+    }
+
+    /// What `script` hands its interpreter when run with `args`.
+    fn run(script: &Path, args: &[&str]) -> Vec<String> {
+        let output = Command::new(script).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_short_plain_path_keeps_the_plain_shebang() {
+        let python = Path::new("/store/objects/abc/bin/python");
+        assert_eq!(
+            shebang(python).unwrap(),
+            b"#!/store/objects/abc/bin/python\n"
+        );
+        assert_eq!(
+            rewrite_shebang(b"#!python\r\nx\n", python).unwrap(),
+            b"#!/store/objects/abc/bin/python\r\nx\n"
+        );
+        let longest = format!("/{}", "a".repeat(MAX_SHEBANG_LINE - 4));
+        assert!(!needs_trampoline(Path::new(&longest)));
+        assert!(needs_trampoline(Path::new(&format!("{longest}a"))));
+    }
+
+    /// A store path with a space, shell metacharacters and quotes, and one
+    /// past Linux's 256-byte shebang limit: every launcher still execs the
+    /// interpreter with the script and its arguments (#691).
+    #[test]
+    fn launchers_exec_the_interpreter_from_a_path_a_shebang_cannot_hold() {
+        let temp = TempDir::named("wheel-shebang");
+        let spaced = temp
+            .0
+            .join("ci data/$HOME `x` \"q\" back\\slash it's '''/bin/python");
+        let long = temp.0.join(format!("{}/bin/python", "d".repeat(240)));
+        for python in [spaced, long] {
+            assert!(needs_trampoline(&python));
+            fake_python(&python);
+            let bin = install_against(&temp, &python);
+            for script in ["tool", "raw"] {
+                let path = bin.join(script);
+                assert_eq!(
+                    run(&path, &["one arg", "$two"]),
+                    [path.display().to_string(), "one arg".into(), "$two".into()],
+                    "{script} via {}",
+                    python.display()
+                );
+            }
+            // Python reads the trampoline as a string literal, without a
+            // warning, and goes on to the script's own code.
+            if Path::new("/usr/bin/python3").is_file() {
+                for script in ["tool", "raw"] {
+                    let output = Command::new("/usr/bin/python3")
+                        .args(["-W", "error", "-c"])
+                        .arg(
+                            "import sys; compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')",
+                        )
+                        .arg(bin.join(script))
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success(), "{script}: {output:?}");
+                }
+            }
+            fs::remove_dir_all(temp.0.join("env")).unwrap();
+        }
     }
 }

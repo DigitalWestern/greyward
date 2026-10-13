@@ -105,7 +105,7 @@ fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
 /// `package.json` (each glob expanded, and its literal path too),
 /// `pnpm-workspace.yaml`'s `packages`, the `importers` of
 /// `pnpm-lock.yaml`, and the `workspaces` the root entry of
-/// `package-lock.json` records. The union: receipt coverage is never
+/// `package-lock.json` or `npm-shrinkwrap.json` records. The union: receipt coverage is never
 /// smaller than the tool's own member set, and an extra manifest is only
 /// an extra output. A member named by a path that is not plain and
 /// relative, or a members list ward cannot read, is an error: a member
@@ -165,12 +165,12 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
             add(&importer, "pnpm-lock.yaml")?;
         }
     }
-    if let Some(text) = root.read_input_string(Path::new("package-lock.json"))? {
+    for lock_name in ["npm-shrinkwrap.json", "package-lock.json"] {
+        let Some(text) = root.read_input_string(Path::new(lock_name))? else {
+            continue;
+        };
         let lock: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("package-lock.json: {error}"),
-            )
+            io::Error::new(io::ErrorKind::InvalidData, format!("{lock_name}: {error}"))
         })?;
         let listed = lock["packages"][""]["workspaces"]
             .as_array()
@@ -179,7 +179,7 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
             .filter_map(|entry| entry.as_str());
         for entry in listed {
             for dir in expand_workspace_glob(root, entry)? {
-                add(&dir, "package-lock.json")?;
+                add(&dir, lock_name)?;
             }
         }
     }
@@ -224,7 +224,14 @@ pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
     if entries.is_empty() || !root_dir.join(member).join("package.json").is_file() {
         return false;
     }
-    let relative = member.to_string_lossy().replace('\\', "/");
+    entries_name(&entries, &member.to_string_lossy().replace('\\', "/"))
+}
+
+/// Whether the `workspaces` entries `entries` (in order, `!` patterns
+/// included) name the directory `relative`: the last entry that matches it
+/// decides, a positive one naming it and a `!` one taking it out again, as
+/// `@npmcli/map-workspaces` applies them.
+fn entries_name(entries: &[String], relative: &str) -> bool {
     let relative = relative.trim_end_matches('/');
     let options = glob::MatchOptions {
         case_sensitive: true,
@@ -242,7 +249,7 @@ pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
                 .unwrap_or(false)
     };
     let mut named = false;
-    for entry in &entries {
+    for entry in entries {
         match entry.strip_prefix('!') {
             Some(excluded) => {
                 if matches(excluded) {
@@ -257,6 +264,51 @@ pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
         }
     }
     named
+}
+
+/// npm's own workspace member set for the project at `root`: every
+/// directory the root `package.json`'s `workspaces` entries name (each
+/// glob expanded, less what a later `!` pattern takes out) that has a
+/// `package.json`, relative to the root and sorted. This is the set `npm
+/// ci` builds its ideal tree from, so a member here that the lock does not
+/// list was added after the lock was written. [`workspace_members`] is the
+/// wider union a resolution record covers; this is the narrower set the
+/// lock must match. A member that is not a plain path inside the project
+/// is an error.
+pub(crate) fn npm_manifest_members(root: &ProjectRoot) -> io::Result<Vec<String>> {
+    let Some(text) = root.read_input_string(Path::new("package.json"))? else {
+        return Ok(Vec::new());
+    };
+    let package: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("package.json: {error}"))
+    })?;
+    let entries = npm_workspace_entries(&package)?;
+    let mut members: Vec<String> = Vec::new();
+    for pattern in entries.iter().filter(|entry| !entry.starts_with('!')) {
+        for dir in expand_workspace_glob(root, pattern)? {
+            if dir.is_empty() || dir == "." || members.contains(&dir) {
+                continue;
+            }
+            let path = PathBuf::from(&dir);
+            let plain = path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)));
+            if !plain {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "package.json names the workspace member {pattern:?}, which is not a \
+                         plain path inside the project"
+                    ),
+                ));
+            }
+            if root.is_input_file(&path.join("package.json")) && entries_name(&entries, &dir) {
+                members.push(dir);
+            }
+        }
+    }
+    members.sort();
+    Ok(members)
 }
 
 /// Every `workspaces` entry of a `package.json` as written, `!` patterns

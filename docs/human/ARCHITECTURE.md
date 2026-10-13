@@ -200,13 +200,16 @@ Rust `/4` records remain readable). Environments are immutable: no activate scri
 cannot mutate them.
 
 **npm** (`tailors/node/`: `plan.rs`, `realize.rs`, `project.rs`, `lock_import/`). `package-lock.json` is parsed
-locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
+locally (an `npm-shrinkwrap.json`, the same format, is read first when both exist, as npm reads
+it); a pnpm v9/v6 or Yarn classic lockfile is imported by
 `lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
 `npm install --package-lock-only`. Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
-dependency maps (the root's and each workspace member's), pnpm's importer
+dependency maps (the root's and each workspace member's, `peerDependencies` included), the
+root's `workspaces` as npm copies it into the lock, and every member npm's own `workspaces`
+expansion finds (less `!` patterns), pnpm's importer
 specifiers, and Yarn classic's `name@spec` selectors (with no entry left
 that nothing depends on; a `link:` dependency, which Yarn classic never
 locks, is linked to its directory inside the project). A pnpm `file:`

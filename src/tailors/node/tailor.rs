@@ -28,6 +28,7 @@ use std::process::Command;
 
 const NODE_INPUTS: &[&str] = &[
     "package.json",
+    "npm-shrinkwrap.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
@@ -184,7 +185,7 @@ impl Tailor for Node {
     }
 
     fn input_files(&self) -> &'static str {
-        "package.json, package-lock.json, pnpm-lock.yaml, yarn.lock"
+        "package.json, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock"
     }
 
     fn source_files(&self) -> &'static [SourceFile] {

@@ -405,6 +405,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   every workspace member's `package.json`, so a members list Greyward cannot read would leave a
   member uncovered. The refusal comes in preflight, before anything is realized; write
   `packages` as a plain list of patterns.
+- **An npm lock's `overrides` are not checked against package.json.** Before planning,
+  Greyward refuses a `package-lock.json` or `npm-shrinkwrap.json` whose dependency maps or root
+  `workspaces` disagree with the package.json files, or that misses a workspace member the root
+  `workspaces` patterns find. npm keeps no copy of `overrides` in the lock, so a changed
+  override is not seen until the lock is regenerated, as with `npm ci`.
 - **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
   planning, Greyward refuses a `pnpm-lock.yaml` that is missing a workspace member
   `pnpm-workspace.yaml` names, or whose importers disagree with a package.json, applying the

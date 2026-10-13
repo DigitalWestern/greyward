@@ -31,6 +31,7 @@ pub(crate) mod resolve;
 pub mod run_refusal;
 pub mod tailor;
 
+mod archives;
 mod bins;
 mod classify;
 mod plan;

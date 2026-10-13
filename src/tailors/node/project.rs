@@ -783,40 +783,6 @@ fn remove_sync_duplicate_links(project: &ProjectRoot, store: &Store, home: &Path
     }
 }
 
-/// The integrity candidate of `integrity` the environment holds bytes for,
-/// `None` for a git package, an empty integrity, or one no cache entry
-/// matched.
-fn matched_digest<'a>(
-    integrity: &str,
-    cache: &'a std::collections::BTreeSet<crate::kernel::digest::Digest>,
-) -> Option<&'a crate::kernel::digest::Digest> {
-    if integrity.is_empty() || integrity.starts_with("git:") {
-        return None;
-    }
-    let candidates = crate::kernel::digest::sri_candidates(integrity).ok()?;
-    candidates.iter().find_map(|candidate| cache.get(candidate))
-}
-
-/// Give each package row of `body` the digest its bytes matched. The
-/// integrity may list several digests of one algorithm, and the bytes
-/// matched one: the one `env_obj`'s record names as a cache entry, which
-/// it does on a warm sync as on the cold one. The SBOM exports that one.
-fn record_matched_digests(
-    body: &mut serde_json::Value,
-    store: &Store,
-    env_obj: &Path,
-) -> io::Result<()> {
-    let env_id = crate::kernel::store::object_id_from_path(env_obj)?;
-    let cache = crate::kernel::objmeta::read_store_record(store, &env_id)?.cache;
-    for row in body["packages"].as_array_mut().into_iter().flatten() {
-        let integrity = row["integrity"].as_str().unwrap_or_default();
-        if let Some(digest) = matched_digest(integrity, &cache) {
-            row["matched_digest"] = serde_json::json!({"algo": digest.algo(), "hex": digest.hex()});
-        }
-    }
-    Ok(())
-}
-
 /// The closure record `ward status` and `ward gc` read.
 #[allow(clippy::too_many_arguments)]
 fn node_closure_body(
@@ -1040,7 +1006,7 @@ pub fn project_node_env_recorded(
         inputs,
         basis,
     );
-    record_matched_digests(&mut body, &store, &env_obj)?;
+    super::archives::record_matched_digests(&mut body, &env_obj)?;
     record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {
         crate::comforter::merge_record(&mut body, record);
@@ -1124,23 +1090,6 @@ pub(super) fn dir_size(path: &Path) -> io::Result<u64> {
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
-
-    /// A closure row names the one integrity candidate the environment's
-    /// record holds as a cache entry: the digest the bytes matched.
-    #[test]
-    fn a_row_names_the_digest_its_bytes_matched() {
-        let first = "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==";
-        let second = "sha512-AAAAktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==";
-        let integrity = format!("{first} {second}");
-        let matched = crate::kernel::digest::Digest::from_sri(second).unwrap();
-        let unrelated =
-            crate::kernel::digest::Digest::from_parts("sha256", &"a".repeat(64)).unwrap();
-        let cache: std::collections::BTreeSet<_> = [matched.clone(), unrelated].into();
-        assert_eq!(matched_digest(&integrity, &cache), Some(&matched));
-        assert_eq!(matched_digest(first, &cache), None);
-        assert_eq!(matched_digest("", &cache), None);
-        assert_eq!(matched_digest("git:0123", &cache), None);
-    }
 
     /// A link nested under a registry package would be created through the
     /// forest's symlink into that package's store object. Projection refuses

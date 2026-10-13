@@ -385,7 +385,8 @@ pub(super) fn resolve_native_libs_id<'a>(
 }
 
 /// The byte sources for a cold realization: one held cache lease per distinct
-/// registry tarball, plus the realized object for every git dependency.
+/// registry tarball, plus the realized object for every git dependency, and
+/// for each registry package the integrity candidate its bytes matched.
 ///
 /// Peer snapshots are separate graph nodes that normally share one registry
 /// tarball, so the byte fetch is deduplicated while extraction and placement
@@ -401,11 +402,13 @@ fn fetch_plan_sources(
     Vec<(crate::kernel::fetch::CacheLease, Digest)>,
     Vec<(NpmPackage, PathBuf)>,
     Vec<(NpmPackage, PathBuf)>,
+    BTreeMap<String, Digest>,
 )> {
     let mut leases: Vec<(crate::kernel::fetch::CacheLease, Digest)> = Vec::new();
     let mut tarballs: Vec<(NpmPackage, PathBuf)> = Vec::new();
     let mut git_objects: Vec<(NpmPackage, PathBuf)> = Vec::new();
-    let mut downloaded = BTreeMap::<(String, String), PathBuf>::new();
+    let mut downloaded = BTreeMap::<(String, String), (PathBuf, Digest)>::new();
+    let mut matched = BTreeMap::<String, Digest>::new();
     for p in &plan.packages {
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
@@ -426,18 +429,21 @@ fn fetch_plan_sources(
             continue;
         }
         let cache_key = (p.url.clone(), p.integrity.clone());
-        let t = if let Some(t) = downloaded.get(&cache_key) {
-            t.clone()
+        // `fetch_tarball` verified these bytes against `p`'s integrity and
+        // says which candidate they matched: that is `p`'s archive.
+        let (t, digest) = if let Some(fetched) = downloaded.get(&cache_key) {
+            fetched.clone()
         } else {
             let (lease, digest) = fetch_tarball(store, activity, p)?;
             let path = lease.to_path_buf();
-            leases.push((lease, digest));
-            downloaded.insert(cache_key, path.clone());
-            path
+            leases.push((lease, digest.clone()));
+            downloaded.insert(cache_key, (path.clone(), digest.clone()));
+            (path, digest)
         };
+        matched.insert(p.path.clone(), digest);
         tarballs.push((p.clone(), t));
     }
-    Ok((leases, tarballs, git_objects))
+    Ok((leases, tarballs, git_objects, matched))
 }
 
 /// The staged env skeleton: the root node_modules plus one per workspace.
@@ -888,7 +894,8 @@ pub(super) fn realize_node_env_with_node_object(
     // cached bytes mid-extraction; `leases` is held to the end of this
     // function for exactly that reason.
     drop(classification_tarballs);
-    let (leases, mut tarballs, mut git_objects) = fetch_plan_sources(store, activity, plan)?;
+    let (leases, mut tarballs, mut git_objects, matched) =
+        fetch_plan_sources(store, activity, plan)?;
     confirm_classified_sources(&classified_from, &tarballs)?;
 
     let native_libs = if native_libs_id.is_some() {
@@ -930,6 +937,9 @@ pub(super) fn realize_node_env_with_node_object(
         &identity,
         &mut deps,
     )?;
+    // Written after the scripts ran, which cannot write outside their own
+    // package directory in any case.
+    super::archives::write_matched_archives(&staged, &matched)?;
 
     let object = commit_env_object(
         store,

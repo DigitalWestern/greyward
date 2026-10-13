@@ -29,6 +29,22 @@ pub(crate) enum LinkEnd {
     Gone,
 }
 
+/// A workspace member's `package.json` as ward reads it itself
+/// ([`ProjectRoot::read_member_manifest`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberManifest {
+    /// The file's bytes, read beneath the member's own directory.
+    Read(Vec<u8>),
+    /// No such directory or file.
+    Missing,
+    /// The directory leads out of the project, the file out of the
+    /// member's directory, or it is not a regular file.
+    Refused,
+}
+
+/// The most of a member's `package.json` ward reads.
+const MANIFEST_LIMIT: u64 = 16 << 20;
+
 /// How a name is opened to judge where it leads: symlinks followed, no
 /// read access needed.
 #[cfg(target_os = "linux")]
@@ -167,6 +183,62 @@ impl ProjectRoot {
         })
     }
 
+    /// The `package.json` of the workspace member `dir`, read by ward
+    /// itself and never taken from a tool's answer: the member directory is
+    /// opened from the held descriptor with `openat2` (`RESOLVE_BENEATH |
+    /// RESOLVE_NO_MAGICLINKS`), so a symlink on the way out of the project
+    /// refuses it, and the manifest is opened beneath that directory the
+    /// same way, so a manifest that is a symlink out of the member is
+    /// refused too. Without `openat2` (and on macOS), the descriptor walk
+    /// of [`ProjectRoot::input_containment`] judges both.
+    pub(crate) fn read_member_manifest(&self, dir: &Path) -> io::Result<MemberManifest> {
+        let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+        let member = match open_beneath(self.dir.as_raw_fd(), dir, flags) {
+            Ok(member) => member,
+            Err(error) => match beneath_refusal(&error) {
+                Some(Beneath::Unsupported) => return self.member_manifest_by_walk(dir),
+                Some(Beneath::Missing) => return Ok(MemberManifest::Missing),
+                Some(Beneath::Refused) => return Ok(MemberManifest::Refused),
+                None => return Err(error),
+            },
+        };
+        let flags = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        let manifest = match open_beneath(member.as_raw_fd(), Path::new("package.json"), flags) {
+            Ok(manifest) => manifest,
+            Err(error) => match beneath_refusal(&error) {
+                Some(Beneath::Missing) => return Ok(MemberManifest::Missing),
+                Some(_) => return Ok(MemberManifest::Refused),
+                None => return Err(error),
+            },
+        };
+        read_manifest(manifest)
+    }
+
+    fn member_manifest_by_walk(&self, dir: &Path) -> io::Result<MemberManifest> {
+        let manifest = dir.join("package.json");
+        for path in [dir, manifest.as_path()] {
+            match self.deepest_existing(path)? {
+                Deepest::Opened(file, rest) if rest.is_empty() => {
+                    if !self.holds_inside(&file)? {
+                        return Ok(MemberManifest::Refused);
+                    }
+                }
+                _ => return Ok(MemberManifest::Missing),
+            }
+        }
+        if !self
+            .contained_input_path(&manifest)?
+            .starts_with(self.contained_input_path(dir)?)
+        {
+            return Ok(MemberManifest::Refused);
+        }
+        Ok(match self.read_input(&manifest)? {
+            Some(bytes) if bytes.len() as u64 <= MANIFEST_LIMIT => MemberManifest::Read(bytes),
+            Some(_) => MemberManifest::Refused,
+            None => MemberManifest::Missing,
+        })
+    }
+
     fn holds_inside(&self, file: &fs::File) -> io::Result<bool> {
         let root = fd_stat(self.dir.as_raw_fd())?;
         Ok(same_inode(&fd_stat(file.as_raw_fd())?, &root) || self.contains_open_file(file)?)
@@ -223,16 +295,52 @@ impl ProjectRoot {
     }
 }
 
+/// What a failed beneath-open means.
+enum Beneath {
+    Missing,
+    Refused,
+    Unsupported,
+}
+
+fn beneath_refusal(error: &io::Error) -> Option<Beneath> {
+    match error.raw_os_error()? {
+        libc::ENOENT | libc::ENOTDIR => Some(Beneath::Missing),
+        libc::EXDEV | libc::ELOOP | libc::EISDIR => Some(Beneath::Refused),
+        libc::ENOSYS | libc::EPERM => Some(Beneath::Unsupported),
+        _ => None,
+    }
+}
+
+/// A manifest's bytes, refused unless it is a regular file within the size
+/// ward reads.
+fn read_manifest(file: fs::File) -> io::Result<MemberManifest> {
+    let stat = fd_stat(file.as_raw_fd())?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(MemberManifest::Refused);
+    }
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(&file, MANIFEST_LIMIT + 1), &mut bytes)?;
+    if bytes.len() as u64 > MANIFEST_LIMIT {
+        return Ok(MemberManifest::Refused);
+    }
+    Ok(MemberManifest::Read(bytes))
+}
+
 /// `target` below `dirfd`, every symlink followed but none out of `dirfd`
 /// and no magic link (`openat2` with `RESOLVE_BENEATH |
 /// RESOLVE_NO_MAGICLINKS`).
-#[cfg(target_os = "linux")]
 fn open_beneath_following(dirfd: RawFd, target: &Path) -> io::Result<fs::File> {
+    open_beneath(dirfd, target, libc::O_PATH | libc::O_CLOEXEC)
+}
+
+/// [`open_beneath_following`] with the open's own `flags`.
+#[cfg(target_os = "linux")]
+fn open_beneath(dirfd: RawFd, target: &Path, flags: libc::c_int) -> io::Result<fs::File> {
     let path = CString::new(target.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
     // SAFETY: open_how is plain data; zeroed is its documented default.
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
+    how.flags = flags as u64;
     how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS;
     // SAFETY: openat2 with a live directory fd, a NUL-terminated path and a
     // correctly sized open_how; a returned fd is owned by the File.
@@ -253,7 +361,7 @@ fn open_beneath_following(dirfd: RawFd, target: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_beneath_following(_dirfd: RawFd, _target: &Path) -> io::Result<fs::File> {
+fn open_beneath(_dirfd: RawFd, _target: &Path, _flags: libc::c_int) -> io::Result<fs::File> {
     Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 

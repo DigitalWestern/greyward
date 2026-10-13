@@ -219,21 +219,19 @@ fn spawn_unmanaged(command: &mut Command) -> io::Result<std::process::Child> {
 }
 
 /// The child's status, unless its stderr shows the sandbox itself failed
-/// to start: that is an error of its own, never the command's exit.
+/// to start, or that the command never started: an error of its own, never
+/// the command's exit.
 fn refuse_setup_failure(
     status: std::process::ExitStatus,
     stderr: &[u8],
     cmd: &[&str],
 ) -> io::Result<std::process::ExitStatus> {
-    if let Some(SandboxFailureKind::Setup) = classify_sandbox_failure(&status, stderr) {
-        return Err(sandbox_failure_error(
-            SandboxFailureKind::Setup,
-            &status,
-            stderr,
-            cmd,
-        ));
+    match classify_sandbox_failure(&status, stderr) {
+        Some(kind @ (SandboxFailureKind::Setup | SandboxFailureKind::TooLong)) => {
+            Err(sandbox_failure_error(kind, &status, stderr, cmd))
+        }
+        _ => Ok(status),
     }
-    Ok(status)
 }
 
 pub struct Sandbox<'a> {
@@ -904,18 +902,24 @@ fn with_userns_restriction_note(message: String, stderr: &str, restricted: bool)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SandboxFailureKind {
     Setup,
+    /// bubblewrap's exec of the command failed with E2BIG.
+    TooLong,
     Command,
 }
 
 /// Classify a non-zero sandbox result without looking at the host platform.
 /// Engine setup diagnostics have distinct prefixes; all other stderr belongs
-/// to the command and must remain an ordinary exit status.
+/// to the command and must remain an ordinary exit status, and one
+/// bubblewrap diagnostic is the build's own (`held::exec_too_long`).
 fn classify_sandbox_failure(
     status: &std::process::ExitStatus,
     stderr: &[u8],
 ) -> Option<SandboxFailureKind> {
     if status.success() {
         return None;
+    }
+    if held::exec_too_long(stderr) {
+        return Some(SandboxFailureKind::TooLong);
     }
     if stderr.starts_with(b"bwrap:") || stderr.starts_with(b"sandbox-exec:") {
         Some(SandboxFailureKind::Setup)
@@ -935,6 +939,7 @@ fn sandbox_failure_error(
             io::ErrorKind::Unsupported,
             explained_bwrap_stderr(&String::from_utf8_lossy(stderr)),
         ),
+        SandboxFailureKind::TooLong => io::Error::from_raw_os_error(libc::E2BIG),
         SandboxFailureKind::Command => command_failed(status, cmd),
     }
 }
@@ -2726,6 +2731,78 @@ mod tests {
         assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
     }
 
+    /// bubblewrap adds PWD before it runs the command, so an environment
+    /// that just fits bubblewrap's own start can fail bubblewrap's exec of
+    /// the command with E2BIG. Every argument ward generates is in the
+    /// `--args` data, so that is the build's command and environment too:
+    /// the build's own failure, as an E2BIG at the spawn is. The size is
+    /// searched for: the largest environment bubblewrap still starts with.
+    #[test]
+    fn linux_an_environment_too_large_for_bubblewraps_exec_is_the_builds_failure() {
+        if !linux_ready("linux_an_environment_too_large_for_bubblewraps_exec_is_the_builds_failure")
+        {
+            return;
+        }
+        let root = temp_dir("exec-e2big");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        // SAFETY: sysconf reads no memory of ours.
+        let arg_max = usize::try_from(unsafe { libc::sysconf(libc::_SC_ARG_MAX) }).unwrap();
+        let filler = "x".repeat(100_000);
+        let envs = |rest: usize| -> Vec<(String, String)> {
+            let mut envs: Vec<(String, String)> = (0..arg_max / 100_000)
+                .map(|i| (format!("FILL{i}"), filler.clone()))
+                .collect();
+            envs.push(("REST".to_string(), "y".repeat(rest)));
+            envs
+        };
+        let started = |rest: usize| {
+            sandbox.run_bwrap_capture(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &envs(rest),
+            )
+        };
+        // The largest REST bubblewrap itself starts with.
+        let (mut low, mut high) = (0, 130_000);
+        assert!(started(low).is_ok(), "the base environment starts");
+        assert!(started(high).is_err(), "the largest environment does not");
+        while high - low > 1 {
+            let middle = (low + high) / 2;
+            if started(middle).is_ok() {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        let output = started(low).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with("bwrap: execvp ") && stderr.contains("Argument list too long"),
+            "bubblewrap's exec of the command did not fail: {stderr}"
+        );
+        let error = sandbox
+            .run_in_status_on(
+                Platform::X86_64UnknownLinuxGnu,
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &envs(low),
+                None,
+            )
+            .expect_err("an environment past the limit runs nothing");
+        assert_eq!(error.raw_os_error(), Some(libc::E2BIG), "{error}");
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
+    }
+
     /// bubblewrap's helper is the sandbox's pid 1, readable by the build,
     /// so its environment must hold nothing from the host (#669).
     #[test]
@@ -3774,6 +3851,25 @@ esac
             classify_sandbox_failure(&status, b"formatter: could not parse input\n"),
             Some(SandboxFailureKind::Command)
         );
+        // Only bubblewrap's exec of the command failing with E2BIG is the
+        // build's own; every other bubblewrap diagnostic stays a setup one.
+        assert_eq!(
+            classify_sandbox_failure(
+                &status,
+                b"bwrap: execvp /usr/bin/env: Argument list too long\n"
+            ),
+            Some(SandboxFailureKind::TooLong)
+        );
+        for setup in [
+            &b"bwrap: execvp /usr/bin/env: No such file or directory\n"[..],
+            b"bwrap: Can't mount tmpfs: Argument list too long\n",
+            b"bwrap: execvp /usr/bin/env: Argument list too long\nbwrap: more\n",
+        ] {
+            assert_eq!(
+                classify_sandbox_failure(&status, setup),
+                Some(SandboxFailureKind::Setup)
+            );
+        }
         assert_eq!(
             classify_sandbox_failure(
                 &std::process::ExitStatus::from_raw(0),

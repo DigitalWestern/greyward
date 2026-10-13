@@ -180,17 +180,19 @@ impl HeldRoots {
         self.roots.iter().filter_map(|root| root.target).collect()
     }
 
-    /// The shell script that closes every passed descriptor and runs its
-    /// arguments, or `None` when nothing is passed.
-    /// The shell that runs `close_script`: the system shell when every
-    /// number is a single digit, since dash reads no other (`exec 12<&-` is
-    /// "exec: 12: not found"), and bash, which takes any number, otherwise.
-    pub(super) fn close_shell(&self) -> io::Result<&'static str> {
+    /// The command line of the shell that runs `close_script`: the system
+    /// shell when every number is a single digit, since dash reads no other
+    /// (`exec 12<&-` is "exec: 12: not found"), and bash, which takes any
+    /// number, otherwise. Neither reads a startup file: the environment is
+    /// empty (no `ENV`, no `BASH_ENV`), a `-c` shell is not interactive, and
+    /// bash is told not to source `~/.bashrc`, which it would otherwise do
+    /// when stdin looks like a network connection, before anything closes.
+    pub(super) fn close_shell(&self) -> io::Result<&'static [&'static str]> {
         if self.numbers().iter().all(|number| *number <= HELD_FD_LAST) {
-            return Ok("/bin/sh");
+            return Ok(&["/bin/sh"]);
         }
         if Path::new(BASH).is_file() {
-            return Ok(BASH);
+            return Ok(&[BASH, "--norc", "--noprofile"]);
         }
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -201,6 +203,8 @@ impl HeldRoots {
         ))
     }
 
+    /// The shell script that closes every passed descriptor and runs its
+    /// arguments, or `None` when nothing is passed.
     pub(super) fn close_script(&self) -> Option<String> {
         let closes: Vec<String> = self
             .roots

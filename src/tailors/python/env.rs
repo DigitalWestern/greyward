@@ -27,7 +27,16 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 /// The schema `environment_identity` writes.
-pub(crate) const PYTHON_ENV_SCHEMA: &str = "python-env/3";
+pub(crate) const PYTHON_ENV_SCHEMA: &str = "python-env/4";
+
+/// A `python-env/4` `pkg:` value: the artifact's derivation, then the
+/// version and filename the lock names. `/3` keyed a wheel by its hash
+/// alone, so a lock that renamed the same bytes to another release reused
+/// the environment built under the old one, which the per-wheel check at
+/// install never saw again (#688).
+fn package_value(artifact: &str, package: &crate::kernel::types::LockedPackage) -> String {
+    format!("{artifact}|{}|{}", package.version, package.filename)
+}
 
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
@@ -258,7 +267,7 @@ fn environment_identity_inner(
                 sdist.input
             }
         };
-        values.insert(format!("pkg:{}", p.name), value);
+        values.insert(format!("pkg:{}", p.name), package_value(&value, p));
     }
     // One identity input per planned package.
     for p in &packages {
@@ -1124,7 +1133,7 @@ mod tests {
         key
     }
 
-    /// `python-env/3` goldens, on both platforms, from fixed inputs: a
+    /// `python-env/4` goldens, on both platforms, from fixed inputs: a
     /// fixed store root (a real identity input) and one wheel. The identity
     /// constructor is a pure function of its platform argument, so the
     /// Darwin value is computed here and the macOS gate only confirms it.
@@ -1159,11 +1168,11 @@ mod tests {
         for (platform, golden) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
-                "306c7508efb42b2526003af9975593dc92cf1abc-env-3.12.14",
+                "e7d2ef83ec74a977f5ce2188dbdca9eff7365b82-env-3.12.14",
             ),
             (
                 Platform::Aarch64AppleDarwin,
-                "8c17d18f771550bb1f0178cb694ae02b1f565806-env-3.12.14",
+                "42ff9984bc2ff596a4a99bfa4c541f63ca036877-env-3.12.14",
             ),
         ] {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
@@ -1193,7 +1202,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            assert_eq!(wheel.inputs["schema"], "python-env/3");
+            assert_eq!(wheel.inputs["schema"], "python-env/4");
             assert_eq!(wheel.inputs["native"], NATIVE_NONE);
             assert_eq!(wheel.object_id(), golden, "{}", platform.triple());
             assert_eq!(
@@ -1212,6 +1221,12 @@ mod tests {
             old.inputs.remove("package_digest");
             old.inputs.remove("native");
             assert_ne!(old.object_id(), wheel.object_id());
+            // And the `/3` spelling, whose wheel value was the hash alone.
+            let mut v3 = wheel.clone();
+            v3.inputs.insert("schema".into(), "python-env/3".into());
+            v3.inputs
+                .insert("pkg:example".into(), format!("Wheel:{}", "a".repeat(64)));
+            assert_ne!(v3.object_id(), wheel.object_id());
 
             // The drift `/2` could not see.
             let mut dropped = wheel.clone();
@@ -1223,6 +1238,76 @@ mod tests {
             );
             assert_ne!(dropped.object_id(), empty.object_id());
         }
+    }
+
+    /// #688: the same wheel bytes locked under another release, or another
+    /// filename, are another environment. Under `python-env/3` the hash alone
+    /// keyed the wheel, so the cached environment built as 2.32.3 was reused
+    /// for a lock naming 2.32.4 and never reached the install-time check.
+    #[test]
+    fn a_wheel_relocked_under_another_version_is_another_environment() {
+        crate::tailors::install_kinds();
+        let store = Store::for_test(PathBuf::from("/fixture/tog-store"));
+        let lease = crate::kernel::testutil::detached_lease();
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let cpython = python::object_id_for(platform, "3.12.14").unwrap();
+        let identity = |version: &str, filename: &str| {
+            let plan = Plan {
+                ecosystem: "python".into(),
+                python_version: "3.12.14".into(),
+                packages: vec![LockedPackage {
+                    index: None,
+                    name: "requests".into(),
+                    version: version.into(),
+                    filename: filename.into(),
+                    url: format!("https://files.pythonhosted.org/{filename}"),
+                    sha256: "a".repeat(64),
+                    kind: ArtifactKind::Wheel,
+                    git: None,
+                }],
+            };
+            let identity = environment_identity(
+                &mut crate::kernel::testutil::DoorScope::new().door(
+                    &store,
+                    &lease.1,
+                    platform,
+                    crate::kernel::resolve::DoorKind::Planner,
+                ),
+                &plan,
+                &cpython,
+                &selected_3_12(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::kernel::objmeta::check_identity_grammar(&identity),
+                Ok(())
+            );
+            identity
+        };
+        let locked = identity("2.32.3", "requests-2.32.3-py3-none-any.whl");
+        let relocked = identity("2.32.4", "requests-2.32.4-py3-none-any.whl");
+        let renamed = identity("2.32.3", "requests-2.32.3-py2.py3-none-any.whl");
+        assert_ne!(locked.object_id(), relocked.object_id());
+        assert_ne!(locked.object_id(), renamed.object_id());
+        assert_eq!(
+            locked.inputs["pkg:requests"],
+            format!(
+                "Wheel:{}|2.32.3|requests-2.32.3-py3-none-any.whl",
+                "a".repeat(64)
+            )
+        );
+
+        // A `/4` identity whose package value lost its lock names is refused.
+        let mut bare = locked.clone();
+        bare.inputs
+            .insert("pkg:requests".into(), format!("Wheel:{}", "a".repeat(64)));
+        bare.inputs.insert(
+            "package_digest".into(),
+            package_digest_of_inputs(&bare.inputs),
+        );
+        let reason = crate::kernel::objmeta::check_identity_grammar(&bare).unwrap_err();
+        assert!(reason.contains("|<version>|<filename>"), "{reason}");
     }
 
     /// The real shape of the drift, not a mutated finished identity: a
@@ -1345,16 +1430,17 @@ mod tests {
             "Sdist:{SDIST_SHA256}:sdist-build/2;toolchain:\
              71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e,\
              51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670,\
-             3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"
+             3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab\
+             |1.0|fast-golden-1.0.tar.gz"
         );
         for (platform, golden) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
-                "d2e3be1a4083e0b84ac330da60c9d411edba3c26-env-3.12.14",
+                "390e72c0a216924d7632f2881ee71cb8fb3c53d7-env-3.12.14",
             ),
             (
                 Platform::Aarch64AppleDarwin,
-                "a301ce7f5f46a0c9061c5787feb552e30e7da55f-env-3.12.14",
+                "dc53ac0f6e887758639d62143e88bcf93b80482b-env-3.12.14",
             ),
         ] {
             let cpython = python::object_id_for(platform, "3.12.14").unwrap();
@@ -1374,7 +1460,7 @@ mod tests {
             assert_eq!(identity.inputs["pkg:fast-golden"], pkg_input);
             assert_eq!(
                 identity.inputs["package_digest"],
-                "sha256:fb32a8449436b9a5d2ccd4fe85c1f75cdc45fc2a65063dd7174c6a12a25dd6e6"
+                "sha256:ad906cd48e8499ea77ac62bfac71463e3612ccd6d24a3081f06f9a1a4ab30dcb"
             );
             assert_eq!(identity.inputs["native"], NATIVE_NONE);
             assert_eq!(

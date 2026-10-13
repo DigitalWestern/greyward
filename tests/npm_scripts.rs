@@ -865,6 +865,140 @@ fn skip_download_switch_is_injected_and_recorded() {
     attribution.discard();
 }
 
+/// A skipped download is part of the environment object, not only of the
+/// sync that built it. A warm sync of the same environment under a policy
+/// that denies `artifact-not-provisioned` refuses the cached object, as the
+/// cold build under that policy would (#670): the env identity does not
+/// include the policy, so a permissive build must not serve a strict one.
+#[test]
+fn a_cached_skipped_download_is_refused_under_a_denying_policy() {
+    if !sandbox_or_skip(
+        "a_cached_skipped_download_is_refused_under_a_denying_policy",
+        Platform::host().expect("host platform"),
+    ) {
+        return;
+    }
+    let _policy_guard = policy_guard();
+    let platform = Platform::host().expect("host platform");
+    let temp = TempDir::new("cached-skip-npm");
+    let dir = temp.path();
+    let (tarball, sri) = make_named_pkg_tarball(
+        dir,
+        "puppeteer",
+        "[ \"$PUPPETEER_SKIP_DOWNLOAD\" = true ] || exit 3",
+    );
+    let store = store_at(dir);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    // One selection for both syncs: the stub Node is packed afresh on each
+    // call, and a different Node is a different environment.
+    let selected = stub_node_selection(dir, &store, activity, platform);
+    seed_gyp_python(&store, platform);
+    let mut plan = plan_named(&tarball, &sri, "puppeteer");
+    plan.node_version = selected.version("node").unwrap().to_string();
+    let realize = || {
+        node::realize_node_env_for(
+            &store,
+            activity,
+            platform,
+            &plan,
+            &[],
+            &selected,
+            &node::shipped_gyp_python().unwrap(),
+        )
+    };
+
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let env = realize().expect("permissive cold realize");
+    attribution.discard();
+    let stored = store
+        .exceptions(env.file_name().unwrap().to_str().unwrap())
+        .unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|exception| exception.kind == policy::ARTIFACT_NOT_PROVISIONED),
+        "the object does not carry the skipped download: {stored:?}"
+    );
+
+    let deny = |kind: &str| {
+        policy::PolicyScope::install(policy::Policy {
+            deny: [kind.to_string()].into(),
+            ..Default::default()
+        })
+    };
+    {
+        let _scope = deny(policy::ARTIFACT_NOT_PROVISIONED);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let error = realize()
+            .expect_err("a warm sync under a denying policy must refuse the cached object");
+        attribution.discard();
+        let message = error.to_string();
+        assert!(message.contains("cached object"), "{message}");
+        assert!(message.contains("artifact-not-provisioned"), "{message}");
+    }
+
+    // The same environment as a ward before `object-meta/3` recorded it:
+    // schema `/2`, and no skipped download, which `/2` never stored.
+    let id = env.file_name().unwrap().to_str().unwrap().to_string();
+    let meta = store.root.join("meta").join(format!("{id}.json"));
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    let mut old = current.clone();
+    old["schema"] = serde_json::json!("object-meta/2");
+    old["exceptions"] = serde_json::json!([]);
+    let write_old = || std::fs::write(&meta, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    let schema = || -> serde_json::Value {
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&meta).unwrap()).unwrap()
+            ["schema"]
+            .clone()
+    };
+    write_old();
+
+    // A policy that denies none of the kinds `/2` could lack reuses it.
+    {
+        let _scope = deny(policy::FILE_COLLISION);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let warm = realize().expect("a /2 object is reused when nothing it could lack is denied");
+        attribution.discard();
+        assert_eq!(warm, env);
+        assert_eq!(schema(), "object-meta/2");
+    }
+
+    // One that denies the skipped download cannot trust the `/2` record,
+    // so the environment is built again, and the build refuses the skip
+    // as it happens (not as a cached object).
+    {
+        let _scope = deny(policy::ARTIFACT_NOT_PROVISIONED);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let error = realize().expect_err("the rebuild must refuse the skipped download");
+        attribution.discard();
+        let message = error.to_string();
+        assert!(!message.contains("cached object"), "{message}");
+        assert!(message.contains("artifact-not-provisioned"), "{message}");
+        assert_eq!(schema(), "object-meta/2");
+    }
+
+    // A rebuild the policy allows upgrades the record in place to `/3`
+    // with the whole set, the skipped download included.
+    {
+        let _scope = deny(policy::BUILT_FROM_SOURCE);
+        let attribution = policy::Attribution::open("node").expect("test attribution");
+        let rebuilt = realize().expect("the allowed rebuild commits the same id");
+        attribution.discard();
+        assert_eq!(rebuilt, env);
+        assert_eq!(schema(), "object-meta/3");
+        let stored = store.exceptions(&id).unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|exception| exception.kind == policy::ARTIFACT_NOT_PROVISIONED),
+            "the upgraded record lacks the skipped download: {stored:?}"
+        );
+    }
+}
+
 #[test]
 fn prebuilt_downloader_is_told_to_build_from_source() {
     if !sandbox_or_skip(
@@ -894,7 +1028,7 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
 
 /// A project that locks Python builds its native addons on that Python.
 /// node-gyp's interpreter is the project's CPython 3.13, not the shipped
-/// 3.12 a Node-only project gets, and the `node-env/6` identity names it,
+/// 3.12 a Node-only project gets, and the `node-env/7` identity names it,
 /// so the two projects never share an environment object.
 #[test]
 #[ignore]
@@ -994,7 +1128,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
         )
         .unwrap();
         let inputs = &meta["identity"]["inputs"];
-        assert_eq!(inputs["schema"], "node-env/6");
+        assert_eq!(inputs["schema"], "node-env/7");
         assert!(
             inputs["gyp_python"]
                 .as_str()

@@ -857,7 +857,7 @@ fn build_plan(
     lock_source: &str,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
-    let record = &mut crate::kernel::policy::record;
+    let record = &mut crate::kernel::policy::record_plan_time;
     build_plan_recording(platform, graph, lock_source, node_version, record)
 }
 
@@ -2058,6 +2058,14 @@ snapshots: {}
         )
         .unwrap();
         assert!(plan.packages.is_empty());
+        // The skip is the project's lock fact, recorded again every sync:
+        // the environment built from this plan has no git package and
+        // must not store it.
+        assert!(
+            crate::kernel::policy::object_exceptions().is_empty(),
+            "{:?}",
+            crate::kernel::policy::object_exceptions()
+        );
         let exceptions = crate::kernel::policy::drain();
         assert_eq!(exceptions.len(), 1, "{exceptions:?}");
         assert_eq!(exceptions[0].kind, crate::kernel::policy::GIT_DEPENDENCY);

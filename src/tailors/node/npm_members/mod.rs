@@ -635,7 +635,20 @@ pub(crate) mod tests {
                 std::os::unix::fs::symlink(link[1].as_str().unwrap(), at).unwrap();
             }
             let held = ProjectRoot::open(&root).unwrap();
-            let found = npm_members(&held, &case["workspaces"])
+            let first = npm_members(&held, &case["workspaces"]);
+            // npm's answer for an unchanged tree is the same pairs in the
+            // same order every time: the drift check refuses a reorder.
+            let again = npm_members(&held, &case["workspaces"]);
+            if let (Ok(first), Ok(again)) = (&first, &again) {
+                if first != again {
+                    failures.push(format!("{name}: two runs differ: {first:?}, {again:?}"));
+                }
+            } else if let Err(error) = &again {
+                if first.is_ok() {
+                    failures.push(format!("{name}: second run refused: {error}"));
+                }
+            }
+            let found = first
                 .map(|found| found.members)
                 .map_err(|error| error.to_string());
             let expected = Ok(strings(&case["expected"]));
@@ -789,6 +802,8 @@ pub(crate) mod tests {
                 libc::dup2(captured.as_raw_fd(), 2);
             }
             let result = npm_members(&held, &serde_json::json!(["packages/*"]));
+            // A probe through the same descriptor shows the capture works.
+            unsafe { libc::write(2, b"capture-probe\n".as_ptr().cast(), 14) };
             unsafe {
                 libc::dup2(saved[0], 1);
                 libc::dup2(saved[1], 2);
@@ -800,6 +815,7 @@ pub(crate) mod tests {
             assert!(error.contains(expected), "{error}");
             assert!(!error.contains(MARKER), "{error}");
             let printed = std::fs::read_to_string(scratch.0.join("captured")).unwrap();
+            assert!(printed.contains("capture-probe"), "nothing was captured");
             assert!(!printed.contains(MARKER), "printed: {printed}");
         }
     }

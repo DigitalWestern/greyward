@@ -533,6 +533,7 @@ fn forest_paths(
     plan: &NpmPlan,
     reasons: &CloneReasons,
     workspaces: &[String],
+    link_targets: &[String],
 ) -> io::Result<ForestPaths> {
     use sha2::{Digest as _, Sha256};
     let CloneReasons {
@@ -548,10 +549,20 @@ fn forest_paths(
         format!("\x00needs-workspace:{}", dependents.join(","))
     };
     let env_name = env_obj.file_name().unwrap().to_string_lossy().into_owned();
+    // A target a symlink in the project resolves elsewhere keys on where
+    // it leads too, so repointing the symlink plants a new forest; a plain
+    // target keeps its key.
     let link_key: String = plan
         .links
         .iter()
-        .map(|l| format!("{}={};", l.path, l.target))
+        .zip(link_targets)
+        .map(|(l, resolved)| {
+            if *resolved == l.target {
+                format!("{}={};", l.path, l.target)
+            } else {
+                format!("{}={}>{resolved};", l.path, l.target)
+            }
+        })
         .collect();
     let workspace_key = workspaces.join(",");
     let proj_id = hex::encode(Sha256::digest(
@@ -672,13 +683,38 @@ fn build_project_forest(
 /// Workspace links: symlinks into the project's own source dirs. The targets
 /// are user-owned and writable by nature. Idempotent — the projection id
 /// covers the link set, so a changed set is a new forest.
+/// Each link target of `plan`, as the held project descriptor resolves it
+/// ([`ProjectRoot::contained_input_path`]): the symlink-free path a
+/// workspace link is planted to, so a symlink in the project repointed
+/// after the plan was checked cannot carry the link anywhere else.
+fn resolved_link_targets(project: &ProjectRoot, plan: &NpmPlan) -> io::Result<Vec<String>> {
+    plan.links
+        .iter()
+        .map(|l| {
+            project
+                .contained_input_path(Path::new(&l.target))
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|error| err(format!("workspace link {}: target {error}", l.path)))
+        })
+        .collect()
+}
+
 fn link_workspace_sources(
-    project_dir: &Path,
+    project: &ProjectRoot,
     plan: &NpmPlan,
+    link_targets: &[String],
     proj_dir: &Path,
     forest: &Path,
 ) -> io::Result<()> {
-    for l in &plan.links {
+    let project_dir = project.path();
+    // Resolved again from the descriptor right before planting: a symlink
+    // repointed since the forest was keyed is refused, never followed.
+    if resolved_link_targets(project, plan)? != link_targets {
+        return Err(err(
+            "a workspace link target in the project changed while the sync ran; run it again",
+        ));
+    }
+    for (l, resolved) in plan.links.iter().zip(link_targets) {
         let link_root = workspace_path(&l.path)
             .map(|(workspace, _)| {
                 proj_dir
@@ -717,7 +753,7 @@ fn link_workspace_sources(
         let target = relative_path(
             link.parent()
                 .ok_or_else(|| err("workspace link has no parent"))?,
-            &project_dir.join(&l.target),
+            &project_dir.join(resolved),
         )?;
         match link.symlink_metadata() {
             Err(_) => std::os::unix::fs::symlink(target, &link)?,
@@ -908,7 +944,16 @@ pub fn project_node_env_recorded(
         &tracked,
     )?;
 
-    let paths = forest_paths(project, &env_obj, &store, plan, &reasons, &workspaces)?;
+    let link_targets = resolved_link_targets(project, plan)?;
+    let paths = forest_paths(
+        project,
+        &env_obj,
+        &store,
+        plan,
+        &reasons,
+        &workspaces,
+        &link_targets,
+    )?;
     let ForestPaths {
         proj_dir, forest, ..
     } = &paths;
@@ -961,7 +1006,7 @@ pub fn project_node_env_recorded(
         reasons.cloned(),
         fresh,
     )?;
-    link_workspace_sources(project_dir, plan, proj_dir, forest)?;
+    link_workspace_sources(project, plan, &link_targets, proj_dir, forest)?;
     // Old forests are deliberately NOT pruned here: a dev server may still
     // be running from one, and pruning would break it mid-session. They are
     // cheap symlink trees; explicit `ward gc` with liveness checks is the
@@ -1104,9 +1149,12 @@ mod tests {
             lock_source: "pnpm-lock.yaml".to_string(),
         };
 
+        let held = ProjectRoot::open(&project).unwrap();
+        let targets = ["vendor/a".to_string()];
         let error = link_workspace_sources(
-            &project,
+            &held,
             &plan("node_modules/parent/node_modules/a"),
+            &targets,
             &root.join("forest"),
             &forest,
         )
@@ -1123,13 +1171,68 @@ mod tests {
         );
 
         link_workspace_sources(
-            &project,
+            &held,
             &plan("node_modules/a"),
+            &targets,
             &root.join("forest"),
             &forest,
         )
         .unwrap();
         assert!(forest.join("a").symlink_metadata().unwrap().is_symlink());
+    }
+
+    /// A link target that passes through a symlink in the project is
+    /// planted to where the held descriptor resolved it, so repointing the
+    /// symlink afterwards cannot carry the link outside the project; and
+    /// one repointed between the check and the planting is refused (Sol
+    /// review of #692).
+    #[test]
+    fn a_workspace_link_is_planted_to_its_resolved_target() {
+        let scratch = TempDir::named("link-resolved-target");
+        let root = scratch.0.clone();
+        let project = root.join("project");
+        let forest = root.join("forest/node_modules");
+        for dir in [
+            project.join("src/lib"),
+            project.join("other/lib"),
+            root.join("outside/lib"),
+            forest.clone(),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink("src", project.join("vendor")).unwrap();
+        let plan = NpmPlan {
+            node_version: String::new(),
+            packages: Vec::new(),
+            links: vec![NpmLink {
+                path: "node_modules/lib".to_string(),
+                target: "vendor/lib".to_string(),
+            }],
+            workspaces: Vec::new(),
+            lock_source: "pnpm-lock.yaml".to_string(),
+        };
+        let held = ProjectRoot::open(&project).unwrap();
+        let targets = resolved_link_targets(&held, &plan).unwrap();
+        assert_eq!(targets, ["src/lib"]);
+        link_workspace_sources(&held, &plan, &targets, &root.join("forest"), &forest).unwrap();
+        let repoint = |to: &Path| {
+            fs::remove_file(project.join("vendor")).unwrap();
+            std::os::unix::fs::symlink(to, project.join("vendor")).unwrap();
+        };
+        repoint(&root.join("outside"));
+        assert_eq!(
+            forest.join("lib").canonicalize().unwrap(),
+            project.join("src/lib").canonicalize().unwrap()
+        );
+        fs::remove_file(forest.join("lib")).unwrap();
+        repoint(Path::new("other"));
+        let error = link_workspace_sources(&held, &plan, &targets, &root.join("forest"), &forest)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("changed while the sync ran"),
+            "{error}"
+        );
+        assert!(forest.join("lib").symlink_metadata().is_err());
     }
 
     /// vite commits a fixture `node_modules` inside a workspace member

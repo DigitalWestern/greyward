@@ -90,16 +90,7 @@ fn safe(text: &str) -> String {
 }
 
 fn home() -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| other("x: HOME is not set; set HOME to an absolute directory"))?;
-    if !home.is_absolute() {
-        return Err(other(format!(
-            "x: HOME must be an absolute directory, got {}; refusing to use it",
-            home.display()
-        )));
-    }
-    Ok(home)
+    crate::kernel::home::home().map_err(|error| other(format!("x: {error}")))
 }
 
 /// The toolchain an `x` environment runs on: the project's lock when `x`

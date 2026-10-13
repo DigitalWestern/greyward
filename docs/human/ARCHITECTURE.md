@@ -775,14 +775,30 @@ A store says which format it is in: `<store>/format` holds one line,
 nothing else. There is no migration code: a store it cannot read is
 refused, and the fix is to empty it.
 
-- No directory, or an empty one: a new store is created, marker first.
+- No directory, or an empty one (or one holding only empty store
+  namespaces): a new store is created, marker first.
 - The marker says `greyward-store 1`: the store opens.
-- Store directories but no marker: a store written before the marker
-  existed, or one a reset did not finish. Refused.
+- No marker, and something only a ward writes into a store, read through
+  the held root without following a link: an empty regular lease file
+  (`activity.lock`, `gc.lock`), or a `meta/<object id>.json` that parses as
+  that object's record. A store written before the marker existed, or one
+  a reset did not finish. Refused, with `ward gc --reset` as the fix.
+- No marker and none of that, but other files: not a store at all (a
+  `GREYWARD_STORE` pointed at a home or a project by mistake). Names alone
+  prove nothing: `tmp/`, `records/` and `objects/` can be anyone's, and so
+  can an object-shaped filename or a record-shaped directory, and a `meta`
+  linked to another store's holds none of this directory's records.
+  Refused with no `fix:` line, no store is created beside those files, no
+  lease file is written into the directory, and `ward gc --reset` refuses
+  it too (#676).
 - A higher number: a newer Greyward wrote it. Refused, and the fix is to update
   this Greyward.
 - Anything else in the marker, or a marker that cannot be read (its mode,
-  an I/O error): refused.
+  an I/O error): refused, with `ward gc --reset` as the fix when the store
+  evidence above is beside it. Without it, the `format` is anyone's file
+  (or directory, or link) and the directory is not a store, as above.
+  `ward gc --reset` empties only a root whose marker is current or that
+  holds that evidence.
 
 The marker is read twice. `Store::open` reads it when a command starts, and
 every activity lease (`Store::activity`, `Store::try_activity_exclusive`)
@@ -811,9 +827,9 @@ There is no fallback lock.
 
 The one reader that takes no lock is `ward store path`, which only prints
 the path and reads the marker to say whether the store is refused. It reads
-the marker a second time before it calls namespaces without a marker an old
-store, because a store being created publishes the marker before its first
-namespace. During a reset it can report the store as having no marker. That
+the marker a second time before it calls store files without a marker an
+old store, because a store being created publishes the marker before
+anything else. During a reset it can report the store as having no marker. That
 is true at that moment, and it stops when the reset finishes. `ward doctor`
 is not such a reader: it opens the store (waiting for the root lock like
 any other command, and saying so) and then takes a shared lease without
@@ -842,7 +858,9 @@ root without reading the marker, takes the exclusive lease, and then:
 1. unlinks the marker and fsyncs the root directory, so the removal is on
    disk before anything else is deleted;
 2. removes `objects/`, `meta/`, `roots/`, `records/`, `resolve/`,
-   `forests/`, `root-locks/` and staging;
+   `forests/`, `root-locks/`, and the entries under `tmp/` named as ward's
+   own temporaries (`stage-*`, `dl-*`, `meta-*`, ...), leaving anything
+   else there;
 3. recreates the namespaces and fsyncs them;
 4. publishes the new marker: written to a temporary file, fsynced, renamed
    into place, and the root directory fsynced.
@@ -1043,7 +1061,12 @@ its own, so the lease that protects a stage directory is visibly the one held
 across its children and its commit (`tests/architecture.rs` lists the few raw
 children that touch no store path). Contention is a named
 outcome, not a hang: GC acquires exclusive activity and skips safely while a
-managed job holds the shared lease. Stage dirs and download temps use
+managed job holds the shared lease, naming it. The lease is a bare `flock`,
+so each holder also writes `jobs/<pid>-<random>`, one line with its command
+and pid, and holds an exclusive `flock` on that note's own descriptor until
+the lease ends and the note is removed. A note whose lock another descriptor
+can take was left by a killed ward and is not reported; the next note written
+removes it once it is a minute old. Stage dirs and download temps use
 collision-proof names.
 
 ## Layering rules

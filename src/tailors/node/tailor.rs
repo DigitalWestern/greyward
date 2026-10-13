@@ -324,6 +324,7 @@ impl Tailor for Node {
             None => node::GreywardConfig::default(),
         };
         record_skipped_project_scripts(project, &plan, package_json.as_deref(), attribution)?;
+        node::resolve::record_members_outside(project, attribution)?;
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
         // node-gyp runs on the helper Python selection when the project has
         // one; a Node-only project gets the shipped default.

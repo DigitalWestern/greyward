@@ -1596,6 +1596,31 @@ deny = ["git-dependency"]"#,
     /// inherit the exception. Both still reach the closure, and the policy
     /// refuses both. A realization-time record of a fact first recorded at
     /// plan time makes it the object's too.
+    /// Every kind recorded while an object is realized is stored with it
+    /// unless it is a plan-time kind: no allow-list a new kind has to join.
+    /// A git fetch's transport record (`host-git-transport`, made inside
+    /// `ensure_git_source` for a source and each submodule) is the case a
+    /// list would drop: a warm sync never fetches again, so only the
+    /// object's record can replay it to a policy that denies it.
+    #[test]
+    fn a_realization_time_record_of_any_kind_is_stored_with_the_object() {
+        let _guard = exception_guard();
+        let permissive = Policy::default();
+        let attribution = Attribution::open("node").unwrap();
+        for kind in KINDS.iter().copied().chain(["host-git-transport"]) {
+            record_with(&permissive, kind, "dep@1.0.0", "fetched").unwrap();
+        }
+        let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
+        let expected: Vec<&str> = KINDS
+            .iter()
+            .copied()
+            .chain(["host-git-transport"])
+            .filter(|kind| !PLAN_TIME_KINDS.contains(kind))
+            .collect();
+        assert_eq!(stored, expected);
+        attribution.discard();
+    }
+
     #[test]
     fn a_plan_time_record_is_not_stored_with_the_object() {
         let _guard = exception_guard();

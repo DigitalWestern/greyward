@@ -44,6 +44,12 @@ pub fn install_wheel(
         .to_string();
     let distribution_name = distribution_dir.replace('_', "-");
     let entry_points = read_entry_points(&mut archive, &distribution_id)?;
+    refuse_reserved_script_names(
+        archive.members(),
+        &data_prefix,
+        entry_points.as_deref(),
+        &distribution_id,
+    )?;
 
     let env_root = bin_dir.parent().ok_or_else(|| {
         invalid_data(format!(
@@ -367,6 +373,41 @@ fn write_wheel_entry(
 /// runs. The script keeps its own name in it, so `sys.argv[0]`'s basename
 /// and `__file__`'s name are the ones it shipped with.
 const SHIPPED_SCRIPTS: &str = ".ward-scripts";
+
+/// Refuse, before anything is written, a wheel that would put a script or
+/// an entry-point launcher at a path through [`SHIPPED_SCRIPTS`]: that name
+/// is ward's private directory in `bin`, under every store path, so no
+/// package may claim it whether or not its own scripts are wrapped.
+fn refuse_reserved_script_names(
+    members: &[ZipMember],
+    data_prefix: &str,
+    entry_points: Option<&str>,
+    distribution_id: &str,
+) -> io::Result<()> {
+    let scripts = format!("{data_prefix}scripts/");
+    let shipped = members
+        .iter()
+        .filter_map(|member| member.name.strip_prefix(&scripts));
+    let launchers = match entry_points {
+        Some(text) => parse_entry_points(text)?
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect(),
+        None => Vec::new(),
+    };
+    let reserved = |path: &str| path.split('/').any(|part| part == SHIPPED_SCRIPTS);
+    if let Some(path) = shipped
+        .map(str::to_string)
+        .chain(launchers)
+        .find(|path| reserved(path))
+    {
+        return Err(invalid_data(format!(
+            "{distribution_id} installs bin/{path}, but bin/{SHIPPED_SCRIPTS} is reserved for \
+             ward's wrapped scripts; refusing the wheel"
+        )));
+    }
+    Ok(())
+}
 
 /// `<dir>/.ward-scripts/<name>`, for the script `destination` names.
 fn hidden_script(destination: &Path) -> io::Result<PathBuf> {
@@ -830,6 +871,49 @@ mod tests {
         check_wheel_distribution(&wheel, "requests", None).unwrap();
         dist_info("evil-1.0.dist-info");
         assert!(check_wheel_distribution(&wheel, "requests", None).is_err());
+    }
+
+    /// Sol's round 3: `bin/.ward-scripts` is ward's private directory, so a
+    /// shipped script or an entry point by that name is refused up front,
+    /// with nothing written, under an ordinary store path too.
+    #[test]
+    fn a_wheel_claiming_the_private_scripts_directory_is_refused() {
+        let temp = TempDir::new();
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python");
+        let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
+        let entry_points: &[u8] = b"[console_scripts]\n.ward-scripts = demo:main\n";
+        for entries in [
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/scripts/.ward-scripts", b"#!/bin/sh\n"),
+            ][..],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.data/scripts/sub/.ward-scripts/x", b"#!/bin/sh\n"),
+            ],
+            &[
+                ("demo/__init__.py", &b""[..]),
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo-1.0.dist-info/entry_points.txt", entry_points),
+            ],
+        ] {
+            write_wheel(&wheel, entries);
+            let error = install_wheel(&wheel, &site, &bin, "3.12", &python, &mut BTreeMap::new())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("demo-1.0.dist-info installs bin/")
+                    && error.contains("bin/.ward-scripts is reserved"),
+                "{error}"
+            );
+            assert!(!site.join("demo").exists(), "nothing is written first");
+        }
     }
 
     #[test]

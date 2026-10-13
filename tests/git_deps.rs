@@ -190,6 +190,63 @@ fn a_warm_npm_git_environment_replays_its_fetch_exceptions() {
     attribution.discard();
 }
 
+/// The transport is a fetch-time record like `git-dependency`: a
+/// `file://` git dependency realized cold under the default policy stores
+/// `host-git-transport` with the environment, and a warm sync under a
+/// policy denying only that kind refuses the cached object.
+#[test]
+#[ignore]
+fn a_warm_npm_git_environment_replays_its_host_git_transport() {
+    let _serial = serial();
+    let platform = Platform::host().expect("host platform");
+    let root = TempDir::new("gitdep-npm-warm-transport");
+    let (url, commit) = fixture_repo(&root.0);
+    assert!(url.starts_with("git+file://"), "{url}");
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let lock = format!(
+        r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#{commit}"}}}}}}"#
+    );
+
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let plan = node::plan_npm(platform, &lock).expect("plan");
+    let env = node::realize_node_env(&store, activity, platform, &plan, &[]).expect("cold");
+    attribution.discard();
+
+    let id = env.file_name().unwrap().to_str().unwrap();
+    let record = greyward::kernel::objmeta::read_store_record(&store, id).unwrap();
+    assert!(
+        record
+            .exceptions
+            .iter()
+            .any(|e| e.kind == policy::HOST_GIT_TRANSPORT),
+        "the cold realization stored no host-git-transport: {:?}",
+        record.exceptions
+    );
+
+    let _deny = policy::PolicyScope::install(policy::Policy {
+        deny: [policy::HOST_GIT_TRANSPORT.to_string()].into(),
+        ..Default::default()
+    });
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let error = without_staging(&store, || {
+        node::realize_node_env(&store, activity, platform, &plan, &[])
+    })
+    .expect_err("a warm environment dropped its host-git-transport exception");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains(policy::HOST_GIT_TRANSPORT),
+        "{error}"
+    );
+    attribution.discard();
+}
+
 #[test]
 fn an_unpinned_git_reference_is_refused() {
     let platform = Platform::host().expect("host platform");

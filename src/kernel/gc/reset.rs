@@ -137,7 +137,10 @@ fn report_stages<W: Write>(
     )
 }
 
-/// Everything under `tmp/` but the publication lock. An absent `tmp` holds
+/// Every entry under `tmp/` named as a ward temporary
+/// (`read::TMP_LEFTOVERS`), whatever its type: a ward from before the
+/// marker may have left one of another type. Anything else there is not
+/// ward's, and stays, as it does at the root (#676). An absent `tmp` holds
 /// nothing; one that is not a real directory is refused rather than
 /// followed.
 fn staging_entries(store: &Store) -> io::Result<Vec<OsString>> {
@@ -150,7 +153,12 @@ fn staging_entries(store: &Store) -> io::Result<Vec<OsString>> {
     let tmp = open_real_directory(&path, "tmp")?;
     let mut names: Vec<OsString> = store::read_dir_names_at(tmp.as_raw_fd())?
         .into_iter()
-        .filter(|name| name.as_bytes() != PUBLISH_LOCK.as_bytes())
+        .filter(|name| {
+            name.as_bytes() != PUBLISH_LOCK.as_bytes()
+                && read::TMP_LEFTOVERS
+                    .iter()
+                    .any(|(prefix, _)| name.as_bytes().starts_with(prefix.as_bytes()))
+        })
         .collect();
     names.sort();
     Ok(names)
@@ -277,6 +285,65 @@ mod reset_tests {
             .commit_with_deps(&identity, &staged, &[], &ObjectDeps::new())
             .unwrap();
         assert!(reopened.object_path(&id).join("payload").is_file());
+    }
+
+    /// The issue's case (#676): `GREYWARD_STORE` names an ordinary directory
+    /// that happens to have a `tmp/` and a `records/`. It is not called an
+    /// old store, no store is created in it, no lease file is written into
+    /// it, and a reset touches nothing.
+    #[test]
+    fn a_directory_that_is_no_store_is_neither_opened_nor_reset() {
+        let temp = TempStore::new("reset-not-a-store");
+        let root = temp.root.join("notastore");
+        for (path, bytes) in [
+            ("tmp/draft.txt", &b"draft"[..]),
+            ("tmp/stage-notes.txt", b"mine"),
+            ("records/2026.csv", b"a,b\n"),
+            ("docs/a.txt", b"a"),
+        ] {
+            fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            fs::write(root.join(path), bytes).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let before = names(&root);
+        assert_eq!(
+            Store::probe_at(&root).unwrap().unwrap().1,
+            StoreFormat::Uninitialized
+        );
+        let error = Store::open_at(&root).unwrap_err();
+        assert!(error.to_string().contains("is not a ward store"), "{error}");
+        // No `fix:` line: a reset is the one thing not to run here.
+        assert_eq!(store::refusal_fix(&error), None);
+        let store = Store::handle(root.clone());
+        let error = store.try_activity_exclusive_unchecked().unwrap_err();
+        assert!(error.to_string().contains("no ward store"), "{error}");
+        assert!(store.activity(ActivityMode::Shared).is_err());
+        assert_eq!(names(&root), before, "a refused lease wrote a file");
+        assert_eq!(fs::read(root.join("tmp/draft.txt")).unwrap(), b"draft");
+        assert_eq!(fs::read(root.join("tmp/stage-notes.txt")).unwrap(), b"mine");
+        assert_eq!(fs::read(root.join("records/2026.csv")).unwrap(), b"a,b\n");
+        assert_eq!(
+            Store::probe_at(&root).unwrap().unwrap().1,
+            StoreFormat::Uninitialized
+        );
+    }
+
+    /// A reset of a real store empties only what ward names under `tmp/`.
+    #[test]
+    fn reset_keeps_what_ward_never_names_under_tmp() {
+        let temp = TempStore::new("reset-tmp-names");
+        let (store, _) = populated(&temp);
+        fs::write(store.root.join("tmp/draft.txt"), b"draft").unwrap();
+        fs::write(store.root.join("tmp/dl-0-left"), b"partial").unwrap();
+        let (result, text) = run(&store, false);
+        result.unwrap();
+        assert!(text.contains("removed 2 staging entries"), "{text}");
+        assert!(!store.root.join("tmp/stage-old").exists());
+        assert!(!store.root.join("tmp/dl-0-left").exists());
+        assert_eq!(
+            fs::read(store.root.join("tmp/draft.txt")).unwrap(),
+            b"draft"
+        );
     }
 
     #[test]
@@ -411,6 +478,8 @@ mod reset_tests {
         let store = temp.store();
         // The command that will wait: it has opened the store already.
         let opened = Store::open_at(&store.root).unwrap();
+        // The reset holds the lease, so its file is there when it stops.
+        drop(opened.activity(ActivityMode::Exclusive).unwrap());
         // The reset gets as far as removing the marker and stops.
         fs::remove_file(store.root.join(FORMAT_FILE)).unwrap();
         for result in [

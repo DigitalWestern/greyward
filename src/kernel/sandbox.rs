@@ -39,35 +39,9 @@ use std::sync::OnceLock;
 mod held;
 pub(crate) use held::pass_fds;
 use held::{args_file, pass_in_place, refuse_unpassable, HeldRoots};
-
-/// How much of the host's system directories a sandboxed build can see.
-/// The host C toolchain is an unpinned build input either way (see
-/// docs/human/LIMITATIONS.md); this decides what else of the host rides
-/// along with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostView {
-    /// The whole host `/usr` (and `/bin`, `/lib`, ...), read-only: every
-    /// header, library and pkg-config file this machine has installed is
-    /// visible to the build.
-    Full,
-    /// The host's runtime files plus the C runtime's own development files:
-    /// glibc, libxcrypt and kernel headers, their link-time libraries and
-    /// start files, and the compiler's own directories. Every other host
-    /// header, linker-visible library, static archive, libtool archive,
-    /// pkg-config file and CMake package directory is absent, so a build
-    /// cannot link something one host happens to have installed and
-    /// another does not. Programs keep every shared library they load at
-    /// run time.
-    RuntimeOnly,
-    /// The whole host filesystem, read-only, `/tmp` included, so a tool
-    /// sees every path an unconfined run of it would. Only for a tool from
-    /// the store that reads the project as data and runs none of its code
-    /// (npm's workspace member reader): no host socket scan can cover `/`,
-    /// so the trust is in the tool, and ward's signing keys are hidden.
-    /// Network, writes outside the declared roots, and the environment
-    /// stay confined as in every view.
-    WholeHost,
-}
+mod view;
+pub use view::HostView;
+use view::{push_hidden_keys, push_host_root};
 
 /// A sandboxed build, ecosystem-agnostic: tailors construct the spec — argv,
 /// environment, read/write roots, scratch — and the kernel executes it. Keeps
@@ -290,15 +264,7 @@ impl Sandbox<'_> {
              (allow file-read-metadata)\n\
              (allow file-write-data (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))\n",
         );
-        if self.host_view == HostView::WholeHost {
-            p.push_str("(allow file-read*)\n");
-            for key in hidden_keys() {
-                p.push_str(&format!(
-                    "(deny file-read* (literal {:?}))\n",
-                    key.display().to_string()
-                ));
-            }
-        }
+        view::push_whole_host_profile(&mut p, self.host_view);
         for r in &self.read {
             p.push_str(&format!(
                 "(allow file-read* (subpath {:?}))\n",
@@ -607,11 +573,7 @@ impl Sandbox<'_> {
             OsString::from("--clearenv"),
         ];
         let whole_host = self.host_view == HostView::WholeHost;
-        if whole_host {
-            push_bind(&mut args, "--ro-bind", "/", "/");
-        } else {
-            args.extend(system_root_args(Path::new("/"))?);
-        }
+        push_host_root(&mut args, whole_host)?;
         let (skeleton, ld_cache) = match self.host_view {
             HostView::Full | HostView::WholeHost => (None, None),
             HostView::RuntimeOnly => {
@@ -659,13 +621,7 @@ impl Sandbox<'_> {
             push_arg(&mut args, cwd.as_os_str());
         }
         push_root_binds(&mut args, &read_binds, &write_binds);
-        if whole_host {
-            for key in hidden_keys() {
-                push_arg(&mut args, "--ro-bind");
-                push_arg(&mut args, "/dev/null");
-                args.push(key.into_os_string());
-            }
-        }
+        push_hidden_keys(&mut args, whole_host);
 
         // The command's environment goes on argv, as `NAME=VALUE` operands
         // of `/usr/bin/env` below, never through bubblewrap's `--args`: then
@@ -1501,23 +1457,6 @@ pub(crate) fn resolve_host_path(host_root: &Path, path: &Path) -> io::Result<Pat
         }
     }
     Ok(resolved)
-}
-
-/// Ward's signing keys as they really are on disk, for `HostView::WholeHost`
-/// to cover: each existing one, by its symlink-free path.
-fn hidden_keys() -> Vec<PathBuf> {
-    existing_keys(&crate::kernel::resolve::confine::signing_key_paths())
-}
-
-fn existing_keys(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut keys: Vec<PathBuf> = paths
-        .iter()
-        .filter_map(|key| fs::canonicalize(key).ok())
-        .filter(|key| key.is_file())
-        .collect();
-    keys.sort();
-    keys.dedup();
-    keys
 }
 
 pub(crate) fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
@@ -3710,7 +3649,7 @@ mod tests {
         std::os::unix::fs::symlink(&key, &link).unwrap();
         let canonical = fs::canonicalize(&key).unwrap();
         assert_eq!(
-            existing_keys(&[link, key.clone(), root.0.join("missing.key")]),
+            super::view::existing_keys(&[link, key.clone(), root.0.join("missing.key")]),
             [canonical]
         );
         let sandbox = Sandbox {

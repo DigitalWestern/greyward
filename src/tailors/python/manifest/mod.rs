@@ -153,11 +153,51 @@ impl Manifest {
         selected: &crate::kernel::toolchain::Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
+        self.complete_setup(project, selected, door, SetupRun::Persist)
+            .map(|_| ())
+    }
+
+    /// [`Manifest::prepare_setup`] that reads a matching metadata cache but
+    /// never writes one: planning, which `--frozen` runs, writes nothing to
+    /// the project before it has checked the lock (#673). A miss probes,
+    /// and keeps the result in memory.
+    pub fn read_setup(
+        &mut self,
+        project: &ProjectRoot,
+        selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<()> {
+        self.complete_setup(project, selected, door, SetupRun::InMemory)
+            .map(|_| ())
+    }
+
+    /// [`Manifest::read_setup`] from a matching metadata cache only: true
+    /// when the cache completed the manifest, false on a miss, with
+    /// setup.py never run. The permission to use what setup.py gave is
+    /// checked either way, as on a cache hit.
+    pub fn read_setup_cache(
+        &mut self,
+        project: &ProjectRoot,
+        selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<bool> {
+        self.complete_setup(project, selected, door, SetupRun::CacheOnly)
+    }
+
+    /// Whether the manifest was completed: false only for a
+    /// [`SetupRun::CacheOnly`] miss.
+    fn complete_setup(
+        &mut self,
+        project: &ProjectRoot,
+        selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
+        run: SetupRun,
+    ) -> io::Result<bool> {
         let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         let dir = project.path();
         let python_version = selected.version("cpython")?;
         if !self.setup || self.setup_cfg {
-            return Ok(());
+            return Ok(true);
         }
         // The older egg_info path runs project code too. Its cached result
         // retains that provenance, so permission is checked on cache hits.
@@ -190,9 +230,12 @@ impl Manifest {
                     self.requirements = cache.requirements;
                     self.source = self.requirements_text();
                     replace_setup_requires_python(&mut self.python, cache.requires_python);
-                    return Ok(());
+                    return Ok(true);
                 }
             }
+        }
+        if run == SetupRun::CacheOnly {
+            return Ok(false);
         }
 
         let build_env = build::ensure_build_environment(door, selected)
@@ -260,13 +303,27 @@ impl Manifest {
         };
         // Through the held project descriptor: a symlinked `.greyward` must not
         // carry this cache outside the project.
-        project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
+        if run == SetupRun::Persist {
+            project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
+        }
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
         self.source = self.requirements_text();
         replace_setup_requires_python(&mut self.python, requires_python);
-        Ok(())
+        Ok(true)
     }
+}
+
+/// How [`Manifest::complete_setup`] may get setup.py's requirements on a
+/// metadata cache miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupRun {
+    /// Run the probe and write the cache (`prepare`).
+    Persist,
+    /// Run the probe and keep the result in memory (planning).
+    InMemory,
+    /// Never run it: a miss leaves the manifest as it was.
+    CacheOnly,
 }
 
 fn join_requirements(requirements: &[String], constraints: &[String]) -> String {
@@ -1099,6 +1156,119 @@ dependencies = [{ name = "six" }]
         );
     }
 
+    /// A uv.lock source is classified by its key (#687): a GitLab or Gitea
+    /// index URL, which contains `git`, `path` or `url` in its text, is a
+    /// registry with an unattested index; a local wheel, a local sdist and a
+    /// find-links directory, whose files uv writes with no URL, are each
+    /// skipped by name instead of making the whole lock unreadable.
+    #[test]
+    fn uv_lock_sources_are_classified_by_key() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let gitlab = "https://gitlab.example.com/api/v4/projects/7/packages/pypi/simple";
+        let packages = parse_uv_lock(&format!(
+            r#"[[package]]
+name = "six"
+version = "1.17.0"
+source = {{ registry = "https://pypi.org/simple" }}
+wheels = [{{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "{hash}" }}]
+
+[[package]]
+name = "internal"
+version = "1.0.0"
+source = {{ registry = "{gitlab}" }}
+wheels = [{{ url = "https://gitlab.example.com/files/internal-1.0.0-py3-none-any.whl", hash = "{hash}" }}]
+
+[[package]]
+name = "localwheel"
+version = "1.0.0"
+source = {{ path = "wheels/localwheel-1.0.0-py3-none-any.whl" }}
+wheels = [{{ filename = "localwheel-1.0.0-py3-none-any.whl", hash = "{hash}" }}]
+
+[[package]]
+name = "localsdist"
+version = "1.0.0"
+source = {{ path = "dist/localsdist-1.0.0.tar.gz" }}
+sdist = {{ hash = "{hash}" }}
+
+[[package]]
+name = "findlinks"
+version = "1.0.0"
+source = {{ registry = "wheels" }}
+wheels = [{{ path = "findlinks-1.0.0-py3-none-any.whl", hash = "{hash}" }}]
+"#
+        ))
+        .unwrap();
+        assert_eq!(
+            packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.files.len()))
+                .collect::<Vec<_>>(),
+            [
+                ("six", 1),
+                ("internal", 1),
+                ("localwheel", 0),
+                ("localsdist", 0),
+                ("findlinks", 0)
+            ]
+        );
+        let selected = uv_lock_manifest(
+            &packages,
+            &[],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|package| package.name.as_str())
+                .collect::<Vec<_>>(),
+            ["internal", "six"]
+        );
+        use crate::kernel::policy::{REQUIREMENT_SKIPPED, UNATTESTED_INDEX};
+        let local = "uv lock package is a local or VCS source, not a locked registry artifact";
+        assert_eq!(
+            drained_records(),
+            [
+                record(
+                    REQUIREMENT_SKIPPED,
+                    "findlinks",
+                    "uv lock package is from a find-links directory on disk, not a locked \
+                     registry artifact"
+                ),
+                record(
+                    UNATTESTED_INDEX,
+                    "internal",
+                    "uv lock package names a non-public registry source"
+                ),
+                record(REQUIREMENT_SKIPPED, "localsdist", local),
+                record(REQUIREMENT_SKIPPED, "localwheel", local),
+            ]
+        );
+        // The project itself is found by key and value, and a source uv
+        // never writes is refused rather than guessed at.
+        assert!(uv::is_uv_project_root("{ editable = \".\" }"));
+        assert!(uv::is_uv_project_root("{ virtual = \".\" }"));
+        assert!(!uv::is_uv_project_root("{ editable = \"packages/a\" }"));
+        assert!(!uv::is_uv_project_root(&format!(
+            "{{ registry = \"{gitlab}\" }}"
+        )));
+        let error = parse_uv_lock(
+            "[[package]]\nname = \"odd\"\nversion = \"1\"\nsource = { mirror = \"x\" }\n",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("uv.lock odd has a source ward does not know"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn setup_cfg_multiline_and_comments() {
         let cfg = pyselect::parse_setup_cfg(
@@ -1477,8 +1647,6 @@ files = []
         )
         .unwrap();
         fs::write(dir.0.join("requirements.lock.txt"), "six==1.17.0\n").unwrap();
-        fs::create_dir_all(dir.0.join(".greyward")).unwrap();
-        fs::write(dir.0.join(".greyward/lock-source.hash"), "stale\n").unwrap();
 
         let manifest = discover(
             Platform::X86_64UnknownLinuxGnu,
@@ -2522,6 +2690,139 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
         assert!(!is_trivial_setup_py(
             "from setuptools import setup as s\ns(install_requires=['six'])\n"
         ));
+    }
+
+    fn discover_in(dir: &Path) -> io::Result<Manifest> {
+        discover(
+            Platform::X86_64UnknownLinuxGnu,
+            &ProjectRoot::open(dir).unwrap(),
+            crate::tailors::python::pyselect::DEFAULT_VERSION,
+        )
+    }
+
+    /// setuptools prefers the `install_requires` passed to `setup()` over
+    /// setup.cfg's (setuptools 84 `egg_info` writes `requests` here), so a
+    /// setup.py that may pass one is probed; the plain `setup()` shim leaves
+    /// setup.cfg authoritative (#690).
+    #[test]
+    fn setup_py_install_requires_wins_over_setup_cfg() {
+        let dir = temp_project("setupcfg-precedence");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = six\n",
+        )
+        .unwrap();
+        for setup_py in [
+            "from setuptools import setup\nsetup(install_requires=[\"requests\"])\n",
+            "from setuptools import setup\nsetup(**{\"install_requires\": [\"requests\"]})\n",
+            "from setuptools import setup\nfrom meta import kwargs\nsetup(**kwargs)\n",
+        ] {
+            fs::write(dir.0.join("setup.py"), setup_py).unwrap();
+            let manifest = discover_in(&dir.0).unwrap();
+            assert_eq!(manifest.input, "setup.py", "{setup_py}");
+            assert!(manifest.requires_setup(), "{setup_py}");
+        }
+        fs::write(
+            dir.0.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        assert_eq!(manifest.input, "setup.cfg");
+        assert_eq!(manifest.requirements, ["six"]);
+    }
+
+    /// The dashed spellings setuptools accepts are dependencies too, so the
+    /// environment is not built empty (#690).
+    #[test]
+    fn dashed_setup_cfg_keys_are_dependencies() {
+        let dir = temp_project("setupcfg-dashes");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall-requires =\n    six\n",
+        )
+        .unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        assert_eq!(manifest.input, "setup.cfg");
+        assert_eq!(manifest.requirements, ["six"]);
+    }
+
+    /// `install_requires = file: ...` (setuptools 62.6+) reads each named
+    /// file in the project as requirement lines; a missing file adds
+    /// nothing, as in setuptools; a file outside the project and a pip
+    /// option inside one are refused (#690).
+    #[test]
+    fn setup_cfg_file_directive_reads_the_named_requirements() {
+        let dir = temp_project("setupcfg-file");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = file: reqs.txt, absent.txt\n\
+             [options.extras_require]\nfast = file: fast.txt\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("reqs.txt"), "six\n# a comment\n\n  idna>=3  \n").unwrap();
+        fs::write(dir.0.join("fast.txt"), "uvloop\n").unwrap();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        // The extra is read from its file too, and left out: not requested.
+        assert_eq!(manifest.requirements, ["six", "idna>=3"]);
+        let root = ProjectRoot::open(&dir.0).unwrap();
+        assert_eq!(
+            setup_cfg_file_inputs(&root).unwrap(),
+            [
+                PathBuf::from("reqs.txt"),
+                "absent.txt".into(),
+                "fast.txt".into()
+            ]
+        );
+        assert!(crate::tailors::python::resolve::resolution_inputs(&root)
+            .unwrap()
+            .contains(&PathBuf::from("reqs.txt")));
+
+        fs::write(dir.0.join("reqs.txt"), "-r other.txt\n").unwrap();
+        let error = discover_in(&dir.0).unwrap_err().to_string();
+        assert!(error.contains("`-r other.txt` is a pip option"), "{error}");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = file: ../shared.txt\n",
+        )
+        .unwrap();
+        let error = discover_in(&dir.0).unwrap_err().to_string();
+        assert!(
+            error.contains("file: ../shared.txt names a file outside the project"),
+            "{error}"
+        );
+    }
+
+    /// setuptools splits the whole `file:` value on commas, its
+    /// continuation lines included, so a directive that carries on after a
+    /// trailing comma names every file on every line.
+    #[test]
+    fn a_setup_cfg_file_directive_continues_across_lines() {
+        let dir = temp_project("setupcfg-file-multiline");
+        fs::write(
+            dir.0.join("setup.cfg"),
+            "[options]\ninstall_requires = file: base.txt,\n    extra.txt\n\
+             [options.extras_require]\nfast = file: fast.txt,\n    more.txt\n",
+        )
+        .unwrap();
+        fs::write(dir.0.join("base.txt"), "six\n").unwrap();
+        fs::write(dir.0.join("extra.txt"), "idna>=3\n").unwrap();
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let manifest = discover_in(&dir.0).unwrap();
+        assert_eq!(manifest.requirements, ["six", "idna>=3"]);
+        let root = ProjectRoot::open(&dir.0).unwrap();
+        assert_eq!(
+            setup_cfg_file_inputs(&root).unwrap(),
+            [
+                PathBuf::from("base.txt"),
+                "extra.txt".into(),
+                "fast.txt".into(),
+                "more.txt".into()
+            ]
+        );
     }
 
     #[test]

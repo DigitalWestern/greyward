@@ -170,7 +170,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   newer Greyward, or whose marker is damaged or unreadable, is refused by every command that
   reads or writes the store. `ward store path` and `ward doctor` still report on it, and
   `ward gc --reset` empties it (the download cache is kept), after which every project
-  syncs again. Nothing carries old objects across a format change.
+  syncs again. Nothing carries old objects across a format change. A directory with
+  no marker and nothing a ward stores is not a store: it is refused, never reset, and
+  a store is created only in an empty directory.
 - **Unpinned host build inputs.** The Linux host C toolchain (gcc, binutils, glibc headers)
   and the macOS Xcode/clang/SDK are not in build identity — two hosts can produce different
   "identical" objects. The Linux OTP artifact needs glibc 2.43 and host `libcrypto.so.3`.

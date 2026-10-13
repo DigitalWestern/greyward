@@ -477,7 +477,10 @@ pub use super::cargo_settings::{
 };
 
 /// [`refuse_unneutralized_settings`] for cargo's configuration in each of
-/// `dirs`, every file read through `bound` ([`config_files`]).
+/// `dirs`, every file read through `bound` ([`config_files`]). The door
+/// itself reads the files once and records what they reach as well
+/// (`run_cargo_with`); the tests judge them through this.
+#[cfg(test)]
 pub fn refuse_project_config<'a>(
     dirs: impl IntoIterator<Item = &'a Path>,
     bound: &Bound,

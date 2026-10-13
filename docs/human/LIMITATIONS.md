@@ -491,10 +491,14 @@ Selection covers every patch of each maintained CPython minor that python-build-
   project that no pattern matches is not recorded.
 - **Workspace links are checked when they are planted, not afterwards.** A `node_modules`
   link to a workspace package is planted to the target's symlink-free path, resolved through
-  the held project descriptor, and opened through itself once planted: a directory on the
-  way that a concurrent writer swapped for a symlink out of the project is caught, and the
-  link is removed and the sync refused. A link whose target no longer exists once planted is
-  removed and refused the same way. Edits the project's owner makes to their own tree
+  the held project descriptor. Once planted, the target is opened again from that
+  descriptor with `openat2` (`RESOLVE_BENEATH`, so a symlink on the way that leads out of
+  the project fails the open), the link is opened through itself, and both must be the same
+  directory: a directory on the way that a concurrent writer swapped for a symlink out of
+  the project, before the check or during it, is caught, and the link is removed and the
+  sync refused. A link whose target no longer exists once planted is removed and refused the
+  same way. On a Linux kernel older than 5.6 (no `openat2`) and on macOS, the link is judged
+  by opening it through itself alone, which a swap during the check can pass. Edits the project's owner makes to their own tree
   after the sync (replacing a member directory with a symlink elsewhere) are outside
   Greyward's guarantee: the link points at the project's own source, which its owner
   controls, and the next sync checks it again.

@@ -212,13 +212,19 @@ its descriptor) on the root's `workspaces` list, and its answer is the
 member set every npm check uses (lock freshness, the resolution record's
 inputs, which root a member's edit writes to). Its answer is `[name,
 directory]` pairs written to a file, or a fixed error code; npm's own
-output is discarded, so no text from a file it read is relayed. It runs
+output is discarded. The answer is untrusted: ward reads each member's
+`package.json` itself beneath the held project and the member's own
+directory (`ProjectRoot::read_member_manifest`), names the member from those
+bytes, and refuses if npm's name differs. Every failure is one fixed message
+holding only the project and its declared patterns; the reason is shown only
+with `GREYWARD_DEBUG_NPM_MEMBERS`, since it can quote a host file. It runs
 again for each of them, and an answer that changes within one command
 (names, directories or order) refuses it. A lock is fresh only if it links
 each member as `node_modules/<name>` to its directory. A planted workspace
 link registers a check with `comforter::publication`, which the closure
-writer runs right before publishing: the link must still reach, inside the
-held project, the directory it reached when planted. Before planning, `plan` and `sync`
+writer runs as the last step before the store registers the root and signs
+the closure, after the resolution join: one `openat2` beneath the held
+project must still reach the directory recorded when the link was planted. Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's, `peerDependencies` included), the

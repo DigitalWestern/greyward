@@ -95,8 +95,10 @@ deny = [
 # Deliberately NOT denied. These kinds are recorded so the audit can count
 # them, but they are not security findings:
 #
-#   file-collision                   two wheels shipped the same path; the
-#                                    later one won. Both are locked and
+#   file-collision                   two wheels shipped the same path (the
+#                                    later one won), or two Node packages
+#                                    claimed one bin name in a node_modules
+#                                    (the first kept it). Both are locked and
 #                                    hash-verified; this is a packaging
 #                                    hygiene issue, not a provenance gap.
 #   foreign-platform-package         a required package whose os/cpu/libc

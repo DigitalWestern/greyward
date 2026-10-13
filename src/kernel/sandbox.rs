@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 
 mod held;
 pub(crate) use held::pass_fds;
-use held::{HeldRoots, ARGS_FD};
+use held::{args_file, HeldRoots, ARGS_FD};
 
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
@@ -739,37 +739,6 @@ struct BwrapInvocation {
     _held: HeldRoots,
     /// The options bubblewrap reads at `ARGS_FD`, open until it runs.
     _options: Option<fs::File>,
-}
-
-/// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
-/// anonymous file read from its start.
-#[cfg(target_os = "linux")]
-fn args_file(args: &[OsString]) -> io::Result<fs::File> {
-    use std::io::{Seek as _, Write as _};
-    use std::os::unix::ffi::OsStrExt as _;
-    // SAFETY: memfd_create reads only the NUL-terminated name.
-    let fd = unsafe { libc::memfd_create(c"greyward-bwrap-args".as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `fd` was just created and nothing else owns it.
-    let mut file = unsafe { <fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
-    let mut data = Vec::new();
-    for arg in args {
-        data.extend_from_slice(arg.as_bytes());
-        data.push(0);
-    }
-    file.write_all(&data)?;
-    file.rewind()?;
-    Ok(file)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn args_file(_: &[OsString]) -> io::Result<fs::File> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "bubblewrap runs only on Linux",
-    ))
 }
 
 /// Longest stderr prefix retained for sandbox setup classification; bwrap's own

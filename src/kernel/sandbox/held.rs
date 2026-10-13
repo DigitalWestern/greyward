@@ -202,3 +202,34 @@ pub(crate) fn pass_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
         });
     }
 }
+
+/// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
+/// anonymous file read from its start.
+#[cfg(target_os = "linux")]
+pub(super) fn args_file(args: &[std::ffi::OsString]) -> io::Result<fs::File> {
+    use std::io::{Seek as _, Write as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: memfd_create reads only the NUL-terminated name.
+    let fd = unsafe { libc::memfd_create(c"greyward-bwrap-args".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just created and nothing else owns it.
+    let mut file = unsafe { <fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    let mut data = Vec::new();
+    for arg in args {
+        data.extend_from_slice(arg.as_bytes());
+        data.push(0);
+    }
+    file.write_all(&data)?;
+    file.rewind()?;
+    Ok(file)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn args_file(_: &[std::ffi::OsString]) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "bubblewrap runs only on Linux",
+    ))
+}

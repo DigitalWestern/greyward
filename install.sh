@@ -199,6 +199,28 @@ run_version() {
     fi
 }
 probe_version() { run_version "$1" || true; }
+# version_of <path>: its --version output, every byte, in version_out (a
+# command substitution alone drops trailing newlines, so a sentinel byte
+# keeps them), and its exit status. Then, when that output is exactly one
+# version line and its newline, the line in version_seen; else it is empty.
+NL='
+'
+version_of() {
+    version_out="$(
+        run_version "$1"
+        _vo_status=$?
+        printf x
+        exit "$_vo_status"
+    )" && _vo_status=0 || _vo_status=$?
+    version_out="${version_out%x}"
+    version_seen=""
+    case "$version_out" in
+        *"$NL") version_line "${version_out%"$NL"}" && version_seen="${version_out%"$NL"}" ;;
+    esac
+    return "$_vo_status"
+}
+# The first line of version_out, at most 80 bytes, for a message.
+version_shown() { printf '%s\n' "$version_out" | head -n 1 | cut -c 1-80; }
 
 # >>> semver (tests/install.sh reads this block out of the script)
 # SemVer 2.0 precedence of version $1 against version $2: prints -1, 0 or 1,
@@ -596,10 +618,12 @@ probed=""
 if [ -x "$INSTALL_DIR/ward" ]; then
     existing=1
     # A --version that fails or times out tells nothing, like no output.
-    probed="$(run_version "$INSTALL_DIR/ward")" || probed=""
-    # Only one exact version line is read: two lines, or anything after
-    # the version, is no version at all.
-    if version_line "$probed"; then previous="$probed"; fi
+    # Only one exact version line and its newline is read: a second line,
+    # a blank one, or anything after the version is no version at all.
+    if version_of "$INSTALL_DIR/ward"; then
+        probed="$version_out"
+        previous="$version_seen"
+    fi
 fi
 # `ward 0.3.0 (abc1234 2026-10-13)`: the version is the second word.
 previous_version="${previous#ward }"
@@ -615,9 +639,8 @@ if [ "$existing" = 1 ]; then
         order=bad
         if [ -n "$probed" ]; then
             # At most 80 bytes of its first line: it may print anything.
-            seen="its '--version' printed '$(printf '%s\n' "$probed" | head -n 1 | cut -c 1-80)'"
-            case "$probed" in *"
-"*) seen="$seen and more lines" ;; esac
+            seen="its '--version' printed '$(version_shown)'"
+            case "${probed%"$NL"}" in *"$NL"*) seen="$seen and more lines" ;; esac
         else
             seen="its '--version' printed nothing, failed or timed out"
         fi
@@ -647,14 +670,15 @@ trap 'rm -rf "$tmp"; rm -f "$staged"' EXIT
 trap 'rm -rf "$tmp"; rm -f "$staged"; exit 1' INT TERM
 cp "$tmp/ward" "$staged" || fail "cannot write to $INSTALL_DIR"
 chmod 755 "$staged"
-installed="$(run_version "$staged")" \
+version_of "$staged" \
     || fail "the downloaded ward does not run on this machine ('--version' failed); $INSTALL_DIR/ward is untouched"
-# Exactly `ward <version>`, optionally followed by ` (<commit> <date>)`, and
-# the version is the tag's: a release whose archive is another release's
-# binary is refused, the way `ward update --self` refuses it.
+# The same one version line the installed ward is held to, and the version
+# is the tag's: a release whose archive is another release's binary is
+# refused, the way `ward update --self` refuses it.
+installed="$version_seen"
 case "$installed" in
     "ward $want" | "ward $want ("*")") ;;
-    *) fail "the downloaded ward says '$installed', not ward $want; the release's asset does not match its tag $tag, and $INSTALL_DIR/ward is untouched" ;;
+    *) fail "the downloaded ward says '$(version_shown)', not the one line 'ward $want'; the release's asset does not match its tag $tag, and $INSTALL_DIR/ward is untouched" ;;
 esac
 mv -f "$staged" "$INSTALL_DIR/ward" || fail "cannot replace $INSTALL_DIR/ward"
 if [ -z "$previous" ] && [ "$existing" = 1 ]; then

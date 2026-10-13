@@ -463,7 +463,113 @@ out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$GREYWARD_DOWNLOAD_BASE/$asset.sha256"
 check "says it is not a release tag"      grep -Fq "not a release tag" <<<"$out"
 check "downloaded nothing without a tag"  absent 'downloading' "$out"
 
-echo "== 26. release-sign.sh signs only what the tag's own commit built"
+echo "== 26. versions compare by SemVer 2.0 precedence"
+# install.sh's own function, read out of the script under test.
+eval "$(sed -n '/^semver_cmp() {/,/^}/p' "$ROOT/install.sh")"
+if ! command -v semver_cmp >/dev/null 2>&1; then
+    bad "install.sh defines semver_cmp"
+else
+    ascending="0.3.0-alpha 0.3.0-alpha.1 0.3.0-alpha.beta 0.3.0-beta 0.3.0-beta.2 0.3.0-beta.11 0.3.0-rc.1 0.3.0-rc.9 0.3.0-rc.10 0.3.0 0.3.1 0.10.0 1.0.0"
+    set -- $ascending
+    while [ "$#" -ge 2 ]; do
+        check "$1 < $2" test "$(semver_cmp "$1" "$2")" = -1
+        check "$2 > $1" test "$(semver_cmp "$2" "$1")" = 1
+        shift
+    done
+    check "a version equals itself"            test "$(semver_cmp 0.3.0-rc.10 0.3.0-rc.10)" = 0
+    check "build metadata is ignored"          test "$(semver_cmp 0.3.1+build.7 0.3.1)" = 0
+    check "build metadata on a pre-release"    test "$(semver_cmp 0.3.1-rc.2+b.1 0.3.1-rc.10)" = -1
+    check "a v prefix is ignored"              test "$(semver_cmp v0.3.1 0.3.1)" = 0
+    check "a v prefix with metadata"           test "$(semver_cmp 0.2.0 v0.3.1+build.7)" = -1
+    for odd in banana 1.2 1.2.3.4 01.2.3 1.2.3- 1.2.3-a..b 1.2.3-01 "" "1.2.3 x"; do
+        check "'$odd' is no version"           test "$(semver_cmp 0.2.0 "$odd")" = bad
+    done
+fi
+# A newer installed ward, its version line spelled the ways the guard must
+# read: with build metadata, and with a v. The metadata one shares the
+# tested release's major and minor, so its patch field is what decides.
+core="${TEST_VERSION%%-*}"
+next_patch="${core%.*}.$(( ${core##*.} + 1 ))+build.7"
+for line in "ward $next_patch (abc1234 2026-12-01)" "ward v99.0.0"; do
+    H="$WORK/h-semver-$(printf '%s' "$line" | tr -c 'A-Za-z0-9' _)"
+    mkdir -p "$H/.local/bin"
+    printf '#!/bin/sh\necho "%s"\n' "$line" > "$H/.local/bin/ward"
+    chmod 755 "$H/.local/bin/ward"
+    out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
+        && bad "latest replaced '$line'" || ok "latest left '$line' alone"
+    check "it is untouched: $line"         test "$("$H/.local/bin/ward" --version)" = "$line"
+    check "says it is newer: $line"        grep -Fq "newer than the latest release" <<<"$out"
+done
+# Unreadable: latest cannot tell it is older, so it fails closed.
+H="$WORK/h-unparseable"
+mkdir -p "$H/.local/bin"
+printf '#!/bin/sh\necho "ward banana"\n' > "$H/.local/bin/ward"
+chmod 755 "$H/.local/bin/ward"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" 2>&1)" \
+    && bad "latest replaced an unreadable version" || ok "latest left an unreadable version alone"
+check "says it cannot tell"                grep -Fq "cannot tell whether" <<<"$out"
+check "the unreadable ward is untouched"   test "$("$H/.local/bin/ward" --version)" = "ward banana"
+out="$(run_installer "$H" /bin/bash "$H/.local/bin:$BASE_PATH" "--version=$TEST_TAG" 2>&1)" \
+    || { echo "$out"; bad "a named version did not replace an unreadable one"; }
+check "a named version replaces it"        sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
+
+echo "== 27. latest is resolved with wget too, from GNU's and busybox's output"
+# A PATH with wget and no curl. The stand-in wget replays the stderr each
+# wget prints for `-S --spider` on GitHub's releases/latest, and fetches
+# anything else with the real curl.
+NOCURL="$WORK/no-curl"
+mkdir -p "$NOCURL"
+for tool in /usr/bin/* /bin/*; do
+    name="${tool##*/}"
+    case "$name" in curl | wget) continue ;; esac
+    [ -e "$NOCURL/$name" ] || ln -s "$tool" "$NOCURL/$name"
+done
+REAL_CURL="$(command -v curl)"
+{
+    printf '#!/bin/sh\n'
+    printf 'case " $* " in *" --spider "*) cat %s >&2; exit 0 ;; esac\n' "'$WORK/wget-spider.txt'"
+    printf 'out=""; prev=""; url=""\n'
+    printf 'for a in "$@"; do [ "$prev" = -O ] && out="$a"; url="$a"; prev="$a"; done\n'
+    printf 'exec %s -fsSL -o "$out" "$url"\n' "'$REAL_CURL'"
+} > "$NOCURL/wget"
+chmod 755 "$NOCURL/wget"
+gh_latest="https://github.com/DigitalWestern/greyward/releases/latest"
+gh_tag="https://github.com/DigitalWestern/greyward/releases/tag/$TEST_TAG"
+# GNU wget: the server's header, then its own `Location: ... [following]`.
+printf '%s\n' \
+    "Spider mode enabled. Check if remote file exists." \
+    "--2026-10-13 10:00:00--  $gh_latest" \
+    "Resolving github.com (github.com)... 140.82.112.3" \
+    "Connecting to github.com (github.com)|140.82.112.3|:443... connected." \
+    "HTTP request sent, awaiting response... " \
+    "  HTTP/1.1 302 Found" \
+    "  Server: github.com" \
+    "  Location: $gh_tag" \
+    "Location: $gh_tag [following]" \
+    "Spider mode enabled. Check if remote file exists." \
+    "--2026-10-13 10:00:01--  $gh_tag" \
+    "HTTP request sent, awaiting response... " \
+    "  HTTP/1.1 200 OK" \
+    "Remote file exists and could contain further links," \
+    "but recursion is disabled -- not retrieving." > "$WORK/wget-spider.txt"
+H="$WORK/h-wget-gnu"
+out="$(LATEST_TAG_OVERRIDE="" run_installer "$H" /bin/bash "$NOCURL" 2>&1)" \
+    || { echo "$out"; bad "latest with GNU wget failed"; }
+check "GNU wget: latest is the tag"        sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
+# busybox wget: the server's headers only, with a carriage return.
+printf '%s\r\n' \
+    "Connecting to github.com (140.82.112.3:443)" \
+    "  HTTP/1.1 302 Found" \
+    "  Location: $gh_tag" \
+    "Connecting to github.com (140.82.112.3:443)" \
+    "  HTTP/1.1 200 OK" \
+    "remote file exists" > "$WORK/wget-spider.txt"
+H="$WORK/h-wget-busybox"
+out="$(LATEST_TAG_OVERRIDE="" run_installer "$H" /bin/bash "$NOCURL" 2>&1)" \
+    || { echo "$out"; bad "latest with busybox wget failed"; }
+check "busybox wget: latest is the tag"    sh -c "'$H/.local/bin/ward' --version | grep -q '^ward $TEST_VERSION'"
+
+echo "== 28. release-sign.sh signs only what the tag's own commit built"
 # A stand-in for gh: the release's assets in a directory, and an attestation
 # that records the ref and commit the archive was built from. Like gh, it
 # checks --source-ref and --source-digest only when they are passed.

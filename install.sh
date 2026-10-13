@@ -33,8 +33,9 @@
 # (RELEASE_PUBLIC_KEY), checked with openssl 3.0 or newer, and the new binary
 # must run here before it replaces the old one: `ward --version` exits 0 and
 # prints exactly the version of the tag being installed. Without --version,
-# a ward newer than the latest release is left alone; naming an older
-# version installs it, and says it is a downgrade.
+# a ward newer than the latest release (SemVer 2.0 precedence), or one whose
+# version cannot be read, is left alone; naming an older version installs
+# it, and says it is a downgrade.
 #
 # A script cannot change the PATH of the shell that piped it in. The last
 # line it prints is the one command that finishes the job for the current
@@ -198,23 +199,61 @@ run_version() {
 }
 probe_version() { run_version "$1" || true; }
 
-# Exit 0 when version $1 is older than version $2 (`0.2.0`, `0.3.0-rc.1`):
-# numeric major.minor.patch first, then a pre-release below its release.
-version_older() {
-    _vo_a="${1%%-*}"; _vo_b="${2%%-*}"
-    for _vo_i in 1 2 3; do
-        _vo_x="$(printf '%s' "$_vo_a" | cut -d. -f"$_vo_i")"
-        _vo_y="$(printf '%s' "$_vo_b" | cut -d. -f"$_vo_i")"
-        _vo_x="${_vo_x:-0}"; _vo_y="${_vo_y:-0}"
-        case "$_vo_x$_vo_y" in *[!0-9]*) return 1 ;; esac
-        [ "$_vo_x" -lt "$_vo_y" ] && return 0
-        [ "$_vo_x" -gt "$_vo_y" ] && return 1
-    done
-    case "$1/$2" in
-        *-*/*-*) [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | head -1)" = "$1" ] ;;
-        *-*/*) return 0 ;;
-        *) return 1 ;;
-    esac
+# SemVer 2.0 precedence of version $1 against version $2: prints -1, 0 or 1,
+# or `bad` when either is not a version. A leading `v` and build metadata
+# (`+build.7`, which precedence ignores) are dropped first. Then
+# major.minor.patch compare as numbers, a release sorts above its
+# pre-releases, and pre-release identifiers compare dot by dot: numbers as
+# numbers, a number below a word, words in ASCII order, and a shorter list
+# below a longer one it is a prefix of. So 0.3.0-alpha < 0.3.0-alpha.1 <
+# 0.3.0-alpha.beta < 0.3.0-beta < 0.3.0-rc.9 < 0.3.0-rc.10 < 0.3.0.
+semver_cmp() {
+    LC_ALL=C awk -v a="$1" -v b="$2" '
+        function norm(v) { sub(/^v/, "", v); sub(/\+.*$/, "", v); return v }
+        function isnum(s) { return s ~ /^[0-9]+$/ }
+        # Fills core[1..3] and pre[1..pre[0]]; 0 when v is no version.
+        function parse(v, core, pre,    i, c, p, n, k) {
+            i = index(v, "-")
+            if (i) { c = substr(v, 1, i - 1); p = substr(v, i + 1) } else { c = v; p = "" }
+            if (c !~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) return 0
+            split(c, core, ".")
+            n = 0
+            if (i) {
+                if (p !~ /^[0-9A-Za-z.-]+$/ || p ~ /^\./ || p ~ /\.$/ || p ~ /\.\./) return 0
+                n = split(p, pre, ".")
+                for (k = 1; k <= n; k++) if (pre[k] ~ /^0[0-9]+$/) return 0
+            }
+            pre[0] = n
+            return 1
+        }
+        function cmpid(x, y) {
+            if (isnum(x) && isnum(y)) {
+                if (x + 0 < y + 0) return -1
+                return (x + 0 > y + 0) ? 1 : 0
+            }
+            if (isnum(x)) return -1
+            if (isnum(y)) return 1
+            if (x < y) return -1
+            return (x > y) ? 1 : 0
+        }
+        function order(    k, c) {
+            if (!parse(norm(a), ca, pa) || !parse(norm(b), cb, pb)) return "bad"
+            for (k = 1; k <= 3; k++) {
+                if (ca[k] + 0 < cb[k] + 0) return -1
+                if (ca[k] + 0 > cb[k] + 0) return 1
+            }
+            if (pa[0] == 0 || pb[0] == 0) {
+                if (pa[0] == pb[0]) return 0
+                return (pa[0] == 0) ? 1 : -1
+            }
+            for (k = 1; k <= pa[0] && k <= pb[0]; k++) {
+                c = cmpid(pa[k], pb[k])
+                if (c != 0) return c
+            }
+            if (pa[0] < pb[0]) return -1
+            return (pa[0] > pb[0]) ? 1 : 0
+        }
+        BEGIN { r = order(); print r }'
 }
 
 # --- uninstall --------------------------------------------------------------
@@ -393,7 +432,11 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q -O "$2" "$1"; }
     final_url() {
-        _fu_to="$(wget -S --spider -O /dev/null "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' | tail -1 | tr -d '\r')" \
+        # The first Location header the server sent. GNU wget echoes it as
+        # `Location: <url> [following]` too, and busybox wget sends only the
+        # header; either way the first one is the server's.
+        _fu_to="$(wget -S --spider -O /dev/null "$1" 2>&1 | sed -n 's/^ *[Ll]ocation: *//p' \
+            | head -n 1 | tr -d '\r' | sed 's/ \[following\]$//')" \
             || return 1
         printf '%s' "${_fu_to:-$1}"
     }
@@ -505,10 +548,21 @@ fi
 # `ward 0.3.0 (abc1234 2026-10-13)`: the version is the second word.
 previous_version="$(printf '%s\n' "$previous" | sed -n '1s/^ward \([^ ]*\).*$/\1/p')"
 downgrade=0
-if [ -n "$previous_version" ] && version_older "$want" "$previous_version"; then
-    [ "$named" = 1 ] || fail "$INSTALL_DIR/ward is $previous, newer than the latest release ($tag); it is untouched.
+if [ -n "$previous" ]; then
+    order="$(semver_cmp "$want" "$previous_version")"
+    case "$order" in
+        -1)
+            [ "$named" = 1 ] || fail "$INSTALL_DIR/ward is $previous, newer than the latest release ($tag); it is untouched.
   To install the older release anyway, name it:  --version=$tag"
-    downgrade=1
+            downgrade=1
+            ;;
+        0 | 1) ;;
+        *)
+            # Unreadable, so it might be newer: latest leaves it alone.
+            [ "$named" = 1 ] || fail "cannot tell whether $INSTALL_DIR/ward ('$previous') is older than the latest release ($tag): one of the two is no SemVer version. It is untouched.
+  To replace it anyway, name the release:  --version=$tag"
+            ;;
+    esac
 fi
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
 # Copy to a sibling, run it there, and only then rename it over the old

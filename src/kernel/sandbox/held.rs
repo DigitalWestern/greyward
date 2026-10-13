@@ -33,6 +33,9 @@ pub(super) struct HeldRoot {
 /// closes them reads one digit, so at most seven are passed.
 const HELD_FD_FIRST: RawFd = 3;
 const HELD_FD_LAST: RawFd = 9;
+/// Where bubblewrap reads ward's own arguments from (`--args`), past
+/// every held root's descriptor. bubblewrap closes it once read.
+pub(super) const ARGS_FD: RawFd = HELD_FD_LAST + 1;
 
 impl HeldRoots {
     pub(super) fn resolve(sandbox: &Sandbox<'_>, cwd: &Path) -> io::Result<Self> {

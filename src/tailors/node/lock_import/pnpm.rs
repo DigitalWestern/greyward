@@ -970,7 +970,7 @@ pub fn plan_pnpm(
     project: &ProjectRoot,
     node_version: &str,
 ) -> io::Result<NpmPlan> {
-    let record = &mut crate::kernel::policy::record;
+    let record = &mut crate::kernel::policy::record_plan_time;
     plan_pnpm_with_recorder(platform, lock_yaml, project, node_version, record)
 }
 
@@ -1092,7 +1092,7 @@ pub(super) fn plan_pnpm_with_policy(
     policy: &crate::kernel::policy::Policy,
 ) -> io::Result<NpmPlan> {
     let mut record = |kind: &str, subject: &str, detail: &str| {
-        crate::kernel::policy::record_with(policy, kind, subject, detail)
+        crate::kernel::policy::record_plan_time_with(policy, kind, subject, detail)
     };
     plan_pnpm_with_recorder(platform, lock_yaml, project, node_version, &mut record)
 }

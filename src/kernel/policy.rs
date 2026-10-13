@@ -4,7 +4,6 @@
 
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::signing::{self, KeySet};
-use crate::kernel::store::Store;
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,6 +71,12 @@ pub const RESOLUTION_BUILD: &str = "resolution-build";
 /// files are verified like any other package's; its install scripts are not
 /// run.
 pub const FOREIGN_PLATFORM_PACKAGE: &str = "foreign-platform-package";
+/// A lifecycle script of the project itself or of one of its workspace
+/// members (`preinstall`, `install`, `postinstall`, `prepare`) that npm
+/// would run on install and ward did not. ward runs dependencies' scripts
+/// in the sandbox, but these write the project's own source, which no store
+/// object may hold. The subject is the directory, the detail the script.
+pub const PROJECT_SCRIPT_SKIPPED: &str = "project-script-skipped";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -93,6 +98,28 @@ pub const KINDS: &[&str] = &[
     UNRECORDED_RESOLUTION,
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
+    PROJECT_SCRIPT_SKIPPED,
+];
+
+/// Kinds that describe the project, its lock or its resolution rather than
+/// the bytes of an object built from them. The planner, the resolution join
+/// or the projection records each one again on every sync, warm or cold, so
+/// a store object never carries one: an environment shared by two projects
+/// must not replay one project's lock findings onto the other. Every other
+/// kind recorded while an object is realized is stored with it, so a cache
+/// hit replays it and a stricter policy refuses the object (`object_exceptions`).
+pub const PLAN_TIME_KINDS: &[&str] = &[
+    REQUIREMENT_SKIPPED,
+    WEAK_INTEGRITY,
+    UNATTESTED_MUTABLE_STATE,
+    UNATTESTED_INDEX,
+    LOCK_DISAGREEMENT,
+    STALE_RESOLUTION,
+    UNCONFINED_RESOLUTION,
+    UNRECORDED_RESOLUTION,
+    RESOLUTION_BUILD,
+    FOREIGN_PLATFORM_PACKAGE,
+    PROJECT_SCRIPT_SKIPPED,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on
@@ -274,6 +301,11 @@ struct Frame {
     owner: std::thread::ThreadId,
     ecosystem: String,
     exceptions: Vec<Exception>,
+    /// The members of `exceptions` recorded only through
+    /// [`record_plan_time`]: facts about the project's lock or resolution
+    /// that a sync records again every time, which no object is built
+    /// from, so [`object_exceptions`] leaves them out whatever their kind.
+    plan_time: Vec<Exception>,
     optional_groups_skipped: Vec<OptionalGroupSkipped>,
     claimed: bool,
     published: bool,
@@ -681,136 +713,11 @@ pub(crate) fn machine_policy_path() -> io::Result<PathBuf> {
     Ok(home.join(".greyward/policy.toml"))
 }
 
-/// The values `GREYWARD_STRICT` takes, as its refusal names them.
-pub const STRICT_VALUES: &str = "1, true or yes to refuse every policy exception; 0, false, no \
-or empty for none (any case)";
-
-/// What `GREYWARD_STRICT` asks for: `1`, `true` or `yes` is strict, and
-/// unset, empty, `0`, `false` or `no` is not, in any case and with
-/// surrounding blanks ignored, the set `CI` is read with. Any other value is
-/// an error: a typo in a setting that only ever tightens policy must not
-/// read as permissive (#681).
-pub fn env_strict() -> Result<bool, String> {
-    parse_strict(std::env::var_os("GREYWARD_STRICT").as_deref())
-}
-
-fn parse_strict(value: Option<&std::ffi::OsStr>) -> Result<bool, String> {
-    let Some(value) = value else {
-        return Ok(false);
-    };
-    let text = value.to_string_lossy();
-    let word = text.trim();
-    if word.is_empty()
-        || ["0", "false", "no"]
-            .iter()
-            .any(|v| word.eq_ignore_ascii_case(v))
-    {
-        return Ok(false);
-    }
-    if ["1", "true", "yes"]
-        .iter()
-        .any(|v| word.eq_ignore_ascii_case(v))
-    {
-        return Ok(true);
-    }
-    Err(format!(
-        "GREYWARD_STRICT={text:?} is not a value ward knows: use {STRICT_VALUES}"
-    ))
-}
-
-/// Apply the strictness requested outside the policy files: `GREYWARD_STRICT`
-/// and `--strict` (`cli_strict`). Shared by every loader and by the
-/// fallback in `current`, so a policy is never built without them. A value
-/// `env_strict` refuses counts as strict here: `commands::dispatch` refuses
-/// it before any verb runs, and anything that reads the policy without
-/// passing through there fails closed.
-fn apply_requested_strictness(
-    policy: &mut Policy,
-    sources: &mut Vec<PolicySource>,
-    cli_strict: bool,
-) {
-    let env_strict = env_strict().unwrap_or(true);
-    // A file that already set `strict = true` keeps the attribution: it is
-    // the source that outlives the command, so dropping --strict or
-    // unsetting GREYWARD_STRICT would not lift the refusal and a message that
-    // said so would be wrong. Only when no file asked for strictness is
-    // the flag or the variable the thing to change, flag first because it
-    // is the one on the line the reader just typed.
-    // Between the two, the variable outlives the command as well: with
-    // both set, dropping --strict leaves GREYWARD_STRICT=1 refusing, so the
-    // flag is named only when it is the whole reason.
-    if policy.strict_source.is_none() {
-        if env_strict {
-            policy.strict_source = Some(StrictSource::Env);
-        } else if cli_strict {
-            policy.strict_source = Some(StrictSource::Flag);
-        }
-    }
-    policy.strict |= cli_strict || env_strict;
-    if cli_strict {
-        sources.push(PolicySource {
-            origin: SourceOrigin::Flag,
-            path: None,
-            strict: true,
-            deny: BTreeSet::new(),
-            trusted: None,
-        });
-    }
-    if env_strict {
-        sources.push(PolicySource {
-            origin: SourceOrigin::Env,
-            path: None,
-            strict: true,
-            deny: BTreeSet::new(),
-            trusted: None,
-        });
-    }
-}
-
-thread_local! {
-    static STRICT_SCOPES: std::cell::RefCell<Vec<(u64, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// The command-line strict flag for one dispatch on the creating thread.
-/// Policy loads snapshot it while this guard is held. Nested dispatches
-/// restore their enclosing flag, and workers receive explicit policies.
-///
-/// ```compile_fail
-/// let guard = greyward::kernel::policy::request_strict(true);
-/// std::thread::spawn(move || drop(guard));
-/// ```
-///
-/// ```compile_fail
-/// let guard = greyward::kernel::policy::request_strict(true);
-/// std::thread::scope(|scope| { scope.spawn(|| println!("{guard:?}")); });
-/// ```
-#[must_use = "the strict flag is in force only while its dispatch guard is held"]
-#[derive(Debug)]
-pub struct StrictScope {
-    id: u64,
-    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-impl Drop for StrictScope {
-    fn drop(&mut self) {
-        STRICT_SCOPES.with(|scopes| scopes.borrow_mut().retain(|(id, _)| *id != self.id));
-    }
-}
-
-/// Install `--strict` for this dispatch, including an explicit false flag.
-/// A later dispatch loads its own flag rather than inheriting the first one.
-pub fn request_strict(strict: bool) -> StrictScope {
-    let id = NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
-    STRICT_SCOPES.with(|scopes| scopes.borrow_mut().push((id, strict)));
-    StrictScope {
-        id,
-        _thread_bound: std::marker::PhantomData,
-    }
-}
-
-fn requested_strict() -> bool {
-    STRICT_SCOPES.with(|scopes| scopes.borrow().last().is_some_and(|(_, strict)| *strict))
-}
+mod strict;
+#[cfg(test)]
+use strict::parse_strict;
+use strict::{apply_requested_strictness, requested_strict};
+pub use strict::{env_strict, request_strict, StrictScope, STRICT_VALUES};
 
 /// The policy one operation loaded, in force from `init` until this is
 /// dropped. The operation holds it for as long as it runs (a verb binds it
@@ -952,6 +859,27 @@ pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> 
     record_with_fix(policy, kind, subject, detail, None)
 }
 
+/// [`record`] for a fact the planner or the resolution join finds in the
+/// project's lock, not in bytes being built: an optional git dependency
+/// the plan skips is a `git-dependency` exception of the project, while a
+/// git dependency realized into an environment is one of the object. The
+/// policy judges both alike. Only [`object_exceptions`] tells them apart:
+/// it leaves this one out, since every sync records it again from the lock
+/// and an object shared with another project must not carry it there.
+pub fn record_plan_time(kind: &str, subject: &str, detail: &str) -> io::Result<()> {
+    record_plan_time_with(&current(), kind, subject, detail)
+}
+
+/// [`record_plan_time`] under `policy`.
+pub fn record_plan_time_with(
+    policy: &Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+) -> io::Result<()> {
+    record_into(policy, kind, subject, detail, None, true)
+}
+
 /// `record_with`, with the kind's own way out in place of the generic one
 /// when `policy` refuses it: `fix` replaces the text after the last `;` of
 /// `refusal`. A kind whose refusal has a better remedy than "allow the
@@ -964,6 +892,18 @@ pub fn record_with_fix(
     subject: &str,
     detail: &str,
     fix: Option<&str>,
+) -> io::Result<()> {
+    record_into(policy, kind, subject, detail, fix, false)
+}
+
+/// The one recorder. `plan_time`: recorded through [`record_plan_time`].
+fn record_into(
+    policy: &Policy,
+    kind: &str,
+    subject: &str,
+    detail: &str,
+    fix: Option<&str>,
+    plan_time: bool,
 ) -> io::Result<()> {
     with_frames(|frames| {
         let Some(frame) = frames.last_mut() else {
@@ -1006,6 +946,11 @@ pub fn record_with_fix(
         // the first, and it is said once: each exception in a closure is
         // narrated once, when the frame first holds it.
         if frame.exceptions.contains(&exception) {
+            // The same fact recorded while bytes were built is the
+            // object's as well, whichever came first.
+            if !plan_time {
+                frame.plan_time.retain(|marked| marked != &exception);
+            }
             return Ok(());
         }
         // The record itself is progress: what to do about it depends on
@@ -1015,6 +960,9 @@ pub fn record_with_fix(
             "exception {}: {}: {}",
             exception.kind, exception.subject, exception.detail
         ));
+        if plan_time {
+            frame.plan_time.push(exception.clone());
+        }
         frame.exceptions.push(exception);
         Ok(())
     })
@@ -1128,6 +1076,7 @@ impl Attribution {
                 owner,
                 ecosystem: ecosystem.to_string(),
                 exceptions: Vec::new(),
+                plan_time: Vec::new(),
                 optional_groups_skipped: Vec::new(),
                 claimed: false,
                 published: false,
@@ -1190,6 +1139,7 @@ impl Attribution {
                 owner,
                 ecosystem: ecosystem.to_string(),
                 exceptions: Vec::new(),
+                plan_time: Vec::new(),
                 optional_groups_skipped: Vec::new(),
                 claimed: false,
                 published: false,
@@ -1248,6 +1198,7 @@ impl Attribution {
             frame.claimed = true;
             // `record_with_fix` keeps each exact exception once, so the
             // frame already holds what the closure records.
+            frame.plan_time.clear();
             Ok(std::mem::take(&mut frame.exceptions))
         })
     }
@@ -1362,7 +1313,10 @@ pub(crate) fn drain() -> Vec<Exception> {
     with_frames(|frames| {
         frames
             .last_mut()
-            .map(|frame| std::mem::take(&mut frame.exceptions))
+            .map(|frame| {
+                frame.plan_time.clear();
+                std::mem::take(&mut frame.exceptions)
+            })
             .unwrap_or_default()
     })
 }
@@ -1372,68 +1326,35 @@ pub(crate) fn clear() {
     with_frames(|frames| {
         if let Some(frame) = frames.last_mut() {
             frame.exceptions.clear();
+            frame.plan_time.clear();
         }
     });
 }
 
-/// Exceptions that change the bytes of the object being built.
+/// The exceptions the object being built carries in its metadata: every
+/// kind recorded in the current frame except the plan-time kinds the sync
+/// records again each time (`PLAN_TIME_KINDS`), and except what was
+/// recorded through [`record_plan_time`] alone. A warm sync skips the
+/// realization that recorded the rest, so the stored list is all a cache
+/// hit can judge; a kind left out here would pass a policy that refuses the
+/// same object built cold.
 pub fn object_exceptions() -> Vec<Exception> {
     with_frames(|frames| {
         frames.last().map_or_else(Vec::new, |frame| {
             frame
                 .exceptions
                 .iter()
-                .filter(|e| {
-                    matches!(
-                        e.kind.as_str(),
-                        FILE_COLLISION
-                            | INSTALL_SCRIPT_FAILED
-                            | GIT_DEPENDENCY
-                            | UNATTESTED_CARGO_LOCK
-                            | HOST_BUILD_INPUTS
-                    )
-                })
+                .filter(|e| !PLAN_TIME_KINDS.contains(&canonical_kind(&e.kind)))
+                .filter(|e| !frame.plan_time.contains(e))
                 .cloned()
                 .collect()
         })
     })
 }
 
-/// Refuse a cached object when its recorded exceptions are denied now.
-pub fn check_cached_with_activity(
-    store: &Store,
-    activity: &crate::kernel::activity::StoreActivity,
-    id: &str,
-) -> io::Result<()> {
-    store.require_activity(activity, "cached policy check")?;
-    let exceptions = store.exceptions(id)?;
-    check_exception_set(id, &exceptions)?;
-    for exception in &exceptions {
-        record(&exception.kind, &exception.subject, &exception.detail)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Result<()> {
-    if exceptions.is_empty() {
-        return Ok(());
-    }
-    let denied_kinds: Vec<&str> = exceptions
-        .iter()
-        .filter(|e| denied(&current(), &e.kind))
-        .map(|e| e.kind.as_str())
-        .collect();
-    if denied_kinds.is_empty() {
-        return Ok(());
-    }
-    Err(crate::kernel::error::refused(
-        io::ErrorKind::PermissionDenied,
-        format!(
-            "cached object {id} carries exception(s): {}; 'ward --fresh' will not help; rebuild the object under a permissive policy or fix the cause",
-            denied_kinds.join(", ")
-        ),
-    ))
-}
+mod cached;
+pub(crate) use cached::check_exception_set;
+pub use cached::{check_cached_reusable, check_cached_with_activity, KINDS_NOT_IN_META_2};
 
 /// Tests that read or set `HOME` / `GREYWARD_POLICY` hold this lock: the
 /// environment is process-global, so a test that mutates it would otherwise
@@ -1604,6 +1525,146 @@ deny = ["git-dependency"]"#,
         )
         .unwrap();
         assert!(denied(&denying, HOST_BUILD_INPUTS));
+    }
+
+    /// Every kind is either stored with the object it was recorded beside
+    /// or listed as plan-time, and the choice is made here, by name: a kind
+    /// added to `KINDS` fails this test until it is placed in one list.
+    /// An object kind recorded while bytes are realized is stored, so a warm
+    /// sync that skips the realization learns it from the object alone
+    /// (#670: the three artifact kinds were once dropped at commit, and a
+    /// cache hit passed a policy that refused the cold build). An object
+    /// kind can also be a lock fact (`git-dependency` for an optional git
+    /// dependency the planner skips): that record goes through
+    /// `record_plan_time`, which `a_plan_time_record_is_not_stored_with_the_object`
+    /// covers, and every record below is a realization-time one.
+    #[test]
+    fn every_kind_is_an_object_kind_or_a_plan_time_kind() {
+        const OBJECT_KINDS: &[&str] = &[
+            FILE_COLLISION,
+            INSTALL_SCRIPT_FAILED,
+            GIT_DEPENDENCY,
+            UNATTESTED_CARGO_LOCK,
+            ARTIFACT_NOT_PROVISIONED,
+            ARTIFACT_PROVISIONED,
+            BUILT_FROM_SOURCE,
+            EXTERNAL_TOOLCHAIN,
+            HOST_BUILD_INPUTS,
+        ];
+        for kind in KINDS {
+            let object = OBJECT_KINDS.contains(kind);
+            let plan_time = PLAN_TIME_KINDS.contains(kind);
+            assert!(
+                object != plan_time,
+                "{kind} must be in exactly one of OBJECT_KINDS and PLAN_TIME_KINDS"
+            );
+        }
+        for kind in OBJECT_KINDS.iter().chain(PLAN_TIME_KINDS) {
+            assert!(KINDS.contains(kind), "{kind} is not a known kind");
+        }
+
+        let _guard = exception_guard();
+        let attribution = Attribution::open("node").unwrap();
+        for kind in KINDS {
+            record_with(&Policy::default(), kind, "subject", "d").unwrap();
+        }
+        let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
+        attribution.discard();
+        assert_eq!(stored, OBJECT_KINDS, "{stored:?}");
+
+        // `object-meta/2` stored these five object kinds and no others, so
+        // a `/2` record can lack exactly the rest.
+        const STORED_BY_META_2: &[&str] = &[
+            FILE_COLLISION,
+            INSTALL_SCRIPT_FAILED,
+            GIT_DEPENDENCY,
+            UNATTESTED_CARGO_LOCK,
+            HOST_BUILD_INPUTS,
+        ];
+        let lacking: Vec<&str> = OBJECT_KINDS
+            .iter()
+            .copied()
+            .filter(|kind| !STORED_BY_META_2.contains(kind))
+            .collect();
+        assert_eq!(lacking, KINDS_NOT_IN_META_2);
+    }
+
+    /// The same kind is an object fact or a project fact by where it was
+    /// recorded. A git dependency realized into the environment is stored
+    /// with it. An optional one the planner skipped is not: nothing of it
+    /// is in the object, and another project sharing the object must not
+    /// inherit the exception. Both still reach the closure, and the policy
+    /// refuses both. A realization-time record of a fact first recorded at
+    /// plan time makes it the object's too.
+    /// Every kind recorded while an object is realized is stored with it
+    /// unless it is a plan-time kind: no allow-list a new kind has to join.
+    /// A git fetch's transport record (`host-git-transport`, made inside
+    /// `ensure_git_source` for a source and each submodule) is the case a
+    /// list would drop: a warm sync never fetches again, so only the
+    /// object's record can replay it to a policy that denies it.
+    #[test]
+    fn a_realization_time_record_of_any_kind_is_stored_with_the_object() {
+        let _guard = exception_guard();
+        let permissive = Policy::default();
+        let attribution = Attribution::open("node").unwrap();
+        for kind in KINDS.iter().copied().chain(["host-git-transport"]) {
+            record_with(&permissive, kind, "dep@1.0.0", "fetched").unwrap();
+        }
+        let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
+        let expected: Vec<&str> = KINDS
+            .iter()
+            .copied()
+            .chain(["host-git-transport"])
+            .filter(|kind| !PLAN_TIME_KINDS.contains(kind))
+            .collect();
+        assert_eq!(stored, expected);
+        attribution.discard();
+    }
+
+    #[test]
+    fn a_plan_time_record_is_not_stored_with_the_object() {
+        let _guard = exception_guard();
+        let permissive = Policy::default();
+        let mut attribution = Attribution::open("node").unwrap();
+        record_plan_time_with(
+            &permissive,
+            GIT_DEPENDENCY,
+            "node_modules/skipped",
+            "npm_git_dep: skipped: repo https://example.invalid/s, commit main",
+        )
+        .unwrap();
+        record_with(
+            &permissive,
+            GIT_DEPENDENCY,
+            "realized@1.0.0",
+            "https://example.invalid/r at abc",
+        )
+        .unwrap();
+        let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.subject).collect();
+        assert_eq!(stored, ["realized@1.0.0"]);
+        assert_eq!(pending().len(), 2, "{:?}", pending());
+
+        // A later realization-time record of the plan-time fact.
+        record_with(
+            &permissive,
+            GIT_DEPENDENCY,
+            "node_modules/skipped",
+            "npm_git_dep: skipped: repo https://example.invalid/s, commit main",
+        )
+        .unwrap();
+        assert_eq!(object_exceptions().len(), 2);
+        let claimed = attribution.claim("node").unwrap();
+        assert_eq!(claimed.len(), 2, "{claimed:?}");
+        attribution.discard();
+
+        let denying = Policy {
+            deny: [GIT_DEPENDENCY.to_string()].into(),
+            ..Policy::default()
+        };
+        let attribution = Attribution::open("node").unwrap();
+        let error = record_plan_time_with(&denying, GIT_DEPENDENCY, "s", "d").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        attribution.discard();
     }
 
     #[test]

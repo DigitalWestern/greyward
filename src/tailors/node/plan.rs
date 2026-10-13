@@ -740,7 +740,7 @@ pub fn plan_npm_with(
         platform,
         lock_json,
         node_version,
-        &mut crate::kernel::policy::record,
+        &mut crate::kernel::policy::record_plan_time,
     )
 }
 

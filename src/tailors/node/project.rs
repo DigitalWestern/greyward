@@ -835,7 +835,18 @@ fn node_closure_body(
         "lock_source": plan.lock_source,
         "inputs": inputs,
         "packages": plan.packages.iter().map(|p| {
-            let mut row = serde_json::json!({"path": p.path, "version": p.version, "integrity": p.integrity});
+            // `name` is the package the bytes are (checked against the
+            // tarball's package.json at install), which an npm alias places
+            // under another path; a git package names its repository and
+            // commit, so the SBOM can say where it came from.
+            let mut row = serde_json::json!({
+                "path": p.path, "name": p.name, "version": p.version, "integrity": p.integrity,
+            });
+            if let Some(git) = &p.git {
+                row["git"] = serde_json::json!({
+                    "url": git.url, "commit": git.commit, "subdirectory": git.subdirectory,
+                });
+            }
             // A `file:` directory package names its source, so `ward status`
             // can pack it again and compare.
             if let Some(dir) = super::local_package::source_dir(p) {
@@ -995,6 +1006,7 @@ pub fn project_node_env_recorded(
         inputs,
         basis,
     );
+    super::archives::record_matched_digests(&mut body, &env_obj)?;
     record_unprojected(&mut body, &tracked, &workspaces);
     if let Some(record) = runtime_record {
         crate::comforter::merge_record(&mut body, record);

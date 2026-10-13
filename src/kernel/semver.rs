@@ -699,9 +699,113 @@ fn desugar(term: &Term) -> Option<Vec<Comparator>> {
     })
 }
 
+/// node-semver's `clean(version, { loose: true })`: the spelling
+/// `@npmcli/package-json` gives a package.json `version` when npm reads one
+/// (`fixVersionField`, loose outside strict mode). `None` where node-semver
+/// returns `null`.
+///
+/// Surrounding whitespace and any leading `=`, `v` or whitespace go.
+/// `MAJOR.MINOR.PATCH` may carry leading zeros and is rendered as numbers
+/// (`01.2.3` is `1.2.3`). The `-` before a prerelease is optional. An
+/// all-digit prerelease identifier below `MAX_COMPONENT` is rendered as a
+/// number (`1.2.3-01` is `1.2.3-1`) and any other is kept as written.
+/// Build metadata is dropped.
+pub fn clean_loose(text: &str) -> Option<String> {
+    // JavaScript's `trim` and `\s` include the byte-order mark.
+    let space = |c: char| c.is_whitespace() || c == '\u{feff}';
+    // `clean` trims and strips `[=v]+`; the constructor measures what is
+    // left, in UTF-16 units, then trims again and admits `[v=\s]*`.
+    let text = text.trim_matches(space).trim_start_matches(['=', 'v']);
+    if text.encode_utf16().count() > MAX_LENGTH {
+        return None;
+    }
+    let text = text
+        .trim_matches(space)
+        .trim_start_matches(|c: char| c == '=' || c == 'v' || space(c));
+    // Past `MAX_COMPONENT` node-semver throws, and `clean` is `null`.
+    let component = |digits: &str| -> Option<u64> {
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let value = js_number(digits);
+        (value <= MAX_COMPONENT as f64).then_some(value as u64)
+    };
+    let (rest, build) = match text.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (text, None),
+    };
+    if build.is_some_and(|build| !dotted_identifiers(build)) {
+        return None;
+    }
+    // Each of MAJOR.MINOR.PATCH is `\d+`. PATCH takes every digit it can,
+    // and what follows is the prerelease, with or without its `-`.
+    let mut parts = rest.splitn(3, '.');
+    let major = component(parts.next()?)?;
+    let minor = component(parts.next()?)?;
+    let tail = parts.next()?;
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    let patch = component(&tail[..digits])?;
+    let after = &tail[digits..];
+    let mut version = format!("{major}.{minor}.{patch}");
+    if after.is_empty() {
+        return Some(version);
+    }
+    // `-?` is greedy but gives the `-` back when the rest alone is no
+    // prerelease: `1.2.3-` is prerelease `-`.
+    let prerelease = match after.strip_prefix('-') {
+        Some(rest) if dotted_identifiers(rest) => rest,
+        _ if dotted_identifiers(after) => after,
+        _ => return None,
+    };
+    let rendered: Vec<String> = prerelease
+        .split('.')
+        .map(|id| {
+            if id.bytes().all(|b| b.is_ascii_digit()) {
+                let value = js_number(id);
+                if value < MAX_COMPONENT as f64 {
+                    return (value as u64).to_string();
+                }
+            }
+            id.to_string()
+        })
+        .collect();
+    version.push('-');
+    version.push_str(&rendered.join("."));
+    Some(version)
+}
+
+/// `[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*`: node-semver's loose prerelease
+/// grammar and its build grammar, which admit the same strings.
+fn dotted_identifiers(text: &str) -> bool {
+    text.split('.')
+        .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Generated with node-semver 7.8.5 (the copy npm 11 bundles):
+    /// `JSON.stringify(input)<TAB>JSON.stringify(semver.clean(input, true))`,
+    /// for hand-picked inputs and then 400 seeded random ones built from the
+    /// characters the grammar turns on.
+    const CLEAN_CASES: &str = include_str!("semver_clean_cases.tsv");
+
+    #[test]
+    fn clean_loose_agrees_with_node_semver_case_by_case() {
+        let mut checked = 0;
+        for line in CLEAN_CASES.lines().filter(|line| !line.is_empty()) {
+            let (input, expected) = line.split_once('\t').expect("case line");
+            let input: String = serde_json::from_str(input).unwrap();
+            let expected: Option<String> = serde_json::from_str(expected).unwrap();
+            assert_eq!(clean_loose(&input), expected, "clean({input:?}, true)");
+            checked += 1;
+        }
+        assert!(checked > 40, "{checked}");
+        // The two spellings npm rewrites that ward compared as written.
+        assert_eq!(clean_loose("01.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(clean_loose("1.2.3-01").as_deref(), Some("1.2.3-1"));
+    }
 
     /// Generated with node-semver 7.8.5 (the copy npm 11 bundles):
     /// `range<TAB>version<TAB>satisfies`, or `range<TAB>-<TAB>invalid` for a

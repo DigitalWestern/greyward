@@ -111,7 +111,12 @@ fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
 pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut members: Vec<PathBuf> = Vec::new();
     let mut add = |named: &str, source: &str| -> io::Result<()> {
-        let trimmed = named.trim_start_matches("./").trim_end_matches('/');
+        // Only whole `./` segments go: a dot directory such as `.config`
+        // is a member's own name (#694).
+        let mut trimmed = named.trim_end_matches('/');
+        while let Some(rest) = trimmed.strip_prefix("./") {
+            trimmed = rest.trim_start_matches('/');
+        }
         if trimmed.is_empty() || trimmed == "." {
             return Ok(());
         }
@@ -227,16 +232,43 @@ pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
 /// lock must match. A member that is not a plain path inside the project
 /// is an error.
 pub(crate) fn npm_manifest_members(root: &ProjectRoot) -> io::Result<Vec<String>> {
+    Ok(npm_manifest_membership(root)?.members)
+}
+
+/// Record, as a skipped requirement, each directory npm would take as a
+/// member through a symlink that leads outside the project: ward reads a
+/// member from inside the project only, so it leaves the directory out of
+/// the member set, and the closure says so (#694).
+pub(crate) fn record_members_outside(
+    root: &ProjectRoot,
+    attribution: &crate::kernel::policy::Attribution,
+) -> io::Result<()> {
+    for member in npm_manifest_membership(root)?.outside {
+        attribution.record(
+            crate::kernel::policy::REQUIREMENT_SKIPPED,
+            &member,
+            "workspace member left out: it is a symlink that leads outside the project, \
+             and ward reads workspace members from inside the project only",
+        )?;
+    }
+    Ok(())
+}
+
+fn npm_manifest_membership(root: &ProjectRoot) -> io::Result<workspace_glob::Found> {
     let Some(text) = root.read_input_string(Path::new("package.json"))? else {
-        return Ok(Vec::new());
+        return Ok(workspace_glob::Found {
+            members: Vec::new(),
+            outside: Vec::new(),
+        });
     };
     let package: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
         io::Error::new(io::ErrorKind::InvalidData, format!("package.json: {error}"))
     })?;
     let entries = npm_workspace_entries(&package)?;
     let workspaces = workspace_glob::NpmWorkspaces::new(&entries)?;
+    let found = workspaces.directories(root)?;
     let mut members: Vec<String> = Vec::new();
-    for dir in workspaces.directories(root)? {
+    for dir in found.members {
         if dir.is_empty() || dir == "." || members.contains(&dir) {
             continue;
         }
@@ -258,7 +290,10 @@ pub(crate) fn npm_manifest_members(root: &ProjectRoot) -> io::Result<Vec<String>
         }
     }
     members.sort();
-    Ok(members)
+    Ok(workspace_glob::Found {
+        members,
+        outside: found.outside,
+    })
 }
 
 /// Every `workspaces` entry of a `package.json` as written, `!` patterns
@@ -632,6 +667,67 @@ mod tests {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    /// A member npm would reach through a symlink out of the project is
+    /// left out and recorded; one through a symlink inside it is a member
+    /// (#694).
+    #[test]
+    fn a_member_symlinked_outside_the_project_is_recorded_as_skipped() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::named("node-outside-member");
+        let root = temp.0.join("ws");
+        write(
+            &root,
+            "package.json",
+            r#"{"name":"ws","workspaces":["packages/*"]}"#,
+        );
+        write(&root, "packages/a/package.json", "{}");
+        write(&root, "vendor/lib/package.json", "{}");
+        write(&temp.0, "elsewhere/package.json", "{}");
+        std::os::unix::fs::symlink("../vendor/lib", root.join("packages/lib")).unwrap();
+        std::os::unix::fs::symlink("../../elsewhere", root.join("packages/ext")).unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        assert_eq!(
+            npm_manifest_members(&held).unwrap(),
+            ["packages/a", "packages/lib"]
+        );
+        let attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        record_members_outside(&held, &attribution).unwrap();
+        let recorded: Vec<(String, String)> = attribution
+            .recorded()
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject))
+            .collect();
+        attribution.discard();
+        assert_eq!(
+            recorded,
+            [(
+                crate::kernel::policy::REQUIREMENT_SKIPPED.to_string(),
+                "packages/ext".to_string()
+            )]
+        );
+    }
+
+    /// A dot directory a pattern names is a member under its own name, and
+    /// only a whole leading `./` is taken off a path (#694).
+    #[test]
+    fn a_dot_directory_member_keeps_its_name() {
+        let temp = TempDir::named("node-dot-member");
+        let root = temp.0.join("ws");
+        write(
+            &root,
+            "package.json",
+            r#"{"name":"ws","workspaces":[".config/*","././.tools/x/"]}"#,
+        );
+        write(&root, ".config/a/package.json", "{}");
+        write(&root, ".tools/x/package.json", "{}");
+        write(&root, "config/a/package.json", "{}");
+        let held = ProjectRoot::open(&root).unwrap();
+        assert_eq!(
+            workspace_members(&held).unwrap(),
+            [PathBuf::from(".config/a"), PathBuf::from(".tools/x")]
+        );
     }
 
     /// npm's words on a failure are kept: the resolve-only form lowers the

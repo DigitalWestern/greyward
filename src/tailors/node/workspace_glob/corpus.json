@@ -1,0 +1,765 @@
+[
+  {
+    "name": "star",
+    "workspaces": [
+      "packages/*"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/.hidden",
+      "packages/node_modules",
+      "other/c"
+    ],
+    "bare": [
+      "packages/empty"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b"
+    ]
+  },
+  {
+    "name": "trailing slash",
+    "workspaces": [
+      "packages/*/",
+      "tools/x/"
+    ],
+    "dirs": [
+      "packages/a",
+      "tools/x"
+    ],
+    "expected": [
+      "packages/a",
+      "tools/x"
+    ]
+  },
+  {
+    "name": "leading ./ and /",
+    "workspaces": [
+      "./packages/a",
+      "/packages/b",
+      ".//packages/c"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c",
+      "packages/d"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ]
+  },
+  {
+    "name": "dot directory verbatim",
+    "workspaces": [
+      ".config/*"
+    ],
+    "dirs": [
+      ".config/a",
+      "config/a"
+    ],
+    "expected": [
+      ".config/a"
+    ]
+  },
+  {
+    "name": "star skips dot names",
+    "workspaces": [
+      "packages/.*",
+      "apps/*"
+    ],
+    "dirs": [
+      "packages/.a",
+      "packages/b",
+      "apps/.c",
+      "apps/d"
+    ],
+    "expected": [
+      "apps/d",
+      "packages/.a"
+    ]
+  },
+  {
+    "name": "braces",
+    "workspaces": [
+      "packages/{a,b}"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b"
+    ]
+  },
+  {
+    "name": "nested braces",
+    "workspaces": [
+      "{apps,libs/{x,y}}/*"
+    ],
+    "dirs": [
+      "apps/a",
+      "libs/x/b",
+      "libs/y/c",
+      "libs/z/d"
+    ],
+    "expected": [
+      "apps/a",
+      "libs/x/b",
+      "libs/y/c"
+    ]
+  },
+  {
+    "name": "empty alternative",
+    "workspaces": [
+      "p{,2}"
+    ],
+    "dirs": [
+      "p",
+      "p2",
+      "p3"
+    ],
+    "expected": [
+      "p",
+      "p2"
+    ]
+  },
+  {
+    "name": "numeric range",
+    "workspaces": [
+      "p{1..3}"
+    ],
+    "dirs": [
+      "p1",
+      "p2",
+      "p3",
+      "p4"
+    ],
+    "expected": [
+      "p1",
+      "p2",
+      "p3"
+    ]
+  },
+  {
+    "name": "padded range",
+    "workspaces": [
+      "p{08..10}"
+    ],
+    "dirs": [
+      "p08",
+      "p09",
+      "p10",
+      "p8"
+    ],
+    "expected": [
+      "p08",
+      "p09",
+      "p10"
+    ]
+  },
+  {
+    "name": "stepped range",
+    "workspaces": [
+      "p{1..7..3}"
+    ],
+    "dirs": [
+      "p1",
+      "p2",
+      "p4",
+      "p7"
+    ],
+    "expected": [
+      "p1",
+      "p4",
+      "p7"
+    ]
+  },
+  {
+    "name": "letter range",
+    "workspaces": [
+      "p{a..c}"
+    ],
+    "dirs": [
+      "pa",
+      "pb",
+      "pc",
+      "pd"
+    ],
+    "expected": [
+      "pa",
+      "pb",
+      "pc"
+    ]
+  },
+  {
+    "name": "literal brace set",
+    "workspaces": [
+      "p{a}"
+    ],
+    "dirs": [
+      "p{a}",
+      "pa"
+    ],
+    "expected": [
+      "p{a}"
+    ]
+  },
+  {
+    "name": "extglob at",
+    "workspaces": [
+      "packages/@(a|b)"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c",
+      "packages/ab"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b"
+    ]
+  },
+  {
+    "name": "extglob not",
+    "workspaces": [
+      "packages/!(a)"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/ab",
+      "packages/.c"
+    ],
+    "expected": [
+      "packages/ab",
+      "packages/b"
+    ]
+  },
+  {
+    "name": "extglob not with a tail",
+    "workspaces": [
+      "packages/!(a)x"
+    ],
+    "dirs": [
+      "packages/ax",
+      "packages/bx",
+      "packages/x",
+      "packages/aax"
+    ],
+    "expected": [
+      "packages/aax",
+      "packages/bx",
+      "packages/x"
+    ]
+  },
+  {
+    "name": "extglob plus",
+    "workspaces": [
+      "packages/+(a)"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/aa",
+      "packages/b",
+      "packages/ab"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/aa"
+    ]
+  },
+  {
+    "name": "extglob star",
+    "workspaces": [
+      "packages/x*(a|b)"
+    ],
+    "dirs": [
+      "packages/x",
+      "packages/xa",
+      "packages/xab",
+      "packages/xc"
+    ],
+    "expected": [
+      "packages/x",
+      "packages/xa",
+      "packages/xab"
+    ]
+  },
+  {
+    "name": "extglob question",
+    "workspaces": [
+      "packages/x?(a)"
+    ],
+    "dirs": [
+      "packages/x",
+      "packages/xa",
+      "packages/xaa"
+    ],
+    "expected": [
+      "packages/x",
+      "packages/xa"
+    ]
+  },
+  {
+    "name": "extglob in braces",
+    "workspaces": [
+      "packages/{@(a|b),c}"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c",
+      "packages/d"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ]
+  },
+  {
+    "name": "character classes",
+    "workspaces": [
+      "packages/[ab]",
+      "tools/[!c]",
+      "libs/[[:digit:]]"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/c",
+      "tools/c",
+      "tools/d",
+      "libs/1",
+      "libs/x"
+    ],
+    "expected": [
+      "libs/1",
+      "packages/a",
+      "tools/d"
+    ]
+  },
+  {
+    "name": "question mark",
+    "workspaces": [
+      "packages/?"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/ab",
+      "packages/.b"
+    ],
+    "expected": [
+      "packages/a"
+    ]
+  },
+  {
+    "name": "globstar matches its own directory",
+    "workspaces": [
+      "packages/**"
+    ],
+    "dirs": [
+      "packages",
+      "packages/a",
+      "packages/a/b",
+      "packages/.dot/c",
+      "packages/a/node_modules/x"
+    ],
+    "expected": [
+      "packages",
+      "packages/a",
+      "packages/a/b"
+    ]
+  },
+  {
+    "name": "globstar in the middle",
+    "workspaces": [
+      "apps/**/pkg"
+    ],
+    "dirs": [
+      "apps/pkg",
+      "apps/a/pkg",
+      "apps/a/b/pkg",
+      "apps/a/other"
+    ],
+    "expected": [
+      "apps/a/b/pkg",
+      "apps/a/pkg",
+      "apps/pkg"
+    ]
+  },
+  {
+    "name": "literal node_modules is never a member",
+    "workspaces": [
+      "node_modules/x",
+      "a/node_modules/y"
+    ],
+    "dirs": [
+      "node_modules/x",
+      "a/node_modules/y"
+    ],
+    "expected": []
+  },
+  {
+    "name": "negation",
+    "workspaces": [
+      "packages/*",
+      "!packages/b"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/b/c"
+    ],
+    "expected": [
+      "packages/a"
+    ]
+  },
+  {
+    "name": "negation with a trailing slash stays",
+    "workspaces": [
+      "packages/*",
+      "!packages/b/",
+      "packages/b"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b"
+    ],
+    "expected": [
+      "packages/a"
+    ]
+  },
+  {
+    "name": "consecutive negations splice forward",
+    "workspaces": [
+      "packages/*",
+      "!packages/a",
+      "!packages/{a,b}",
+      "packages/a"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/c"
+    ]
+  },
+  {
+    "name": "negation of a subtree",
+    "workspaces": [
+      "packages/**",
+      "!packages/b/**"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/b/c",
+      "packages/c/d"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/c/d"
+    ]
+  },
+  {
+    "name": "a later pattern cancels a negation",
+    "workspaces": [
+      "packages/**",
+      "!packages/b/**",
+      "packages/b/a"
+    ],
+    "dirs": [
+      "packages/b",
+      "packages/b/a",
+      "packages/b/z",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/b",
+      "packages/b/a",
+      "packages/b/z",
+      "packages/c"
+    ]
+  },
+  {
+    "name": "a negation removes the positive pattern it matches",
+    "workspaces": [
+      "packages/a",
+      "!packages/{a,b}"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b"
+    ],
+    "expected": []
+  },
+  {
+    "name": "a negation that matches a pattern string",
+    "workspaces": [
+      "packages/*",
+      "!packages/*"
+    ],
+    "dirs": [
+      "packages/a"
+    ],
+    "expected": []
+  },
+  {
+    "name": "double and triple bang",
+    "workspaces": [
+      "!!packages/a",
+      "packages/b",
+      "!!!packages/b"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b"
+    ],
+    "expected": [
+      "packages/a"
+    ]
+  },
+  {
+    "name": "only a negation",
+    "workspaces": [
+      "!packages/a"
+    ],
+    "dirs": [
+      "packages/a"
+    ],
+    "expected": []
+  },
+  {
+    "name": "symlinked member inside the project",
+    "workspaces": [
+      "packages/*"
+    ],
+    "dirs": [
+      "packages/a",
+      "vendor/lib"
+    ],
+    "links": [
+      [
+        "packages/lib",
+        "../vendor/lib"
+      ]
+    ],
+    "expected": [
+      "packages/a",
+      "packages/lib"
+    ]
+  },
+  {
+    "name": "symlinked member named literally",
+    "workspaces": [
+      "packages/lib"
+    ],
+    "dirs": [
+      "vendor/lib"
+    ],
+    "links": [
+      [
+        "packages/lib",
+        "../vendor/lib"
+      ]
+    ],
+    "expected": [
+      "packages/lib"
+    ]
+  },
+  {
+    "name": "globstar does not descend a symlink",
+    "workspaces": [
+      "packages/**"
+    ],
+    "dirs": [
+      "packages/a",
+      "vendor",
+      "vendor/x"
+    ],
+    "links": [
+      [
+        "packages/v",
+        "../vendor"
+      ]
+    ],
+    "expected": [
+      "packages/a",
+      "packages/v"
+    ]
+  },
+  {
+    "name": "a star segment descends a symlink",
+    "workspaces": [
+      "links/*/pkg"
+    ],
+    "dirs": [
+      "real/pkg"
+    ],
+    "links": [
+      [
+        "links/r",
+        "../real"
+      ]
+    ],
+    "expected": [
+      "links/r/pkg"
+    ]
+  },
+  {
+    "name": "dangling symlink",
+    "workspaces": [
+      "packages/*"
+    ],
+    "dirs": [
+      "packages/a"
+    ],
+    "links": [
+      [
+        "packages/gone",
+        "../missing"
+      ]
+    ],
+    "expected": [
+      "packages/a"
+    ]
+  },
+  {
+    "name": "globstar then a name past a symlink",
+    "workspaces": [
+      "packages/**/x"
+    ],
+    "dirs": [
+      "packages/a/x",
+      "vendor/x"
+    ],
+    "links": [
+      [
+        "packages/v",
+        "../vendor"
+      ]
+    ],
+    "expected": [
+      "packages/a/x",
+      "packages/v/x"
+    ]
+  },
+  {
+    "name": "negated extglob alternatives",
+    "workspaces": [
+      "packages/!(a|b)"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/c"
+    ]
+  },
+  {
+    "name": "nested extglob",
+    "workspaces": [
+      "packages/@(a|+(b))"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/bb",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/a",
+      "packages/b",
+      "packages/bb"
+    ]
+  },
+  {
+    "name": "star then extglob",
+    "workspaces": [
+      "packages/*@(x|y)"
+    ],
+    "dirs": [
+      "packages/ax",
+      "packages/by",
+      "packages/z",
+      "packages/x"
+    ],
+    "expected": [
+      "packages/ax",
+      "packages/by",
+      "packages/x"
+    ]
+  },
+  {
+    "name": "negation with an extglob",
+    "workspaces": [
+      "packages/*",
+      "!packages/@(a|b)"
+    ],
+    "dirs": [
+      "packages/a",
+      "packages/b",
+      "packages/c"
+    ],
+    "expected": [
+      "packages/c"
+    ]
+  },
+  {
+    "name": "class range",
+    "workspaces": [
+      "p[a-c]"
+    ],
+    "dirs": [
+      "pa",
+      "pb",
+      "pd"
+    ],
+    "expected": [
+      "pa",
+      "pb"
+    ]
+  },
+  {
+    "name": "negated posix class",
+    "workspaces": [
+      "p[^[:alpha:]]"
+    ],
+    "dirs": [
+      "pa",
+      "p1"
+    ],
+    "expected": [
+      "p1"
+    ]
+  },
+  {
+    "name": "unclosed class and paren are literal",
+    "workspaces": [
+      "p[a",
+      "q@(a"
+    ],
+    "dirs": [
+      "p[a",
+      "pa",
+      "q@(a",
+      "qa"
+    ],
+    "expected": [
+      "p[a",
+      "q@(a"
+    ]
+  }
+]

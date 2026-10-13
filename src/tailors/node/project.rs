@@ -1506,6 +1506,71 @@ mod tests {
         publish().unwrap();
     }
 
+    /// Sol round 6: a Yarn `link:src/lib` dependency, in a project with no
+    /// workspaces, whose target is moved out of the project during the
+    /// closure writer's resolution join, with a symlink to its new place
+    /// left behind. The recheck runs after the join, right before the root
+    /// is registered and the closure signed, so nothing is published and
+    /// the link is removed (#692).
+    #[test]
+    fn a_link_target_moved_out_during_the_join_is_refused_before_publication() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let scratch = TempDir::named("link-moved-during-join");
+        let root = scratch.0.clone();
+        let project = root.join("project");
+        let forest = root.join("forest/node_modules");
+        for dir in [
+            project.join("src/lib"),
+            root.join("outside"),
+            forest.clone(),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"app","dependencies":{"lib":"link:src/lib"}}"#,
+        )
+        .unwrap();
+        let plan = NpmPlan {
+            node_version: "22.0.0".to_string(),
+            packages: Vec::new(),
+            links: vec![NpmLink {
+                path: "node_modules/lib".to_string(),
+                target: "src/lib".to_string(),
+            }],
+            workspaces: Vec::new(),
+            lock_source: "yarn.lock".to_string(),
+        };
+        let held = ProjectRoot::open(&project).unwrap();
+        let targets = ["src/lib".to_string()];
+        link_workspace_sources(&held, &plan, &targets, &root.join("forest"), &forest).unwrap();
+        let move_out = {
+            let project = project.clone();
+            let moved = root.join("outside/src");
+            move || {
+                fs::rename(project.join("src"), &moved).unwrap();
+                std::os::unix::fs::symlink(&moved, project.join("src")).unwrap();
+            }
+        };
+        crate::comforter::test_support::run_after_join(move_out);
+        let (_store_dir, store) =
+            crate::comforter::test_support::test_store("link-moved-during-join");
+        let mut attribution = crate::kernel::policy::Attribution::open("node").unwrap();
+        let error = crate::comforter::test_support::publish_test_closure(
+            &project,
+            "node",
+            &store,
+            &mut attribution,
+        )
+        .unwrap_err()
+        .to_string();
+        attribution.discard();
+        assert!(error.contains("leads outside"), "{error}");
+        assert!(forest.join("lib").symlink_metadata().is_err());
+        assert!(!project.join(".greyward/closures/node.json").exists());
+        crate::comforter::publication::withdraw_publication_check(&project, LINKS_CHECK);
+    }
+
     /// vite commits a fixture `node_modules` inside a workspace member
     /// (#174). Only a real directory holding a tracked file is kept back;
     /// an untracked npm-made one, and a member git cannot see, are moved

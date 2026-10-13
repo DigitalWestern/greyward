@@ -810,6 +810,36 @@ dependencies:
         .unwrap();
     }
 
+    /// npm expands `workspaces` with minimatch, braces included, so a
+    /// member a `{a,b}` set names is one the lock must list (Sol review of
+    /// #694). A dot-named directory a wildcard would reach is not one.
+    #[test]
+    fn a_brace_pattern_names_members_the_lock_must_list() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-braces");
+        let workspaces = r#"["packages/{a,b}","tools/*"]"#;
+        let lock = format!(
+            r#"{{"lockfileVersion":3,"packages":{{"":{{"name":"p","workspaces":{workspaces}}},"packages/a":{{}}}}}}"#
+        );
+        let project = npm_workspace(
+            &scratch.0,
+            workspaces,
+            &["packages/a", "packages/b", "packages/c", "tools/.hidden"],
+            "package-lock.json",
+            &lock,
+        );
+        assert_eq!(
+            node::resolve::npm_manifest_members(&project).unwrap(),
+            ["packages/a", "packages/b"]
+        );
+        assert_eq!(
+            message(check_lock_freshness(
+                &project,
+                &npm_plan("package-lock.json", &["packages/a"])
+            )),
+            "packages/b/package.json is an npm workspace member but package-lock.json does not list it; regenerate the lock (npm install --package-lock-only)"
+        );
+    }
+
     /// npm copies the root `workspaces` into `packages[""]`, so a pattern
     /// changed since the lock was written is a stale lock even before a
     /// member it names exists; an empty list is not recorded at all.

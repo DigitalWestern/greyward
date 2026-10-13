@@ -315,7 +315,8 @@ fn supersede(
 /// the script's body is never rewritten: Python reads a module docstring,
 /// a `from __future__` import and a line-two coding declaration by their
 /// position, and a line put in front of them moves all three. The script is
-/// installed as shipped beside `destination` as `.<name>.real`, after
+/// installed as shipped, under its own name, in a private directory beside
+/// `destination` ([`hidden_script`]), after
 /// `claim` has cleared that path, and `destination` becomes a `/bin/sh`
 /// wrapper that runs the interpreter on it ([`script_wrapper`]). Returns
 /// that hidden file's path, for the caller to record.
@@ -337,6 +338,9 @@ fn write_wheel_entry(
             if needs_trampoline(python_exe) {
                 let hidden = hidden_script(destination)?;
                 claim(&hidden)?;
+                if let Some(dir) = hidden.parent() {
+                    fs::create_dir_all(dir)?;
+                }
                 fs::write(&hidden, &contents)?;
                 set_mode(&hidden, 0o644)?;
                 contents = script_wrapper(python_exe, &final_path(&hidden, bin_dir, python_exe)?);
@@ -359,15 +363,20 @@ fn write_wheel_entry(
     Ok(real)
 }
 
-/// `.<name>.real`, beside the script `destination` names.
+/// The private directory beside a wrapper that holds the shipped script it
+/// runs. The script keeps its own name in it, so `sys.argv[0]`'s basename
+/// and `__file__`'s name are the ones it shipped with.
+const SHIPPED_SCRIPTS: &str = ".ward-scripts";
+
+/// `<dir>/.ward-scripts/<name>`, for the script `destination` names.
 fn hidden_script(destination: &Path) -> io::Result<PathBuf> {
     let name = destination
         .file_name()
         .ok_or_else(|| invalid_data(format!("script {} has no name", destination.display())))?;
-    let mut hidden = std::ffi::OsString::from(".");
-    hidden.push(name);
-    hidden.push(".real");
-    Ok(destination.with_file_name(hidden))
+    let parent = destination.parent().ok_or_else(|| {
+        invalid_data(format!("script {} has no directory", destination.display()))
+    })?;
+    Ok(parent.join(SHIPPED_SCRIPTS).join(name))
 }
 
 /// Where `hidden`, written under `bin_dir` in the environment being
@@ -1720,7 +1729,7 @@ mod shebang_tests {
             let bin = install_against(&temp, &python);
             // A launcher ward writes runs itself; a shipped script runs as
             // shipped, from its hidden sibling.
-            for (script, runs) in [("tool", "tool"), ("raw", ".raw.real")] {
+            for (script, runs) in [("tool", "tool"), ("raw", ".ward-scripts/raw")] {
                 let path = bin.join(script);
                 assert_eq!(
                     run(&path, &["one arg", "$two"]),
@@ -1734,7 +1743,7 @@ mod shebang_tests {
                 );
             }
             assert_eq!(
-                fs::read(bin.join(".raw.real")).unwrap(),
+                fs::read(bin.join(".ward-scripts/raw")).unwrap(),
                 b"#!python\r\nprint('raw')\n"
             );
             // Python reads the trampoline as a string literal, without a
@@ -1776,12 +1785,15 @@ mod shebang_tests {
         let docstring: &[u8] =
             b"#!python\n\"\"\"Doc.\"\"\"\nfrom __future__ import annotations\nimport sys\nprint('doc', sys.argv[1:])\n";
         let latin: &[u8] = b"#!python\n# coding: latin-1\nprint('caf\xe9'.encode('utf-8').hex())\n";
+        // Sol's round 2: a script that dispatches on its own name.
+        let dispatch: &[u8] = b"#!python\nimport os, sys\nhandlers = {'tool': lambda: print('tool ran')}\nhandlers[os.path.basename(sys.argv[0])]()\nprint(os.path.basename(__file__))\n";
         let wheel = temp.0.join("demo-1.0-py3-none-any.whl");
         let mut writer = ZipWriter::new(fs::File::create(&wheel).unwrap());
         for (name, bytes) in [
             ("demo-1.0.dist-info/RECORD", &b""[..]),
             ("demo-1.0.data/scripts/doc", docstring),
             ("demo-1.0.data/scripts/latin", latin),
+            ("demo-1.0.data/scripts/tool", dispatch),
         ] {
             writer
                 .start_file(name, SimpleFileOptions::default())
@@ -1792,8 +1804,8 @@ mod shebang_tests {
         install_wheel(&wheel, &site, &bin, "3.12", &python, &mut BTreeMap::new()).unwrap();
 
         // Each body is installed byte for byte, beside its wrapper.
-        assert_eq!(fs::read(bin.join(".doc.real")).unwrap(), docstring);
-        assert_eq!(fs::read(bin.join(".latin.real")).unwrap(), latin);
+        assert_eq!(fs::read(bin.join(".ward-scripts/doc")).unwrap(), docstring);
+        assert_eq!(fs::read(bin.join(".ward-scripts/latin")).unwrap(), latin);
         let output = |script: &str, args: &[&str]| {
             let output = Command::new(bin.join(script)).args(args).output().unwrap();
             assert!(output.status.success(), "{script}: {output:?}");
@@ -1802,5 +1814,7 @@ mod shebang_tests {
         assert_eq!(output("doc", &["a b", "$c"]), "doc ['a b', '$c']\n");
         // Read as latin-1, `é` is one character, which is `c3a9` in UTF-8.
         assert_eq!(output("latin", &[]), "636166c3a9\n");
+        // The shipped script keeps its name: argv[0] and __file__ end in it.
+        assert_eq!(output("tool", &[]), "tool ran\ntool\n");
     }
 }

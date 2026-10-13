@@ -27,29 +27,27 @@ pub(super) struct HeldRoot {
     /// Whether bubblewrap binds it (not for a working directory that is no
     /// declared root).
     bound: bool,
-    /// The descriptor number bubblewrap receives it at, once `pin` chose it.
+    /// The descriptor number bubblewrap receives it at, once pinned.
     target: Option<RawFd>,
-    /// Whether `target` is only the child's (`pin`'s fallback), so the
-    /// descriptor is moved onto it there.
-    moved: bool,
-    /// The copy of `dir` that holds `target` here, when `dir` is elsewhere.
+    /// The copy of `dir` open at `target`, until the child has run.
     _pinned: Option<std::os::fd::OwnedFd>,
 }
 
-/// The descriptor numbers a held root is passed at. The shell that closes
-/// them reads one digit (dash: `exec 12<&-` is "exec: 12: not found"), so
-/// at most seven are passed.
+/// The lowest number a held root is passed at, and the highest the system
+/// shell closes: dash reads one digit (`exec 12<&-` is "exec: 12: not
+/// found"), so a number past it is closed by bash.
 const HELD_FD_FIRST: RawFd = 3;
 const HELD_FD_LAST: RawFd = 9;
-/// The lowest number the `--args` descriptor may have: past every held
-/// root's target, the only numbers the child's descriptors are moved onto.
+/// The lowest number the `--args` descriptor may have, so it never takes a
+/// number the system shell could close a held root at.
 #[cfg(target_os = "linux")]
 const ARGS_FD_FLOOR: RawFd = HELD_FD_LAST + 1;
+/// The shell that closes held descriptors above `HELD_FD_LAST`.
+const BASH: &str = "/bin/bash";
 
 impl HeldRoots {
     pub(super) fn resolve(sandbox: &Sandbox<'_>, cwd: &Path) -> io::Result<Self> {
         let mut held = Self::default();
-        let mut bound = 0;
         for path in sandbox.read.iter().chain(&sandbox.write) {
             if held.find(path).is_some() {
                 continue;
@@ -57,25 +55,14 @@ impl HeldRoots {
             let Some((dir, dest)) = crate::kernel::fsroot::held_root_for(path)? else {
                 continue;
             };
-            if bound > HELD_FD_LAST - HELD_FD_FIRST {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "the sandbox binds more than {} directories of open projects",
-                        HELD_FD_LAST - HELD_FD_FIRST + 1
-                    ),
-                ));
-            }
             held.roots.push(HeldRoot {
                 requested: path.to_path_buf(),
                 dest,
                 dir,
                 bound: true,
                 target: None,
-                moved: false,
                 _pinned: None,
             });
-            bound += 1;
         }
         if held.find(cwd).is_none() {
             if let Some((dir, dest)) = crate::kernel::fsroot::held_root_for(cwd)? {
@@ -85,7 +72,6 @@ impl HeldRoots {
                     dir,
                     bound: false,
                     target: None,
-                    moved: false,
                     _pinned: None,
                 });
             }
@@ -140,69 +126,81 @@ impl HeldRoots {
         }
     }
 
-    /// Choose the number each bound root is passed at, just before the
-    /// spawn. A number this process holds open cannot be one std allocates
-    /// for the spawn's own pipes (its error channel among them), so nothing
-    /// in the child is moved onto it: `dir` itself when it is numbered 3 to
-    /// 9, else a close-on-exec copy at the lowest free number from 3, kept
-    /// open here. When 3 to 9 are all taken here, std's pipes land above
-    /// them too, and the descriptor is moved onto a number in the child as
-    /// before; only another thread closing one of them before the spawn
-    /// could then put a pipe there.
+    /// Give each bound root the number it is passed at, just before the
+    /// spawn: a fresh close-on-exec copy of its descriptor at the lowest free
+    /// number from 3, kept open here until the child has run. Every copy is
+    /// open at once, so no two roots share a number, and std cannot take one
+    /// for the spawn's own pipes (its error channel among them); in the
+    /// child only close-on-exec is cleared.
     pub(super) fn pin(&mut self) -> io::Result<()> {
         use std::os::fd::{AsRawFd as _, FromRawFd as _};
-        let mut taken = Vec::new();
         for root in self.roots.iter_mut().filter(|root| root.bound) {
-            let fd = root.dir.as_raw_fd();
-            let number = if (HELD_FD_FIRST..=HELD_FD_LAST).contains(&fd) {
-                fd
-            } else {
-                // SAFETY: F_DUPFD_CLOEXEC only reads `dir`, open here.
-                let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, HELD_FD_FIRST) };
-                if copy < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // SAFETY: `copy` was just duplicated and nothing else owns it.
-                let copy = unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) };
-                if copy.as_raw_fd() <= HELD_FD_LAST {
-                    let number = copy.as_raw_fd();
-                    root._pinned = Some(copy);
-                    number
-                } else {
-                    root.moved = true;
-                    (HELD_FD_FIRST..=HELD_FD_LAST)
-                        .find(|number| !taken.contains(number))
-                        .expect("at most seven roots are bound")
-                }
-            };
-            taken.push(number);
-            root.target = Some(number);
+            // SAFETY: F_DUPFD_CLOEXEC only reads `dir`, open here.
+            let copy =
+                unsafe { libc::fcntl(root.dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, HELD_FD_FIRST) };
+            if copy < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `copy` was just duplicated and nothing else owns it.
+            let copy = unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) };
+            root.target = Some(copy.as_raw_fd());
+            root._pinned = Some(copy);
         }
+        let numbers = self.numbers();
+        debug_assert!(
+            numbers
+                .iter()
+                .enumerate()
+                .all(|(at, number)| !numbers[..at].contains(number)),
+            "held roots share a descriptor number: {numbers:?}"
+        );
         Ok(())
     }
 
-    /// The numbers the bound roots keep in the child as they are here.
-    pub(super) fn in_place(&self) -> Vec<RawFd> {
-        self.roots
-            .iter()
-            .filter(|root| !root.moved)
-            .filter_map(|root| root.target)
-            .collect()
+    /// Held roots bubblewrap binds, from open directories, for a test that
+    /// places their descriptors itself.
+    #[cfg(test)]
+    pub(super) fn bound_for_test(dirs: Vec<(fs::File, PathBuf)>) -> Self {
+        let roots = dirs
+            .into_iter()
+            .map(|(dir, dest)| HeldRoot {
+                requested: dest.clone(),
+                dest,
+                dir,
+                bound: true,
+                target: None,
+                _pinned: None,
+            })
+            .collect();
+        Self { roots }
     }
 
-    /// `(source, target)` for every bound root moved onto its number in
-    /// the child (`pin`'s fallback).
-    pub(super) fn moved(&self) -> Vec<(RawFd, RawFd)> {
-        use std::os::fd::AsRawFd as _;
-        self.roots
-            .iter()
-            .filter(|root| root.moved)
-            .filter_map(|root| Some((root.dir.as_raw_fd(), root.target?)))
-            .collect()
+    /// The number every bound root is passed at, once pinned.
+    pub(super) fn numbers(&self) -> Vec<RawFd> {
+        self.roots.iter().filter_map(|root| root.target).collect()
     }
 
     /// The shell script that closes every passed descriptor and runs its
     /// arguments, or `None` when nothing is passed.
+    /// The shell that runs `close_script`: the system shell when every
+    /// number is a single digit, since dash reads no other (`exec 12<&-` is
+    /// "exec: 12: not found"), and bash, which takes any number, otherwise.
+    pub(super) fn close_shell(&self) -> io::Result<&'static str> {
+        if self.numbers().iter().all(|number| *number <= HELD_FD_LAST) {
+            return Ok("/bin/sh");
+        }
+        if Path::new(BASH).is_file() {
+            return Ok(BASH);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "descriptors {HELD_FD_FIRST} to {HELD_FD_LAST} are all in use, and the system \
+                 shell closes no other, so passing a held root to the sandbox needs {BASH}"
+            ),
+        ))
+    }
+
     pub(super) fn close_script(&self) -> Option<String> {
         let closes: Vec<String> = self
             .roots
@@ -327,9 +325,9 @@ pub(super) fn exec_too_long(
     status.code() == Some(1) && stderr.rsplit(|byte| *byte == b'\n').next() == Some(&expected[..])
 }
 
-/// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
-/// anonymous file read from its start. Its descriptor is numbered at or
-/// above `ARGS_FD_FLOOR`, where nothing is moved onto it in the child.
+/// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in a
+/// memory file at a number at or above `ARGS_FD_FLOOR`, kept open until
+/// the child has run.
 #[cfg(target_os = "linux")]
 pub(super) fn args_file(args: &[std::ffi::OsString]) -> io::Result<fs::File> {
     use std::io::{Seek as _, Write as _};

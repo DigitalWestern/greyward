@@ -143,10 +143,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   the requirements file the probe falls back on. `--frozen` checks it without running
   setup.py, and plans from a matching lock with no probe at all. A file setup.py opens by
   a path of its own is not covered: change it, and the lock is not stale until one of
-  those files changes too. setup.py still runs, confined and in memory, when there is no
-  lock (it alone says whether there is anything to lock), when the lock has no header,
-  and when the lock holds a direct reference, which is recorded from setup.py's own
-  words. A lock compiled before ward wrote that header names no source, so `--frozen`
+  those files changes too. When the probe fails and the lock is compiled from the
+  requirements file it falls back on, the header names that file (`source=`), and a
+  reused lock reads its hash pins from it. setup.py still runs, confined and in memory,
+  when there is no lock (it alone says whether there is anything to lock) and when the
+  lock has no header. A direct reference in a matching lock is recorded from setup.py's
+  metadata cache when `prepare` wrote one, and from the lock as it is otherwise (a
+  fresh checkout under `--frozen`), so its wording can be uv's. A lock compiled before ward wrote that header names no source, so `--frozen`
   holds it to the requirements instead: every package they need here must be in it at
   a version they allow. An edit the locked version still satisfies (`six>=1.16` to
   `six>=1.15`) passes that check. One `ward` without `--frozen` writes the header.

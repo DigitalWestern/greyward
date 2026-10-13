@@ -153,7 +153,8 @@ impl Manifest {
         selected: &crate::kernel::toolchain::Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
-        self.complete_setup(project, selected, door, true)
+        self.complete_setup(project, selected, door, SetupRun::Persist)
+            .map(|_| ())
     }
 
     /// [`Manifest::prepare_setup`] that reads a matching metadata cache but
@@ -166,21 +167,37 @@ impl Manifest {
         selected: &crate::kernel::toolchain::Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
-        self.complete_setup(project, selected, door, false)
+        self.complete_setup(project, selected, door, SetupRun::InMemory)
+            .map(|_| ())
     }
 
+    /// [`Manifest::read_setup`] from a matching metadata cache only: true
+    /// when the cache completed the manifest, false on a miss, with
+    /// setup.py never run. The permission to use what setup.py gave is
+    /// checked either way, as on a cache hit.
+    pub fn read_setup_cache(
+        &mut self,
+        project: &ProjectRoot,
+        selected: &crate::kernel::toolchain::Selected,
+        door: &mut ResolutionDoor<'_>,
+    ) -> io::Result<bool> {
+        self.complete_setup(project, selected, door, SetupRun::CacheOnly)
+    }
+
+    /// Whether the manifest was completed: false only for a
+    /// [`SetupRun::CacheOnly`] miss.
     fn complete_setup(
         &mut self,
         project: &ProjectRoot,
         selected: &crate::kernel::toolchain::Selected,
         door: &mut ResolutionDoor<'_>,
-        persist: bool,
-    ) -> io::Result<()> {
+        run: SetupRun,
+    ) -> io::Result<bool> {
         let (store, activity, platform) = (door.store(), door.lease(), door.platform());
         let dir = project.path();
         let python_version = selected.version("cpython")?;
         if !self.setup || self.setup_cfg {
-            return Ok(());
+            return Ok(true);
         }
         // The older egg_info path runs project code too. Its cached result
         // retains that provenance, so permission is checked on cache hits.
@@ -213,9 +230,12 @@ impl Manifest {
                     self.requirements = cache.requirements;
                     self.source = self.requirements_text();
                     replace_setup_requires_python(&mut self.python, cache.requires_python);
-                    return Ok(());
+                    return Ok(true);
                 }
             }
+        }
+        if run == SetupRun::CacheOnly {
+            return Ok(false);
         }
 
         let build_env = build::ensure_build_environment(door, selected)
@@ -283,15 +303,27 @@ impl Manifest {
         };
         // Through the held project descriptor: a symlinked `.greyward` must not
         // carry this cache outside the project.
-        if persist {
+        if run == SetupRun::Persist {
             project.write_file(Path::new(SETUP_CACHE), &serde_json::to_vec_pretty(&cache)?)?;
         }
         let _ = fs::remove_dir_all(&scratch);
         self.requirements = requirements;
         self.source = self.requirements_text();
         replace_setup_requires_python(&mut self.python, requires_python);
-        Ok(())
+        Ok(true)
     }
+}
+
+/// How [`Manifest::complete_setup`] may get setup.py's requirements on a
+/// metadata cache miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupRun {
+    /// Run the probe and write the cache (`prepare`).
+    Persist,
+    /// Run the probe and keep the result in memory (planning).
+    InMemory,
+    /// Never run it: a miss leaves the manifest as it was.
+    CacheOnly,
 }
 
 fn join_requirements(requirements: &[String], constraints: &[String]) -> String {

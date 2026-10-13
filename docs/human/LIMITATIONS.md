@@ -508,8 +508,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   - a registry, index or source URL that is not `https://` or `sparse+https://`, or a git
     index over `ssh://` or `git://`: a `file://` or path index (and the archives its
     `config.json` points at) is read without Greyward's proxy, so its index and git checks never
-    run. `http://` mirrors are refused too. An ssh index records `host-git-transport`, as an
-    ssh git dependency does;
+    run. `http://` mirrors are refused too. An index or mirror over `ssh://` or `git://`
+    records `host-git-transport`, as an ssh git dependency does, and the record `ward attest`
+    signs carries it, even for a mirror replacing crates.io;
   - an `[alias]` whose expansion holds `--config` or `-Z`, which `ward run`'s wrapper would
     not see (it refuses `--config` on the command line);
   - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`), a git variable

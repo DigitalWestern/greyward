@@ -873,3 +873,26 @@ fn an_external_workspace_member_is_read_like_an_external_path_dependency() {
     let (ok, stderr) = run(&["sync"]);
     assert!(ok, "sync from the generated lock: {stderr}");
 }
+
+/// A project with no `Cargo.lock` whose manifest names a file registry
+/// index: generating the lock is refused, and the refusal keeps its class
+/// through the sync, so `ward sync` exits 3 and no lock is written.
+#[test]
+#[ignore]
+fn a_refused_lock_generation_exits_as_a_refusal() {
+    let temp = TempDir::new("cargo-e2e-refused-generation");
+    let store = temp.0.join("store");
+    let project = temp.0.join("project");
+    copy_tree(&fixture("cargo-hello"), &project);
+    std::fs::remove_file(project.join("Cargo.lock")).unwrap();
+    let manifest = project.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("bad = { version = \"1\", registry-index = \"file:///srv/index\" }\n");
+    std::fs::write(&manifest, text).unwrap();
+    let out = ward_with_tmp(&project, &store, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("could not generate Cargo.lock"), "{stderr}");
+    assert!(stderr.contains("file:///srv/index"), "{stderr}");
+    assert!(!project.join("Cargo.lock").exists());
+}

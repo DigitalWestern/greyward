@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 
 mod held;
 pub(crate) use held::pass_fds;
-use held::{args_file, HeldRoots, ARGS_FD};
+use held::{args_file, refuse_nul, HeldRoots, ARGS_FD};
 
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
@@ -442,6 +442,8 @@ impl Sandbox<'_> {
         // descriptor, so only the build's own command counts toward the
         // kernel's argument limits: a spawn that fails with E2BIG is the
         // build's failure in either view (#679, `error::sandbox_spawn`).
+        // Unmarked: a NUL in a value the build supplied is its own failure.
+        refuse_nul(&invocation.args)?;
         let (options, own) = invocation.args.split_at(invocation.command_start);
         let options = args_file(options).map_err(setup)?;
         command.arg("--args").arg(ARGS_FD.to_string()).args(own);
@@ -2570,6 +2572,46 @@ mod tests {
             !listed.lines().any(|fd| fd == ARGS_FD.to_string()),
             "the build sees bubblewrap's --args descriptor: {listed}"
         );
+    }
+
+    /// A NUL byte in a value the build supplies (here a lock's version
+    /// reaching `npm_package_version`) would end its argument early in
+    /// bubblewrap's `--args` data and turn the rest into options of its
+    /// own. Such a value is refused as the build's own failure, as the
+    /// kernel refused it on argv, and nothing is mounted.
+    #[test]
+    fn linux_a_nul_in_a_build_value_adds_no_sandbox_option() {
+        if !linux_ready("linux_a_nul_in_a_build_value_adds_no_sandbox_option") {
+            return;
+        }
+        let root = temp_dir("nul-option");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let sandbox = Sandbox {
+            read: vec![],
+            write: vec![&scratch],
+            host_view: HostView::Full,
+        };
+        let envs = [(
+            "npm_package_version".to_string(),
+            "1.0.0\0--ro-bind\0/\0/host".to_string(),
+        )];
+        let result = sandbox.run_bwrap_capture(
+            &["/bin/sh", "-c", "test -e /host/etc && echo mounted"],
+            "/usr/bin:/bin",
+            &scratch,
+            &scratch,
+            &envs,
+        );
+        if let Ok(output) = &result {
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("mounted"),
+                "the value mounted the host at /host"
+            );
+        }
+        let error = result.expect_err("a value holding a NUL starts nothing");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
     }
 
     /// bubblewrap's helper is the sandbox's pid 1, readable by the build,

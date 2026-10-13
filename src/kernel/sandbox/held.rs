@@ -203,6 +203,21 @@ pub(crate) fn pass_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
     }
 }
 
+/// Refuse a command line holding a NUL byte: in the `--args` data it
+/// would end an argument early and make the rest options of bubblewrap's
+/// own. The refusal is `InvalidInput` and unmarked, the build's own failure,
+/// as the kernel's refusal of such an argument on argv is.
+pub(super) fn refuse_nul(args: &[std::ffi::OsString]) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    match args.iter().position(|arg| arg.as_bytes().contains(&0)) {
+        None => Ok(()),
+        Some(at) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("sandbox argument {at} holds a NUL byte"),
+        )),
+    }
+}
+
 /// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
 /// anonymous file read from its start.
 #[cfg(target_os = "linux")]

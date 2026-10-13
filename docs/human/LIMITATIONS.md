@@ -468,15 +468,21 @@ Selection covers every patch of each maintained CPython minor that python-build-
   with no `packages` key (one that only holds settings) is read as naming no members, and a
   `packages` value that is not a plain list (an anchor, an alias) skips the member check with
   a note.
-- **Reading npm workspace members runs Node.** Greyward does not match `workspaces`
-  patterns itself: it asks the npm bundled with the store Node (`@npmcli/map-workspaces`),
-  sandboxed with no network and the project read-only, so the member set is npm's own,
-  extglobs, classes and symlink rules included. Any command that reads a project whose root
-  `package.json` has a `workspaces` list (sync, `ward add`, `inspect`, `audit`, `join`,
-  `attest`) realizes that Node first, a download the first time. The answer is kept for the
-  rest of the command. Directories outside the project that a symlink below a pattern's
-  literal prefix leads to are mounted read-only too, so npm sees what it would see
-  unconfined.
+- **Reading npm workspace members runs Node, and it sees the whole host read-only.**
+  Greyward does not match `workspaces` patterns itself: it asks the npm bundled with the
+  store Node (`@npmcli/map-workspaces`), so the member set is npm's own, extglobs, classes
+  and symlink rules included. Any command that reads a project whose root `package.json`
+  has a `workspaces` list (sync, `ward add`, `inspect`, `audit`, `join`, `attest`) realizes
+  that Node first, a download the first time. npm runs in the sandbox with no network and
+  nothing writable but its scratch directory, and with the whole host filesystem
+  read-only, so a symlink to anywhere resolves as it would unconfined. That view shows
+  every host file Greyward's own user can read except Greyward's signing keys, and every
+  host Unix socket: no socket scan can cover `/`, so the trust is in the tool, which is the
+  store's hash-checked npm reading the project's patterns as data and running none of the
+  project's code. The project itself is bound from the directory Greyward holds; a project
+  whose path was pointed elsewhere after Greyward opened it is refused. npm runs again for
+  every question, and if its answer changes while one command runs (a member added during
+  a sync), the command refuses rather than publish a record for the old set.
 - **A workspace member reached through a symlink out of the project is left out.** npm takes
   a directory its `workspaces` patterns find through a symlink, wherever the symlink leads.
   Greyward takes, of the members npm returns, the ones whose target is inside the project,

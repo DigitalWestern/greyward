@@ -13,8 +13,8 @@ use crate::tailors::node::lock_import;
 use std::io;
 use std::path::Path;
 
-/// A package.json with no lockfile ward can import (package-lock.json,
-/// pnpm-lock.yaml, yarn.lock): delegate lock generation to npm, mirroring
+/// A package.json with no lockfile ward can import ([`LOCKS`]): delegate
+/// lock generation to npm, mirroring
 /// the uv flow for Python. Resolution is the ecosystem's job; realization
 /// is ward's. The project is read through the held descriptor; npm itself
 /// runs in `project.path()`.
@@ -26,9 +26,7 @@ pub fn ensure_npm_lock(
     door: &mut ResolutionDoor<'_>,
 ) -> io::Result<()> {
     if !input_exists(project, "package.json")
-        || input_exists(project, "package-lock.json")
-        || input_exists(project, "pnpm-lock.yaml")
-        || input_exists(project, "yarn.lock")
+        || LOCKS.iter().any(|lock| input_exists(project, lock))
     {
         return Ok(());
     }
@@ -93,6 +91,17 @@ pub(crate) fn refuse_member_lock_generation(project: &ProjectRoot) -> io::Result
     }
 }
 
+/// The locks ward plans from, in the order it picks one: npm's own
+/// precedence first (`npm-shrinkwrap.json` over `package-lock.json`, as
+/// arborist's `Shrinkwrap.load` reads them; both are the same format), then
+/// pnpm's and yarn's.
+pub(crate) const LOCKS: [&str; 4] = [
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+];
+
 /// The plan from whichever lock the project has, read through the held
 /// descriptor (a lock npm just generated is read back the same way).
 pub fn load_npm_plan(
@@ -127,10 +136,12 @@ pub fn load_npm_plan_with_basis(
             basis: node::resolve::resolution_basis(project, lock_name, lock_text)?,
         })
     };
-    if project.is_input_file(Path::new("package-lock.json")) {
-        let text = read_input(project, "package-lock.json")?;
-        let plan = node::plan_npm_with(platform, &text, node_version)?;
-        return planned("package-lock.json", &text, plan).map(Some);
+    for lock_name in ["npm-shrinkwrap.json", "package-lock.json"] {
+        if project.is_input_file(Path::new(lock_name)) {
+            let text = read_input(project, lock_name)?;
+            let plan = node::plan_npm_lock(platform, lock_name, &text, node_version)?;
+            return planned(lock_name, &text, plan).map(Some);
+        }
     }
     if project.is_input_file(Path::new("pnpm-lock.yaml")) {
         let text = read_input(project, "pnpm-lock.yaml")?;
@@ -162,9 +173,7 @@ pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
 
 /// A `package.json` with none of the locks ward imports.
 pub(crate) fn needs_lock(project: &ProjectRoot) -> bool {
-    let locked = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
-        .iter()
-        .any(|lock| input_exists(project, lock));
+    let locked = LOCKS.iter().any(|lock| input_exists(project, lock));
     input_exists(project, "package.json") && !locked
 }
 
@@ -362,5 +371,43 @@ mod tests {
         let temp = crate::kernel::testutil::TempDir::named("node-frozen-empty");
         let project = crate::kernel::fsroot::ProjectRoot::open(&temp.0).unwrap();
         super::require_lock(&project).unwrap();
+    }
+
+    /// npm reads npm-shrinkwrap.json before package-lock.json (#694), so
+    /// ward plans from it when both exist, and a project with only a
+    /// shrinkwrap is locked: no lock is generated beside it and `--frozen`
+    /// does not refuse it.
+    #[test]
+    fn a_shrinkwrap_is_the_npm_lock_and_wins_over_package_lock() {
+        let temp = crate::kernel::testutil::TempDir::named("node-shrinkwrap");
+        let dir = &temp.0;
+        let lock = |dependency: &str| {
+            format!(
+                r#"{{"lockfileVersion":3,"packages":{{"":{{"name":"p"}},"node_modules/{dependency}":{{"version":"1.0.0","resolved":"https://r/{dependency}.tgz","integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}}}}}"#
+            )
+        };
+        std::fs::write(dir.join("package.json"), r#"{"name":"p"}"#).unwrap();
+        std::fs::write(dir.join("npm-shrinkwrap.json"), lock("from-shrinkwrap")).unwrap();
+        let project = crate::kernel::fsroot::ProjectRoot::open(dir).unwrap();
+        assert!(!super::needs_lock(&project));
+        super::require_lock(&project).unwrap();
+        std::fs::write(dir.join("package-lock.json"), lock("from-package-lock")).unwrap();
+        let selected = crate::tailors::node::shipped_selection().unwrap();
+        let planned = super::load_npm_plan_with_basis(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &selected,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(planned.plan.lock_source, "npm-shrinkwrap.json");
+        let paths: Vec<&str> = planned
+            .plan
+            .packages
+            .iter()
+            .map(|p| p.path.as_str())
+            .collect();
+        assert_eq!(paths, ["node_modules/from-shrinkwrap"]);
+        assert!(planned.basis.contains_key("npm-shrinkwrap.json"));
     }
 }

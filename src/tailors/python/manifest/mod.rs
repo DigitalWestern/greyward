@@ -773,8 +773,8 @@ version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = ["python_full_version >= '3.12'"]
 dependencies = [{ name = "idna", marker = "python_version >= '3.12'" }]
-sdist = { url = "https://files.pythonhosted.org/six.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
-wheels = [{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
+sdist = { url = "https://files.pythonhosted.org/six-1.17.0.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+wheels = [{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]
 "#).unwrap();
         assert_eq!(packages[0].files.len(), 2);
         assert_eq!(
@@ -804,35 +804,35 @@ source = { registry = "https://pypi.org/simple" }
 "#;
         for (wheel, why) in [
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl" }"#,
                 "no hash",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "md5:abcdef" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "md5:abcdef" }"#,
                 "md5 hash",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
                 "bare hex without the sha256: prefix",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }"#,
                 "uppercase algorithm prefix",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = 42 }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = 42 }"#,
                 "hash is not a string",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:" }"#,
                 "empty digest",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:aaaaaaaa" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:aaaaaaaa" }"#,
                 "short digest",
             ),
             (
-                r#"{ url = "https://files.pythonhosted.org/six.whl", hash = "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" }"#,
+                r#"{ url = "https://files.pythonhosted.org/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" }"#,
                 "non-hex digest",
             ),
             (
@@ -849,7 +849,7 @@ source = { registry = "https://pypi.org/simple" }
             );
         }
         let error = parse_uv_lock(&format!(
-            "{base}sdist = {{ url = \"https://files.pythonhosted.org/six.tar.gz\" }}\n"
+            "{base}sdist = {{ url = \"https://files.pythonhosted.org/six-1.17.0.tar.gz\" }}\n"
         ))
         .unwrap_err()
         .to_string();
@@ -961,7 +961,7 @@ dependencies = [{ name = "six" }]
                 version: "8.0.0".into(),
                 source: "registry".into(),
                 files: vec![UvFile {
-                    url: "https://files.example/pytest-8.0.0.tar.gz".into(),
+                    url: "https://files.pythonhosted.org/pytest-8.0.0.tar.gz".into(),
                     hash: "a".repeat(64),
                     filename: "pytest-8.0.0.tar.gz".into(),
                     kind: ArtifactKind::Sdist,
@@ -991,14 +991,14 @@ dependencies = [{ name = "six" }]
             source: "{ registry = \"https://pypi.org/simple\" }".into(),
             files: vec![
                 UvFile {
-                    url: "https://files.example/demo-1.0.0-cp311-cp311-manylinux_2_17_x86_64.whl"
+                    url: "https://files.pythonhosted.org/demo-1.0.0-cp311-cp311-manylinux_2_17_x86_64.whl"
                         .into(),
                     hash: "a".repeat(64),
                     filename: "demo-1.0.0-cp311-cp311-manylinux_2_17_x86_64.whl".into(),
                     kind: ArtifactKind::Wheel,
                 },
                 UvFile {
-                    url: "https://files.example/demo-1.0.0-cp312-cp312-manylinux_2_17_x86_64.whl"
+                    url: "https://files.pythonhosted.org/demo-1.0.0-cp312-cp312-manylinux_2_17_x86_64.whl"
                         .into(),
                     hash: "b".repeat(64),
                     filename: "demo-1.0.0-cp312-cp312-manylinux_2_17_x86_64.whl".into(),
@@ -1025,7 +1025,7 @@ dependencies = [{ name = "six" }]
     #[test]
     fn uv_lock_follows_selected_roots_not_unreachable_dev_packages() {
         let file = |name: &str| UvFile {
-            url: format!("https://files.example/{name}-1.0.0.tar.gz"),
+            url: format!("https://files.pythonhosted.org/{name}-1.0.0.tar.gz"),
             hash: "a".repeat(64),
             filename: format!("{name}-1.0.0.tar.gz"),
             kind: ArtifactKind::Sdist,
@@ -1101,7 +1101,7 @@ dependencies = [{ name = "six" }]
             version: "1.0.0".into(),
             source: source.into(),
             files: vec![UvFile {
-                url: format!("https://files.example/{name}-1.0.0.tar.gz"),
+                url: format!("https://files.pythonhosted.org/{name}-1.0.0.tar.gz"),
                 hash: "a".repeat(64),
                 filename: format!("{name}-1.0.0.tar.gz"),
                 kind: ArtifactKind::Sdist,
@@ -1154,6 +1154,115 @@ dependencies = [{ name = "six" }]
                 ),
             ]
         );
+    }
+
+    /// #688: a private registry's package carries its index into the lock
+    /// (the SBOM's `repository_url`), and a public-index package whose file
+    /// is served from another host is recorded as unattested. A file URL
+    /// naming another distribution or release than its entry is refused.
+    #[test]
+    fn uv_lock_records_each_package_index_and_file_host() {
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let package = |name: &str, version: &str, source: &str, url: &str| UvPackage {
+            name: name.into(),
+            version: version.into(),
+            source: source.into(),
+            files: vec![UvFile {
+                url: url.into(),
+                hash: "a".repeat(64),
+                filename: url.rsplit('/').next().unwrap().into(),
+                kind: ArtifactKind::Sdist,
+            }],
+            dependencies: Vec::new(),
+            resolution_markers: Vec::new(),
+            dependency_edges: Vec::new(),
+            optional_dependencies: BTreeMap::new(),
+        };
+        let pypi = "{ registry = \"https://pypi.org/simple\" }";
+        let private = "https://private.invalid/simple";
+        let packages = vec![
+            package(
+                "internal",
+                "1.0.0",
+                &format!("{{ registry = \"{private}\" }}"),
+                "https://private.invalid/files/internal-1.0.0.tar.gz",
+            ),
+            package(
+                "mirrored",
+                "1.0.0",
+                pypi,
+                "https://mirror.invalid/mirrored-1.0.0.tar.gz",
+            ),
+            package(
+                "six",
+                "1.17.0",
+                pypi,
+                "https://files.pythonhosted.org/packages/six-1.17.0.tar.gz",
+            ),
+        ];
+        let selected = uv_lock_manifest(
+            &packages,
+            &[],
+            Platform::X86_64UnknownLinuxGnu,
+            "3.12.14",
+            pypi::Glibc(2, 43),
+        )
+        .unwrap()
+        .unwrap();
+        let index = |name: &str| {
+            selected
+                .iter()
+                .find(|package| package.name == name)
+                .unwrap()
+                .index
+                .clone()
+        };
+        assert_eq!(index("internal").as_deref(), Some(private));
+        assert_eq!(index("mirrored"), None);
+        assert_eq!(index("six"), None);
+        use crate::kernel::policy::UNATTESTED_INDEX;
+        assert_eq!(
+            drained_records(),
+            [
+                record(
+                    UNATTESTED_INDEX,
+                    "internal",
+                    "uv lock package names a non-public registry source"
+                ),
+                record(
+                    UNATTESTED_INDEX,
+                    "mirrored",
+                    "uv lock package names the public index, but its file is served from another host"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn uv_lock_file_urls_must_name_their_entry() {
+        let lock = |version: &str, url: &str| {
+            format!(
+                "[[package]]\nname = \"requests\"\nversion = \"{version}\"\n\
+                 source = {{ registry = \"https://pypi.org/simple\" }}\n\
+                 sdist = {{ url = \"{url}\", hash = \"sha256:{}\" }}\n",
+                "a".repeat(64)
+            )
+        };
+        let base = "https://files.pythonhosted.org/packages";
+        parse_uv_lock(&lock("2.32.3", &format!("{base}/requests-2.32.3.tar.gz"))).unwrap();
+        let other = parse_uv_lock(&lock("2.32.3", &format!("{base}/totally-other-9.9.tar.gz")))
+            .unwrap_err()
+            .to_string();
+        assert!(other.starts_with("uv.lock requests: sdist file"), "{other}");
+        assert!(
+            other.contains("but the lock names requests 2.32.3"),
+            "{other}"
+        );
+        let older = parse_uv_lock(&lock("2.1.0", &format!("{base}/requests-2.0.0.tar.gz")))
+            .unwrap_err()
+            .to_string();
+        assert!(older.contains("is requests 2.0.0"), "{older}");
     }
 
     /// A uv.lock source is classified by its key (#687): a GitLab or Gitea
@@ -1806,7 +1915,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
     #[test]
     fn uv_lock_selects_resolution_and_dependency_marker_variants() {
         let file = |name: &str, version: &str| UvFile {
-            url: format!("https://files.example/{name}-{version}.tar.gz"),
+            url: format!("https://files.pythonhosted.org/{name}-{version}.tar.gz"),
             hash: "a".repeat(64),
             filename: format!("{name}-{version}.tar.gz"),
             kind: ArtifactKind::Sdist,
@@ -1893,7 +2002,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
             version: "1.0.0".into(),
             source: "registry".into(),
             files: vec![UvFile {
-                url: "https://files.example/foo-1.0.0.tar.gz".into(),
+                url: "https://files.pythonhosted.org/foo-1.0.0.tar.gz".into(),
                 hash: "a".repeat(64),
                 filename: "foo-1.0.0.tar.gz".into(),
                 kind: ArtifactKind::Sdist,
@@ -1918,7 +2027,7 @@ files = [{ file = "dep-2.whl", hash = "sha256:cccccccccccccccccccccccccccccccccc
     #[test]
     fn uv_lock_root_extra_traverses_optional_dependency_table() {
         let file = |name: &str| UvFile {
-            url: format!("https://files.example/{name}-1.0.0.tar.gz"),
+            url: format!("https://files.pythonhosted.org/{name}-1.0.0.tar.gz"),
             hash: "a".repeat(64),
             filename: format!("{name}-1.0.0.tar.gz"),
             kind: ArtifactKind::Sdist,
@@ -1985,13 +2094,13 @@ name = "foo"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 optional-dependencies = { feature = [{ name = "bar" }] }
-sdist = { url = "https://files.example/foo-1.0.0.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+sdist = { url = "https://files.pythonhosted.org/foo-1.0.0.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
 
 [[package]]
 name = "bar"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.example/bar-1.0.0.tar.gz", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+sdist = { url = "https://files.pythonhosted.org/bar-1.0.0.tar.gz", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
 "#;
         let packages = parse_uv_lock(lock).unwrap();
         assert_eq!(
@@ -2212,7 +2321,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             version: "1.0.0".into(),
             source: "registry".into(),
             files: vec![UvFile {
-                url: "https://files.example/windows-only-1.0.0.tar.gz".into(),
+                url: "https://files.pythonhosted.org/windows-only-1.0.0.tar.gz".into(),
                 hash: "a".repeat(64),
                 filename: "windows-only-1.0.0.tar.gz".into(),
                 kind: ArtifactKind::Sdist,
@@ -2583,7 +2692,7 @@ files = [{ file = "old.whl", hash = "sha256:dddddddddddddddddddddddddddddddddddd
             version: "1.0.0.post1".into(),
             source: "registry".into(),
             files: vec![UvFile {
-                url: "https://files.example/foo-1.0.0.post1.tar.gz".into(),
+                url: "https://files.pythonhosted.org/foo-1.0.0.post1.tar.gz".into(),
                 hash: "a".repeat(64),
                 filename: "foo-1.0.0.post1.tar.gz".into(),
                 kind: ArtifactKind::Sdist,

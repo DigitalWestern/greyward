@@ -428,7 +428,9 @@ pub(crate) fn realize_env_at_depth(
         .object_path(&commit_identity.object_id())
         .join("bin/python");
     let mut installed = BTreeMap::new();
-    for (_p, wheel_file) in &artifacts {
+    for (package, wheel_file) in &artifacts {
+        // The wheel's own metadata must name the locked package (#688).
+        wheel::check_wheel_package(wheel_file, package)?;
         wheel::install_wheel(
             wheel_file,
             &site,
@@ -1048,6 +1050,7 @@ mod tests {
         fs::write(&archive, &bytes).unwrap();
         let sha256 = hex::encode(sha2::Sha256::digest(bytes));
         LockedPackage {
+            index: None,
             name: name.into(),
             version: "1.0".into(),
             filename: format!("{name}-1.0.tar.gz"),
@@ -1081,6 +1084,7 @@ mod tests {
         let sha256 = hex::encode(sha2::Sha256::digest(fs::read(&archive).unwrap()));
         let _ = fs::remove_dir_all(source);
         LockedPackage {
+            index: None,
             name: name.into(),
             version: "1.0".into(),
             filename: format!("{name}-1.0.tar.gz"),
@@ -1106,6 +1110,7 @@ mod tests {
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
             packages: vec![LockedPackage {
+                index: None,
                 name: "setuptools".into(),
                 version: "84.0.0".into(),
                 filename: "setuptools.whl".into(),
@@ -1140,6 +1145,7 @@ mod tests {
         };
         let wheel_plan = Plan {
             packages: vec![LockedPackage {
+                index: None,
                 name: "example".into(),
                 version: "1.0.0".into(),
                 filename: "example-1.0.0-py3-none-any.whl".into(),
@@ -1239,6 +1245,7 @@ mod tests {
             packages: Vec::new(),
         };
         let wheel = |name: &str| LockedPackage {
+            index: None,
             name: name.into(),
             version: "1.0.0".into(),
             filename: format!("{name}-1.0.0-py3-none-any.whl"),

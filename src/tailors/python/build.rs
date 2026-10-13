@@ -215,6 +215,7 @@ fn build_toolchain_plan(python_version: &str) -> Plan {
         packages: BUILD_TOOLCHAIN
             .iter()
             .map(|(name, version, filename, url, sha)| LockedPackage {
+                index: None,
                 name: (*name).into(),
                 version: (*version).into(),
                 filename: (*filename).into(),
@@ -361,6 +362,7 @@ pub(crate) fn local_native_sdist_for_test(store: &Store, name: &str) -> LockedPa
     fs::write(&archive, &bytes).expect("write local native sdist");
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     LockedPackage {
+        index: None,
         name: name.into(),
         version: "1.0".into(),
         filename: format!("{name}-1.0.tar.gz"),
@@ -396,6 +398,7 @@ pub(crate) fn local_rust_sdist_for_test(store: &Store, name: &str) -> LockedPack
     fs::write(&archive, &bytes).expect("write local Rust sdist");
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     LockedPackage {
+        index: None,
         name: name.into(),
         version: "1.0".into(),
         filename: format!("{name}-1.0.tar.gz"),
@@ -1055,6 +1058,7 @@ pub(crate) fn git_sdist_package(
         &pkg.version,
     )?;
     Ok(LockedPackage {
+        index: None,
         name: pkg.name.clone(),
         version: pkg.version.clone(),
         filename,
@@ -1291,6 +1295,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let pin = crate::tailors::python::lookup(platform, "3.12.14")
         .expect("pinned CPython for test platform");
     let pkg = LockedPackage {
+        index: None,
         name: "example".into(),
         version: "1.0.0".into(),
         filename: "example-1.0.0.tar.gz".into(),
@@ -1423,6 +1428,8 @@ fn single_built_wheel(outdir: &Path, pkg: &LockedPackage) -> io::Result<PathBuf>
             ),
         ));
     }
+    // The build may only produce the package it was asked for (#688).
+    crate::tailors::python::pypi::check_built_wheel(&wheels[0], pkg)?;
     Ok(wheels[0].clone())
 }
 
@@ -1493,6 +1500,57 @@ mod isolation_tests;
 
 #[cfg(test)]
 mod tests {
+    /// #688: a build of `foo==1.0` that leaves another project's wheel, or
+    /// another release's, is refused; a git package is held to its name.
+    #[test]
+    fn a_built_wheel_must_be_the_locked_package() {
+        use crate::kernel::types::{ArtifactKind, LockedPackage};
+        let pkg = |name: &str, version: &str, url: &str| LockedPackage {
+            index: None,
+            name: name.into(),
+            version: version.into(),
+            filename: format!("{name}-{version}.tar.gz"),
+            url: url.into(),
+            sha256: "a".repeat(64),
+            kind: ArtifactKind::Sdist,
+            git: None,
+        };
+        let built = |wheel: &str, locked: &LockedPackage| {
+            let dir = crate::kernel::testutil::TempDir::named("built-wheel-name");
+            std::fs::write(dir.0.join(wheel), b"").unwrap();
+            super::single_built_wheel(&dir.0, locked).map(|_| ())
+        };
+        let foo = pkg(
+            "foo",
+            "1.0",
+            "https://files.pythonhosted.org/foo-1.0.tar.gz",
+        );
+        built("foo-1.0-py3-none-any.whl", &foo).unwrap();
+        built("Foo-1.0.0-py3-none-any.whl", &foo).unwrap();
+        let other = built("bar-9.9-py3-none-any.whl", &foo)
+            .unwrap_err()
+            .to_string();
+        assert!(other.starts_with("foo==1.0: built wheel file"), "{other}");
+        assert!(
+            other.contains("is bar 9.9, but the lock names foo 1.0"),
+            "{other}"
+        );
+        let release = built("foo-2.0-py3-none-any.whl", &foo)
+            .unwrap_err()
+            .to_string();
+        assert!(release.contains("is foo 2.0"), "{release}");
+        let git = pkg(
+            "foo",
+            "0+git.0123456789ab",
+            "git+https://example.com/foo.tar.gz",
+        );
+        built("foo-3.1-py3-none-any.whl", &git).unwrap();
+        let git = built("bar-3.1-py3-none-any.whl", &git)
+            .unwrap_err()
+            .to_string();
+        assert!(git.contains("the lock names foo;"), "{git}");
+    }
+
     /// tokenizers 0.13.3's real error sat above rustc's command line and
     /// pip's traceback, so the 40-line tail showed only warnings. The
     /// excerpt leads with the first compiler error.
@@ -1797,6 +1855,7 @@ mod tests {
     #[test]
     fn darwin_sdist_identity_unchanged() {
         let pkg = LockedPackage {
+            index: None,
             name: "docopt".into(),
             version: "0.6.2".into(),
             filename: "docopt-0.6.2.tar.gz".into(),
@@ -1858,6 +1917,7 @@ mod tests {
     #[test]
     fn isolated_identity_has_schema_four_and_build_env() {
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -1972,6 +2032,7 @@ mod tests {
     fn isolated_identity_goldens_and_dropped_pairs() {
         crate::tailors::install_kinds();
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -2051,6 +2112,7 @@ mod tests {
     #[test]
     fn recursion_cap_is_loud() {
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -2089,6 +2151,7 @@ mod tests {
             Platform::Aarch64AppleDarwin
         };
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),
@@ -2123,6 +2186,7 @@ mod tests {
     #[test]
     fn build_sdist_preserves_unsupported_kind() {
         let pkg = LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0".into(),
             filename: "example-1.0.tar.gz".into(),

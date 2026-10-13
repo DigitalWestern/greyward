@@ -917,9 +917,11 @@ works.
            takes the newest pinned patch, X.Y.Z must be an exact pinned
            build, and with neither the newest pinned build is taken once
            and then recorded in greyward-toolchain.toml.
-  node     package.json with package-lock.json (v2/v3), pnpm-lock.yaml
-           (v9, v6 importer shape also accepted) or yarn.lock (Yarn
-           classic v1); a missing lock is written by the store npm
+  node     package.json with package-lock.json (v2/v3; an
+           npm-shrinkwrap.json is read first, as npm reads it),
+           pnpm-lock.yaml (v9, v6 importer shape also accepted) or
+           yarn.lock (Yarn classic v1); a missing lock is written by the
+           store npm
   cargo    Cargo.toml, Cargo.lock; a missing lock is written by the
            store Cargo
   go       go.mod, go.sum; the closure is computed by the store Go

@@ -110,15 +110,20 @@ pub(super) fn link_package_bins(
 /// links into, and the package's name below that `node_modules` (scoped
 /// names keep their scope): `node_modules/a/node_modules/@s/b` links into
 /// `node_modules/a/node_modules/.bin` as `@s/b`.
+///
+/// The holder is the last path component that is exactly `node_modules`
+/// with a name after it, as bin-links' `get-node-modules` takes it: a scope
+/// such as `@my-node_modules` only contains the word.
 fn bin_dir_of(path: &str) -> io::Result<(String, &str)> {
-    let index = path
-        .rfind("node_modules/")
-        .filter(|&index| index == 0 || path[..index].ends_with('/'))
+    let components: Vec<&str> = path.split('/').collect();
+    let holder = (0..components.len().saturating_sub(1))
+        .rev()
+        .find(|&index| components[index] == "node_modules")
         .ok_or_else(|| err(format!("{path}: not a node_modules placement")))?;
-    let holder = &path[..index + "node_modules".len()];
+    let holder_len: usize = components[..=holder].iter().map(|c| c.len() + 1).sum();
     Ok((
-        format!("{holder}/.bin"),
-        &path[index + "node_modules/".len()..],
+        format!("{}/.bin", &path[..holder_len - 1]),
+        &path[holder_len..],
     ))
 }
 
@@ -269,6 +274,42 @@ mod tests {
         assert_eq!(
             bin_dir_of("node_modules/@s/x").unwrap(),
             ("node_modules/.bin".to_string(), "@s/x")
+        );
+    }
+
+    /// A scope or package name that contains `node_modules` is a name, not
+    /// the directory that holds the package (Sol review of #695).
+    #[test]
+    fn the_holding_node_modules_is_a_whole_path_component() {
+        assert_eq!(
+            bin_dir_of("node_modules/@my-node_modules/tool").unwrap(),
+            ("node_modules/.bin".to_string(), "@my-node_modules/tool")
+        );
+        assert_eq!(
+            bin_dir_of("node_modules/a/node_modules/x-node_modules").unwrap(),
+            (
+                "node_modules/a/node_modules/.bin".to_string(),
+                "x-node_modules"
+            )
+        );
+        assert_eq!(
+            bin_dir_of("packages/my-node_modules/node_modules/t").unwrap(),
+            (
+                "packages/my-node_modules/node_modules/.bin".to_string(),
+                "t"
+            )
+        );
+        assert!(bin_dir_of("node_modules").is_err());
+        assert!(bin_dir_of("packages/x").is_err());
+        let staged = staged(&["node_modules/@my-node_modules/tool"]);
+        link_package_bins(
+            &staged.0,
+            &[package("node_modules/@my-node_modules/tool", "tool")],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_link(staged.0.join("node_modules/.bin/tool")).unwrap(),
+            Path::new("../@my-node_modules/tool/cli.js")
         );
     }
 }

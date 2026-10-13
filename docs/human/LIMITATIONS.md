@@ -331,9 +331,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   macOS by the cross-check, as before, rather than extracted as the wrong tree (#307 stays
   open until a macOS run shows whether `--no-mac-metadata` on `-t` lifts it). Single
   manifests read out of an sdist come from the same validated in-process stream, never a
-  second tar child. The Elixir release zip and Hex's own `.ez` archive are
-  unpacked by `/usr/bin/unzip`, inheriting the user's `UNZIP`/`UNZIPOPT`. Wheels, zip sdists
-  and the outer zip of a `.conda` package are read in process with the `zip` crate.
+  second tar child. Zip archives (wheels, zip sdists, the Elixir release zip, Hex's own
+  `.ez` archive and the outer zip of a `.conda` package) are read in process by one kernel
+  reader under the tarball's name rules: no unsafe, invisible or twice-written name, no
+  symlink or special file, no encrypted entry. Each member must inflate to exactly the size
+  it declares, and the declared sizes count against a budget (4 GiB for a wheel, 1 GiB for
+  the rest) before anything is written. Modes follow pip: a file with any execute bit is
+  0755, every other file 0644, and directory modes are ignored.
 
 ## Python
 

@@ -8,6 +8,7 @@
 //! touches the store or network.
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::archive::{ZipReader, MAX_ARCHIVE_BYTES};
 use crate::kernel::fetch::{download_verified_held, Digest as FetchDigest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -15,10 +16,9 @@ use crate::kernel::types::Identity;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use zip::ZipArchive;
 
 pub const NATIVE_LIBS_VERSION: &str = "3";
 const CONDA_BASE: &str = "https://conda.anaconda.org/conda-forge";
@@ -711,35 +711,30 @@ fn extract_conda(
     package_root: &Path,
     info_root: &Path,
 ) -> io::Result<()> {
-    let file = File::open(archive)?;
-    let mut zip = ZipArchive::new(file).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("read {} as .conda zip: {e}", archive.display()),
-        )
-    })?;
+    // The outer `.conda` layer is a zip: read under the kernel's zip rules
+    // (#675), so its members yield exactly the bytes they declare, within
+    // the budget a tarball gets.
+    let mut zip = ZipReader::open(archive, MAX_ARCHIVE_BYTES)
+        .map_err(|e| invalid_conda(format!("read {} as .conda zip: {e}", archive.display())))?;
     let mut pkg = None;
     let mut info = None;
-    for index in 0..zip.len() {
-        let entry = zip.by_index(index).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("read .conda entry {index}: {e}"),
-            )
-        })?;
-        let name = entry.name().to_string();
+    for member in zip.members() {
+        let name = &member.name;
         if name.starts_with("pkg-") && name.ends_with(".tar.zst") {
-            pkg = Some(name);
+            pkg = Some(member.clone());
         } else if name.starts_with("info-") && name.ends_with(".tar.zst") {
-            info = Some(name);
+            info = Some(member.clone());
         }
     }
     let pkg = pkg.ok_or_else(|| invalid_conda("missing pkg-*.tar.zst"))?;
     let info = info.ok_or_else(|| invalid_conda("missing info-*.tar.zst"))?;
     let pkg_zst = package_root.with_extension("pkg.tar.zst");
     let info_zst = info_root.with_extension("info.tar.zst");
-    unzip_member(archive, &pkg, &pkg_zst)?;
-    unzip_member(archive, &info, &info_zst)?;
+    for (member, destination) in [(&pkg, &pkg_zst), (&info, &info_zst)] {
+        let mut out = File::create(destination)?;
+        zip.copy(member, MAX_ARCHIVE_BYTES, &mut out)
+            .map_err(|e| invalid_conda(format!("read {}: {e}", member.name)))?;
+    }
     let pkg_tar = pkg_zst.with_extension("tar");
     let info_tar = info_zst.with_extension("tar");
     zstd_decompress(activity, &pkg_zst, &pkg_tar)?;
@@ -750,17 +745,6 @@ fn extract_conda(
         let _ = fs::remove_file(path);
     }
     Ok(())
-}
-
-fn unzip_member(archive: &Path, member: &str, destination: &Path) -> io::Result<()> {
-    let file = File::open(archive)?;
-    let mut zip = ZipArchive::new(file).map_err(|e| invalid_conda(format!("read zip: {e}")))?;
-    let mut entry = zip
-        .by_name(member)
-        .map_err(|e| invalid_conda(format!("read {member}: {e}")))?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes)?;
-    fs::write(destination, bytes)
 }
 
 fn zstd_decompress(activity: &StoreActivity, input: &Path, output: &Path) -> io::Result<()> {

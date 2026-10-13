@@ -84,7 +84,7 @@ extractor (`src/kernel/archive.rs`): list and validate every entry first
 (no absolute names, `..` or special files; symlinks only when contained;
 hard links only to an earlier regular file kept after the strip, never to
 themselves; no name written twice, directories excepted, the same rule
-`read_member` applies in process, #613), then extract with `TAR_OPTIONS` (and `UNZIPOPT` for unzip)
+`read_member` applies in process, #613), then extract with `TAR_OPTIONS`
 unset and tar told not to restore extended attributes, ACLs, file flags or
 AppleDouble metadata, since an object's identity covers names, bytes and
 the executable bit only. PAX values are bytes; only `path`, `linkpath` and
@@ -94,7 +94,10 @@ Go toolchain, the optional Rust components and cross targets
 (`src/kernel/provider/rust_extras.rs`) and `ward update --self` use it. The
 other toolchains, and npm, Hex, sdist and crate archives, still call
 `/usr/bin/tar` directly; #236 routes them through it. Extraction must stay
-byte-identical, because object ids depend on it.
+byte-identical, because object ids depend on it. Zip archives (wheels, zip
+sdists, the Elixir zip, Hex `.ez`, the outer `.conda` layer) go through
+`src/kernel/archive/zipfile.rs` under the same name rules, plus a byte
+budget counted in real inflated bytes and pip's modes (#675).
 
 ### Embedded components (bundled npm, node-gyp)
 

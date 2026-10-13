@@ -6,7 +6,7 @@ use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use zip::ZipArchive;
+use crate::kernel::archive::{ZipMember, ZipReader};
 
 /// Install one wheel into an environment being assembled (PEP 427,
 /// pragmatic subset). Routes `{name}.data/{purelib,platlib,headers,scripts,data}`,
@@ -21,10 +21,13 @@ pub fn install_wheel(
     python_exe: &Path,
     installed: &mut BTreeMap<std::path::PathBuf, String>,
 ) -> io::Result<()> {
-    let file = fs::File::open(wheel_path)?;
-    let mut archive = ZipArchive::new(file).map_err(zip_error)?;
+    // The kernel reader refuses what the tar path refuses (#675): unsafe or
+    // repeated names, symlinks and special files, and members that inflate
+    // past the size they declare, counted against this aggregate cap.
+    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
+    let mut archive = ZipReader::open(wheel_path, MAX_UNPACKED_BYTES)?;
 
-    let distribution_id = scan_dist_info(&mut archive, wheel_path)?;
+    let distribution_id = scan_dist_info(archive.members(), wheel_path)?;
     let data_prefix = format!(
         "{}.data/",
         distribution_id
@@ -50,16 +53,11 @@ pub fn install_wheel(
         .join("include/site")
         .join(format!("python{python_minor}"))
         .join(&distribution_dir);
-    let mut directory_modes = Vec::new();
 
-    const MAX_UNPACKED_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB aggregate
-    let mut total_written: u64 = 0;
-
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(zip_error)?;
-        let name = entry.name().to_string();
+    archive.for_each(|member, reader| {
+        let name = member.name.as_str();
         let Some((base, relative, executable)) = route_entry(
-            &name,
+            name,
             &data_prefix,
             site_packages,
             &headers_dir,
@@ -67,16 +65,14 @@ pub fn install_wheel(
             env_root,
         )?
         else {
-            continue;
+            return Ok(());
         };
 
-        let destination = safe_destination(base, relative, env_root, &name)?;
-        if entry.is_dir() {
-            fs::create_dir_all(&destination)?;
-            if let Some(mode) = entry.unix_mode() {
-                directory_modes.push((destination, mode & 0o777));
-            }
-            continue;
+        let destination = safe_destination(base, relative, env_root, name)?;
+        if member.dir {
+            // A directory's stored mode is ignored, as pip ignores it: a
+            // read-only one would stop the next wheel writing into it.
+            return fs::create_dir_all(&destination);
         }
 
         if destination.symlink_metadata().is_ok() {
@@ -91,19 +87,10 @@ pub fn install_wheel(
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        total_written += entry.size();
-        if total_written > MAX_UNPACKED_BYTES {
-            return Err(invalid_data(format!(
-                "wheel expands past {MAX_UNPACKED_BYTES} bytes; refusing (zip bomb guard)"
-            )));
-        }
-        write_wheel_entry(&mut entry, &destination, executable, python_exe)?;
+        write_wheel_entry(reader, member, &destination, executable, python_exe)?;
         installed.insert(destination, distribution_id.clone());
-    }
-
-    for (directory, mode) in directory_modes {
-        set_mode(&directory, mode)?;
-    }
+        Ok(())
+    })?;
 
     if let Some(entry_points) = entry_points {
         install_launchers(
@@ -120,19 +107,13 @@ pub fn install_wheel(
     Ok(())
 }
 
-/// First pass over the archive: reject unsafe or symlink entries and return
-/// the single `.dist-info` directory name the wheel declares.
-fn scan_dist_info(archive: &mut ZipArchive<fs::File>, wheel_path: &Path) -> io::Result<String> {
+/// Reject names the wheel layout cannot place and return the single
+/// `.dist-info` directory name the wheel declares.
+fn scan_dist_info(members: &[ZipMember], wheel_path: &Path) -> io::Result<String> {
     let mut dist_info: Option<String> = None;
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(zip_error)?;
-        let name = entry.name();
+    for member in members {
+        let name = member.name.as_str();
         validate_entry_name(name)?;
-        if entry.is_symlink() {
-            return Err(invalid_data(format!(
-                "symlink entry is not allowed: {name}"
-            )));
-        }
         let top_level = name.split('/').next().unwrap_or_default();
         if top_level.ends_with(".dist-info") {
             match &dist_info {
@@ -155,16 +136,18 @@ fn scan_dist_info(archive: &mut ZipArchive<fs::File>, wheel_path: &Path) -> io::
 }
 
 /// Read `{dist_info}/entry_points.txt`, if the wheel ships one.
-fn read_entry_points(
-    archive: &mut ZipArchive<fs::File>,
-    dist_info: &str,
-) -> io::Result<Option<String>> {
-    let Ok(mut entry) = archive.by_name(&format!("{dist_info}/entry_points.txt")) else {
+fn read_entry_points(archive: &mut ZipReader, dist_info: &str) -> io::Result<Option<String>> {
+    // Entry points are a few lines; 16 MiB is the manifest cap the sdist
+    // readers use.
+    const ENTRY_POINTS_CAP: u64 = 16 << 20;
+    let name = format!("{dist_info}/entry_points.txt");
+    if archive.file(&name).is_none() {
         return Ok(None);
-    };
-    let mut contents = String::new();
-    entry.read_to_string(&mut contents)?;
-    Ok(Some(contents))
+    }
+    let bytes = archive.read(&name, ENTRY_POINTS_CAP)?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| invalid_data(format!("{name} is not UTF-8")))
 }
 
 /// Route one archive entry to its install base and relative path. Entries
@@ -262,10 +245,12 @@ fn supersede(
     fs::remove_file(destination)
 }
 
-/// Unpack one file entry and set its mode. Scripts are buffered so a
+/// Unpack one file entry and set its mode: 0o755 for a script or a file
+/// with any execute bit, else 0o644 (pip's rule). Scripts are buffered so a
 /// `#!python` shebang can be pointed at the environment's interpreter.
 fn write_wheel_entry(
-    entry: &mut zip::read::ZipFile<'_>,
+    entry: &mut dyn Read,
+    member: &ZipMember,
     destination: &Path,
     executable: bool,
     python_exe: &Path,
@@ -283,14 +268,11 @@ fn write_wheel_entry(
         io::copy(entry, &mut out)?;
     }
     let mode = if executable {
-        Some(0o755)
+        0o755
     } else {
-        entry.unix_mode().map(|mode| (mode & 0o777).max(0o644))
+        member.file_mode()
     };
-    if let Some(mode) = mode {
-        set_mode(destination, mode)?;
-    }
-    Ok(())
+    set_mode(destination, mode)
 }
 
 /// Generate `console_scripts`/`gui_scripts` launchers into `bin_dir`.
@@ -341,10 +323,6 @@ fn launcher_source(python_exe: &Path, module: &str, attr: &str) -> String {
         attr0 = attr0,
         attr = attr
     )
-}
-
-fn zip_error(error: zip::result::ZipError) -> io::Error {
-    invalid_data(error.to_string())
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -863,9 +841,19 @@ mod tests {
         fs::create_dir_all(&site).unwrap();
         fs::create_dir_all(&bin).unwrap();
 
-        for (index, data_entry) in [
-            ("absolute", "demo-1.0.data/data//outside.txt"),
-            ("escaping", "demo-1.0.data/data/sub/../../outside.txt"),
+        // The kernel's zip listing refuses both names before the wheel's
+        // own destination check would.
+        for (index, data_entry, needle) in [
+            (
+                "absolute",
+                "demo-1.0.data/data//outside.txt",
+                "empty path component",
+            ),
+            (
+                "escaping",
+                "demo-1.0.data/data/sub/../../outside.txt",
+                "`..` path component",
+            ),
         ] {
             let wheel = temp.0.join(format!("bad-{index}.whl"));
             write_wheel(
@@ -882,7 +870,7 @@ mod tests {
                 &mut BTreeMap::new(),
             )
             .unwrap_err();
-            assert!(error.to_string().contains("unsafe zip entry"), "{error}");
+            assert!(error.to_string().contains(needle), "{error}");
             assert!(!temp.0.join("outside.txt").exists());
         }
     }
@@ -1065,6 +1053,114 @@ mod tests {
             format!("console-script collision: {}", bin.join("tool").display())
         );
     }
+
+    /// An environment's `site-packages` and `bin` under a fresh temp dir.
+    fn env(temp: &TempDir) -> (PathBuf, PathBuf) {
+        let site = temp.0.join("lib/python3.12/site-packages");
+        let bin = temp.0.join("bin");
+        fs::create_dir_all(&site).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        (site, bin)
+    }
+
+    /// Members as `(name, mode, bytes)`; a name ending in `/` is a directory.
+    fn write_wheel_with_modes(path: &Path, entries: &[(&str, u32, &[u8])]) {
+        let mut writer = ZipWriter::new(fs::File::create(path).unwrap());
+        for (name, mode, contents) in entries {
+            let options = SimpleFileOptions::default().unix_permissions(*mode);
+            if name.ends_with('/') {
+                writer.add_directory(*name, options).unwrap();
+            } else {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(contents).unwrap();
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    /// The size guard counts the bytes a member really inflates to, not the
+    /// size its header claims (#675): a member that claims one byte and
+    /// inflates to a megabyte is refused, not installed.
+    #[test]
+    fn a_member_that_inflates_past_its_claimed_size_is_refused() {
+        let temp = TempDir::new();
+        let (site, bin) = env(&temp);
+        let wheel = temp.0.join("demo.whl");
+        write_wheel(
+            &wheel,
+            &[
+                ("demo-1.0.dist-info/RECORD", b""),
+                ("demo/big.bin", &vec![0u8; 1 << 20]),
+            ],
+        );
+        let mut bytes = fs::read(&wheel).unwrap();
+        crate::kernel::archive::zip_testing::claim_size(&mut bytes, "demo/big.bin", 1);
+        fs::write(&wheel, bytes).unwrap();
+        let error = install_wheel(
+            &wheel,
+            &site,
+            &bin,
+            "3.12",
+            &bin.join("python"),
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("inflates past"), "{error}");
+        let written = fs::metadata(site.join("demo/big.bin")).map_or(0, |m| m.len());
+        assert!(written <= 1, "{written}");
+    }
+
+    /// pip's modes: any execute bit gives 0o755, else 0o644, and a stored
+    /// directory mode is ignored, so no wheel can hide a file from other
+    /// users or lock a shared directory against the next wheel.
+    #[test]
+    fn file_modes_are_pips_and_directory_modes_are_ignored() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let (site, bin) = env(&temp);
+        let first = temp.0.join("first.whl");
+        write_wheel_with_modes(
+            &first,
+            &[
+                ("first-1.0.dist-info/RECORD", 0o644, b""),
+                ("ns/", 0o555, b""),
+                ("ns/a.py", 0o600, b"a"),
+                ("ns/group.py", 0o660, b"g"),
+                ("ns/tool.sh", 0o700, b"t"),
+                ("first-1.0.data/purelib/", 0o500, b""),
+                ("locked/", 0o000, b""),
+            ],
+        );
+        let second = temp.0.join("second.whl");
+        write_wheel_with_modes(
+            &second,
+            &[
+                ("second-1.0.dist-info/RECORD", 0o644, b""),
+                ("ns/b.py", 0o644, b"b"),
+            ],
+        );
+        let mut installed = BTreeMap::new();
+        for wheel in [&first, &second] {
+            install_wheel(
+                wheel,
+                &site,
+                &bin,
+                "3.12",
+                &bin.join("python"),
+                &mut installed,
+            )
+            .unwrap();
+        }
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&site.join("ns/a.py")), 0o644);
+        assert_eq!(mode(&site.join("ns/group.py")), 0o644);
+        assert_eq!(mode(&site.join("ns/tool.sh")), 0o755);
+        assert_eq!(fs::read(site.join("ns/b.py")).unwrap(), b"b");
+        // site-packages itself keeps its mode, and the 0o000 directory is
+        // still listable.
+        assert_ne!(mode(&site) & 0o200, 0);
+        assert!(fs::read_dir(site.join("locked")).is_ok());
+    }
 }
 
 /// Offline tests for the wheel entry guards (#348): the zip entry names a
@@ -1133,9 +1229,11 @@ mod entry_guard_tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(
-            error.to_string(),
-            "symlink entry is not allowed: pkg/passwd"
+        assert!(
+            error
+                .to_string()
+                .ends_with("entry \"pkg/passwd\" is a symlink"),
+            "{error}"
         );
         assert!(
             fs::read_dir(&site).unwrap().next().is_none(),

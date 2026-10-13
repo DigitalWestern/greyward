@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::kernel::fsroot::{LinkEnd, ProjectRoot};
+use std::os::unix::fs::MetadataExt as _;
 
 pub(super) fn workspace_set(plan: &NpmPlan) -> Vec<String> {
     if !plan.workspaces.is_empty() {
@@ -762,7 +763,7 @@ fn link_workspace_sources(
             &project_dir.join(resolved),
         )?;
         match link.symlink_metadata() {
-            Err(_) => std::os::unix::fs::symlink(target, &link)?,
+            Err(_) => std::os::unix::fs::symlink(&target, &link)?,
             // The link an earlier sync planted here.
             Ok(_) if fs::read_link(&link).is_ok_and(|existing| existing == target) => {}
             // A cloned package can ship something of its own where the lock
@@ -777,9 +778,23 @@ fn link_workspace_sources(
                 )));
             }
         }
-        let identity = refuse_link_leading_out(project, &link, Path::new(resolved), &l.path)?;
+        let identity =
+            refuse_link_leading_out(project, &link, &target, Path::new(resolved), &l.path)?;
+        // The kernel's own walk of the link agrees: the text ward computed
+        // by path really reaches the directory the held descriptor found.
+        // This can only refuse; the check that guards the link is the one
+        // above, run again before publication.
+        if !fs::metadata(&link).is_ok_and(|reached| (reached.dev(), reached.ino()) == identity) {
+            fs::remove_file(&link)?;
+            return Err(err(format!(
+                "workspace link {} does not reach {resolved} in the project; the link was \
+                 removed, so check the project and run the sync again",
+                l.path
+            )));
+        }
         planted.push(PlantedLink {
             link,
+            text: target,
             target: PathBuf::from(resolved),
             name: l.path.clone(),
             identity,
@@ -816,6 +831,7 @@ const LINKS_CHECK: &str = "node workspace links";
 /// leads to, and that directory's device and inode then.
 struct PlantedLink {
     link: PathBuf,
+    text: PathBuf,
     target: PathBuf,
     name: String,
     identity: (u64, u64),
@@ -836,8 +852,13 @@ fn recheck_links_before_publication(
         LINKS_CHECK,
         std::sync::Arc::new(move || {
             for planted in &planted {
-                let still =
-                    refuse_link_leading_out(&held, &planted.link, &planted.target, &planted.name)?;
+                let still = refuse_link_leading_out(
+                    &held,
+                    &planted.link,
+                    &planted.text,
+                    &planted.target,
+                    &planted.name,
+                )?;
                 if still != planted.identity {
                     fs::remove_file(&planted.link)?;
                     return Err(err(format!(
@@ -865,10 +886,11 @@ fn recheck_links_before_publication(
 fn refuse_link_leading_out(
     project: &ProjectRoot,
     link: &Path,
+    text: &Path,
     target: &Path,
     name: &str,
 ) -> io::Result<(u64, u64)> {
-    let why = match project.link_leads_to(link, target)? {
+    let why = match project.link_leads_to(link, text, target)? {
         LinkEnd::Target(identity) => return Ok(identity),
         LinkEnd::Elsewhere => {
             "leads outside the project once planted: a directory on the way to its target was \
@@ -1361,6 +1383,7 @@ mod tests {
             fs::create_dir_all(dir).unwrap();
         }
         let held = ProjectRoot::open(&project).unwrap();
+        let text = |target: &str| relative_path(&forest, &project.join(target)).unwrap();
         for (name, target) in [("lib", "src/lib"), ("kept", "kept/lib")] {
             let relative = relative_path(&forest, &project.join(target)).unwrap();
             std::os::unix::fs::symlink(relative, forest.join(name)).unwrap();
@@ -1370,6 +1393,7 @@ mod tests {
         let error = refuse_link_leading_out(
             &held,
             &forest.join("lib"),
+            &text("src/lib"),
             Path::new("src/lib"),
             "node_modules/lib",
         )
@@ -1379,6 +1403,7 @@ mod tests {
         refuse_link_leading_out(
             &held,
             &forest.join("kept"),
+            &text("kept/lib"),
             Path::new("kept/lib"),
             "node_modules/kept",
         )
@@ -1396,6 +1421,7 @@ mod tests {
         let error = refuse_link_leading_out(
             &held,
             &forest.join("cli"),
+            &text("tools/cli"),
             Path::new("tools/cli"),
             "node_modules/cli",
         )
@@ -1410,6 +1436,7 @@ mod tests {
         let error = refuse_link_leading_out(
             &held,
             &forest.join("gone"),
+            &text("gone/pkg"),
             Path::new("gone/pkg"),
             "node_modules/gone",
         )

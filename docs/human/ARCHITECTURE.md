@@ -593,21 +593,24 @@ manifest so the default applies, is `changed` naming "the <helper>
 toolchain <ecosystem> builds with". A closure written before the record
 existed counts as `null`, which is what it was built on.
 
-Cached `ward x` environments key on `x/3`: store root, ecosystem, package
-request, platform, the primary runtime version, the selected `bundle_id`
-and the realized runtime object, so a changed bundle component gives a
+Cached `ward x` environments key on `x/5`: store root, ecosystem, package
+request, platform, the primary runtime version, the selected `bundle_id`,
+the realized runtime object, the environment's identity schema
+(`node-env/6`, `python-env/3`) and the object record schema
+(`object-meta/3`), so a changed bundle component or a schema bump gives a
 fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python, a `py:` tool's Rust for
-sdists with a Rust extension) keys on `x/4` instead: the `x/3` fields plus
+sdists with a Rust extension) appends
 `<helper>=<build identity>` for each, decided as above for the project `x`
 runs in and written to the request record's `helpers`. Python's Rust helper
 identity includes both its base runtime object id and its full selection
 fingerprint, covering channel manifests and extension components. Python has
-no default Rust, so a `py:` tool outside a project that locks Rust has no helper,
-keeps its `x/3` name, and its sdists build on what their own toolchain
+no default Rust, so a `py:` tool outside a project that locks Rust has no helper
+field, and its sdists build on what their own toolchain
 file picks; inside one they build on the locked Rust. The key only names the
 directory. A run reuses it only when the request record it wrote there
-(`.greyward/x.json`) says `ready`, so a directory left without one, as a Greyward
+(`.greyward/x.json`) says `ready` and its environment has the identity
+schema this Greyward builds, so a directory left without one, as a Greyward
 before `x/4` left them, is realized again in place. Only the bare
 `ward x --clean` removes it, since nothing records what it was made for,
 and it does so under the store its closure's objects live in, so that
@@ -1196,7 +1199,7 @@ directory prefix (`py`, `npm`), the runtime object id in the cache key, the
 command-line word and message labels, the executable directory,
 resolve-realize-project for one package, the launch environment, and
 whether a cached projection still points at its environment.
-`commands/x/` keeps the `~/.greyward/x` directory, the `x/3`/`x/4` key,
+`commands/x/` keeps the `~/.greyward/x` directory, the `x/5` key,
 the request record, gc root registration, and the policy checks on a
 cached hit (`mod.rs`), the lifecycle lock (`lock.rs`), and
 `ward x --clean` (`cleanup.rs`). It owns the one package-name and version

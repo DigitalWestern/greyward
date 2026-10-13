@@ -26,6 +26,9 @@ use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+/// The schema `environment_identity` writes.
+pub(crate) const PYTHON_ENV_SCHEMA: &str = "python-env/3";
+
 /// Realize the environment object for `plan`. Downloads/validates all
 /// artifacts, assembles the venv shape in a staging dir, commits atomically.
 /// Cache hit if the identical env already exists.
@@ -209,7 +212,7 @@ fn environment_identity_inner(
     agreeing(plan, selected)?;
     let packages = canonical_packages(plan)?;
     let mut inputs = BTreeMap::new();
-    inputs.insert("schema".to_string(), "python-env/3".to_string());
+    inputs.insert("schema".to_string(), PYTHON_ENV_SCHEMA.to_string());
     inputs.insert(
         "store_root".to_string(),
         store.root.to_string_lossy().into_owned(),

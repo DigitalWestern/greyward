@@ -1161,11 +1161,16 @@ mod tests {
         );
     }
 
-    /// `node-env/5` goldens, on both platforms, from fixed inputs: a fixed
+    /// `node-env/6` goldens, on both platforms, from fixed inputs: a fixed
     /// store root (a real identity input), two packages, one declared
     /// artifact and the shipped node-gyp Python. The identity constructor is
     /// a pure function of its platform argument, so the Darwin value is
     /// computed here and the macOS gate only confirms it.
+    ///
+    /// `/6` has the `/5` inputs, built by the #695 realization rules: the
+    /// `/5` spelling gives back the `/5` goldens, so only the schema moved
+    /// and every environment the old rules built gets a new id (Sol review
+    /// of #695).
     ///
     /// `/5` is `/4` plus `gyp_python`: taking that input away and spelling
     /// the schema `/4` gives back the `/4` goldens byte for byte, so nothing
@@ -1193,14 +1198,16 @@ mod tests {
             sha256: "a".repeat(64),
             path: ".npm/tool.tar.gz".into(),
         };
-        for (platform, golden, golden_v4) in [
+        for (platform, golden, golden_v5, golden_v4) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
+                "e21356a9cde5a63366b65c465e9e07d57e9963be-env-24.20.0",
                 "34962336b7a092e840ffe8827b41d3766ebec573-env-24.20.0",
                 "26333746f02786ed4d81de465ca6ee4c43e07000-env-24.20.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,
+                "e5c0f487468afef198bae9bd7be4e6992d6c6576-env-24.20.0",
                 "a0aaa1a6f2b11c672252154e50b87ceba0c0eb37-env-24.20.0",
                 "aa486e4a07068ad33e42126fc5b58b042200b055-env-24.20.0",
             ),
@@ -1227,7 +1234,7 @@ mod tests {
                 &test_gyp_python_id(platform),
             )
             .unwrap();
-            assert_eq!(identity.inputs["schema"], "node-env/5");
+            assert_eq!(identity.inputs["schema"], "node-env/6");
             assert_eq!(identity.inputs["native"], realize::NATIVE_NONE);
             assert_eq!(
                 identity.inputs["gyp_python"],
@@ -1266,6 +1273,13 @@ mod tests {
                 );
                 assert!(crate::kernel::objmeta::check_identity_grammar(&stranger).is_err());
             }
+
+            // The `/5` spelling of the same inputs is the id the old
+            // realization rules built.
+            let mut v5 = identity.clone();
+            v5.inputs.insert("schema".into(), "node-env/5".into());
+            assert_eq!(v5.object_id(), golden_v5, "{}", platform.triple());
+            assert_ne!(v5.object_id(), identity.object_id());
 
             // Without the node-gyp Python and the build view, the `/4`
             // identity is unchanged.

@@ -765,7 +765,7 @@ use crate::kernel::supervise::CLASSIFIER_PREFIX as STDERR_PREFIX_LIMIT;
 /// Copy a child's output stream to `sink` as it arrives, with the signing
 /// key scrubbed out by the same
 /// [`Scrubber`](crate::kernel::resolve::confine::Scrubber) the supervisor's
-/// relay uses (#430), retaining the first `limit` scrubbed bytes. Relay
+/// relay uses (#430), retaining what a `Capture` of `limit` keeps. Relay
 /// failures (e.g. our stderr closed) are ignored: they must not turn a
 /// successful build into a failure.
 fn relay_scrubbed(
@@ -775,11 +775,10 @@ fn relay_scrubbed(
     limit: usize,
 ) -> Vec<u8> {
     let mut scrubber = crate::kernel::resolve::confine::Scrubber::new(secrets.to_vec());
-    let mut prefix = Vec::new();
+    let mut prefix = crate::kernel::supervise::Capture::new(limit);
     let mut buffer = [0u8; 8192];
     let mut pass_on = |bytes: Vec<u8>| {
-        let keep = bytes.len().min(limit - prefix.len());
-        prefix.extend_from_slice(&bytes[..keep]);
+        prefix.push(&bytes);
         let _ = sink.write_all(&bytes);
     };
     loop {
@@ -791,7 +790,7 @@ fn relay_scrubbed(
     }
     pass_on(scrubber.finish());
     let _ = sink.flush();
-    prefix
+    prefix.finish()
 }
 
 /// Run `command` outside the supervisor, both its streams piped and
@@ -1516,6 +1515,42 @@ mod tests {
         assert!(crate::kernel::supervise::interrupted(&error).is_some());
         let other = io::Error::new(io::ErrorKind::NotFound, "no such file");
         assert_eq!(probe_failure(other).unwrap(), "no such file");
+    }
+
+    /// The last line the E2BIG check reads is the stream's own, however
+    /// long the stream: one whose kept head ends with the line but goes on
+    /// is no failed exec, and one that ends with it past the head is.
+    #[test]
+    fn the_failed_exec_line_is_judged_on_the_whole_stream() {
+        use std::os::unix::process::ExitStatusExt;
+        let env = OsStr::new("/usr/bin/env");
+        let failed = std::process::ExitStatus::from_raw(1 << 8);
+        let line = b"bwrap: execvp /usr/bin/env: Argument list too long\n";
+        let relayed = |stream: Vec<u8>| {
+            relay_scrubbed(
+                io::Cursor::new(stream),
+                &mut Vec::new(),
+                &[],
+                STDERR_PREFIX_LIMIT,
+            )
+        };
+        let lines_of = |len: usize| [vec![b'x'; len - 1], vec![b'\n']].concat();
+        let mut at_the_boundary = lines_of(STDERR_PREFIX_LIMIT - line.len());
+        at_the_boundary.extend_from_slice(line);
+        assert_eq!(at_the_boundary.len(), STDERR_PREFIX_LIMIT);
+        at_the_boundary.extend_from_slice(b"the build went on\n");
+        assert!(!held::exec_too_long(
+            &failed,
+            &relayed(at_the_boundary),
+            env
+        ));
+        let mut past_the_head = lines_of(2 * STDERR_PREFIX_LIMIT);
+        past_the_head.extend_from_slice(line);
+        assert!(held::exec_too_long(&failed, &relayed(past_the_head), env));
+        // A last line longer than the window is not judged on its end.
+        let mut one_long_line = vec![b'x'; 2 * STDERR_PREFIX_LIMIT];
+        one_long_line.extend_from_slice(line);
+        assert!(!held::exec_too_long(&failed, &relayed(one_long_line), env));
     }
 
     /// The no-store relay scrubs the signing key as the supervisor's does,

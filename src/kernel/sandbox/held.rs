@@ -205,16 +205,24 @@ pub(crate) fn pass_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
 
 /// Refuse a command line holding a NUL byte: in the `--args` data it
 /// would end an argument early and make the rest options of bubblewrap's
-/// own. The refusal is `InvalidInput` and unmarked, the build's own failure,
-/// as the kernel's refusal of such an argument on argv is.
-pub(super) fn refuse_nul(args: &[std::ffi::OsString]) -> io::Result<()> {
+/// own. Refuse too a variable name `/usr/bin/env` would read differently
+/// (empty, or holding `=`). The refusal is `InvalidInput` and unmarked, the
+/// build's own failure, as the kernel's refusal of a NUL on argv is.
+pub(super) fn refuse_unpassable(
+    args: &[std::ffi::OsString],
+    envs: &[(String, String)],
+) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
-    match args.iter().position(|arg| arg.as_bytes().contains(&0)) {
+    let refuse = |what: String| Err(io::Error::new(io::ErrorKind::InvalidInput, what));
+    if let Some(at) = args.iter().position(|arg| arg.as_bytes().contains(&0)) {
+        return refuse(format!("sandbox argument {at} holds a NUL byte"));
+    }
+    match envs
+        .iter()
+        .find(|(key, _)| key.is_empty() || key.contains('='))
+    {
+        Some((key, _)) => refuse(format!("{key:?} is no environment variable name")),
         None => Ok(()),
-        Some(at) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("sandbox argument {at} holds a NUL byte"),
-        )),
     }
 }
 

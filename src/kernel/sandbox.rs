@@ -38,7 +38,7 @@ use std::sync::OnceLock;
 
 mod held;
 pub(crate) use held::pass_fds;
-use held::{args_file, refuse_unpassable, HeldRoots, ARGS_FD};
+use held::{args_file, pass_in_place, refuse_unpassable, HeldRoots};
 
 /// How much of the host's system directories a sandboxed build can see.
 /// The host C toolchain is an unpinned build input either way (see
@@ -434,6 +434,10 @@ impl Sandbox<'_> {
         self.reject_host_sockets(cwd, tmp, &held, &HOST_ETC_ENTRIES)
             .map_err(setup)?;
         let bwrap = bwrap_preflight_with_activity(activity)?;
+        #[cfg(test)]
+        let engine = held::ENGINE_OVERRIDE.with(|engine| engine.borrow().clone());
+        #[cfg(test)]
+        let bwrap = engine.as_deref().unwrap_or(bwrap);
         let mut invocation = self
             .bwrap_args(cmd, env_path, tmp, cwd, envs, &held)
             .map_err(setup)?;
@@ -448,10 +452,9 @@ impl Sandbox<'_> {
         // (#679, `error::sandbox_spawn`).
         let (options, own) = invocation.args.split_at(invocation.command_start);
         let options = args_file(options).map_err(setup)?;
-        command.arg("--args").arg(ARGS_FD.to_string()).args(own);
-        let mut fds = held.passed();
-        fds.push((std::os::fd::AsRawFd::as_raw_fd(&options), ARGS_FD));
-        pass_fds(&mut command, fds);
+        let options_fd = pass_in_place(&mut command, &options);
+        command.arg("--args").arg(options_fd.to_string()).args(own);
+        pass_fds(&mut command, held.passed());
         // The descriptors are duplicated only when the child is spawned.
         invocation._held = held;
         invocation._options = Some(options);
@@ -745,7 +748,7 @@ struct BwrapInvocation {
     _skeleton: Option<crate::kernel::hostview::ViewSkeleton>,
     /// The held roots the command passes to bubblewrap, open until it runs.
     _held: HeldRoots,
-    /// The options bubblewrap reads at `ARGS_FD`, open until it runs.
+    /// The options bubblewrap reads through `--args`, open until it runs.
     _options: Option<fs::File>,
 }
 
@@ -2528,6 +2531,59 @@ mod tests {
         assert!(report.contains("1 passed"), "{report}");
     }
 
+    const VANISHED_ENGINE_CHILD: &str = "GREYWARD_TEST_VANISHED_ENGINE_SCRATCH";
+
+    /// bubblewrap gone between the preflight and the spawn is a sandbox that
+    /// never started, reported through std's spawn-error channel. The
+    /// `--args` descriptor must not land on that channel's child end, so
+    /// the test runs in a child of this binary that starts with only the
+    /// standard descriptors, where the channel takes the lowest free
+    /// numbers.
+    #[test]
+    fn linux_an_engine_gone_after_the_preflight_is_a_setup_failure() {
+        const NAME: &str =
+            "kernel::sandbox::tests::linux_an_engine_gone_after_the_preflight_is_a_setup_failure";
+        if !linux_ready("linux_an_engine_gone_after_the_preflight_is_a_setup_failure") {
+            return;
+        }
+        if let Some(scratch) = std::env::var_os(VANISHED_ENGINE_CHILD) {
+            let scratch = PathBuf::from(scratch);
+            let missing = scratch.join("no-such-bwrap");
+            held::ENGINE_OVERRIDE.with(|engine| *engine.borrow_mut() = Some(missing));
+            let sandbox = Sandbox {
+                read: vec![],
+                write: vec![&scratch],
+                host_view: HostView::Full,
+            };
+            let result = sandbox.run_bwrap_capture(
+                &["/usr/bin/true"],
+                "/usr/bin:/bin",
+                &scratch,
+                &scratch,
+                &[],
+            );
+            let error = result.expect_err("a missing engine starts nothing");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+            assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+            return;
+        }
+        let root = temp_dir("vanished-engine");
+        let scratch = root.0.join("scratch");
+        fs::create_dir(&scratch).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(VANISHED_ENGINE_CHILD, &scratch)
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
+    }
+
     /// ward's own bubblewrap arguments do not count toward the kernel's
     /// argument limit, so a build command that fits on its own starts
     /// however many mounts the sandbox generates: here a few hundred long
@@ -2576,8 +2632,9 @@ mod tests {
         let listed = run_capture(&sandbox, &cmd, &scratch, &scratch, &[])
             .expect("a command that fits the limit on its own starts");
         let listed = String::from_utf8(listed).unwrap();
+        // The descriptor is numbered past every held root's (3 to 9).
         assert!(
-            !listed.lines().any(|fd| fd == ARGS_FD.to_string()),
+            listed.lines().all(|fd| fd.parse::<i32>().unwrap() < 10),
             "the build sees bubblewrap's --args descriptor: {listed}"
         );
     }

@@ -33,9 +33,10 @@ pub(super) struct HeldRoot {
 /// closes them reads one digit, so at most seven are passed.
 const HELD_FD_FIRST: RawFd = 3;
 const HELD_FD_LAST: RawFd = 9;
-/// Where bubblewrap reads ward's own arguments from (`--args`), past
-/// every held root's descriptor. bubblewrap closes it once read.
-pub(super) const ARGS_FD: RawFd = HELD_FD_LAST + 1;
+/// The lowest number the `--args` descriptor may have: past every held
+/// root's target, the only numbers the child's descriptors are moved onto.
+#[cfg(target_os = "linux")]
+const ARGS_FD_FLOOR: RawFd = HELD_FD_LAST + 1;
 
 impl HeldRoots {
     pub(super) fn resolve(sandbox: &Sandbox<'_>, cwd: &Path) -> io::Result<Self> {
@@ -203,6 +204,14 @@ pub(crate) fn pass_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// An engine `Sandbox::bwrap` runs on this thread in place of the
+    /// preflight's, for a test of an engine gone after the preflight.
+    pub(super) static ENGINE_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Refuse a command line holding a NUL byte: in the `--args` data it
 /// would end an argument early and make the rest options of bubblewrap's
 /// own. Refuse too a variable name `/usr/bin/env` would read differently
@@ -227,10 +236,12 @@ pub(super) fn refuse_unpassable(
 }
 
 /// `args`, each ended by a NUL as bubblewrap's `--args` reads them, in an
-/// anonymous file read from its start.
+/// anonymous file read from its start. Its descriptor is numbered at or
+/// above `ARGS_FD_FLOOR`, where nothing is moved onto it in the child.
 #[cfg(target_os = "linux")]
 pub(super) fn args_file(args: &[std::ffi::OsString]) -> io::Result<fs::File> {
     use std::io::{Seek as _, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
     use std::os::unix::ffi::OsStrExt as _;
     // SAFETY: memfd_create reads only the NUL-terminated name.
     let fd = unsafe { libc::memfd_create(c"greyward-bwrap-args".as_ptr(), libc::MFD_CLOEXEC) };
@@ -238,7 +249,15 @@ pub(super) fn args_file(args: &[std::ffi::OsString]) -> io::Result<fs::File> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `fd` was just created and nothing else owns it.
-    let mut file = unsafe { <fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    let low = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: F_DUPFD_CLOEXEC only reads `low`, which stays open here.
+    let fd = unsafe { libc::fcntl(low.as_raw_fd(), libc::F_DUPFD_CLOEXEC, ARGS_FD_FLOOR) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(low);
+    // SAFETY: `fd` was just duplicated and nothing else owns it.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
     let mut data = Vec::new();
     for arg in args {
         data.extend_from_slice(arg.as_bytes());
@@ -247,6 +266,28 @@ pub(super) fn args_file(args: &[std::ffi::OsString]) -> io::Result<fs::File> {
     file.write_all(&data)?;
     file.rewind()?;
     Ok(file)
+}
+
+/// Hand `file` to the command at the number it has here, its descriptor's
+/// close-on-exec cleared after `bwrap_command` set it on everything. No
+/// descriptor is moved onto another number for it: one numbered in advance
+/// could cover std's spawn-error channel, and then a spawn that failed
+/// would report none. Returns the number.
+pub(super) fn pass_in_place(command: &mut Command, file: &fs::File) -> RawFd {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    let fd = file.as_raw_fd();
+    // SAFETY: the closure calls only fcntl, async-signal-safe, on a
+    // descriptor `file` keeps open until the child is spawned.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    fd
 }
 
 #[cfg(not(target_os = "linux"))]

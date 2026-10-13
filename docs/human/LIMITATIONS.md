@@ -512,8 +512,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
     ssh git dependency does;
   - an `[alias]` whose expansion holds `--config` or `-Z`, which `ward run`'s wrapper would
     not see (it refuses `--config` on the command line);
-  - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`), `RUSTC_BOOTSTRAP`
-    (or `RUSTC_BOOTSTRAP_*`), or a variable Greyward forces for cargo (`CARGO_HOME`, `PATH`,
+  - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`), a git variable
+    (`GIT_*`, since git reads `GIT_CONFIG_PARAMETERS` after the settings Greyward forces),
+    `RUSTC_BOOTSTRAP` (or `RUSTC_BOOTSTRAP_*`), or a variable Greyward forces for cargo (`CARGO_HOME`, `PATH`,
     `RUSTC_WRAPPER`, ...): cargo sets `[env]` for every program it starts, the compiler probe
     in resolution included;
   - compiler flags (`build.rustflags`, `build.rustdocflags`, `host.rustflags`,
@@ -522,11 +523,18 @@ Selection covers every patch of each maintained CPython minor that python-build-
     argument file: cargo passes them to the compiler probe, and rustc loads a codegen backend
     library, running its code, before checking it.
 
+  The same URL rule holds for a dependency's `registry-index` in any manifest cargo reads
+  (the root, workspace members, path dependencies, every dependency table including
+  `target.*`, build and dev ones, `[patch]`), checked before cargo starts, so lock
+  generation never reads a file index.
+
   `ward attest` also refuses a lock when `cargo metadata` shows a crate the lock pins to a
   registry or a commit read from anywhere but cargo's own download of it. Metadata prints no
   checksum and keeps the registry's source id for a directory replacement, so where cargo
   read the crate is the check. It also refuses a lock whose registry is not a network one,
-  since a manifest's `registry-index = "file://..."` reaches a file index with no config. `ward run` checks from the directory it starts in up to the
+  since a manifest's `registry-index = "file://..."` reaches a file index with no config.
+  Each locked package is matched by name, version and source, so a crates.io download does
+  not stand for a same-named package from another registry. `ward run` checks from the directory it starts in up to the
   workspace root, and the project's `.greyward/cargo-home` config, which is cargo's home
   there, not the directories above the workspace. Authenticated alternative registries fail, as the
   sandbox gets no token. Path dependencies outside the workspace root are found from the

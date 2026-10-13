@@ -144,8 +144,9 @@ else
 fi
 
 echo "== 10d. cargo: hostile project config + build.rs network probe"
-# Hostile .cargo/config.toml (evil source dir + fake rustc) arrives AFTER a
-# legit lock: forced --config + RUSTC must neutralize both.
+# Hostile .cargo/config.toml arrives AFTER a legit lock. A directory
+# source (files whose checksums the project writes) is refused by name
+# before cargo starts; a fake rustc is neutralized by the forced settings.
 mkdir -p "$WORK/cargo/.cargo"
 printf '#!/bin/sh\necho FAKE RUSTC >&2\nexit 1\n' > "$WORK/cargo/fake-rustc"
 chmod +x "$WORK/cargo/fake-rustc"
@@ -154,12 +155,21 @@ cat > "$WORK/cargo/.cargo/config.toml" <<HOSTILE
 replace-with = "evil"
 [source.evil]
 directory = "$WORK/cargo/nonexistent"
+HOSTILE
+if (cd "$WORK/cargo" && "$GREYWARD" build 2>"$WORK/evil-source.err"); then
+  bad "hostile directory source accepted"
+elif grep -q 'sets source.crates-io.replace-with, source.evil.directory' "$WORK/evil-source.err"; then
+  ok "hostile directory source refused"
+else
+  bad "hostile directory source failed for another reason: $(cat "$WORK/evil-source.err")"
+fi
+cat > "$WORK/cargo/.cargo/config.toml" <<HOSTILE
 [build]
 rustc = "$WORK/cargo/fake-rustc"
 HOSTILE
 rm -rf "$WORK/cargo/target"
 if (cd "$WORK/cargo" && "$GREYWARD" build) && [ "$(cd "$WORK/cargo" && "$GREYWARD" run target/debug/cargo-hello)" = "hello 128" ]; then
-  ok "hostile source/rustc config neutralized"
+  ok "hostile rustc config neutralized"
 else
   bad "hostile config was honored"
 fi

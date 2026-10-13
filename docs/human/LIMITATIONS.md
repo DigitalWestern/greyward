@@ -448,21 +448,33 @@ Selection covers every patch of each maintained CPython minor that python-build-
 - **Cargo resolves in the sandbox, through TLS interception** (`add`/`remove`/`update`, a
   missing `Cargo.lock`, `attest`, and an sdist's missing lock). Cargo has no network of its
   own: Greyward's proxy answers the crates.io index and download hosts and pinned git fetches,
-  and records each request. Known edges: a project `.cargo/config.toml` (or a file it
-  includes) that sets `paths`, `registry.global-credential-providers`, any
-  `credential-provider`, or `[credential-alias]` is refused by name before cargo starts, in
-  resolution, `ward`, `ward build` and `ward run`. No setting Greyward can force undoes them:
-  `paths` builds a local directory in place of a locked crate with `Cargo.lock` unchanged
-  (use a `[patch]` table in Cargo.toml, which the lock records), and cargo runs the global
-  provider list for a replacement source after Greyward's own `cargo:token` finds no token
-  (keep providers in your own `~/.cargo/config.toml`). Source replacement itself (a mirror
-  through `[source.<name>] registry`, a vendor `directory`, a `local-registry`) stays
-  allowed: a lock entry from anywhere but crates.io or a pinned git commit is refused, and
-  each crate is fetched from crates.io and checked against the lock's checksum, so a
-  replacement cannot change what is built. `ward attest` also refuses a lock when `cargo
-  metadata` reports a crate the lock pins to a registry or a commit as a local directory.
-  `ward run` checks from the directory it starts in up to the workspace root, not the
-  directories above it. Authenticated alternative registries fail, as the
+  and records each request. Known edges: a project cargo configuration is refused by name
+  before cargo starts, in resolution, `ward`, `ward build` and `ward run`, when it (or a file
+  it includes) sets any of these, since no setting Greyward can force undoes them:
+  - `paths`, which builds a local directory in place of a locked crate with `Cargo.lock`
+    unchanged (use a `[patch]` table in Cargo.toml, which the lock records);
+  - `registry.global-credential-providers`, any `credential-provider`, or
+    `[credential-alias]`: cargo runs the global provider list for a replacement source after
+    Greyward's own `cargo:token` finds no token (keep providers in your own
+    `~/.cargo/config.toml`);
+  - `[source.greyward-vendor]` or a `replace-with` naming it, a `directory` or
+    `local-registry` source, or a `replace-with` chain that ends at one. Cargo trusts the
+    checksums a directory source writes about itself, so it can serve any code under a
+    locked name. A project vendored with `cargo vendor` must drop that config: Greyward
+    vendors the lock itself. A network mirror (`[source.<name>] registry`, a chain of them)
+    stays allowed, since cargo checks each downloaded crate against the lock's checksum;
+  - an `[alias]` whose expansion holds `--config` or `-Z`, which `ward run`'s wrapper would
+    not see (it refuses `--config` on the command line);
+  - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`) or a variable Greyward
+    forces for cargo (`CARGO_HOME`, `PATH`, `RUSTC_WRAPPER`, ...): cargo sets `[env]` for
+    every program it starts, the compiler probe in resolution included.
+
+  `ward attest` also refuses a lock when `cargo metadata` shows a crate the lock pins to a
+  registry or a commit read from anywhere but cargo's own download of it. Metadata prints no
+  checksum and keeps the registry's source id for a directory replacement, so where cargo
+  read the crate is the check. `ward run` checks from the directory it starts in up to the
+  workspace root, and the project's `.greyward/cargo-home` config, which is cargo's home
+  there, not the directories above the workspace. Authenticated alternative registries fail, as the
   sandbox gets no token. Path dependencies outside the workspace root are found from the
   manifests (dependency tables, `[patch]`, `[replace]`, `target.*`, `[workspace]`) and
   snapshotted read-only; one named only through a `[lib] path`, a build script or a

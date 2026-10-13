@@ -716,6 +716,11 @@ pub fn lock_digest(lock_toml: &str) -> String {
     hex::encode(Sha256::digest(lock_toml.as_bytes()))
 }
 
+/// The name of the source ward's forced config replaces crates.io (and
+/// each git source) with: the vendor object. A project config may not
+/// name it (`cargo_door::refuse_unneutralized_settings`).
+pub const VENDOR_SOURCE: &str = "greyward-vendor";
+
 /// The forced cargo config: source replacement into the vendor object plus
 /// offline, applied via CLI `--config` (which outranks every config file).
 /// Every git source in the plan gets its own `[source."git+…"]` stanza
@@ -729,8 +734,8 @@ pub fn ward_config_text_for(
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
     let mut text = format!(
         "[source.crates-io]\n\
-         replace-with = \"greyward-vendor\"\n\
-         [source.greyward-vendor]\n\
+         replace-with = \"{VENDOR_SOURCE}\"\n\
+         [source.{VENDOR_SOURCE}]\n\
          directory = {vendor}\n"
     );
     let mut seen = BTreeSet::new();
@@ -753,7 +758,7 @@ pub fn ward_config_text_for(
             "[source.{key}]\n\
              git = {url}\n\
              {reference}\
-             replace-with = \"greyward-vendor\"\n"
+             replace-with = \"{VENDOR_SOURCE}\"\n"
         ));
     }
     text.push_str("[net]\noffline = true\n");

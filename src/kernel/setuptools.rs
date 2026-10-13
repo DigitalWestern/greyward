@@ -44,7 +44,15 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
             let Some(key) = key else {
                 return;
             };
-            if section.eq_ignore_ascii_case("options") {
+            // setuptools reads a dashed option (`install-requires`) as its
+            // underscored name in every `options*` section but the one whose
+            // keys are extra names (`Distribution.warn_dash_deprecation`).
+            let key = if section.starts_with("options") && section != "options.extras_require" {
+                key.replace('-', "_")
+            } else {
+                key
+            };
+            if section == "options" {
                 match key.as_str() {
                     "install_requires" => {
                         metadata.install_requires_found = true;
@@ -69,7 +77,7 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
                     }
                     _ => {}
                 }
-            } else if section.eq_ignore_ascii_case("options.extras_require") {
+            } else if section == "options.extras_require" {
                 for value in values.iter().filter(|value| !value.trim().is_empty()) {
                     metadata
                         .extras_require
@@ -77,7 +85,7 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
                         .or_default()
                         .push(value.trim().to_string());
                 }
-            } else if section.eq_ignore_ascii_case("options.packages.find") {
+            } else if section == "options.packages.find" {
                 let packages = metadata.packages_find.get_or_insert_with(Default::default);
                 for value in values.iter().filter(|value| !value.trim().is_empty()) {
                     let values = value
@@ -117,8 +125,11 @@ pub fn parse_setup_cfg(text: &str) -> SetupCfgMetadata {
         current_values.clear();
         option_indent = None;
 
+        // ConfigParser matches section names exactly: setuptools never
+        // reads an `[OPTIONS]` section, so neither does this. Option keys
+        // are lowercased, as its `optionxform` does.
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
+            section = trimmed[1..trimmed.len() - 1].trim().to_string();
             continue;
         }
 
@@ -331,6 +342,27 @@ mod tests {
 
     fn found(text: &str) -> Option<String> {
         extract_setup_py_python_requires(text)
+    }
+
+    /// setuptools 84 reads `install-requires` and `python-requires` as their
+    /// underscored names (with a deprecation warning), keeps dashes in extra
+    /// names, and never reads a section whose name differs in case (#690).
+    #[test]
+    fn setup_cfg_keys_and_sections_are_read_as_setuptools_reads_them() {
+        let parsed = parse_setup_cfg(
+            "[options]\ninstall-requires = six\npython-requires = >=3.13\n\
+             [options.extras_require]\nfast-io = uvloop\n",
+        );
+        assert!(parsed.install_requires_found);
+        assert_eq!(parsed.install_requires, ["six"]);
+        assert_eq!(parsed.python_requires.as_deref(), Some(">=3.13"));
+        assert_eq!(parsed.extras_require["fast-io"], ["uvloop"]);
+
+        let parsed = parse_setup_cfg(
+            "[OPTIONS]\ninstall_requires = six\npython_requires = >=3.13\n\
+             [Options.extras_require]\nx = uvloop\n",
+        );
+        assert_eq!(parsed, SetupCfgMetadata::default());
     }
 
     #[test]

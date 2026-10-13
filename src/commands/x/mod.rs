@@ -559,14 +559,18 @@ fn cached_projection(
     Ok((closure, id))
 }
 
+/// `Ok(false)`: the environment's record is `object-meta/2` and the policy
+/// denies a kind `/2` never stored, so the caller realizes it again.
 fn check_cached_projection(
     store: &Store,
     activity: &StoreActivity,
     root: &Path,
     ecosystem: &str,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let (closure, id) = cached_projection(store, activity, root, ecosystem)?;
-    policy::check_cached_with_activity(store, activity, &id)?;
+    if !policy::check_cached_reusable(store, activity, &id)? {
+        return Ok(false);
+    }
 
     let persisted: Vec<policy::Exception> = if closure["exceptions"].is_null() {
         Vec::new()
@@ -581,7 +585,7 @@ fn check_cached_projection(
             policy::record(&exception.kind, &exception.subject, &exception.detail)?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug)]
@@ -672,8 +676,7 @@ fn x_request_is_ready(
     }
     // Keep policy failures as failures. They must not be mistaken for a
     // missing projection and bypassed by a fresh realization.
-    check_cached_projection(store, activity, root, ecosystem)?;
-    Ok(true)
+    check_cached_projection(store, activity, root, ecosystem)
 }
 
 /// `ward x`: `x` has its own cached projection path and therefore does

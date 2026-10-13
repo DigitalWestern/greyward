@@ -900,8 +900,18 @@ the `(dev, ino)` the plan recorded. A dry run stops after `plan` and prints
 it, so preview and sweep are the same phases over the same snapshot.
 
 Whether an object may be deleted is decided by `meta/<id>.json`
-(`object-meta/2`): explicit dependency object ids, algorithm-qualified cache
-digests, and the `evidence` marker `"explicit"`.
+(`object-meta/3`, or the older `object-meta/2`): explicit dependency object
+ids, algorithm-qualified cache digests, and the `evidence` marker
+`"explicit"`.
+The record also holds the policy exceptions the realization recorded. `/3`
+holds every realization-time one. `/2` kept only five kinds and dropped the
+artifact and toolchain kinds (`policy::KINDS_NOT_IN_META_2`), so a `/2`
+record's list may be short. A producer that can build the object again
+(the Node, Python and Ruby environments, sdist wheels, `ward x`) reuses a
+`/2` object only while the policy denies none of those kinds
+(`policy::check_cached_reusable`). Otherwise it builds the object again:
+the build refuses a denied exception as it records it, and an allowed build
+commits the same id, which rewrites the record as `/3` with the whole set.
 Explicit evidence names what the realization actually read, which can be
 less than its identity names: a node env's identity carries every declared
 artifact and provisioned download the plan could use, but only the ones an
@@ -987,6 +997,14 @@ unchanged, and the test goldens check that dropping `gyp_python` gives back the
 `/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the
 `rust` input was already the Rust object id, so honoring the project's
 selection changes the value and never the shape.
+
+`node-env/6` changes no input. Extraction now checks that each registry
+tarball's `package.json` names the package and version its lock entry gives,
+and refuses a mismatch. An environment built before that check could hold a
+tarball the lock mislabeled, and the closure rows and the SBOM would name the
+wrong package. The schema string alone moves, so every such environment is
+rebuilt once, under the check. The goldens check that spelling the schema
+`/5` gives back the `/5` ids byte for byte.
 
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes
@@ -1117,7 +1135,7 @@ and build inputs tailors share, so no tailor reaches into another):
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, drop.rs --drop-object,
                     reset.rs --reset
-    objmeta.rs      object-meta/2 records; kind rows are installed by
+    objmeta.rs      object-meta/3 (and /2) records; kind rows are installed by
                     commands::dispatch or public tailor entry points
     activity.rs     store activity leases
     pep440.rs       PEP 440 versions and specifiers: Python interpreter

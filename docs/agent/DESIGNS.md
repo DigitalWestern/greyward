@@ -4240,9 +4240,10 @@ Exceptions: an object whose realization records an object exception
 (`object_exceptions()`: every kind but `PLAN_TIME_KINDS`, which a sync records
 again each time) still records it in `meta/<id>.json` as today. A user's
 Greyward checks a system object's recorded exceptions against *that user's*
-policy chain through `check_cached_with_activity`, the same check a cached
-object gets now, so a shared object never smuggles a waived exception past
-a stricter user.
+policy chain through `check_cached_with_activity` (or
+`check_cached_reusable`, which rebuilds an `object-meta/2` object whose
+exceptions it cannot trust), the same check a cached object gets now, so a
+shared object never smuggles a waived exception past a stricter user.
 
 ### Reading it: the trust check
 

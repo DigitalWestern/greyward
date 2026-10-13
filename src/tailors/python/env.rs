@@ -357,8 +357,11 @@ pub(crate) fn realize_env_at_depth(
     if let Some(cached) =
         ENV_FALLBACK_RECORDS.cached_object(store, activity, &identity, lookup_inputs)?
     {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
-        return Ok(store.object_path(&cached.id));
+        // An `object-meta/2` record a stricter policy cannot judge is
+        // realized again under the same id.
+        if crate::kernel::policy::check_cached_reusable(store, activity, &cached.id)? {
+            return Ok(store.object_path(&cached.id));
+        }
     }
 
     // Canonical package order + duplicate rejection: identity uses the same

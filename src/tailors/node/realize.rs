@@ -51,7 +51,7 @@ pub fn realize_node_env(
 /// Realize the tree with the Node the project's selection names, running
 /// node-gyp on `gyp_python`: the helper toolchain selection when the
 /// project has one, [`shipped_gyp_python`](crate::tailors::node::shipped_gyp_python)
-/// otherwise. Its object id is an input of the `node-env/5` identity.
+/// otherwise. Its object id is an input of the `node-env/6` identity.
 pub fn realize_node_env_for(
     store: &Store,
     activity: &StoreActivity,
@@ -77,7 +77,11 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
 }
 
 /// The schema the producer writes. `node-env/5` is `/4` plus `gyp_python`.
-pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/5";
+/// `node-env/6` has the `/5` inputs: it marks the environments built since
+/// extraction checks each tarball against the name and version its lock
+/// entry gives (`check_tarball_identity`), so one built before that check
+/// is never reused.
+pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/6";
 
 /// The two spellings of the `node-env/5` native decision. The producer
 /// writes one of them on every commit, so a dropped `native_libs` key is a
@@ -864,9 +868,12 @@ pub(super) fn realize_node_env_with_node_object(
         native_libs_id.as_deref(),
         &gyp_python_id,
     )?;
+    // An `object-meta/2` environment a stricter policy cannot judge falls
+    // through to a cold realization, which commits the same id again.
     if let Some(cached) = script_view::cached_object(store, activity, &identity)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
-        return Ok(store.object_path(&cached.id));
+        if crate::kernel::policy::check_cached_reusable(store, activity, &cached.id)? {
+            return Ok(store.object_path(&cached.id));
+        }
     }
 
     let workspaces = workspace_set(plan);

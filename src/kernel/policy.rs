@@ -123,6 +123,20 @@ pub const PLAN_TIME_KINDS: &[&str] = &[
     PROJECT_SCRIPT_SKIPPED,
 ];
 
+/// The object kinds an `object-meta/2` record never stored: `/2` kept only
+/// file-collision, install-script-failed, git-dependency,
+/// unattested-cargo-lock and host-build-inputs from a build's frame (a
+/// producer that wrote another kind explicitly still has it). A `/2`
+/// object may have been built with any of these and not say so, so
+/// [`check_cached_reusable`] rebuilds it rather than trust it under a
+/// policy that denies one.
+pub const KINDS_NOT_IN_META_2: &[&str] = &[
+    ARTIFACT_NOT_PROVISIONED,
+    ARTIFACT_PROVISIONED,
+    BUILT_FROM_SOURCE,
+    EXTERNAL_TOOLCHAIN,
+];
+
 /// Kinds were spelled with two separators until the names were unified on
 /// the hyphen. Policy files and closure records written under the old
 /// spellings keep working: every kind is read through `canonical_kind`, so
@@ -1365,6 +1379,35 @@ pub fn check_cached_with_activity(
     Ok(())
 }
 
+/// [`check_cached_with_activity`] for an object whose producer stores its
+/// frame through [`object_exceptions`] and can build it again. `Ok(true)`:
+/// the object was checked and its exceptions replayed, so reuse it.
+/// `Ok(false)`: its record is `object-meta/2`, whose exceptions are a lower
+/// bound, and the current policy denies a kind `/2` never stored
+/// ([`KINDS_NOT_IN_META_2`]). The caller realizes the object again: the
+/// build records its exceptions as it goes, so a denied one is refused at
+/// record time, and an allowed build upgrades the record to `/3` at commit.
+/// A denied kind the record does carry is still refused here.
+pub fn check_cached_reusable(
+    store: &Store,
+    activity: &crate::kernel::activity::StoreActivity,
+    id: &str,
+) -> io::Result<bool> {
+    store.require_activity(activity, "cached policy check")?;
+    let stored = crate::kernel::objmeta::read_store_record(store, id)?;
+    check_exception_set(id, &stored.exceptions)?;
+    if !stored.exceptions_complete {
+        let policy = current();
+        if KINDS_NOT_IN_META_2.iter().any(|kind| denied(&policy, kind)) {
+            return Ok(false);
+        }
+    }
+    for exception in &stored.exceptions {
+        record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn check_exception_set(id: &str, exceptions: &[Exception]) -> io::Result<()> {
     if exceptions.is_empty() {
         return Ok(());
@@ -1597,6 +1640,22 @@ deny = ["git-dependency"]"#,
         let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
         attribution.discard();
         assert_eq!(stored, OBJECT_KINDS, "{stored:?}");
+
+        // `object-meta/2` stored these five object kinds and no others, so
+        // a `/2` record can lack exactly the rest.
+        const STORED_BY_META_2: &[&str] = &[
+            FILE_COLLISION,
+            INSTALL_SCRIPT_FAILED,
+            GIT_DEPENDENCY,
+            UNATTESTED_CARGO_LOCK,
+            HOST_BUILD_INPUTS,
+        ];
+        let lacking: Vec<&str> = OBJECT_KINDS
+            .iter()
+            .copied()
+            .filter(|kind| !STORED_BY_META_2.contains(kind))
+            .collect();
+        assert_eq!(lacking, KINDS_NOT_IN_META_2);
     }
 
     #[test]

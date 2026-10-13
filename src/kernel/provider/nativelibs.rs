@@ -732,13 +732,13 @@ fn extract_conda(
     let info_zst = info_root.with_extension("info.tar.zst");
     for (member, destination) in [(&pkg, &pkg_zst), (&info, &info_zst)] {
         let mut out = File::create(destination)?;
-        zip.copy(member, MAX_ARCHIVE_BYTES, &mut out)
+        zip.copy(member, CONDA_STAGE_CAP, &mut out)
             .map_err(|e| invalid_conda(format!("read {}: {e}", member.name)))?;
     }
     let pkg_tar = pkg_zst.with_extension("tar");
     let info_tar = info_zst.with_extension("tar");
-    zstd_decompress(activity, &pkg_zst, &pkg_tar)?;
-    zstd_decompress(activity, &info_zst, &info_tar)?;
+    zstd_decompress(activity, &pkg_zst, &pkg_tar, CONDA_STAGE_CAP)?;
+    zstd_decompress(activity, &info_zst, &info_tar, CONDA_STAGE_CAP)?;
     extract_tar(activity, &pkg_tar, package_root)?;
     extract_tar(activity, &info_tar, info_root)?;
     for path in [pkg_zst, info_zst, pkg_tar, info_tar] {
@@ -747,7 +747,23 @@ fn extract_conda(
     Ok(())
 }
 
-fn zstd_decompress(activity: &StoreActivity, input: &Path, output: &Path) -> io::Result<()> {
+/// Ceiling on each file a `.conda` stages on disk before its tar reaches
+/// the archive reader's budget: the zip member, and the tar zstd
+/// decompresses it to. The tar's member data is held to
+/// `MAX_ARCHIVE_BYTES` by the reader. Twice that leaves room for every
+/// header and its padding (a million members' worth), and a compression
+/// bomb stops here rather than filling the disk first (#708).
+const CONDA_STAGE_CAP: u64 = 2 * crate::kernel::archive::MAX_ARCHIVE_BYTES;
+
+/// Decompress `input` to `output` with the host's zstd, which stops at
+/// `cap` bytes of output: the child's file size limit makes the write past
+/// it fail.
+fn zstd_decompress(
+    activity: &StoreActivity,
+    input: &Path,
+    output: &Path,
+    cap: u64,
+) -> io::Result<()> {
     let program = ["/usr/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/unzstd"]
         .iter()
         .map(Path::new)
@@ -763,10 +779,27 @@ fn zstd_decompress(activity: &StoreActivity, input: &Path, output: &Path) -> io:
         .args(["-d", "-f", "-q", "-o"])
         .arg(output)
         .arg(input);
+    let limit = libc::rlimit {
+        rlim_cur: cap as libc::rlim_t,
+        rlim_max: cap as libc::rlim_t,
+    };
+    // SAFETY: the post-fork closure only calls setrlimit on a value built
+    // before fork, which is async-signal-safe and allocates nothing.
+    unsafe {
+        use std::os::unix::process::CommandExt as _;
+        command.pre_exec(move || {
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
     let status = crate::kernel::supervise::local_status(&mut command, activity)?;
     if !status.success() {
+        let _ = fs::remove_file(output);
         return Err(invalid_conda(format!(
-            "zstd failed for {}",
+            "zstd failed for {}, or its output passed the {cap}-byte cap",
             input.display()
         )));
     }
@@ -1464,6 +1497,62 @@ mod tests {
 
     fn temp_dir(label: &str) -> TempDir {
         TempDir::named(&format!("native-{label}"))
+    }
+
+    /// A `.conda` member and the tar zstd writes from it each stop at the
+    /// cap rather than filling the disk before the archive budget applies
+    /// (#708). The caps here are small, the production cap is the same
+    /// code.
+    #[test]
+    fn conda_staging_stops_at_the_cap() {
+        let scratch = temp_dir("conda-cap");
+        let root = scratch.0.join("store");
+        for sub in ["objects", "meta", "cache/sha256", "tmp"] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        let store = Store::for_test(root);
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+
+        let archive = scratch.0.join("p.conda");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        zip.start_file("pkg-p.tar.zst", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zip, &[7u8; 4096]).unwrap();
+        zip.finish().unwrap();
+        let staged = scratch.0.join("staged");
+        let mut reader = ZipReader::open(&archive, 1 << 20).unwrap();
+        let member = reader.members()[0].clone();
+        let error = reader
+            .copy(&member, 1024, &mut File::create(&staged).unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("1024 byte read cap"), "{error}");
+        reader
+            .copy(&member, 4096, &mut File::create(&staged).unwrap())
+            .unwrap();
+        assert_eq!(fs::read(&staged).unwrap().len(), 4096);
+
+        if !Path::new("/usr/bin/zstd").is_file() {
+            eprintln!("skip the zstd cap: host has no /usr/bin/zstd");
+            return;
+        }
+        let zeros = scratch.0.join("zeros");
+        fs::write(&zeros, vec![0u8; 1 << 20]).unwrap();
+        let compressed = scratch.0.join("zeros.zst");
+        let status = Command::new("/usr/bin/zstd")
+            .args(["-q", "-o"])
+            .arg(&compressed)
+            .arg(&zeros)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let output = scratch.0.join("out.tar");
+        let error = zstd_decompress(&activity, &compressed, &output, 64 << 10).unwrap_err();
+        assert!(error.to_string().contains("cap"), "{error}");
+        assert!(fs::metadata(&output).map_or(true, |m| m.len() <= 64 << 10));
+        zstd_decompress(&activity, &compressed, &output, 1 << 20).unwrap();
+        assert_eq!(fs::metadata(&output).unwrap().len(), 1 << 20);
     }
 
     /// A conda `_path` that leaves the package root, or is spelled so a

@@ -3744,6 +3744,15 @@ mod tests {
             assert_eq!(class, expected, "{kind:?}");
             assert_eq!(error.kind(), kind);
         }
+        // A sandbox whose view could not be set up ran no script (#679).
+        let setup = crate::kernel::error::sandbox_setup(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "create the sandbox host view",
+        ));
+        assert!(matches!(
+            classify_lifecycle_result(Err(setup)),
+            Err(LifecycleFailure::SandboxUnavailable(_))
+        ));
     }
 }
 

@@ -165,6 +165,8 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
             add(&importer, "pnpm-lock.yaml")?;
         }
     }
+    // npm reads one lock: the shrinkwrap when there is one, and a
+    // package-lock beside it is never parsed (it may not even be valid).
     for lock_name in ["npm-shrinkwrap.json", "package-lock.json"] {
         let Some(text) = root.read_input_string(Path::new(lock_name))? else {
             continue;
@@ -182,6 +184,7 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
                 add(&dir, lock_name)?;
             }
         }
+        break;
     }
     members.sort();
     Ok(members)

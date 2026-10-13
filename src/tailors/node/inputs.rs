@@ -409,5 +409,19 @@ mod tests {
             .collect();
         assert_eq!(paths, ["node_modules/from-shrinkwrap"]);
         assert!(planned.basis.contains_key("npm-shrinkwrap.json"));
+        // The package-lock a shrinkwrap shadows is never parsed: not for
+        // the plan, the workspace members or the resolution basis, as npm
+        // ignores it (Sol review of #694).
+        std::fs::write(dir.join("package-lock.json"), "{ not json").unwrap();
+        let planned = super::load_npm_plan_with_basis(
+            crate::kernel::platform::Platform::X86_64UnknownLinuxGnu,
+            &project,
+            &selected,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(planned.plan.lock_source, "npm-shrinkwrap.json");
+        crate::tailors::node::resolve::workspace_members(&project).unwrap();
+        crate::tailors::node::resolve::check_members_readable(&project).unwrap();
     }
 }

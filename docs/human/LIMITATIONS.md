@@ -118,8 +118,13 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   a change after that date is proven by test, not by two machines.
 - **A committed lock is a set of URLs to review.** A lock row's URL must sit under an
   endpoint the source policy admits for the row's own `provider`, and so must every
-  redirect, but a hostile lock can still name another file under that publisher's
-  endpoints, or name a different shipped publisher as its provider. Reviewing a lock
+  redirect. GitHub's asset CDN (`objects.githubusercontent.com`,
+  `release-assets.githubusercontent.com`) is admitted only as the target of a redirect
+  from the publisher's own `github.com/<repo>/releases/download/` URL, never as the URL
+  a row names, so every GitHub-hosted row says which repository it comes from. The
+  conda-forge native libraries Python and npm builds link against go through the same
+  policy, as the `conda-forge` publisher. A hostile lock can still name another file
+  under that publisher's endpoints, or name a different shipped publisher as its provider. Reviewing a lock
   diff is reviewing its URLs and providers. A downloaded toolchain row can no longer
   name `file://` (a Rust `source = "path"` row names a local tree and downloads
   nothing); the generic fetch helper that package-registry downloads use still

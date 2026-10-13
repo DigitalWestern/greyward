@@ -8,7 +8,7 @@ use super::cargo_door::ConfigFile;
 use super::crates::VENDOR_SOURCE;
 use crate::kernel::resolve::confine;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The settings a project's cargo configuration may not make, because no
 /// forced `--config` undoes them:
@@ -507,7 +507,13 @@ pub fn network_lock_source(source: &str) -> bool {
 /// lock cargo leaves names it, and the door runs this on every cargo run
 /// before the ledger is committed or anything is published
 /// ([`cargo_confined`](super::cargo_door::cargo_confined)).
-pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<()> {
+///
+/// What it accepts, it returns the transports of
+/// ([`lock_transports`]): a git dependency read from a path on this machine
+/// or fetched over ssh, and an ssh registry index, each `host-git-transport`
+/// as a git dependency's transport is, for the door to record under the
+/// policy before anything is published.
+pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<crate::kernel::policy::Exception>> {
     let refuse = |why: String| {
         crate::kernel::error::refused(
             io::ErrorKind::PermissionDenied,
@@ -533,7 +539,7 @@ pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<()> {
         })
         .collect();
     if bad.is_empty() {
-        return Ok(());
+        return Ok(lock_transports(&table));
     }
     Err(refuse(format!(
         "cargo resolved {} from a source ward does not resolve from; a dependency is \
@@ -543,4 +549,90 @@ pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<()> {
          fetched git dependency's included, can name one)",
         bad.join(", ")
     )))
+}
+
+/// `host-git-transport` for each source in a parsed `Cargo.lock` that cargo
+/// reached through this machine's git transport rather than the proxy: a
+/// git dependency over `file://` or `ssh://`
+/// ([`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception),
+/// the subject its vendoring records), and a registry index over `ssh://`
+/// (as [`index_transports`] records one a config names; a manifest's
+/// `registry-index` needs no config). `git://` offers no credential and
+/// records nothing, as for a git dependency. Each once.
+fn lock_transports(table: &toml::Table) -> Vec<crate::kernel::policy::Exception> {
+    let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
+    let sources = table
+        .get("package")
+        .and_then(|packages| packages.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|package| package.get("source")?.as_str());
+    for source in sources {
+        let git = if source.starts_with("git+") {
+            super::crates::parse_cargo_git_source(source).map(|git| git.inner)
+        } else {
+            source
+                .strip_prefix("registry+")
+                .filter(|index| {
+                    index
+                        .get(..6)
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
+                })
+                .map(|index| crate::kernel::gitsrc::GitSource {
+                    url: format!("ssh://{}", &index[6..]),
+                    commit: "0".repeat(40),
+                    subdirectory: None,
+                })
+        };
+        if let Some(exception) = git
+            .as_ref()
+            .and_then(crate::kernel::gitsrc::transport_exception)
+        {
+            if !found.contains(&exception) {
+                found.push(exception);
+            }
+        }
+    }
+    found
+}
+
+/// Every `Cargo.lock` (relative to the lock root) a cargo run with `args`
+/// may leave: the root's; the one beside the manifest `--manifest-path`
+/// names and each directory above it up to the root, where cargo writes
+/// the lock of the workspace that manifest belongs to; and each declared
+/// output named `Cargo.lock`.
+pub fn cargo_locks(args: &[&str], outputs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut locks = vec![PathBuf::from("Cargo.lock")];
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if *word == "--" {
+            break;
+        }
+        let manifest = match word.strip_prefix("--manifest-path") {
+            Some("") => words.next().copied(),
+            Some(value) => value.strip_prefix('='),
+            None => None,
+        };
+        let Some(manifest) = manifest else {
+            continue;
+        };
+        let mut dir = Path::new(manifest).parent();
+        while let Some(at) = dir.filter(|at| !at.as_os_str().is_empty()) {
+            locks.push(at.join("Cargo.lock"));
+            dir = at.parent();
+        }
+    }
+    locks.extend(
+        outputs
+            .iter()
+            .filter(|output| output.file_name().is_some_and(|name| name == "Cargo.lock"))
+            .cloned(),
+    );
+    let mut unique = Vec::new();
+    for lock in locks {
+        if !unique.contains(&lock) {
+            unique.push(lock);
+        }
+    }
+    unique
 }

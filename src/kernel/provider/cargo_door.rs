@@ -28,7 +28,7 @@ use super::crates_index;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::confine;
 use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Staged, Target, Wire, Wiring};
-use crate::kernel::resolve::session::Intercept;
+use crate::kernel::resolve::session::{Fact, Intercept};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use std::ffi::OsString;
@@ -472,8 +472,8 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
 }
 
 pub use super::cargo_settings::{
-    forced_env_names, index_transports, network_lock_source, network_url, record_index_transports,
-    refuse_lock_sources, refuse_unneutralized_settings,
+    cargo_locks, forced_env_names, index_transports, network_lock_source, network_url,
+    record_index_transports, refuse_lock_sources, refuse_unneutralized_settings,
 };
 
 /// [`refuse_unneutralized_settings`] for cargo's configuration in each of
@@ -1306,14 +1306,6 @@ pub fn cargo_confined<'a>(
     confined.routes = vec![crates_index::route()?];
     confined.intercept = Intercept::Tls;
     confined.wire = Some(Box::new(|wire: &Wire<'_>| wiring(wire)));
-    // Every run (lock generation, an update, attest's metadata) is judged
-    // by the lock it leaves, before anything is published.
-    confined.check = Some(Box::new(|staged: &Staged<'_>| {
-        match staged.read(Path::new("Cargo.lock"))? {
-            Some(lock) => refuse_lock_sources(&lock),
-            None => Ok(()),
-        }
-    }));
     match publish {
         CargoPublish::Project { outputs, receipt } => {
             // A record names files inside the workspace only, so it cannot
@@ -1343,6 +1335,28 @@ pub fn cargo_confined<'a>(
             confined.target = Target::Detached;
         }
     }
+    // Every run (lock generation, an update, attest's metadata) is judged
+    // by the locks it leaves, before anything is published.
+    let locks = cargo_locks(run.args, &confined.outputs);
+    confined.check = Some(Box::new(move |staged: &Staged<'_>| {
+        let mut facts: Vec<Fact> = Vec::new();
+        for lock in &locks {
+            let Some(bytes) = staged.read(lock)? else {
+                continue;
+            };
+            for exception in refuse_lock_sources(&bytes)? {
+                let fact = Fact {
+                    kind: crate::kernel::policy::HOST_GIT_TRANSPORT,
+                    subject: exception.subject,
+                    detail: exception.detail,
+                };
+                if !facts.contains(&fact) {
+                    facts.push(fact);
+                }
+            }
+        }
+        Ok(facts)
+    }));
     Ok(confined)
 }
 
@@ -1425,12 +1439,14 @@ fn run_cargo_with(
     }
     let spec = cargo_spec(run.rust_obj, run.lock_root, run.args);
     spec.trace();
-    door.run_confined(spec, confined).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("store cargo {}: {error}", run.args.join(" ")),
-        )
-    })
+    door.run_confined(spec, confined)
+        .map_err(|error| cargo_failure(run.args, error))
+}
+
+/// A confined cargo run's error, named by its arguments, keeping its class:
+/// a refusal stays one (exit 3, `"refused"` in `--json`).
+fn cargo_failure(args: &[&str], error: io::Error) -> io::Error {
+    crate::kernel::error::context(error, format_args!("store cargo {}", args.join(" ")))
 }
 
 /// `run_cargo` that fails on a nonzero exit, naming cargo's own words.
@@ -2732,6 +2748,140 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["other", "path", "version"]);
+    }
+
+    /// The hook reads every lock cargo may leave: with `--manifest-path`
+    /// (Python's sdist build runs `--manifest-path native/Cargo.toml` at the
+    /// source root) the lock is beside that manifest, or in a directory
+    /// above it, and the root has none.
+    #[test]
+    fn the_lock_check_reads_the_lock_beside_the_manifest_path() {
+        assert_eq!(
+            cargo_locks(
+                &["generate-lockfile", "--manifest-path", "native/Cargo.toml"],
+                &[
+                    PathBuf::from("native/Cargo.lock"),
+                    PathBuf::from("Cargo.lock")
+                ],
+            ),
+            [
+                PathBuf::from("Cargo.lock"),
+                PathBuf::from("native/Cargo.lock")
+            ]
+        );
+        assert_eq!(
+            cargo_locks(
+                &[
+                    "update",
+                    "--manifest-path=a/b/Cargo.toml",
+                    "--",
+                    "--manifest-path=x/Cargo.toml"
+                ],
+                &[PathBuf::from("c/Cargo.lock"), PathBuf::from("Cargo.toml")],
+            ),
+            [
+                PathBuf::from("Cargo.lock"),
+                PathBuf::from("a/b/Cargo.lock"),
+                PathBuf::from("a/Cargo.lock"),
+                PathBuf::from("c/Cargo.lock"),
+            ]
+        );
+
+        let temp = TempDir::named("cargo-door-nested-lock");
+        let root = temp.0.join("src");
+        std::fs::create_dir_all(root.join("native")).unwrap();
+        std::fs::write(
+            root.join("native/Cargo.toml"),
+            "[package]\nname = \"native\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("native/Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"bad\"\nversion = \"1.0.0\"\n\
+             source = \"registry+file:///src/index\"\n",
+        )
+        .unwrap();
+        let run = CargoRun {
+            rust_obj: Path::new("/nonexistent/rust"),
+            lock_root: &root,
+            args: &["generate-lockfile", "--manifest-path", "native/Cargo.toml"],
+            publish: CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+        };
+        let check = |outputs: Vec<PathBuf>| {
+            let confined = cargo_confined(&run, CargoPublish::Detached { outputs }, &[]).unwrap();
+            (confined.check.unwrap())(&Staged::in_dir(&root))
+        };
+        let error = check(vec![PathBuf::from("native/Cargo.lock")]).unwrap_err();
+        assert!(error.to_string().contains("bad@1.0.0"), "{error}");
+        // Found from the manifest path alone, too.
+        assert!(check(Vec::new()).is_err());
+        // A git dependency read from a path here is returned to record.
+        std::fs::write(
+            root.join("native/Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"g\"\nversion = \"1.0.0\"\n\
+             source = \"git+file:///srv/repo?branch=main#0123456789abcdef0123456789abcdef01234567\"\n",
+        )
+        .unwrap();
+        let facts = check(Vec::new()).unwrap();
+        assert_eq!(facts.len(), 1, "{facts:?}");
+        assert_eq!(facts[0].kind, crate::kernel::policy::HOST_GIT_TRANSPORT);
+        assert_eq!(facts[0].subject, "file:///srv/repo");
+    }
+
+    /// What the lock check accepts it returns the transports of, each
+    /// `host-git-transport` once: git over file:// and ssh://, an ssh
+    /// registry index. https and git:// record nothing.
+    #[test]
+    fn the_lock_check_returns_each_host_git_transport() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let lock = format!(
+            "version = 4\n\
+             [[package]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \"git+file:///srv/a#{commit}\"\n\
+             [[package]]\nname = \"a2\"\nversion = \"1.0.0\"\nsource = \"git+file:///srv/a?rev={commit}#{commit}\"\n\
+             [[package]]\nname = \"b\"\nversion = \"1.0.0\"\nsource = \"git+ssh://git@g.test/b#{commit}\"\n\
+             [[package]]\nname = \"c\"\nversion = \"1.0.0\"\nsource = \"registry+ssh://git@g.test/index\"\n\
+             [[package]]\nname = \"d\"\nversion = \"1.0.0\"\nsource = \"git+https://g.test/d#{commit}\"\n\
+             [[package]]\nname = \"e\"\nversion = \"1.0.0\"\nsource = \"git+git://g.test/e#{commit}\"\n\
+             [[package]]\nname = \"f\"\nversion = \"1.0.0\"\nsource = \"registry+git://g.test/index\"\n\
+             [[package]]\nname = \"i\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        );
+        let found = refuse_lock_sources(lock.as_bytes()).unwrap();
+        let subjects: Vec<&str> = found.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            [
+                "file:///srv/a",
+                "ssh://git@g.test/b",
+                "ssh://git@g.test/index"
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|e| e.kind == crate::kernel::policy::HOST_GIT_TRANSPORT));
+    }
+
+    /// A refusal from inside the door keeps its class through the cargo
+    /// run's error, so the CLI exits 3 and `--json` says "refused".
+    #[test]
+    fn a_cargo_run_refusal_keeps_its_class() {
+        let refused = crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            "cargo resolved bad@1.0.0 from a file index; nothing was published",
+        );
+        let error = cargo_failure(&["generate-lockfile"], refused);
+        let class = crate::kernel::error::class_of(&error);
+        assert_eq!(class, Some(crate::kernel::error::Class::Refused));
+        assert_eq!(class.map(|class| class.exit_code()), Some(3));
+        assert_eq!(class.map(|class| class.name()), Some("refused"));
+        let text = error.to_string();
+        assert!(
+            text.starts_with("store cargo generate-lockfile: "),
+            "{text}"
+        );
+        assert!(text.contains("bad@1.0.0"), "{text}");
     }
 
     #[test]

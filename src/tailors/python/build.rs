@@ -1,6 +1,9 @@
 //! Sandboxed sdist to wheel builds. PEP 517 build dependencies are inspected
 //! without execution and, when needed, realized as a separate Python env.
 
+use super::cargo_lock::{
+    cargo_lock_cache_key, cargo_lock_for, generated_cargo_lock_path, reuse_cached_cargo_lock,
+};
 use super::sdist_view::{self, SdistWheel};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
@@ -567,29 +570,6 @@ fn is_compiler_error(line: &str) -> bool {
         || body.contains(": fatal error:")
 }
 
-fn cargo_lock_for(source: &Path, manifest: &Path) -> Option<PathBuf> {
-    [
-        manifest.parent().map(|parent| parent.join("Cargo.lock")),
-        Some(source.join("Cargo.lock")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|path| path.is_file())
-}
-
-fn cargo_lock_cache_key(sdist_sha256: &str, rust_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(
-        format!("{sdist_sha256}\0{rust_id}").as_bytes(),
-    ))
-}
-
-pub(super) fn generated_cargo_lock_path(source: &Path, manifest: &Path) -> PathBuf {
-    source
-        .join(manifest.parent().unwrap_or_else(|| Path::new("")))
-        .join("Cargo.lock")
-}
-
 /// `cargo generate-lockfile` for an sdist that ships no `Cargo.lock`,
 /// confined through the door with the unpacked source as its greyward-owned
 /// lock root (Detached): the lock is written back there, and the run's
@@ -640,7 +620,7 @@ fn generate_cargo_lock(
             publish: CargoPublish::Detached { outputs },
         },
     )
-    .map_err(|e| io::Error::new(e.kind(), format!("generate the sdist's Cargo.lock: {e}")))?;
+    .map_err(|e| crate::kernel::error::context(e, "generate the sdist's Cargo.lock"))?;
     if let Some(objects) = report.ledger.clone() {
         missing_lock.keep_ledger(objects);
     }
@@ -743,23 +723,7 @@ fn rust_plan_inputs(
     let (lock_text, generated_lock) = if let Some(path) = cargo_lock_for(source, &manifest) {
         (fs::read_to_string(path)?, false)
     } else if let Ok(text) = fs::read_to_string(&generated_path) {
-        let lock_path = generated_cargo_lock_path(source, manifest_rel);
-        if fs::symlink_metadata(&lock_path)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "cached Cargo.lock would overwrite an extracted symlink: {}",
-                    lock_path.display()
-                ),
-            ));
-        }
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&lock_path, &text)?;
+        reuse_cached_cargo_lock(&text, source, manifest_rel)?;
         (text, true)
     } else {
         // This is the one cold path that must invoke Cargo. Persist the lock

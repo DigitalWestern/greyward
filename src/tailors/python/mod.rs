@@ -5,6 +5,7 @@
 
 pub mod build;
 pub(crate) mod build_requires;
+mod cargo_lock;
 pub(crate) mod door;
 pub mod edit;
 pub mod env;

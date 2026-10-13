@@ -527,7 +527,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   cargo run (lock generation, an update, `ward attest`), before anything is published or a
   resolution record is written, Greyward refuses a lock that resolves a package from a
   `file://` or path registry, `http://`, or any source that is not a network registry or a
-  git repository. That is the guarantee. A dependency's `registry-index` can sit in any
+  git repository. Every lock the run may leave is checked: the root's, the one beside a
+  `--manifest-path` manifest (a Python sdist's `native/Cargo.toml`), and a cached generated
+  lock before it is reused. A git dependency read from a path on this machine or over ssh,
+  and an ssh registry index, record `host-git-transport` from that lock, so a policy that
+  denies it refuses the run before anything is published. That is the guarantee. A dependency's `registry-index` can sit in any
   manifest, including a git dependency's own, which cargo fetches mid-run. As an earlier,
   clearer refusal, Greyward also checks `registry-index` before cargo starts in the
   manifests it can see: the root, the workspace members cargo finds (hidden directories

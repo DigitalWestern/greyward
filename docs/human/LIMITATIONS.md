@@ -523,10 +523,16 @@ Selection covers every patch of each maintained CPython minor that python-build-
     argument file: cargo passes them to the compiler probe, and rustc loads a codegen backend
     library, running its code, before checking it.
 
-  The same URL rule holds for a dependency's `registry-index` in any manifest cargo reads
-  (the root, workspace members, path dependencies, every dependency table including
-  `target.*`, build and dev ones, `[patch]`), checked before cargo starts, so lock
-  generation never reads a file index.
+  The same URL rule holds for every package source in the lock cargo leaves: after each
+  cargo run (lock generation, an update, `ward attest`), before anything is published or a
+  resolution record is written, Greyward refuses a lock that resolves a package from a
+  `file://` or path registry, `http://`, or any source that is not a network registry or a
+  git repository. That is the guarantee. A dependency's `registry-index` can sit in any
+  manifest, including a git dependency's own, which cargo fetches mid-run. As an earlier,
+  clearer refusal, Greyward also checks `registry-index` before cargo starts in the
+  manifests it can see: the root, the workspace members cargo finds (hidden directories
+  included), path dependencies, and every dependency table including `target.*`, build
+  and dev ones and each `[patch]` entry.
 
   `ward attest` also refuses a lock when `cargo metadata` shows a crate the lock pins to a
   registry or a commit read from anywhere but cargo's own download of it. Metadata prints no

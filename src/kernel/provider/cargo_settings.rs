@@ -478,3 +478,69 @@ pub fn forced_env_names() -> Vec<String> {
     }
     names
 }
+
+/// Whether a `source` in `Cargo.lock` (or a `cargo metadata` source id) is
+/// one ward resolves from: a registry index over the network
+/// ([`network_url`]), or a git repository over a scheme git is allowed
+/// (`https://`, `ssh://`, `git://`, and `file://`, which records
+/// `host-git-transport` as every git dependency's transport is). A
+/// `file://` or path registry, `http://`, and any other kind are not.
+pub fn network_lock_source(source: &str) -> bool {
+    if let Some(index) = source.strip_prefix("registry+") {
+        return network_url(index);
+    }
+    if source.starts_with("sparse+") {
+        return network_url(source);
+    }
+    source.strip_prefix("git+").is_some_and(|url| {
+        ["https://", "ssh://", "git://", "file://"]
+            .iter()
+            .any(|scheme| url.starts_with(scheme))
+            && !crate::kernel::gitsrc::option_looking_authority(url)
+    })
+}
+
+/// Refuse a `Cargo.lock` (its bytes) that resolves a package from a
+/// source ward does not resolve from ([`network_lock_source`]). This is
+/// the guarantee behind the manifest pre-scan: whatever manifest named a
+/// file index (a member, a patch, a fetched git dependency's own), the
+/// lock cargo leaves names it, and the door runs this on every cargo run
+/// before the ledger is committed or anything is published
+/// ([`cargo_confined`](super::cargo_door::cargo_confined)).
+pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<()> {
+    let refuse = |why: String| {
+        crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            format!("{why}; nothing was published"),
+        )
+    };
+    let table = std::str::from_utf8(lock)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+        .ok_or_else(|| refuse("the Cargo.lock cargo left does not parse".to_string()))?;
+    let bad: Vec<String> = table
+        .get("package")
+        .and_then(|packages| packages.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|package| {
+            let source = package.get("source")?.as_str()?;
+            if network_lock_source(source) {
+                return None;
+            }
+            let field = |key: &str| package.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+            Some(format!("{}@{} ({source})", field("name"), field("version")))
+        })
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(refuse(format!(
+        "cargo resolved {} from a source ward does not resolve from; a dependency is \
+         resolved only from a registry index over https (sparse+https://, https://), a git \
+         index over ssh:// or git://, or a git repository, since a file or path index is \
+         read without the proxy that checks every index (a manifest's `registry-index`, a \
+         fetched git dependency's included, can name one)",
+        bad.join(", ")
+    )))
+}

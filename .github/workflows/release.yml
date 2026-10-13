@@ -2,7 +2,8 @@
 # provenance, and attach them to a draft GitHub Release. install.sh and
 # `ward update --self` download exactly these asset names, so keep them
 # stable: greyward-<triple>.tar.gz, greyward-<triple>.tar.gz.sha256, and the
-# greyward-<triple>.tar.gz.sig that tools/release-sign.sh adds.
+# greyward-<triple>.tar.gz.sig, LATEST and LATEST.sig that
+# tools/release-sign.sh adds (install.sh reads the latest release's LATEST).
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #   # then, where the release key lives, once this workflow is done:

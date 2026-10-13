@@ -138,7 +138,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   it checks each archive's provenance attestation names the release workflow, the tag and
   the commit the repository's tag points at, so an older release's archive uploaded into a
   new draft is not signed. Each installer also requires the binary to report the release's
-  own version, and only a named version replaces a newer ward. Whoever holds the
+  own version, and only a named version replaces a newer ward. `install.sh` finds the
+  latest release in the signed `LATEST` asset that `tools/release-sign.sh` uploads with
+  every release (one line, the tag), so a writer of releases can point it only at a
+  release the key signed: an older one installs on a machine with no ward, and the
+  downgrade check refuses it over a newer one. Whoever holds the
   key can, and a lost key means a new one ships in a new `install.sh` and a new ward,
   which every existing ward must reach by `install.sh` once. The installer needs OpenSSL
   3.0 or newer to check the signature, and refuses without it. The `.sha256` beside each

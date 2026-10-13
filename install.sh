@@ -32,10 +32,11 @@
 # What it trusts: the archive must be signed by the release key below
 # (RELEASE_PUBLIC_KEY), checked with openssl 3.0 or newer, and the new binary
 # must run here before it replaces the old one: `ward --version` exits 0 and
-# prints exactly the version of the tag being installed. Without --version,
-# a ward newer than the latest release (SemVer 2.0 precedence), or one whose
-# version cannot be read, is left alone; naming an older version installs
-# it, and says it is a downgrade.
+# prints exactly the version of the tag being installed. The latest release
+# is the tag in its LATEST asset, signed by the same key. Without
+# --version, a ward newer than the latest release (SemVer 2.0 precedence),
+# or one whose --version is not the one line `ward <version>`, is left
+# alone; naming an older version installs it, and says it is a downgrade.
 #
 # A script cannot change the PATH of the shell that piped it in. The last
 # line it prints is the one command that finishes the job for the current
@@ -212,14 +213,36 @@ probe_version() { run_version "$1" || true; }
 # in ASCII order, and a shorter list below a longer one it is a prefix of.
 # No arithmetic anywhere: 0.3.0-alpha < 0.3.0-alpha.1 < 0.3.0-alpha.beta <
 # 0.3.0-beta < 0.3.0-rc.9 < 0.3.0-rc.10 < 0.3.0, and 1.0.0--1 < 1.0.0--2.
+# A version longer than 256 bytes is no version: nothing past the cap is
+# ever compared. (The grammar is ASCII only, so a string of at most 256
+# characters that matches it is also at most 256 bytes.)
 SEMVER_ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
-SEMVER_RE="^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-$SEMVER_ID(\\.$SEMVER_ID)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?\$"
+SEMVER_BODY="v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-$SEMVER_ID(\\.$SEMVER_ID)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
+SEMVER_MAX=256
 semver_valid() {
     case "$1" in
         "" | *"
 "*) return 1 ;;
     esac
-    printf '%s\n' "$1" | LC_ALL=C grep -Eq "$SEMVER_RE"
+    [ "${#1}" -le "$SEMVER_MAX" ] || return 1
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq "^$SEMVER_BODY\$"
+}
+# The one line an installed ward's --version must print to be read:
+# `ward <version>`, or `ward <version> (<commit> <date>)` the way ward
+# prints it (`(unknown unknown)` for a build outside git). Two lines, a
+# word after it, or an over-long version is no version line.
+version_line() {
+    case "$1" in
+        *"
+"*) return 1 ;;
+    esac
+    [ "${#1}" -le $((SEMVER_MAX + 90)) ] || return 1
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq "^ward $SEMVER_BODY( \\([0-9A-Za-z.-]{1,40} [0-9A-Za-z.-]{1,40}\\))?\$"
+}
+# 0 when $1 sorts before $2 byte by byte: awk compares two strings (never
+# numbers, the "" forces it) in the C locale's byte order.
+semver_before() {
+    _sb_a="$1" _sb_b="$2" LC_ALL=C awk 'BEGIN { exit !((ENVIRON["_sb_a"] "") < (ENVIRON["_sb_b"] "")) }'
 }
 # Two identifiers (never empty): -1, 0 or 1.
 semver_id_cmp() {
@@ -236,7 +259,7 @@ semver_id_cmp() {
     esac
     if [ "$1" = "$2" ]; then
         echo 0
-    elif LC_ALL=C expr "x$1" \< "x$2" >/dev/null; then
+    elif semver_before "$1" "$2"; then
         echo -1
     else
         echo 1
@@ -445,112 +468,11 @@ asset="greyward-$triple.tar.gz"
 
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
-    # The URL $1 ends up at after its redirects.
-    final_url() { curl -fsSL --retry 3 -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q -O "$2" "$1"; }
-    # The redirect targets in wget's -S output, in order. GNU wget 1.x and
-    # busybox print the server's Location header (its name in any case);
-    # GNU wget then echoes it as `Location: <url> [following]`, and that
-    # suffix and CR are dropped. wget2 prints no headers, only
-    # `URL '<absolute url>' not followed (max redirections exceeded)`.
-    locations() {
-        tr -d '\r' | sed -n \
-            -e 's/^ *[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]: *\(.*[^ ]\) *$/\1/p' \
-            -e "s/^URL '\\(.*\\)' not followed.*\$/\\1/p" \
-            | sed 's/ \[following\]$//'
-    }
-    # URL $2 as a Location sent from URL $1 (RFC 9110 10.2.2): absolute,
-    # scheme-relative, absolute-path or relative to $1's directory.
-    url_join() {
-        _uj_scheme="${1%%://*}"
-        _uj_rest="${1#*://}"
-        _uj_host="${_uj_rest%%/*}"
-        case "$2" in
-            *://*) printf '%s' "$2" ;;
-            //*) printf '%s:%s' "$_uj_scheme" "$2" ;;
-            /*) printf '%s://%s%s' "$_uj_scheme" "$_uj_host" "$2" ;;
-            *)
-                _uj_path="${_uj_rest%%[?#]*}"
-                case "$_uj_path" in
-                    */*) _uj_dir="${_uj_path%/*}" ;;
-                    *) _uj_dir="$_uj_path" ;;
-                esac
-                printf '%s://%s/%s' "$_uj_scheme" "$_uj_dir" "$2"
-                ;;
-        esac
-    }
-    # Follows $1's redirects one hop at a time, at most 10, and prints the
-    # first URL that is a release tag page (or the last one reached).
-    # wget that knows --max-redirect (GNU wget, wget2) is asked one hop per
-    # call; busybox wget, which follows on its own, prints every hop's
-    # headers in one run, and those are walked the same way.
-    final_url() {
-        _fu_url="$1"
-        _fu_hops=0
-        if wget --help 2>&1 | grep -q -- '--max-redirect'; then
-            _fu_one_hop=1
-        else
-            _fu_one_hop=0
-            _fu_all="$(wget -S -O /dev/null "$1" 2>&1 | locations)"
-        fi
-        while :; do
-            case "$_fu_url" in
-                */releases/tag/?*) printf '%s' "$_fu_url"; return 0 ;;
-            esac
-            if [ "$_fu_one_hop" = 1 ]; then
-                _fu_next="$(wget --max-redirect=0 -S -O /dev/null "$_fu_url" 2>&1 | locations | head -n 1)"
-            else
-                _fu_next="$(printf '%s\n' "$_fu_all" | sed -n "$((_fu_hops + 1))p")"
-            fi
-            [ -n "$_fu_next" ] || { printf '%s' "$_fu_url"; return 0; }
-            [ "$_fu_hops" -lt 10 ] || return 1
-            _fu_url="$(url_join "$_fu_url" "$_fu_next")"
-            _fu_hops=$((_fu_hops + 1))
-        done
-    }
 else
     fail "need curl or wget to download the $asset release asset"
 fi
-
-# The exact release this run installs, as a tag, and whether it was named.
-# A named version may replace a newer installed ward (a downgrade, said as
-# one); `latest` never does. `latest` is read from where GitHub's
-# releases/latest redirects, before anything is downloaded, so the binary is
-# held to that tag below: an older release's validly signed assets, uploaded
-# into a newer release, do not install. GREYWARD_LATEST_TAG names the tag
-# for a caller that resolved it already (action.yml, with its token), and
-# GREYWARD_LATEST_URL another page to resolve it from (tests/install.sh).
-case "$VERSION" in
-    latest)
-        named=0
-        tag="${GREYWARD_LATEST_TAG:-}"
-        if [ -z "$tag" ]; then
-            latest_url="${GREYWARD_LATEST_URL:-https://github.com/$REPO/releases/latest}"
-            resolved="$(final_url "$latest_url")" \
-                || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
-            tag="${resolved##*/releases/tag/}"
-            [ "$tag" != "$resolved" ] \
-                || fail "$latest_url led to $resolved, not a release tag; name one with --version=<tag>"
-        fi
-        ;;
-    v*) named=1; tag="$VERSION" ;;
-    *)  named=1; tag="v$VERSION" ;;
-esac
-case "$tag" in
-    v[0-9]*) ;;
-    *) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
-esac
-case "$tag" in
-    *[!A-Za-z0-9.+-]*) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
-esac
-want="${tag#v}"
-base="https://github.com/$REPO/releases/download/$tag"
-# Test hook: serve the three asset files (the archive, its .sha256 and its
-# .sig) from anywhere (tests/install.sh and action.yml use it). The files are
-# still verified against the release key, and the binary against $tag, so
-# the hook moves where they come from, never what is trusted.
-base="${GREYWARD_DOWNLOAD_BASE:-$base}"
 
 if command -v sha256sum >/dev/null 2>&1; then
     digest() { sha256sum "$1" | cut -d' ' -f1; }
@@ -572,6 +494,76 @@ case "$key_hex" in *[!0-9a-f]*) key_hex="" ;; esac
 tmp="$(mktemp -d 2>/dev/null || mktemp -d -t greyward-install)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
+# A signature: Ed25519 over a file's bytes, one line of base64 in its .sig.
+# The public key goes to openssl as DER, the fixed SubjectPublicKeyInfo
+# prefix for Ed25519 followed by the key's 32 bytes. verify_sig <file> <sig>
+# fails for a .sig that is not base64 or not by the release key.
+hex_to_bin "302a300506032b6570032100$key_hex" >"$tmp/release-key.der"
+verify_sig() {
+    openssl base64 -d -A -in "$2" -out "$2.bin" 2>/dev/null || return 1
+    openssl pkeyutl -verify -pubin -keyform DER -inkey "$tmp/release-key.der" -rawin \
+        -in "$1" -sigfile "$2.bin" >/dev/null 2>&1
+}
+
+# The exact release this run installs, as a tag, and whether it was named.
+# A named version may replace a newer installed ward (a downgrade, said as
+# one); `latest` never does. `latest` is the tag in the newest release's
+# LATEST asset: one line, signed by the release key like the archives
+# (tools/release-sign.sh writes it), fetched from GitHub's
+# releases/latest/download/LATEST, whose redirects curl or wget follow on
+# their own. It is read before anything else is downloaded, so the binary
+# is held to that tag below: an older release's validly signed assets,
+# uploaded into a newer release, do not install. GREYWARD_LATEST_TAG names
+# the tag for a caller that resolved it already (action.yml, with its
+# token), and GREYWARD_LATEST_URL another LATEST to read (tests/install.sh).
+case "$VERSION" in
+    latest)
+        named=0
+        tag="${GREYWARD_LATEST_TAG:-}"
+        if [ -z "$tag" ]; then
+            latest_url="${GREYWARD_LATEST_URL:-https://github.com/$REPO/releases/latest/download/LATEST}"
+            fetch "$latest_url" "$tmp/LATEST" \
+                || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
+            fetch "$latest_url.sig" "$tmp/LATEST.sig" \
+                || fail "$latest_url has no signature next to it; refusing to trust it. Name a release with --version=<tag>"
+            verify_sig "$tmp/LATEST" "$tmp/LATEST.sig" \
+                || fail "$latest_url is not signed by ward's release key ($RELEASE_KEY); refusing to trust it. Name a release with --version=<tag>"
+            # Exactly one line, the tag and its newline, and the tag a
+            # v-prefixed SemVer 2.0 version: anything else is refused.
+            latest_bytes="$(wc -c <"$tmp/LATEST")"
+            [ "$((latest_bytes))" -le $((SEMVER_MAX + 2)) ] \
+                || fail "$latest_url is not one release tag; name one with --version=<tag>"
+            tag="$(cat "$tmp/LATEST")"
+            case "$tag" in *"
+"*) tag="" ;; esac
+            [ -n "$tag" ] && printf '%s\n' "$tag" | cmp -s - "$tmp/LATEST" \
+                || fail "$latest_url is not one release tag on one line; name one with --version=<tag>"
+            case "$tag" in
+                v*) semver_valid "$tag" || tag="" ;;
+                *) tag="" ;;
+            esac
+            [ -n "$tag" ] \
+                || fail "$latest_url does not name a release tag (v<SemVer 2.0 version>); name one with --version=<tag>"
+        fi
+        ;;
+    v*) named=1; tag="$VERSION" ;;
+    *)  named=1; tag="v$VERSION" ;;
+esac
+case "$tag" in
+    v[0-9]*) ;;
+    *) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
+esac
+case "$tag" in
+    *[!A-Za-z0-9.+-]*) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
+esac
+want="${tag#v}"
+base="https://github.com/$REPO/releases/download/$tag"
+# Test hook: serve the three asset files (the archive, its .sha256 and its
+# .sig) from anywhere (tests/install.sh and action.yml use it). The files are
+# still verified against the release key, and the binary against $tag, so
+# the hook moves where they come from, never what is trusted.
+base="${GREYWARD_DOWNLOAD_BASE:-$base}"
+
 say "downloading $base/$asset"
 fetch "$base/$asset" "$tmp/$asset" \
     || fail "download failed. Is there a release at https://github.com/$REPO/releases with $asset?
@@ -587,16 +579,9 @@ actual="$(digest "$tmp/$asset")"
   expected $expected
   got      $actual"
 
-# The signature: Ed25519 over the archive's bytes, one line of base64. The
-# public key goes to openssl as DER, the fixed SubjectPublicKeyInfo prefix
-# for Ed25519 followed by the key's 32 bytes.
 fetch "$base/$asset.sig" "$tmp/$asset.sig" \
     || fail "signature file missing next to the release asset; refusing to install an unverified binary"
-hex_to_bin "302a300506032b6570032100$key_hex" >"$tmp/release-key.der"
-openssl base64 -d -A -in "$tmp/$asset.sig" -out "$tmp/$asset.sig.bin" 2>/dev/null \
-    || fail "the signature file for $asset is not base64; refusing to install an unverified binary"
-openssl pkeyutl -verify -pubin -keyform DER -inkey "$tmp/release-key.der" -rawin \
-    -in "$tmp/$asset" -sigfile "$tmp/$asset.sig.bin" >/dev/null 2>&1 \
+verify_sig "$tmp/$asset" "$tmp/$asset.sig" \
     || fail "$asset is not signed by ward's release key ($RELEASE_KEY); refusing to install it.
   (This needs OpenSSL 3.0 or newer; 'openssl version' says: $(openssl version 2>&1))"
 
@@ -612,13 +597,13 @@ if [ -x "$INSTALL_DIR/ward" ]; then
     existing=1
     # A --version that fails or times out tells nothing, like no output.
     probed="$(run_version "$INSTALL_DIR/ward")" || probed=""
-    # Only a ward version belongs in an "upgraded X -> Y" line.
-    case "$probed" in
-        "ward "*) previous="$probed" ;;
-    esac
+    # Only one exact version line is read: two lines, or anything after
+    # the version, is no version at all.
+    if version_line "$probed"; then previous="$probed"; fi
 fi
 # `ward 0.3.0 (abc1234 2026-10-13)`: the version is the second word.
-previous_version="$(printf '%s\n' "$previous" | sed -n '1s/^ward \([^ ]*\).*$/\1/p')"
+previous_version="${previous#ward }"
+previous_version="${previous_version%% *}"
 downgrade=0
 if [ "$existing" = 1 ]; then
     # An installed ward whose version cannot be read might be newer, so it
@@ -629,7 +614,10 @@ if [ "$existing" = 1 ]; then
     else
         order=bad
         if [ -n "$probed" ]; then
-            seen="its '--version' printed '$(printf '%s' "$probed" | head -n 1)'"
+            # At most 80 bytes of its first line: it may print anything.
+            seen="its '--version' printed '$(printf '%s\n' "$probed" | head -n 1 | cut -c 1-80)'"
+            case "$probed" in *"
+"*) seen="$seen and more lines" ;; esac
         else
             seen="its '--version' printed nothing, failed or timed out"
         fi
@@ -643,7 +631,7 @@ if [ "$existing" = 1 ]; then
         0 | 1) ;;
         *)
             # Unreadable, so it might be newer: latest leaves it alone.
-            [ "$named" = 1 ] || fail "cannot tell whether $INSTALL_DIR/ward is older than the latest release ($tag): $seen, and that is no SemVer 2.0 version (or $tag is not). It is untouched.
+            [ "$named" = 1 ] || fail "cannot tell whether $INSTALL_DIR/ward is older than the latest release ($tag): $seen, which is not the one line 'ward <SemVer 2.0 version>'. It is untouched.
   To replace it anyway, name the release:  --version=$tag"
             ;;
     esac
@@ -669,7 +657,9 @@ case "$installed" in
     *) fail "the downloaded ward says '$installed', not ward $want; the release's asset does not match its tag $tag, and $INSTALL_DIR/ward is untouched" ;;
 esac
 mv -f "$staged" "$INSTALL_DIR/ward" || fail "cannot replace $INSTALL_DIR/ward"
-if [ -z "$previous" ]; then
+if [ -z "$previous" ] && [ "$existing" = 1 ]; then
+    say "replaced $INSTALL_DIR/ward, whose version could not be read, with $installed (--version=$tag was named)"
+elif [ -z "$previous" ]; then
     say "installed $installed to $INSTALL_DIR/ward"
 elif [ "$downgrade" = 1 ]; then
     say "downgraded $previous -> $installed in $INSTALL_DIR (--version=$tag was named)"

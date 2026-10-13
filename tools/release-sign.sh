@@ -17,13 +17,23 @@
 #      repository's release workflow, from refs/tags/<tag> at the commit
 #      the repository's tag names);
 #   3. signs each archive (Ed25519 over its bytes, one line of base64 in
-#      <archive>.sig), checks the signature, and uploads the .sig files;
-#   4. publishes the release when it is still a draft.
+#      <archive>.sig) and checks the signature;
+#   4. writes LATEST, the one line <tag>, and signs it the same way;
+#   5. uploads the .sig files, LATEST and LATEST.sig;
+#   6. publishes the release when it is still a draft.
+#
+# LATEST is how install.sh finds the latest release: it downloads
+# releases/latest/download/LATEST, which GitHub redirects to the LATEST of
+# whichever release is latest, checks LATEST.sig, and installs that tag.
+# Every release carries its own, naming itself, so only the latest one is
+# ever read; signing an older release (v0.1.0 after v0.2.0) changes nothing.
+# A latest release without LATEST is one install.sh refuses to resolve.
 #
 # A release published before signing existed (v0.1.0, v0.2.0) has no
 # attestation: `--without-attestation` signs it on its .sha256 alone, after
 # its archives were checked some other way. A release that already carries a
-# .sig is refused: nothing is ever replaced.
+# .sig, or a LATEST, is refused: nothing is ever replaced. It still gets
+# LATEST like any other.
 #
 #   tools/release-sign.sh --sign <file>...   write <file>.sig only, offline
 #                                            (tests/install.sh uses it)
@@ -110,11 +120,18 @@ fi
 # --- a release ----------------------------------------------------------------
 [ "$#" = 1 ] || usage
 tag="$1"
+# The same grammar install.sh holds a LATEST to, read out of install.sh.
+eval "$(sed -n '/^# >>> semver/,/^# <<< semver/p' "$ROOT/install.sh")"
+[[ "$tag" == v* ]] && semver_valid "$tag" \
+    || die "'$tag' is not a release tag (v<SemVer 2.0 version>)"
 command -v gh >/dev/null || die "needs gh, signed in with write access to $REPO"
 names="$(gh release view "$tag" --repo "$REPO" --json assets -q '.assets[].name')" \
     || die "no release $tag in $REPO"
 if grep -q '\.sig$' <<<"$names"; then
     die "release $tag already carries .sig files; nothing is replaced"
+fi
+if grep -qx 'LATEST' <<<"$names"; then
+    die "release $tag already carries a LATEST; nothing is replaced"
 fi
 archives="$(grep -E '^greyward-[A-Za-z0-9_.-]+\.tar\.gz$' <<<"$names" || true)"
 [ -n "$archives" ] || die "release $tag has no greyward-<triple>.tar.gz"
@@ -148,10 +165,12 @@ while read -r archive; do
     fi
     sign_file "$file"
 done <<<"$archives"
+printf '%s\n' "$tag" >"$work/assets/LATEST"
+sign_file "$work/assets/LATEST"
 
-gh release upload "$tag" --repo "$REPO" "$work"/assets/*.sig
+gh release upload "$tag" --repo "$REPO" "$work"/assets/*.sig "$work/assets/LATEST"
 if [ "$(gh release view "$tag" --repo "$REPO" --json isDraft -q .isDraft)" = true ]; then
     gh release edit "$tag" --repo "$REPO" --draft=false --latest
     say "published $tag"
 fi
-say "done: every archive of $tag is signed by $public"
+say "done: every archive of $tag, and its LATEST, is signed by $public"

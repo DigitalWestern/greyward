@@ -608,9 +608,32 @@ impl Tailor for Node {
     }
 }
 
-/// The lifecycle phases npm runs for the project itself and for each
-/// workspace member on install, in npm's order.
-const PROJECT_LIFECYCLE_PHASES: &[&str] = &["preinstall", "install", "postinstall", "prepare"];
+/// The lifecycle scripts `npm install` (and `npm ci`) without package
+/// arguments runs for the project root after the tree is reified, in
+/// npm's order: the explicit list in npm 11's `lib/commands/install.js`
+/// and `ci.js` (docs.npmjs.com/cli/v11/using-npm/scripts, "npm install").
+const ROOT_LIFECYCLE_PHASES: &[&str] = &[
+    "preinstall",
+    "install",
+    "postinstall",
+    "prepublish",
+    "preprepare",
+    "prepare",
+    "postprepare",
+];
+
+/// What arborist runs for each linked package, workspace members
+/// included, in its order: `preinstall`, then `prepare` (links alone run
+/// it, before their bins are linked), then `install` and `postinstall`
+/// (`@npmcli/arborist` `rebuild.js`, `#build` for `type === 'links'`).
+/// Hooks around `prepare` are not run for a link.
+const MEMBER_LIFECYCLE_PHASES: &[&str] = &["preinstall", "prepare", "install", "postinstall"];
+
+/// The `install` command npm supplies for a package with a `binding.gyp`
+/// and neither an `install` nor a `preinstall` script, unless
+/// `"gypfile": false` (`@npmcli/node-gyp`, used by `@npmcli/run-script`
+/// for the root and by arborist for links).
+const DEFAULT_GYP_INSTALL: &str = "node-gyp rebuild";
 
 /// The project's and its workspace members' own lifecycle scripts, each
 /// recorded as the exception it is: npm runs them on install and ward does
@@ -624,8 +647,11 @@ fn record_skipped_project_scripts(
     root_package_json: Option<&str>,
     attribution: &crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
+    let has_binding_gyp = |dir: &str| project.is_input_file(&Path::new(dir).join("binding.gyp"));
     let mut skipped = match root_package_json {
-        Some(text) => skipped_project_scripts(".", text)?,
+        Some(text) => {
+            skipped_project_scripts(".", text, ROOT_LIFECYCLE_PHASES, has_binding_gyp("."))?
+        }
         None => Vec::new(),
     };
     let members: std::collections::BTreeSet<&str> = plan
@@ -638,7 +664,12 @@ fn record_skipped_project_scripts(
     for member in members {
         let manifest = Path::new(member).join("package.json");
         if let Some(text) = project.read_input_string(&manifest)? {
-            skipped.extend(skipped_project_scripts(member, &text)?);
+            skipped.extend(skipped_project_scripts(
+                member,
+                &text,
+                MEMBER_LIFECYCLE_PHASES,
+                has_binding_gyp(member),
+            )?);
         }
     }
     for (subject, detail) in skipped {
@@ -652,19 +683,34 @@ fn record_skipped_project_scripts(
 }
 
 /// The lifecycle scripts in one package.json that npm would run on install,
-/// as (subject, detail) pairs: the subject is `dir`, the detail names the
-/// phase and its command.
-fn skipped_project_scripts(dir: &str, package_json: &str) -> io::Result<Vec<(String, String)>> {
+/// `phases` in order, as (subject, detail) pairs: the subject is `dir`, the
+/// detail names the phase and its command. `binding_gyp`: `dir` has a
+/// `binding.gyp`, so `install` may be npm's default node-gyp build.
+fn skipped_project_scripts(
+    dir: &str,
+    package_json: &str,
+    phases: &[&str],
+    binding_gyp: bool,
+) -> io::Result<Vec<(String, String)>> {
     let manifest: Value = serde_json::from_str(package_json).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{}: {e}", Path::new(dir).join("package.json").display()),
         )
     })?;
-    Ok(PROJECT_LIFECYCLE_PHASES
+    let scripts = &manifest["scripts"];
+    let default_gyp = binding_gyp
+        && manifest["gypfile"] != Value::Bool(false)
+        && scripts["install"].as_str().is_none()
+        && scripts["preinstall"].as_str().is_none();
+    Ok(phases
         .iter()
         .filter_map(|phase| {
-            let command = manifest["scripts"][*phase].as_str()?;
+            let command = match scripts[*phase].as_str() {
+                Some(command) => command,
+                None if *phase == "install" && default_gyp => DEFAULT_GYP_INSTALL,
+                None => return None,
+            };
             Some((
                 dir.to_string(),
                 format!(
@@ -1505,12 +1551,29 @@ mod tests {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
         let scratch = TempDir::named("node-project-scripts");
         let project = scratch.0.clone();
-        let root = r#"{"name":"app","scripts":{"postinstall":"patch-package","test":"jest","prepare":"husky"}}"#;
+        let root = r#"{"name":"app","scripts":{"postinstall":"patch-package","test":"jest","prepare":"husky","postprepare":"echo done","prepublish":"build","preprepare":"gen"}}"#;
         fs::write(project.join("package.json"), root).unwrap();
         fs::create_dir_all(project.join("packages/lib")).unwrap();
         fs::write(
             project.join("packages/lib/package.json"),
-            r#"{"name":"lib","scripts":{"prepare":"tsc","build":"tsc"}}"#,
+            r#"{"name":"lib","scripts":{"postinstall":"cp","prepare":"tsc","preprepare":"x","postprepare":"y","build":"tsc"}}"#,
+        )
+        .unwrap();
+        // A member with a `binding.gyp` and no install script gets npm's
+        // default node-gyp build; one that opts out with `gypfile: false`
+        // does not.
+        fs::create_dir_all(project.join("packages/addon")).unwrap();
+        fs::write(project.join("packages/addon/binding.gyp"), "{}").unwrap();
+        fs::write(
+            project.join("packages/addon/package.json"),
+            r#"{"name":"addon"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(project.join("packages/optout")).unwrap();
+        fs::write(project.join("packages/optout/binding.gyp"), "{}").unwrap();
+        fs::write(
+            project.join("packages/optout/package.json"),
+            r#"{"name":"optout","gypfile":false}"#,
         )
         .unwrap();
         fs::create_dir_all(project.join("packages/empty")).unwrap();
@@ -1521,7 +1584,12 @@ mod tests {
                 path: "node_modules/lib".into(),
                 target: "packages/lib".into(),
             }],
-            workspaces: vec!["packages/lib".into(), "packages/empty".into()],
+            workspaces: vec![
+                "packages/lib".into(),
+                "packages/empty".into(),
+                "packages/addon".into(),
+                "packages/optout".into(),
+            ],
             lock_source: "package-lock.json".into(),
         };
         let held = ProjectRoot::open(&project).unwrap();
@@ -1550,11 +1618,33 @@ mod tests {
                 ),
                 (
                     ".".to_string(),
+                    format!("`prepublish` script (build) {not_run}")
+                ),
+                (
+                    ".".to_string(),
+                    format!("`preprepare` script (gen) {not_run}")
+                ),
+                (
+                    ".".to_string(),
                     format!("`prepare` script (husky) {not_run}")
                 ),
                 (
+                    ".".to_string(),
+                    format!("`postprepare` script (echo done) {not_run}")
+                ),
+                (
+                    "packages/addon".to_string(),
+                    format!("`install` script (node-gyp rebuild) {not_run}")
+                ),
+                // A link runs `prepare` before `install`, and no hooks
+                // around it.
+                (
                     "packages/lib".to_string(),
                     format!("`prepare` script (tsc) {not_run}")
+                ),
+                (
+                    "packages/lib".to_string(),
+                    format!("`postinstall` script (cp) {not_run}")
                 ),
             ]
         );

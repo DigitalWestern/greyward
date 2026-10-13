@@ -662,9 +662,13 @@ objects built under the older view. See [host-view limitations](LIMITATIONS.md)
 for the plugin allowlist and the remaining explicitly reachable host paths.
 
 A Node sync runs the install scripts of dependencies in the sandbox, but not
-the project's own: a `preinstall`, `install`, `postinstall` or `prepare` in
-the project's package.json, or in a workspace member's, would write the
-project's source, which no store object may hold. npm runs them on install,
+the project's own. For the root npm runs `preinstall`, `install`,
+`postinstall`, `prepublish`, `preprepare`, `prepare` and `postprepare`, in
+that order. For each workspace member or linked directory it runs
+`preinstall`, `prepare`, `install` and `postinstall`. A directory with a
+`binding.gyp` and no `install` or `preinstall` script gets npm's default
+`install`, `node-gyp rebuild`. These would write the project's source,
+which no store object may hold. npm runs them on install,
 so each one the sync skips is recorded as a `project-script-skipped`
 exception (subject the directory, `.` for the root; detail the phase and its
 command). A policy that denies the kind refuses the sync, and `ward audit`

@@ -187,7 +187,10 @@ impl Tailor for Ruby {
         _extension: &str,
     ) -> io::Result<Option<LoneFile>> {
         let runtime = ruby::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
-        let gem_home = ctx.store.run_home(&ctx.project_dir(), "ruby")?.join("gems");
+        let gem_home = ctx
+            .store
+            .run_home(&ctx.project_dir()?, "ruby")?
+            .join("gems");
         std::fs::create_dir_all(&gem_home)?;
         Ok(Some(
             LoneFile::in_bin(&runtime, "ruby").scrubbed(ruby::lone_env(&gem_home)),

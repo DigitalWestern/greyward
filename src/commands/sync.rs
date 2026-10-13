@@ -71,6 +71,9 @@ pub fn preflight_sync(
     // finished sync that could not register would leave a projected
     // environment nothing protects, and the next sweep would collect it.
     store::Store::check_registrable_in(project)?;
+    // The projection's bin directories go on every child's PATH, where a
+    // ':' in the project's path would split one entry into two.
+    crate::kernel::platform::refuse_path_separator("the project", project.path())?;
     let present = tailors::detected_in(project)?;
     // No project is the answer before any lock is: `ward --frozen` in the
     // wrong directory must say there is no manifest here, not that
@@ -153,7 +156,7 @@ pub(crate) fn run_in_mode(
     mode: Mode,
     stop_after_lock: bool,
 ) -> io::Result<()> {
-    let dir = sync_dir(&context::project_dir())?;
+    let dir = sync_dir(&context::project_dir()?)?;
     // An interrupted resolution publication is undone before anything
     // reads the project. Its originals are in the store, so opening the
     // store early leaves no trace a refusal would have avoided.
@@ -518,8 +521,8 @@ fn print_signing_notice(store: &store::Store) {
 /// Where the fix line tells a solo user to keep a key: next to the store's
 /// default home, so the same path works on every machine they set up.
 fn default_signing_key() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    home.unwrap_or_else(|| PathBuf::from("~"))
+    crate::kernel::home::home()
+        .unwrap_or_else(|_| PathBuf::from("~"))
         .join(".greyward")
         .join("signing.key")
 }

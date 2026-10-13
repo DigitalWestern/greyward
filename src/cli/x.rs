@@ -108,7 +108,7 @@ pub(super) fn parse_x(args: &[String]) -> Result<Option<Command>, UsageError> {
         ecosystem,
         from,
         tool,
-        args: args[index + 1..].to_vec(),
+        args: args[index + 1..].iter().map(Into::into).collect(),
     }))
 }
 

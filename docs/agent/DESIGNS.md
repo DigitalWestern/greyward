@@ -1534,6 +1534,15 @@ field pass through one redactor:
   to list them. Intercepted hosts without a protocol get all values
   redacted.
 - Redirect chains are redacted hop by hop the same way.
+- Paths: a portable entry keeps the whole path of a URL only when a
+  session route accepted that path (a compiled-in public registry, whose
+  accepted paths name packages, never an account). Any other URL (an
+  intercepted git host or unattested registry, a path a route's grammar
+  refused, even on the route's host) is named by its origin, its file name and
+  its redacted query (`https://npm.fury.io/.../pkg-1.0.tgz`), since some
+  registries carry an account token in the path (Gemfury's
+  `/<token>/<account>/`) and the ledger leaves the machine. The
+  diagnostics row keeps the whole redacted URL; it never does.
 - Command operands: the Greyward verb's operands and the tool argv are
   scanned. URL-shaped operands are redacted as above. Values of
   credential-bearing flags (`--password`, `--token`, `--auth`, `-u`/
@@ -1876,10 +1885,14 @@ lock) write no record, so the join never looks for one. Planner doors run
 inside a sync whose lock already exists: that lock's own record is what
 the join judges.
 
-**Double counting.** Facts the lock itself shows (`git-dependency`,
-`weak-integrity`) are recorded by the tailor from the lock during sync.
-The proxy uses them only for real-time denial and leaves them out of the
-record. Facts only the proxy can know (`unattested-index` for an endpoint
+**Double counting.** Facts the lock itself shows (a git dependency by
+name, `weak-integrity`) are recorded by the tailor from the lock during
+sync. A git fetch is the exception: the proxy records `git-dependency`
+for every git-shaped request, with the repository's origin as subject
+(`https://github.com`, never the path), because code that runs during
+resolution (a build backend, a script) can make one without the lock
+naming any git dependency. The subject differs from the tailor's (the
+package), so the two never collide. Facts only the proxy can know (`unattested-index` for an endpoint
 the resolution consulted, `resolution-build`, `unconfined-resolution`,
 `stale-resolution`) go into the record. As a second safety, `Attribution::claim` now removes
 exact `(kind, subject, detail)` duplicates, which closes the separate
@@ -1895,7 +1908,7 @@ on the thread that opened the attribution, records after the tool exits.
 
 | What the door or proxy establishes | Kind | Real-time action when denied | Otherwise |
 |---|---|---|---|
-| Any git fetch (smart HTTP through interception, or a refused `git://`) | `git-dependency` (existing) | refuse the request with the policy refusal text | ledger only (sync re-derives from the lock) |
+| Any git fetch (smart HTTP through interception, or a refused `git://`) | `git-dependency` (existing; subject = the repository's origin) | refuse the request with the policy refusal text | record, whether or not the lock names a git dependency |
 | An artifact whose registry claim is SHA-1 or MD5 only (npm `shasum` without `integrity`, a PyPI `md5` fragment), or has no claim where the protocol provides one | `weak-integrity` (existing) | refuse | ledger only |
 | A request to an endpoint outside the permitted set: an intercepted host (uv extra index, `.npmrc` scoped registry, direct-URL dependency) or a refused `CONNECT` | `unattested-index` (existing; the policy text already covers "index-like options") | refuse | intercepted tools (uv, npm, pnpm, cargo): forward and record in the resolution record; mirror tools (Go, Bundler, Hex, NuGet): refuse visibly and record |
 | The resolution required building a source distribution (see below) | `resolution-build` (**new**) | uv runs with `--no-build` only, so the edit fails naming the package that needs a build | record |
@@ -2393,9 +2406,11 @@ Contract 1 needs enforcement, not review alone:
    which restores their bytes exactly, and fail. No edit can be read into
    a backup and then overwritten, because the compare runs on the
    displaced bytes after an atomic swap. A target that did not exist is
-   created with `renameat2(RENAME_NOREPLACE)` (`renameatx_np(RENAME_EXCL)`
-   on macOS), which fails if something appeared in the meantime. After
-   each target, mark it `swapped` in the journal and `fsync`. The
+   created as a hard link to its temporary (`linkat`), which fails if
+   something appeared in the meantime. After each target, mark it
+   `swapped` in the journal and `fsync`; a created target's temporary
+   (the link) is removed only then, so until the journal says `swapped`
+   the link is the proof that Greyward created the file. The
    receipt is the last target and gets the same swap-then-compare as
    every output. A receipt edited or replaced during the run (another
    `ward attest`, a `git checkout`, a hand edit) is detected, swapped
@@ -2452,7 +2467,21 @@ used. A target whose current
 digest is the journal's new digest is restored from its original copy
 (or removed if it was absent). A target at its pre-run digest is left
 alone. A target at a third digest was edited after the crash, so it is
-left alone and reported. Then the journal is marked `finished`, the
+left alone and reported. Every target's folder is opened before any
+target is touched, so a folder that cannot be opened refuses the whole
+rollback and the project stays as the crash left it. A target whose
+no-replace create found its name taken is marked `taken` in the journal
+before the rollback, and no rollback touches it; if that journal write
+fails, nothing is undone until the next recovery. A `pending` target is
+Greyward's only with the mark its swap leaves: a displaced file at the
+temporary for an exchange, the temporary still a hard link to the
+target for a create. Without one (another process wrote the target, or
+a journal from a release that renamed instead of linking) it is left
+alone and reported, whatever its bytes. A temporary is deleted
+only while it holds bytes Greyward can account for (the new bytes, or
+the pre-run bytes the originals hold): anything else there may be a
+save the rollback moved aside before a crash, so it is kept and
+reported. Then the journal is marked `finished`, the
 originals are released, and the journal is deleted. A crash therefore
 never leaves a new lock that the next sync accepts silently: after
 recovery the project is back at its originals, and the receipt that was

@@ -320,7 +320,7 @@ impl Tailor for Python {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "packages")? {
             let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
-            let norm = name.to_ascii_lowercase().replace('_', "-");
+            let norm = python::pypi::normalize_name(&name);
             let mut purl = format!("pkg:pypi/{}@{}", purl_encode(&norm), purl_encode(&ver));
             purl.push_str(&pypi_purl_qualifiers(eco, &p)?);
             let mut c = component(&name, &ver, purl, eco);
@@ -415,6 +415,23 @@ fn pypi_purl_qualifiers(eco: &str, package: &Value) -> io::Result<String> {
         }
         return Ok(qualifiers);
     }
+    // The index the lock named, when the plan kept it (#688): that is the
+    // repository, where the file's host may be a CDN in front of it.
+    // Credentials in it are dropped, as they are from a file URL below.
+    if let Some(index) = package["index"].as_str().filter(|index| !index.is_empty()) {
+        let index = match index.split_once("://") {
+            Some((scheme, rest)) => {
+                let (authority, path) =
+                    rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+                let host = authority
+                    .rsplit_once('@')
+                    .map_or(authority, |(_, host)| host);
+                format!("{scheme}://{host}{path}")
+            }
+            None => index.to_string(),
+        };
+        return Ok(format!("?repository_url={}", purl_encode(&index)));
+    }
     let url = package["url"].as_str().unwrap_or_default();
     let Some((scheme, rest)) = url.split_once("://") else {
         return Ok(String::new());
@@ -434,4 +451,35 @@ fn pypi_purl_qualifiers(eco: &str, package: &Value) -> io::Result<String> {
         "?repository_url={}",
         purl_encode(&format!("{scheme}://{host_port}"))
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    /// #688: the lock's index names the repository, ahead of the file
+    /// URL's host and without its credentials; the public index adds none.
+    #[test]
+    fn a_locked_index_is_the_purl_repository() {
+        let qualifiers = |package| super::pypi_purl_qualifiers("python", &package).unwrap();
+        assert_eq!(
+            qualifiers(json!({
+                "index": "https://user:token@pypi.corp.example/simple",
+                "url": "https://cdn.corp.example/files/internal-1.0.tar.gz"
+            })),
+            "?repository_url=https%3A%2F%2Fpypi.corp.example%2Fsimple"
+        );
+        assert_eq!(
+            qualifiers(json!({
+                "url": "https://cdn.corp.example/files/internal-1.0.tar.gz"
+            })),
+            "?repository_url=https%3A%2F%2Fcdn.corp.example"
+        );
+        assert_eq!(
+            qualifiers(json!({
+                "url": "https://files.pythonhosted.org/packages/six-1.17.0.tar.gz"
+            })),
+            ""
+        );
+    }
 }

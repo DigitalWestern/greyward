@@ -44,9 +44,13 @@ use std::process::Command;
 use crate::kernel::activity::StoreActivity;
 
 mod validate;
+mod zipfile;
 #[cfg(test)]
 pub use validate::validate;
 pub use validate::validate_with_options;
+#[cfg(test)]
+pub(crate) use zipfile::testing as zip_testing;
+pub use zipfile::{extract_zip, ZipMember, ZipReader};
 
 /// One archive member as the header reader read it.
 #[derive(Debug, Clone, PartialEq, Eq)]

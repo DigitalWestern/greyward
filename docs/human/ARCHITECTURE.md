@@ -619,7 +619,7 @@ existed counts as `null`, which is what it was built on.
 Cached `ward x` environments key on `x/5`: store root, ecosystem, package
 request, platform, the primary runtime version, the selected `bundle_id`,
 the realized runtime object, the environment's identity schema
-(`node-env/7`, `python-env/3`) and the object record schema
+(`node-env/7`, `python-env/4`) and the object record schema
 (`object-meta/3`), so a changed bundle component or a schema bump gives a
 fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python, a `py:` tool's Rust for
@@ -1013,6 +1013,7 @@ successor together, accepting one store-wide rebuild of those kinds:
 | `node-env` | `node-env/4` | `plan_digest` over every `pkg:` and `artifact:` entry, and a `native` decision | a multi-package plan could lose one package, or a declared `artifact:` or Linux `native_libs` key |
 | `sdist-build` | `sdist-build/4` | `build_mode` and `native_mode` | dropping *both* halves of `rust`/`vendor` or `native_libs`/`native_linker` left the valid shape that never had one |
 | Rust `sdist-build` | `sdist-build/5` | `rust_build_config` | changed Rust flags could reuse a wheel built with the previous environment. Plain builds retain `/4` |
+| `python-env` | `python-env/4` | each `pkg:` value ends with `\|<version>\|<filename>` as the lock names them | a lock that renamed the same wheel bytes to another release reused the environment built under the old name, past the install-time name check (#688) |
 
 Each added input is written unconditionally, including in the empty case, and
 the producer derives it from the *plan* — the locked package list, the

@@ -927,7 +927,7 @@ pub fn realize_runtime(
             installed?;
         }
 
-        unpack::extract_elixir_and_hex(activity, &elixir_zip, &hex_ez, &staged, &spec.hex_version)?;
+        unpack::extract_elixir_and_hex(&elixir_zip, &hex_ez, &staged, &spec.hex_version)?;
         fs::copy(&rebar3, staged.join("rebar3"))?;
         {
             use std::os::unix::fs::PermissionsExt;

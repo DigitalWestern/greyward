@@ -63,7 +63,12 @@ use std::path::Path;
 ///   library into the forced compiler. Also any variable ward forces or
 ///   removes for cargo ([`forced_env_names`]), and `RUSTC_BOOTSTRAP`
 ///   (`RUSTC_BOOTSTRAP_*` too), which turns on the stable compiler's
-///   unstable flags.
+///   unstable flags. And every `GIT_*` variable: cargo's git (forced to
+///   the command line) reads `GIT_CONFIG_PARAMETERS` after ward's forced
+///   `GIT_CONFIG_COUNT` entries, so one could allow `protocol.ext` and
+///   rewrite a dependency's URL to run a project script, and the rest
+///   (`GIT_EXEC_PATH`, `GIT_SSH*`, `GIT_PROXY_COMMAND`, ...) choose
+///   programs git runs.
 /// - Compiler flags that load project code into the forced compiler:
 ///   `build.rustflags`, `build.rustdocflags`, `host.rustflags` and
 ///   `target.<triple or cfg>.rustflags` or `rustdocflags`, and the
@@ -87,7 +92,7 @@ pub fn refuse_unneutralized_settings(files: &[ConfigFile]) -> io::Result<()> {
                  or local-registry source, a registry or index that is not an https, ssh or \
                  git URL, a change to ward's {} source), names a credential provider, adds \
                  `--config` or `-Z` through an alias, passes the compiler `-Z`, a codegen \
-                 backend or an `@file`, or sets a dynamic-loader, bootstrap or ward-forced \
+                 backend or an `@file`, or sets a dynamic-loader, git, bootstrap or ward-forced \
                  variable in `[env]`, since no setting of ward's can undo any of these. \
                  Remove {} (a `[patch]` table in Cargo.toml overrides a crate where the \
                  lock records it, a registry mirror over https stays allowed, and \
@@ -195,6 +200,7 @@ fn unneutralized_keys(table: &toml::Table, sources: &SourceGraph) -> Vec<String>
         };
         if name.starts_with("LD_")
             || name.starts_with("DYLD_")
+            || name.starts_with("GIT_")
             || name == "RUSTC_BOOTSTRAP"
             || name.starts_with("RUSTC_BOOTSTRAP_")
             || forced.iter().any(|forced| forced == name)
@@ -220,13 +226,15 @@ fn words(value: &toml::Value, separator: char) -> Vec<&str> {
 /// Whether compiler flags can load project code into rustc or rustdoc:
 ///
 /// - An unstable `-Z` option, however getopts would read it: any word that
-///   starts with `-` and holds a capital `Z` before its first `=` (`-Z`,
+///   starts with `-` and holds a capital `Z` in its option part (`-Z`,
 ///   `-Zx`, `-gZ`, `--Z`, `--Z=x`). No option rustc or rustdoc lists but
 ///   `-Z` itself has a `Z` in its name
 ///   (`no_rustc_or_rustdoc_option_but_z_names_a_capital_z`), so this needs
-///   no table of their options and passes each tool's own (rustdoc's `-e`,
-///   `-w`). A value (`-L /x/-Zdir`'s path, `-lstatic=Zlib`'s name) is not an
-///   option part and is not read.
+///   no table of all their options and passes each tool's own. The option
+///   part of a `--long` word ends at its `=`. In a single-dash word it ends
+///   after the first short option known to take a value ([`option_part`]),
+///   so an attached value (`-L/home/Zoe/native`) is not read, as a value
+///   in the next word (`-L /x/-Zdir`) is not.
 /// - The option `codegen-backend` (a library rustc loads, an underscore
 ///   for the dash too) in a `-C` or `--codegen` spelling: `-C x`,
 ///   `-gC x`, `--codegen x` for the next word `x`, and `-Cx`, `-gCx`,
@@ -238,10 +246,6 @@ fn words(value: &toml::Value, separator: char) -> Vec<&str> {
 /// So `--cfg 'feature="codegen-backend"'` and a `--remap-path-prefix`
 /// through a `codegen-backend` directory stay allowed.
 fn loads_project_code(flags: &[&str]) -> bool {
-    let option_part = |word: &'_ str| -> Option<String> {
-        word.starts_with('-')
-            .then(|| word.split('=').next().unwrap_or(word).to_string())
-    };
     let names_unstable = |word: &str| option_part(word).is_some_and(|part| part.contains('Z'));
     let single_dash = |word: &str| word.starts_with('-') && !word.starts_with("--");
     let is_backend = |option: &str| {
@@ -271,6 +275,30 @@ fn loads_project_code(flags: &[&str]) -> bool {
         previous = Some(word);
     }
     false
+}
+
+/// The option part of a flag word, `None` for a word that is no option.
+/// A `--long` word's ends at its first `=`. A single-dash word is a
+/// cluster of short options, as getopts reads it: the part runs through
+/// the first one rustc or rustdoc gives a value (`-C`, `-L`, `-l`, `-o`,
+/// `-A`, `-W`, `-D`, `-F`, rustdoc's `-e` and `-w`), and the rest of the
+/// word is that value, so `-L/home/Zoe/native` is `-L`. A word with none
+/// of those is all option part up to its first `=`, so an unknown option
+/// is read whole, which keeps the `Z` test failing closed.
+fn option_part(word: &str) -> Option<&str> {
+    const SHORT_TAKES_VALUE: &[char] = &['C', 'L', 'l', 'o', 'A', 'W', 'D', 'F', 'e', 'w'];
+    let cluster = word.strip_prefix('-')?;
+    if cluster.starts_with('-') {
+        return Some(word.split('=').next().unwrap_or(word));
+    }
+    let whole = word.split('=').next().unwrap_or(word);
+    match cluster
+        .char_indices()
+        .find(|(_, short)| SHORT_TAKES_VALUE.contains(short))
+    {
+        Some((at, short)) if 1 + at < whole.len() => Some(&word[..1 + at + short.len_utf8()]),
+        _ => Some(whole),
+    }
 }
 
 /// Every registry, index and source URL a config table sets, with its key

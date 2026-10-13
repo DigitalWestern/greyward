@@ -2000,6 +2000,20 @@ mod tests {
                 "[env]\nRUSTC_BOOTSTRAP = \"1\"\n".to_string(),
                 "env.RUSTC_BOOTSTRAP",
             ),
+            // git reads GIT_CONFIG_PARAMETERS after ward's forced
+            // GIT_CONFIG_COUNT entries; every GIT_ variable is git's.
+            (
+                "[env]\nGIT_CONFIG_PARAMETERS = \"'protocol.ext.allow'='always'\"\n".to_string(),
+                "env.GIT_CONFIG_PARAMETERS",
+            ),
+            (
+                "[env]\nGIT_ALLOW_PROTOCOL = { value = \"ext:https\", force = true }\n".to_string(),
+                "env.GIT_ALLOW_PROTOCOL",
+            ),
+            (
+                "[env]\nGIT_TEMPLATE_DIR = \"hooks\"\n".to_string(),
+                "env.GIT_TEMPLATE_DIR",
+            ),
             (
                 "[env]\nRUSTC_BOOTSTRAP_PROC_MACRO = \"1\"\n".to_string(),
                 "env.RUSTC_BOOTSTRAP_PROC_MACRO",
@@ -2074,6 +2088,16 @@ mod tests {
             ),
             (
                 "[build]\nrustflags = [\"--Z=codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            // A Z before the first value-taking short option is still in
+            // the option part.
+            (
+                "[build]\nrustflags = [\"-gZL/x\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-Zfoo\"]\n".to_string(),
                 "build.rustflags",
             ),
             (
@@ -2170,6 +2194,11 @@ mod tests {
             // the rest of its word, or the next word, as its value.
             "[build]\nrustflags = [\"-gO\", \"-Dwarnings\", \"-L\", \"native=/x/-Zdir\", \
              \"-lstatic=z\", \"-Wunused\", \"-Cdebuginfo=1\"]\n"
+                .to_string(),
+            // A value attached to a short option that takes one is not its
+            // name: a library directory under /home/Zoe.
+            "[build]\nrustflags = [\"-L/home/Zoe/native\", \"-lZ\", \"-gLnative=/Z\"]\n\
+             [env]\nRUSTFLAGS = \"-L/home/Zoe/native -Cdebuginfo=1\"\n"
                 .to_string(),
             // rustdoc's own short options, which rustc does not have.
             "[build]\nrustdocflags = [\"-e\", \"extra.css\", \"-whtml\"]\n\

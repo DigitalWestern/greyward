@@ -181,10 +181,13 @@ pub fn environment_name(
 /// projection actually points at. The name's first word is the registry
 /// tool's `cache_prefix`.
 ///
-/// A tool that builds with helper toolchains (npm's node-gyp Python) keys
-/// on each helper's runtime object too, under `x/4`: the `x/3` preimage
-/// with `<helper>=<object id>` fields appended. A tool with none keys on
-/// the `x/3` preimage alone. The key only names the directory: a cache hit
+/// `x/5` adds the environment's identity schema (`node-env/6`) and the
+/// object record schema (`object-meta/3`) to the `x/3` fields, so a bump of
+/// either gives every cached tool a new directory and a rebuild: `x/4` and
+/// `x/3` keyed on neither, and an npm tool kept its `node-env/5`
+/// environment after the bump. A tool that builds with helper toolchains
+/// (npm's node-gyp Python) appends `<helper>=<object id>` for each. The key
+/// only names the directory: a cache hit
 /// also needs the request record (`.greyward/x.json`) the run wrote there, so a
 /// directory an older ward made without one is rebuilt in place, never
 /// reused, and bare `ward x --clean` removes it.
@@ -199,23 +202,44 @@ fn x_root_name(
     runtime_object: &str,
     helper_objects: &[(String, String)],
 ) -> io::Result<String> {
-    let fields = format!(
-        "\0{}\0{ecosystem}\0{package}\0{}\0{}\0{}\0{}\0{runtime_object}",
+    x_root_name_with_schema(
+        store,
+        platform,
+        ecosystem,
+        package,
+        version,
+        toolchain,
+        runtime_object,
+        helper_objects,
+        registry_tool(ecosystem)?.environment_schema(),
+    )
+}
+
+/// [`x_root_name`] for an environment of identity schema `env_schema`.
+#[allow(clippy::too_many_arguments)]
+fn x_root_name_with_schema(
+    store: &Store,
+    platform: Platform,
+    ecosystem: &str,
+    package: &str,
+    version: Option<&str>,
+    toolchain: &Selected,
+    runtime_object: &str,
+    helper_objects: &[(String, String)],
+    env_schema: &str,
+) -> io::Result<String> {
+    let mut preimage = format!(
+        "x/5\0{}\0{ecosystem}\0{package}\0{}\0{}\0{}\0{}\0{runtime_object}\0{env_schema}\0{}",
         store.root.display(),
         version.unwrap_or(""),
         platform.triple(),
         toolchain.primary_version(),
-        toolchain.bundle_id()
+        toolchain.bundle_id(),
+        crate::kernel::objmeta::META_SCHEMA,
     );
-    let preimage = if helper_objects.is_empty() {
-        format!("x/3{fields}")
-    } else {
-        let mut preimage = format!("x/4{fields}");
-        for (helper, object) in helper_objects {
-            preimage.push_str(&format!("\0{helper}={object}"));
-        }
-        preimage
-    };
+    for (helper, object) in helper_objects {
+        preimage.push_str(&format!("\0{helper}={object}"));
+    }
     let key = hex::encode(Sha256::digest(preimage.as_bytes()));
     Ok(format!(
         "{}-{}-{}",
@@ -550,14 +574,27 @@ fn cached_projection(
     Ok((closure, id))
 }
 
+/// `Ok(false)`: the environment has another identity schema than the one
+/// this ward builds, or its record is `object-meta/2` and the policy denies
+/// a kind `/2` never stored, so the caller realizes it again.
 fn check_cached_projection(
     store: &Store,
     activity: &StoreActivity,
     root: &Path,
     ecosystem: &str,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let (closure, id) = cached_projection(store, activity, root, ecosystem)?;
-    policy::check_cached_with_activity(store, activity, &id)?;
+    // An environment of another identity schema was built by a ward that
+    // did not make the current schema's checks: realize it again.
+    let record = crate::kernel::objmeta::read_store_record(store, &id)?;
+    if crate::kernel::objmeta::schema_input_of(&record.identity)
+        != Some(registry_tool(ecosystem)?.environment_schema())
+    {
+        return Ok(false);
+    }
+    if !policy::check_cached_reusable(store, activity, &id)? {
+        return Ok(false);
+    }
 
     let persisted: Vec<policy::Exception> = if closure["exceptions"].is_null() {
         Vec::new()
@@ -572,7 +609,7 @@ fn check_cached_projection(
             policy::record(&exception.kind, &exception.subject, &exception.detail)?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug)]
@@ -663,8 +700,7 @@ fn x_request_is_ready(
     }
     // Keep policy failures as failures. They must not be mistaken for a
     // missing projection and bypassed by a fresh realization.
-    check_cached_projection(store, activity, root, ecosystem)?;
-    Ok(true)
+    check_cached_projection(store, activity, root, ecosystem)
 }
 
 /// `ward x`: `x` has its own cached projection path and therefore does
@@ -1012,18 +1048,17 @@ mod tests {
         assert!(registry_tool("cobol").is_err());
     }
 
-    /// The `x/3` and `x/4` cache directory names, byte for byte. A cached
+    /// The `x/5` cache directory names, byte for byte. A cached
     /// environment is found again only by recomputing this name, so any
     /// change to the key's bytes (its preimage, the hash, or the `py`/`npm`
     /// prefix a registry tool supplies) orphans every cache directory an
     /// earlier ward made. The toolchain is a fixed bundle, not the shipped
     /// catalog, so a catalog bump does not move these goldens.
     ///
-    /// `py:` outside a project that locks Rust has no helper and keeps its
-    /// `x/3` name; inside one it keys on the locked Rust under `x/4` (#190).
-    /// `npm:` keys on its node-gyp Python under `x/4`; the helper-less
-    /// spelling of the same request is still the `x/3` golden, so only the
-    /// helper moved it.
+    /// `py:` outside a project that locks Rust has no helper field; inside
+    /// one it keys on the locked Rust too (#190). `npm:` keys on its
+    /// node-gyp Python; the helper-less spelling of the same request is the
+    /// other golden, so only the helper moved it.
     #[test]
     fn x_root_names_are_byte_identical_goldens() {
         let store = Store::for_test(PathBuf::from("/home/golden/.tog/store"));
@@ -1042,7 +1077,7 @@ mod tests {
                 &[],
             )
             .unwrap(),
-            "py-ruff-215b4362097370ce"
+            "py-ruff-4f120f51a24abfc3"
         );
         assert_eq!(registry_tool("python").unwrap().helpers(), ["rust"]);
         let py = |rust: &str| {
@@ -1058,7 +1093,7 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(py("rust-object"), "py-ruff-d22c85ac801414bf");
+        assert_eq!(py("rust-object"), "py-ruff-89f5921383668166");
         assert_ne!(py("other-rust-object"), py("rust-object"));
         assert_eq!(
             x_root_name(
@@ -1072,7 +1107,7 @@ mod tests {
                 &[],
             )
             .unwrap(),
-            "npm-_angular_cli-5dd983d9952f7476"
+            "npm-_angular_cli-db52f1a80a94001f"
         );
         assert_eq!(registry_tool("node").unwrap().helpers(), ["python"]);
         let npm = |gyp_python: &str| {
@@ -1088,8 +1123,52 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(npm("cpython-object"), "npm-_angular_cli-c9f235c1ffa1b37a");
+        assert_eq!(npm("cpython-object"), "npm-_angular_cli-3196ad549d21dd6c");
         assert_ne!(npm("other-cpython-object"), npm("cpython-object"));
+    }
+
+    /// The key names the environment's identity schema, so a ward that
+    /// bumps `node-env` looks in a new directory and realizes the tool
+    /// again instead of reusing the projection an older ward left. The
+    /// helper-less `x/3` name the previous release gave this request is
+    /// not among the names this ward computes.
+    #[test]
+    fn x_root_names_move_with_the_environment_schema() {
+        let store = Store::for_test(PathBuf::from("/home/golden/.tog/store"));
+        let platform = Platform::X86_64UnknownLinuxGnu;
+        let node = fixed_selection("node", "node", "24.20.0");
+        let name = |schema: &str| {
+            x_root_name_with_schema(
+                &store,
+                platform,
+                "node",
+                "@angular/cli",
+                None,
+                &node,
+                "nodejs-object",
+                &[],
+                schema,
+            )
+            .unwrap()
+        };
+        let current = registry_tool("node").unwrap().environment_schema();
+        assert_eq!(
+            x_root_name(
+                &store,
+                platform,
+                "node",
+                "@angular/cli",
+                None,
+                &node,
+                "nodejs-object",
+                &[]
+            )
+            .unwrap(),
+            name(current)
+        );
+        assert_ne!(name("node-env/5"), name(current));
+        // The previous release's `x/3` name for the same request.
+        assert_ne!(name(current), "npm-_angular_cli-5dd983d9952f7476");
     }
 
     #[test]
@@ -1719,48 +1798,80 @@ mod tests {
         policy::exception_guard()
     }
 
-    /// A published Python `x` root whose environment object carries
-    /// `exceptions` in its metadata: (store, root, object).
     /// The cached projection's object, in the full object-id shape the
     /// cache check demands: the id the `test` identity named `test` at
-    /// version `env` (`node-env`) hashes to, which [`test_record`] checks.
-    const TEST_ENV: &str = "31c924c96f4ad8da436dead232ac5041626c3fe0-test-env";
-    const TEST_NODE_ENV: &str = "c7cb412f1fde50fb7e1c1b24ac0517882f272141-test-node-env";
+    /// version `env` (`node-env`), with the identity schema its ecosystem
+    /// builds, hashes to, which [`test_record`] checks.
+    const TEST_ENV: &str = "2f46023346de4990b814cdd74914709fff68a190-test-env";
+    const TEST_NODE_ENV: &str = "e95ca6ca684ba8a705bcec1b46ee66feda834b2d-test-node-env";
 
     /// The whole metadata record of the placeholder object `id`, carrying
-    /// `exceptions`.
+    /// `exceptions`. Its identity names the schema the ecosystem's tool
+    /// builds today, as a cached environment from this ward does.
     fn test_record(id: &str, exceptions: &[serde_json::Value]) -> String {
-        let identity = crate::kernel::types::Identity {
-            kind: "test".into(),
-            name: "test".into(),
-            version: id[41..].strip_prefix("test-").unwrap().into(),
-            inputs: Default::default(),
+        let version = id[41..].strip_prefix("test-").unwrap();
+        let ecosystem = if version == "node-env" {
+            "node"
+        } else {
+            "python"
         };
+        let schema = registry_tool(ecosystem).unwrap().environment_schema();
+        test_record_with_schema(id, exceptions, schema)
+    }
+
+    /// [`test_record`] with the identity schema `schema`.
+    fn test_record_with_schema(id: &str, exceptions: &[serde_json::Value], schema: &str) -> String {
+        let identity = test_identity(&id[41..], schema);
         assert_eq!(identity.object_id(), id);
         let mut record = crate::kernel::store::bare_record(&identity);
         record["exceptions"] = serde_json::Value::from(exceptions.to_vec());
         record.to_string()
     }
 
+    /// The placeholder identity named `test` at version `name` minus its
+    /// `test-` prefix, under the identity schema `schema`.
+    fn test_identity(name: &str, schema: &str) -> crate::kernel::types::Identity {
+        crate::kernel::types::Identity {
+            kind: "test".into(),
+            name: "test".into(),
+            version: name.strip_prefix("test-").unwrap().into(),
+            inputs: [("schema".to_string(), schema.to_string())].into(),
+        }
+    }
+
+    /// A published Python `x` root whose environment object carries
+    /// `exceptions` in its metadata: (store, root, object).
     fn ready_python_root(
         base: &Path,
         exceptions: &[serde_json::Value],
     ) -> (Store, PathBuf, PathBuf) {
-        fs::create_dir_all(base.join("store/objects").join(TEST_ENV).join("bin")).unwrap();
+        let schema = registry_tool("python").unwrap().environment_schema();
+        ready_python_root_of(base, exceptions, TEST_ENV, schema)
+    }
+
+    /// [`ready_python_root`] for the environment object `id` of the
+    /// identity schema `schema`.
+    fn ready_python_root_of(
+        base: &Path,
+        exceptions: &[serde_json::Value],
+        id: &str,
+        schema: &str,
+    ) -> (Store, PathBuf, PathBuf) {
+        fs::create_dir_all(base.join("store/objects").join(id).join("bin")).unwrap();
         fs::create_dir_all(base.join("store/meta")).unwrap();
         // `Store::has_with_activity` takes the publish lock under `tmp/`.
         fs::create_dir_all(base.join("store/tmp")).unwrap();
         // Closures record the store's own canonical object path.
         let store = Store::for_test(base.join("store").canonicalize().unwrap());
-        let object = store.object_path(TEST_ENV);
+        let object = store.object_path(id);
         let executable = object.join("bin/ruff");
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         // A complete object is a read-only directory with metadata.
         fs::set_permissions(&object, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(
-            store.root.join(format!("meta/{TEST_ENV}.json")),
-            test_record(TEST_ENV, exceptions),
+            store.root.join(format!("meta/{id}.json")),
+            test_record_with_schema(id, exceptions, schema),
         )
         .unwrap();
 
@@ -1883,6 +1994,38 @@ mod tests {
         drop(exclusive);
         let _ = policy::drain();
         fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A projection whose environment has another identity schema than the
+    /// one this ward builds (a `node-env/5` environment after the bump to
+    /// `/6`) is not a cache hit: the run realizes it again rather than
+    /// running an environment built without the current schema's checks.
+    #[test]
+    fn a_projection_of_an_older_environment_schema_is_rebuilt() {
+        let _guard = exception_guard();
+        let _attribution = policy::Attribution::open("python").unwrap();
+        for (schema, ready) in [
+            (registry_tool("python").unwrap().environment_schema(), true),
+            ("python-env/2", false),
+        ] {
+            let temp = TempDir::named("x-old-schema");
+            let base = &temp.0;
+            // A whole, valid object of that schema: its record and id agree.
+            let id = test_identity("test-env", schema).object_id();
+            let (store, root, object) = ready_python_root_of(base, &[], &id, schema);
+            let activity = store
+                .activity(crate::kernel::activity::ActivityMode::Shared)
+                .unwrap();
+            let executable = root.join(".venv/bin/ruff");
+            assert_eq!(
+                x_request_is_ready(&store, &activity, &root, "python", &executable).unwrap(),
+                ready,
+                "{schema}"
+            );
+            let _ = policy::drain();
+            drop(activity);
+            fs::set_permissions(&object, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     /// A root with no request record is never a cache hit, however

@@ -134,6 +134,62 @@ fn npm_git_dependency_is_realized_from_its_commit() {
     attribution.discard();
 }
 
+/// The git fetch happens only on a cold realization, so what it records is
+/// stored with the environment and replayed from there: a warm sync never
+/// reaches `fetch_plan_sources`, and a stricter policy must still refuse
+/// the object. Cold under the default policy, then warm under one denying
+/// `git-dependency`: the planner has already run, so only the object's own
+/// record can refuse it.
+#[test]
+#[ignore]
+fn a_warm_npm_git_environment_replays_its_fetch_exceptions() {
+    let _serial = serial();
+    let platform = Platform::host().expect("host platform");
+    let root = TempDir::new("gitdep-npm-warm");
+    let (url, commit) = fixture_repo(&root.0);
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let lock = format!(
+        r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#{commit}"}}}}}}"#
+    );
+
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let plan = node::plan_npm(platform, &lock).expect("plan");
+    let env = node::realize_node_env(&store, activity, platform, &plan, &[]).expect("cold");
+    attribution.discard();
+
+    // The fetch's record is the object's: it is in the store's metadata.
+    let id = env.file_name().unwrap().to_str().unwrap();
+    let record = greyward::kernel::objmeta::read_store_record(&store, id).unwrap();
+    assert!(
+        record
+            .exceptions
+            .iter()
+            .any(|e| e.kind == policy::GIT_DEPENDENCY),
+        "the cold realization stored no git-dependency: {:?}",
+        record.exceptions
+    );
+
+    let _deny = policy::PolicyScope::install(policy::Policy {
+        deny: [policy::GIT_DEPENDENCY.to_string()].into(),
+        ..Default::default()
+    });
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let error = without_staging(&store, || {
+        node::realize_node_env(&store, activity, platform, &plan, &[])
+    })
+    .expect_err("a warm environment dropped its git-dependency exception");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    assert!(error.to_string().contains("git-dependency"), "{error}");
+    attribution.discard();
+}
+
 #[test]
 fn an_unpinned_git_reference_is_refused() {
     let platform = Platform::host().expect("host platform");

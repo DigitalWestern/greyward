@@ -1346,7 +1346,7 @@ mod tests {
         age(&store.object_path(&dead));
         register_objects(&store, &temp.root.join("project"), &[]);
         edit_record(&store, &odd, |record| {
-            record.insert("schema".into(), serde_json::json!("object-meta/3"));
+            record.insert("schema".into(), serde_json::json!("object-meta/4"));
         });
 
         let (result, text) = sweep(
@@ -1359,7 +1359,7 @@ mod tests {
         let error = result.unwrap_err().to_string();
         // The refusal names the record and the way out.
         assert!(
-            error.contains("unknown metadata schema object-meta/3")
+            error.contains("unknown metadata schema object-meta/4")
                 && error.contains("--drop-object"),
             "{error}\n{text}"
         );

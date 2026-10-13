@@ -1086,7 +1086,7 @@ fn bwrap_disables_userns(bwrap: &Path, activity: &StoreActivity) -> bool {
     static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SUPPORTED.get_or_init(|| {
         let mut command = std::process::Command::new(bwrap);
-        command.arg("--help");
+        command.env_clear().arg("--help");
         crate::kernel::supervise::local_output(&mut command, activity)
             .map(|output| {
                 String::from_utf8_lossy(&output.stdout).contains("--disable-userns")

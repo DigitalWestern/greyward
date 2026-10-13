@@ -234,8 +234,9 @@ pub(crate) struct Attempt<R, D, F, B> {
 /// attempt runs, so a policy that denies `host-build-inputs` stops here
 /// with nothing built against the host.
 ///
-/// A sandbox that could not be set up, or a run ward was asked to stop,
-/// says nothing about the build and is returned as is.
+/// A sandbox that could not be set up (`Unsupported`, or a host view that
+/// could not be built, `error::is_sandbox_setup`), or a run ward was asked
+/// to stop, says nothing about the build and is returned as is.
 ///
 /// Before the retry, `discard` removes what the failed attempt left
 /// behind; a refusal records nothing.
@@ -262,7 +263,8 @@ where
     if matches!(
         hermetic.kind(),
         io::ErrorKind::Unsupported | io::ErrorKind::Interrupted
-    ) {
+    ) || crate::kernel::error::is_sandbox_setup(&hermetic)
+    {
         return Err(hermetic);
     }
     let attempts = format!("the build against the C runtime alone failed ({hermetic})");
@@ -279,14 +281,14 @@ where
     })?;
     // The retry's error first: it is the one left to fix, and a caller
     // that cuts the message short (an exception detail) keeps it.
+    // The retry's own error stays inside, so a sandbox that could not be
+    // set up for it is still one to the caller (#679).
     (attempt.build)(HostView::Full).map_err(|full| {
-        io::Error::new(
-            full.kind(),
-            format!(
-                "the build against this machine's whole /usr failed ({full}), after \
-                 the build against the C runtime alone failed ({hermetic})"
-            ),
-        )
+        let message = format!(
+            "the build against this machine's whole /usr failed ({full}), after \
+             the build against the C runtime alone failed ({hermetic})"
+        );
+        crate::kernel::error::describe(full, message)
     })?;
     let after = (attempt.fingerprint)()?;
     if after != before {
@@ -347,5 +349,56 @@ pub(crate) fn identity_contract(
         }
         (_, Some(_)) => Err("host_fallback without build_view host-fallback/1".to_string()),
         (_, None) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A retry against the whole host whose sandbox could not be set up
+    /// keeps that mark through the retry's message, so no caller counts it
+    /// as a failed build (#679).
+    #[test]
+    fn a_retry_that_could_not_be_set_up_keeps_the_mark() {
+        let mut views = Vec::new();
+        let error = hermetic_first(
+            "probe",
+            "detail",
+            Attempt {
+                record: |_: &str, _: &str, _: &str| Ok(()),
+                discard: || Ok(()),
+                fingerprint: || Ok("fingerprint".to_string()),
+                build: |view: HostView| {
+                    views.push(view);
+                    Err(match view {
+                        HostView::RuntimeOnly => io::Error::other("lzma.h not found"),
+                        HostView::Full => crate::kernel::error::sandbox_setup(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "cannot resolve sandbox path",
+                        )),
+                    })
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(views, [HostView::RuntimeOnly, HostView::Full]);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(crate::kernel::error::is_sandbox_setup(&error), "{error}");
+        assert!(error.to_string().contains("lzma.h not found"), "{error}");
+
+        // A retry that ran and failed stays a failed build.
+        let error = hermetic_first(
+            "probe",
+            "detail",
+            Attempt {
+                record: |_: &str, _: &str, _: &str| Ok(()),
+                discard: || Ok(()),
+                fingerprint: || Ok("fingerprint".to_string()),
+                build: |_: HostView| Err(io::Error::other("compile failed")),
+            },
+        )
+        .unwrap_err();
+        assert!(!crate::kernel::error::is_sandbox_setup(&error), "{error}");
     }
 }

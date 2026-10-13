@@ -357,7 +357,9 @@ impl Store {
         let mut diagnostics = Vec::new();
         for name in read_dir_names_at(roots_dir.as_raw_fd())? {
             let key = name.to_string_lossy().into_owned();
-            if key == ROOTS_INITIALIZED {
+            // A registry temporary is no root: one being written now, or one
+            // a killed ward left, which the next sweep clears (#678).
+            if key == ROOTS_INITIALIZED || is_own_registry_temp(&key) {
                 continue;
             }
             let path = roots.join(&name);
@@ -1285,6 +1287,33 @@ pub(super) fn record_pathname(project_dir: &Path) -> io::Result<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// A registry temporary a killed ward left is no root, and `ward store
+    /// roots` does not list it as an invalid one (#678). A name that is
+    /// neither a key nor one of ours still is.
+    #[test]
+    fn root_diagnostics_skip_registry_temporaries() {
+        use crate::kernel::activity::ActivityMode;
+        use crate::kernel::store::Store;
+        use crate::kernel::testutil::TempDir;
+        use std::fs;
+
+        let temp = TempDir::named("roots-crash-temp");
+        let store = Store::open_at(&temp.0.join("store")).unwrap();
+        let roots = store.root.join("roots");
+        let key = "a".repeat(40);
+        fs::write(roots.join(format!(".{key}.tmp.4242.1")), b"{").unwrap();
+        fs::write(roots.join("stray"), b"").unwrap();
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let listed = store.root_diagnostics(&activity).unwrap();
+        let keys: Vec<_> = listed.iter().map(|root| root.key.as_str()).collect();
+        assert_eq!(keys, ["stray"], "{listed:?}");
+        assert!(listed[0]
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("not a root key"));
+    }
+
     /// Only an exact absolute pathname reads as a pathname-only record.
     /// Corrupt, padded or relative contents are refused, so a writer such
     /// as `gc --register` stops instead of replacing a damaged record.

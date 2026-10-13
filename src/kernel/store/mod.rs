@@ -28,10 +28,10 @@ mod roots_lookup;
 
 pub use closure_import::install_closure_ecosystems;
 use closure_import::*;
-use env::home;
 #[cfg(test)]
 pub(crate) use env::STORE_ENV_LOCK;
 pub(crate) use format::lock_root;
+pub(crate) use format::not_a_store;
 pub(crate) use format::RESET_REMOVES;
 pub use format::{refusal_fix, StoreFormat, FORMAT_FILE};
 pub use fsops::*;
@@ -128,19 +128,23 @@ pub(crate) fn bare_record(identity: &crate::kernel::types::Identity) -> serde_js
 
 impl Store {
     /// Where `open` puts the store, and whether `GREYWARD_STORE` chose it.
-    fn configured_root() -> (PathBuf, bool) {
-        let explicit = std::env::var_os("GREYWARD_STORE").map(PathBuf::from);
-        let from_env = explicit.is_some();
-        (
-            explicit.unwrap_or_else(|| home().join(".greyward/store")),
-            from_env,
-        )
+    /// `HOME` is read only when `GREYWARD_STORE` is unset, and refused
+    /// unless it is absolute (`kernel::home`), so a store is never made
+    /// under the working directory.
+    fn configured_root() -> io::Result<(PathBuf, bool)> {
+        if let Some(explicit) = std::env::var_os("GREYWARD_STORE") {
+            return Ok((PathBuf::from(explicit), true));
+        }
+        let home = crate::kernel::home::home().map_err(|error| {
+            io::Error::other(format!("{error}, or set GREYWARD_STORE to name the store"))
+        })?;
+        Ok((home.join(".greyward/store"), false))
     }
 
     /// Where the store is configured to be (`GREYWARD_STORE`, or
     /// `~/.greyward/store`), as configured: nothing is created or resolved.
-    pub fn configured_path() -> PathBuf {
-        Self::configured_root().0
+    pub fn configured_path() -> io::Result<PathBuf> {
+        Ok(Self::configured_root()?.0)
     }
 
     /// The store `open` would use, without creating or changing anything:
@@ -151,7 +155,7 @@ impl Store {
     /// locate the store and never create it (the local Rust tree cache);
     /// anything that commits, leases or sweeps uses `open`.
     pub fn existing() -> io::Result<Option<Store>> {
-        let (root, _) = Self::configured_root();
+        let (root, _) = Self::configured_root()?;
         let root = match root.canonicalize() {
             Ok(root) => root,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -172,8 +176,13 @@ impl Store {
         };
         real_directory(&root, false)?;
         // The format rule is `open`'s too: a store it refuses is refused
-        // here with the same words, never read.
-        format::probe(&root)?.refuse(&root)?;
+        // here with the same words, never read. A directory with no store
+        // in it has nothing to read, whatever directories it holds.
+        let format = format::probe(&root)?;
+        format.refuse(&root)?;
+        if format == StoreFormat::Uninitialized {
+            return Ok(None);
+        }
         if !real_directory(&root.join("objects"), true)? {
             return Ok(None);
         }
@@ -202,7 +211,7 @@ impl Store {
     /// named (`ward store path`), reported (`ward doctor`) and emptied
     /// (`ward gc --reset`).
     pub fn probe() -> io::Result<Option<(PathBuf, StoreFormat)>> {
-        let (root, _) = Self::configured_root();
+        let (root, _) = Self::configured_root()?;
         Self::probe_at(&root)
     }
 
@@ -211,7 +220,7 @@ impl Store {
     /// starts here, because it must work on a store whose marker cannot
     /// even be read.
     pub fn locate() -> io::Result<Option<PathBuf>> {
-        let (root, _) = Self::configured_root();
+        let (root, _) = Self::configured_root()?;
         match root.canonicalize() {
             Ok(root) => Ok(Some(root)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -301,7 +310,7 @@ impl Store {
     /// error names the two ways out, `ward gc --reset` and moving the
     /// directory aside.
     pub fn open() -> io::Result<Store> {
-        let (root, from_env) = Self::configured_root();
+        let (root, from_env) = Self::configured_root()?;
         Self::open_root(&root, from_env)
     }
 
@@ -328,6 +337,12 @@ impl Store {
             StoreFormat::Current => {}
             // The marker goes in before the first namespace, so neither a
             // crash nor a second ward can find namespaces without it.
+            // Only where nothing would be mixed in with it: a store
+            // created in someone's directory, beside their files, is one a
+            // later reset or sweep could take for its own (#676).
+            StoreFormat::Uninitialized if !format::vacant(&root)? => {
+                return Err(not_a_store(&root, "ward does not create a store in it"))
+            }
             StoreFormat::Uninitialized => format::write_marker(&root)
                 .map_err(|error| open_error(&root.join(FORMAT_FILE), from_env, error))?,
             refused => refused.refuse(&root)?,
@@ -369,6 +384,37 @@ impl Store {
                 ),
             )),
             refused => refused.refuse(&self.root),
+        }
+    }
+
+    /// Whether the directory at `root` holds nothing but empty store
+    /// namespaces, if anything: where `open` may create a store.
+    pub fn vacant(root: &Path) -> io::Result<bool> {
+        format::vacant(root)
+    }
+
+    /// Whether `root` holds what only a ward writes into a store (a lease
+    /// file, an object record), whatever its marker says. `ward gc --reset`
+    /// empties only a root with a current marker or this evidence.
+    pub fn has_store_evidence(root: &Path) -> io::Result<bool> {
+        format::has_store_evidence(root)
+    }
+
+    /// Refuse, before any lease file is created, a root with no store in
+    /// it. A lease file is part of what makes a directory a store
+    /// (`format::probe`), so taking one in a user's directory would make the
+    /// next probe call that directory an old store and offer to reset it.
+    fn refuse_unless_store(&self) -> io::Result<()> {
+        match Self::probe_at(&self.root)? {
+            Some((_, StoreFormat::Uninitialized)) | None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "there is no ward store at {}: the directory has no format marker and \
+                     nothing stored in it",
+                    self.root.display()
+                ),
+            )),
+            Some(_) => Ok(()),
         }
     }
 
@@ -473,6 +519,7 @@ impl Store {
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
     pub fn activity(&self, mode: ActivityMode) -> io::Result<StoreActivity> {
+        self.refuse_unless_store()?;
         let activity = StoreActivity::acquire(&self.root, mode)?;
         self.check_format()?;
         Ok(activity)
@@ -497,6 +544,7 @@ impl Store {
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
     pub fn try_activity_shared(&self) -> io::Result<Option<StoreActivity>> {
+        self.refuse_unless_store()?;
         let Some(activity) = StoreActivity::try_shared(&self.root)? else {
             return Ok(None);
         };
@@ -506,10 +554,12 @@ impl Store {
 
     /// `try_activity_exclusive` without the format check, for the one
     /// operation that exists to work on a store this ward refuses:
-    /// `gc --reset`, which reads no record.
+    /// `gc --reset`, which reads no record. A directory that is no store at
+    /// all is still refused.
     // Reviewed site (tests/architecture.rs): lease primitive (operation boundary).
     #[allow(clippy::disallowed_methods)]
     pub(crate) fn try_activity_exclusive_unchecked(&self) -> io::Result<Option<StoreActivity>> {
+        self.refuse_unless_store()?;
         StoreActivity::try_exclusive(&self.root)
     }
 
@@ -823,6 +873,55 @@ mod tests {
         }
     }
 
+    /// The flush of an object's contents is outside the publish lock
+    /// (#677): every lookup and root registration on the store needs that
+    /// lock, and the flush can take seconds. While the contents are flushed
+    /// another opener of the lock gets it at once; once the object is
+    /// renamed into place, under the lock, it does not.
+    #[test]
+    fn the_contents_are_flushed_outside_the_publish_lock() {
+        let temp = temp_store();
+        let store = Store {
+            root: temp.0.canonicalize().unwrap(),
+        };
+        let lock = store.root.join("tmp/.publish.lock");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let record = seen.clone();
+        let (object, _) = with_publication_hook(
+            move |at| {
+                // flock belongs to the open file description: a fresh open
+                // contends with the commit's own descriptor.
+                let probe = fs::File::open(&lock)?;
+                let free = probe.try_lock().is_ok();
+                // Release the probe's own lock at once rather than at its
+                // close: a child another test forks meanwhile holds a copy of
+                // this descriptor until it execs, and would keep the lock
+                // held for the next probe.
+                if free {
+                    probe.unlock()?;
+                }
+                record.borrow_mut().push((at.to_string(), free));
+                Ok(())
+            },
+            || store.commit_with_deps(&identity(), &staged(&store), &[], &ObjectDeps::new()),
+        )
+        .unwrap();
+        let seen = seen.borrow();
+        let at = |point: &str| {
+            seen.iter()
+                .find(|(at, _)| at == point)
+                .unwrap_or_else(|| panic!("no {point} in {seen:?}"))
+                .1
+        };
+        assert!(
+            at("before-sync-tree"),
+            "the tree flush waits under the lock"
+        );
+        assert!(!at("before-sync-object"), "the rename ran outside the lock");
+        assert!(object.join("content").is_file());
+        assert_eq!(store.is_complete(&identity().object_id()), Some(true));
+    }
+
     #[test]
     fn orphan_completion_is_invalidated_before_a_republication_flush_failure() {
         let temp = temp_store();
@@ -840,7 +939,7 @@ mod tests {
         let stage = staged(&store);
         let result = with_publication_hook(
             |at| {
-                if at == "before-sync-tree" {
+                if at == "before-sync-object" {
                     return Err(io::Error::other("injected flush failure"));
                 }
                 Ok(())
@@ -1928,6 +2027,7 @@ mod tests {
         // A store `open` refuses is refused here too, in the same words.
         let old_store = temp.0.join("old");
         fs::create_dir_all(old_store.join("objects")).unwrap();
+        fs::write(old_store.join("activity.lock"), b"").unwrap();
         let pre_epoch = check(&old_store);
         match old {
             Some(value) => std::env::set_var("GREYWARD_STORE", value),
@@ -2068,6 +2168,7 @@ mod tests {
         for sub in ["objects", "meta", "roots"] {
             fs::create_dir_all(old.join(sub)).unwrap();
         }
+        fs::write(old.join("gc.lock"), b"").unwrap();
         let error = Store::open_at(&old).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let text = error.to_string();
@@ -2105,6 +2206,19 @@ mod tests {
         let unknown = temp.0.join("unknown");
         fs::create_dir(&unknown).unwrap();
         fs::write(unknown.join(FORMAT_FILE), b"hello\n").unwrap();
+        // Alone, a marker this ward cannot read is anyone's file (#676
+        // review): the directory is no store, and is refused as one.
+        let error = Store::open_at(&unknown).unwrap_err();
+        assert!(error.to_string().contains("is not a ward store"), "{error}");
+        // It has a marker, just none this ward recognizes (#676 review).
+        assert!(
+            error
+                .to_string()
+                .contains("no recognized format marker and no store evidence"),
+            "{error}"
+        );
+        assert_eq!(refusal_fix(&error), None);
+        fs::write(unknown.join("activity.lock"), b"").unwrap();
         let error = Store::open_at(&unknown).unwrap_err();
         assert!(refusal_fix(&error).unwrap().ends_with(" ward gc --reset"));
         let text = error.to_string();

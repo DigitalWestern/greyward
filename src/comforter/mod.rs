@@ -7,6 +7,7 @@
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod join;
+pub mod publication;
 pub mod records;
 pub mod status;
 pub mod toolchain;
@@ -287,6 +288,7 @@ pub(crate) fn persist_root_for_refs_with_project_lock(
     // that moved during planning is caught here, before a user directory
     // is moved or a visible link replaced, and again by the closure writer.
     toolchain::recheck_before_publication(project)?;
+    publication::run_publication_checks(project)?;
     project.check_still_named()?;
     // Registration imports the closures the project already has. A `.greyward`
     // that is a symlink, or anything but a real directory, is refused here,
@@ -343,8 +345,10 @@ fn write_closure_inner(
     let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
-    // them before anything of this sync becomes visible.
+    // them before anything of this sync becomes visible, and that what each
+    // producer checked while it built still holds (`publication`).
     toolchain::recheck_before_publication(project)?;
+    publication::run_publication_checks(project)?;
     if !body.is_object() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

@@ -244,6 +244,12 @@ fn a_warm_npm_git_environment_replays_its_host_git_transport() {
         error.to_string().contains(policy::HOST_GIT_TRANSPORT),
         "{error}"
     );
+    // The cached environment's own record refused it, not a cold fetch
+    // that a cache miss would have run.
+    assert!(
+        error.to_string().contains(&format!("cached object {id}")),
+        "{error}"
+    );
     attribution.discard();
 }
 

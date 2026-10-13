@@ -670,6 +670,19 @@ pub fn record_spec(
     })
 }
 
+/// The store and the toolchain a project at a directory selects for the
+/// tailor with id `ecosystem`, opened by the command layer for a tailor
+/// that runs its own pinned tool to read a project.
+pub type ToolchainProvider = dyn Fn(&str, &Path) -> io::Result<(Context, Selected)> + Send + Sync;
+
+/// Hand every tailor that reads a project with its own tool the command
+/// layer's [`ToolchainProvider`]: npm's workspace members are read by npm
+/// itself, run by the Node the project selects. The first install wins.
+pub fn install_toolchain_provider(provider: std::sync::Arc<ToolchainProvider>) {
+    let id = Tailor::id(&node::tailor::Node);
+    node::install_npm_members(std::sync::Arc::new(move |dir: &Path| provider(id, dir)));
+}
+
 /// Hand the closure writer's resolution join every tailor's resolution
 /// files, looked up by the closure's ecosystem, which is a tailor's own id.
 /// `commands::dispatch` calls this before a verb that can write a

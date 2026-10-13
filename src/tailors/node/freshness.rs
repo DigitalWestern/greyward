@@ -777,7 +777,8 @@ dependencies:
     /// The audit's probe (#694): `workspaces: ["packages/*"]` and a new
     /// `packages/b` the lock does not list. The lock was fresh to ward and
     /// `b` got no node_modules; `npm ci` refuses it, and so does ward now.
-    /// A member a later `!` pattern takes out is not one npm installs.
+    /// The member set is npm's own (faked here; the ignored test in
+    /// `npm_members` runs npm).
     #[test]
     fn an_npm_lock_missing_a_new_workspace_member_is_stale() {
         let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-members");
@@ -792,6 +793,9 @@ dependencies:
             "package-lock.json",
             &lock,
         );
+        let _npm = node::npm_members::tests::fake_npm(&scratch.0, |_| {
+            vec!["packages/a".to_string(), "packages/b".to_string()]
+        });
         assert_eq!(
             node::resolve::npm_manifest_members(&project).unwrap(),
             ["packages/a", "packages/b"]
@@ -808,35 +812,6 @@ dependencies:
             &npm_plan("package-lock.json", &["packages/a", "packages/b"]),
         )
         .unwrap();
-    }
-
-    /// npm expands `workspaces` with minimatch, braces included, so a
-    /// member a `{a,b}` set names is one the lock must list (#694). A dot-named directory a wildcard would reach is not one.
-    #[test]
-    fn a_brace_pattern_names_members_the_lock_must_list() {
-        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-braces");
-        let workspaces = r#"["packages/{a,b}","tools/*"]"#;
-        let lock = format!(
-            r#"{{"lockfileVersion":3,"packages":{{"":{{"name":"p","workspaces":{workspaces}}},"packages/a":{{}}}}}}"#
-        );
-        let project = npm_workspace(
-            &scratch.0,
-            workspaces,
-            &["packages/a", "packages/b", "packages/c", "tools/.hidden"],
-            "package-lock.json",
-            &lock,
-        );
-        assert_eq!(
-            node::resolve::npm_manifest_members(&project).unwrap(),
-            ["packages/a", "packages/b"]
-        );
-        assert_eq!(
-            message(check_lock_freshness(
-                &project,
-                &npm_plan("package-lock.json", &["packages/a"])
-            )),
-            "packages/b/package.json is an npm workspace member but package-lock.json does not list it; regenerate the lock (npm install --package-lock-only)"
-        );
     }
 
     /// npm copies the root `workspaces` into `packages[""]`, so a pattern
@@ -872,6 +847,8 @@ dependencies:
             "npm-shrinkwrap.json",
             r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]}}}"#,
         );
+        let _npm =
+            node::npm_members::tests::fake_npm(&scratch.0, |_| vec!["packages/a".to_string()]);
         assert_eq!(
             message(check_lock_freshness(&project, &npm_plan("npm-shrinkwrap.json", &[]))),
             "packages/a/package.json is an npm workspace member but npm-shrinkwrap.json does not list it; regenerate the lock (npm install --package-lock-only)"

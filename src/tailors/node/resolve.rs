@@ -10,7 +10,6 @@
 
 use super::door::{self, NodeRun, NodeTool};
 use super::edit::NodeLock;
-use super::workspace_glob;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::Publish;
 use crate::kernel::resolve::{record, ResolutionDoor};
@@ -100,10 +99,10 @@ fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
 
 /// The workspace members of the project at `root`, relative to it, from
 /// every place a member can be named: npm's `workspaces` in
-/// `package.json` (each glob expanded, and its literal path too),
-/// `pnpm-workspace.yaml`'s `packages`, the `importers` of
-/// `pnpm-lock.yaml`, and the `workspaces` the root entry of
-/// `package-lock.json` or `npm-shrinkwrap.json` records. The union: receipt coverage is never
+/// `package.json` and the copy the root entry of `package-lock.json` or
+/// `npm-shrinkwrap.json` records (each read by npm itself,
+/// [`npm_members`]), `pnpm-workspace.yaml`'s `packages`, and the
+/// `importers` of `pnpm-lock.yaml`. The union: receipt coverage is never
 /// smaller than the tool's own member set, and an extra manifest is only
 /// an extra output. A member named by a path that is not plain and
 /// relative, or a members list ward cannot read, is an error: a member
@@ -112,7 +111,7 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
     let mut members: Vec<PathBuf> = Vec::new();
     let mut add = |named: &str, source: &str| -> io::Result<()> {
         // Only whole `./` segments go: a dot directory such as `.config`
-        // is a member's own name (#694).
+        // is a member's own name.
         let mut trimmed = named.trim_end_matches('/');
         while let Some(rest) = trimmed.strip_prefix("./") {
             trimmed = rest.trim_start_matches('/');
@@ -138,14 +137,8 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
         }
         Ok(())
     };
-    if let Some(text) = root.read_input_string(Path::new("package.json"))? {
-        let package: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("package.json: {error}"))
-        })?;
-        let entries = npm_workspace_entries(&package)?;
-        for dir in workspace_glob::every_named_directory(root, &entries)? {
-            add(&dir, "package.json")?;
-        }
+    for dir in npm_manifest_members(root)? {
+        add(&dir, "package.json")?;
     }
     match super::lock_import::pnpm_workspace_members(root)? {
         Some(found) => {
@@ -153,14 +146,7 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
                 add(&member, "pnpm-workspace.yaml")?;
             }
         }
-        None => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "pnpm-workspace.yaml: packages is not a list ward can read, so the workspace's \
-                 members cannot be named in a resolution record; write it as a plain list of \
-                 patterns",
-            ))
-        }
+        None => return Err(unreadable_pnpm_members()),
     }
     if let Some(text) = root.read_input_string(Path::new("pnpm-lock.yaml"))? {
         for importer in super::lock_import::pnpm_lock_importers(&text)? {
@@ -176,13 +162,8 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
         let lock: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
             io::Error::new(io::ErrorKind::InvalidData, format!("{lock_name}: {error}"))
         })?;
-        let listed: Vec<String> = lock["packages"][""]["workspaces"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.as_str().map(str::to_string))
-            .collect();
-        for dir in workspace_glob::every_named_directory(root, &listed)? {
+        let listed = workspaces_value(&lock["packages"][""], lock_name)?;
+        for dir in super::npm_members::npm_members(root, &listed)?.members {
             add(&dir, lock_name)?;
         }
         break;
@@ -191,54 +172,92 @@ pub(crate) fn workspace_members(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
     Ok(members)
 }
 
-/// `Tailor::preflight`'s share: the workspace members can be named, so a
-/// `pnpm-workspace.yaml` ward cannot read refuses the sync before anything
-/// is realized rather than when the closure is written.
+fn unreadable_pnpm_members() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "pnpm-workspace.yaml: packages is not a list ward can read, so the workspace's \
+         members cannot be named in a resolution record; write it as a plain list of \
+         patterns",
+    )
+}
+
+/// `Tailor::preflight`'s share: a `pnpm-workspace.yaml` ward cannot read
+/// refuses the sync before anything is realized rather than when the
+/// closure is written. npm's members are read later, by npm, once the
+/// sync has a Node to run it with.
 pub(crate) fn check_members_readable(root: &ProjectRoot) -> io::Result<()> {
-    workspace_members(root).map(drop)
+    match super::lock_import::pnpm_workspace_members(root)? {
+        Some(_) => Ok(()),
+        None => Err(unreadable_pnpm_members()),
+    }
 }
 
 /// Whether npm, run in `root_dir.join(member)`, would take `root_dir` as
-/// its workspace root: `root_dir/package.json` names `member` in
-/// `workspaces` (a literal path or a glob, less any `!` pattern that
-/// matches it), and the member has a `package.json`. This is npm's own
+/// its workspace root: npm's own member set for `root_dir/package.json`'s
+/// `workspaces` ([`npm_manifest_members`]) holds `member`. This is npm's
 /// rule (`@npmcli/config`'s `loadLocalPrefix`, through
 /// `@npmcli/map-workspaces`), so a root `package.json` that is missing,
-/// unreadable, or has no list is simply not a root, as it is for npm.
-pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> bool {
+/// unreadable, or has no list is simply not a root, as it is for npm. An
+/// error running npm is an error: guessing either way would put the edit's
+/// lock in the wrong place.
+pub(crate) fn npm_workspace_names(root_dir: &Path, member: &Path) -> io::Result<bool> {
     let Ok(text) = std::fs::read_to_string(root_dir.join("package.json")) else {
-        return false;
+        return Ok(false);
     };
     let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
+        return Ok(false);
     };
-    let Ok(entries) = npm_workspace_entries(&package) else {
-        return false;
+    let Ok(workspaces) = workspaces_value(&package, "package.json") else {
+        return Ok(false);
     };
-    if entries.is_empty() || !root_dir.join(member).join("package.json").is_file() {
-        return false;
+    if workspaces.is_null() || !root_dir.join(member).join("package.json").is_file() {
+        return Ok(false);
     }
+    let held = hold_workspace_root(root_dir, member)?;
     let relative = member.to_string_lossy().replace('\\', "/");
-    workspace_glob::NpmWorkspaces::new(&entries).is_ok_and(|workspaces| workspaces.names(&relative))
+    Ok(super::npm_members::npm_members(&held, &workspaces)?
+        .members
+        .contains(&relative))
 }
 
-/// npm's own workspace member set for the project at `root`: every
-/// directory the root `package.json`'s `workspaces` entries name (each
-/// glob expanded, less what a later `!` pattern takes out) that has a
-/// `package.json`, relative to the root and sorted. This is the set `npm
-/// ci` builds its ideal tree from, so a member here that the lock does not
-/// list was added after the lock was written. [`workspace_members`] is the
-/// wider union a resolution record covers; this is the narrower set the
-/// lock must match. A member that is not a plain path inside the project
-/// is an error.
+/// Hold the workspace root at `root_dir`. A root that may be searched but
+/// not listed (0111) cannot be opened as a project, yet npm still reads
+/// its members by name, so it is held the way an ancestor is: by walking
+/// up from the member through [`ProjectRoot::parent`] (#480).
+fn hold_workspace_root(root_dir: &Path, member: &Path) -> io::Result<ProjectRoot> {
+    match ProjectRoot::open(root_dir) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            let mut held = ProjectRoot::open(&root_dir.join(member))?;
+            for _ in member.components() {
+                held = held.parent()?.ok_or(error_at_top(root_dir))?;
+            }
+            Ok(held)
+        }
+        opened => opened,
+    }
+}
+
+fn error_at_top(root_dir: &Path) -> io::Error {
+    io::Error::other(format!(
+        "{}: the walk up from a workspace member passed `/`",
+        root_dir.display()
+    ))
+}
+
+/// npm's own workspace member set for the project at `root`, as npm's
+/// map-workspaces reads the root `package.json`'s `workspaces`
+/// ([`npm_members`]): relative to the root and sorted, each with a
+/// `package.json`, and none that a symlink carries out of the project.
+/// This is the set `npm ci` builds its ideal tree from, so a member here
+/// that the lock does not list was added after the lock was written.
 pub(crate) fn npm_manifest_members(root: &ProjectRoot) -> io::Result<Vec<String>> {
     Ok(npm_manifest_membership(root)?.members)
 }
 
-/// Record, as a skipped requirement, each directory npm would take as a
-/// member through a symlink that leads outside the project: ward reads a
-/// member from inside the project only, so it leaves the directory out of
-/// the member set, and the closure says so (#694).
+/// Record, as a skipped requirement, each directory npm takes as a member
+/// through a symlink that leads outside the project: ward reads a member
+/// from inside the project only, so it leaves the directory out of the
+/// member set, and the closure says so (#694).
 pub(crate) fn record_members_outside(
     root: &ProjectRoot,
     attribution: &crate::kernel::policy::Attribution,
@@ -254,76 +273,36 @@ pub(crate) fn record_members_outside(
     Ok(())
 }
 
-fn npm_manifest_membership(root: &ProjectRoot) -> io::Result<workspace_glob::Found> {
+fn npm_manifest_membership(root: &ProjectRoot) -> io::Result<super::npm_members::Found> {
     let Some(text) = root.read_input_string(Path::new("package.json"))? else {
-        return Ok(workspace_glob::Found {
-            members: Vec::new(),
-            outside: Vec::new(),
-        });
+        return Ok(super::npm_members::Found::default());
     };
     let package: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
         io::Error::new(io::ErrorKind::InvalidData, format!("package.json: {error}"))
     })?;
-    let entries = npm_workspace_entries(&package)?;
-    let workspaces = workspace_glob::NpmWorkspaces::new(&entries)?;
-    let found = workspaces.directories(root)?;
-    let mut members: Vec<String> = Vec::new();
-    for dir in found.members {
-        if dir.is_empty() || dir == "." || members.contains(&dir) {
-            continue;
-        }
-        let path = PathBuf::from(&dir);
-        let plain = path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)));
-        if !plain {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "package.json names the workspace member {dir:?}, which is not a plain \
-                     path inside the project"
-                ),
-            ));
-        }
-        if root.is_input_file(&path.join("package.json")) {
-            members.push(dir);
-        }
-    }
-    members.sort();
-    Ok(workspace_glob::Found {
-        members,
-        outside: found.outside,
-    })
+    super::npm_members::npm_members(root, &workspaces_value(&package, "package.json")?)
 }
 
-/// Every `workspaces` entry of a `package.json` as written, `!` patterns
-/// included: a list, or the object form's `packages` list.
-fn npm_workspace_entries(package: &serde_json::Value) -> io::Result<Vec<String>> {
-    let list = match package.get("workspaces") {
-        None => return Ok(Vec::new()),
-        Some(serde_json::Value::Array(list)) => list,
-        Some(serde_json::Value::Object(object)) => match object.get("packages") {
-            None => return Ok(Vec::new()),
-            Some(serde_json::Value::Array(list)) => list,
-            Some(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "package.json: workspaces.packages is not a list",
-                ))
-            }
-        },
-        Some(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "package.json: workspaces is not a list",
-            ))
-        }
+/// The `workspaces` value of a `package.json` (or of an npm lock's root
+/// entry, `source` naming which) as written, for npm to read: a list, or
+/// the object form with a `packages` list; null when there is none.
+fn workspaces_value(package: &serde_json::Value, source: &str) -> io::Result<serde_json::Value> {
+    let refused = |what: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{source}: {what} is not a list"),
+        )
     };
-    Ok(list
-        .iter()
-        .filter_map(|entry| entry.as_str())
-        .map(str::to_string)
-        .collect())
+    match package.get("workspaces") {
+        None | Some(serde_json::Value::Null) => Ok(serde_json::Value::Null),
+        Some(list @ serde_json::Value::Array(_)) => Ok(list.clone()),
+        Some(serde_json::Value::Object(object)) => match object.get("packages") {
+            None => Ok(serde_json::Value::Null),
+            Some(list @ serde_json::Value::Array(_)) => Ok(list.clone()),
+            Some(_) => Err(refused("workspaces.packages")),
+        },
+        Some(_) => Err(refused("workspaces")),
+    }
 }
 
 /// The closure's `resolution_basis`: every resolution file of the lock
@@ -669,9 +648,10 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// A member npm would reach through a symlink out of the project is
-    /// left out and recorded; one through a symlink inside it is a member
-    /// (#694).
+    /// A member npm reaches through a symlink out of the project is left
+    /// out and recorded; one through a symlink inside it is a member
+    /// (#694). npm's answer is faked here; the ignored test in
+    /// `npm_members` runs the real one.
     #[test]
     fn a_member_symlinked_outside_the_project_is_recorded_as_skipped() {
         let _attribution_lock = crate::kernel::policy::attribution_test_lock();
@@ -688,6 +668,11 @@ mod tests {
         std::os::unix::fs::symlink("../vendor/lib", root.join("packages/lib")).unwrap();
         std::os::unix::fs::symlink("../../elsewhere", root.join("packages/ext")).unwrap();
         let held = ProjectRoot::open(&root).unwrap();
+        let _npm = crate::tailors::node::npm_members::tests::fake_npm(&root, |_| {
+            ["packages/a", "packages/lib", "packages/ext"]
+                .map(String::from)
+                .to_vec()
+        });
         assert_eq!(
             npm_manifest_members(&held).unwrap(),
             ["packages/a", "packages/lib"]
@@ -709,27 +694,6 @@ mod tests {
         );
     }
 
-    /// A dot directory a pattern names is a member under its own name, and
-    /// only a whole leading `./` is taken off a path (#694).
-    #[test]
-    fn a_dot_directory_member_keeps_its_name() {
-        let temp = TempDir::named("node-dot-member");
-        let root = temp.0.join("ws");
-        write(
-            &root,
-            "package.json",
-            r#"{"name":"ws","workspaces":[".config/*","././.tools/x/"]}"#,
-        );
-        write(&root, ".config/a/package.json", "{}");
-        write(&root, ".tools/x/package.json", "{}");
-        write(&root, "config/a/package.json", "{}");
-        let held = ProjectRoot::open(&root).unwrap();
-        assert_eq!(
-            workspace_members(&held).unwrap(),
-            [PathBuf::from(".config/a"), PathBuf::from(".tools/x")]
-        );
-    }
-
     /// npm's words on a failure are kept: the resolve-only form lowers the
     /// log level to errors rather than silencing npm.
     #[test]
@@ -746,12 +710,11 @@ mod tests {
     }
 
     /// The outputs are the lock root's manifest and locks and every
-    /// member manifest named anywhere: npm's `workspaces` (a glob, its
-    /// literal path, a `!` ignored, a directory without a manifest not
-    /// listed, `node_modules` and a symlinked directory never entered),
-    /// pnpm's `packages`, the pnpm lock's importers, and the npm lock's
-    /// root `workspaces`. The inputs are the root's configuration and each
-    /// member's `.npmrc`.
+    /// member manifest named anywhere: npm's members of the package.json
+    /// `workspaces` (npm's answer faked here, less one a symlink carries
+    /// out of the project), pnpm's `packages`, the pnpm lock's importers,
+    /// and npm's members of the npm lock's root `workspaces`. The inputs
+    /// are the root's configuration and each member's `.npmrc`.
     #[test]
     fn outputs_name_every_member_manifest_from_every_source() {
         let temp = TempDir::named("node-outputs");
@@ -792,6 +755,23 @@ mod tests {
         );
         write(&root, "packages/a/.npmrc", "");
         let held = ProjectRoot::open(&root).unwrap();
+        let _npm = crate::tailors::node::npm_members::tests::fake_npm(&root, |workspaces| {
+            let named: &[&str] = if workspaces == &serde_json::json!(["fromnpmlock/*"]) {
+                &["fromnpmlock/n"]
+            } else if workspaces == &serde_json::json!(["../elsewhere"]) {
+                &["../elsewhere"]
+            } else {
+                &[
+                    "packages/a",
+                    "packages/linked",
+                    "apps/web",
+                    "apps/nested/deep",
+                    "tools/cli",
+                    "lit1",
+                ]
+            };
+            named.iter().map(|dir| dir.to_string()).collect()
+        });
         let outputs: Vec<String> = resolution_outputs(&held)
             .unwrap()
             .iter()
@@ -810,9 +790,7 @@ mod tests {
                 "fromnpmlock/n/package.json",
                 "fromyaml/y/package.json",
                 "lit1/package.json",
-                "lit[1]/package.json",
                 "packages/a/package.json",
-                "packages/skip/package.json",
                 "tools/cli/package.json",
             ]
         );

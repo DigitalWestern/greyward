@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Fill in the `expected` member list of every case in
-// src/tailors/node/workspace_glob/corpus.json by running npm's own
-// @npmcli/map-workspaces over a tree built from the case, so the Rust
-// matcher (src/tailors/node/workspace_glob/) is checked against npm
-// rather than against a reading of its source.
+// src/tailors/node/npm_members/corpus.json by running npm's own
+// @npmcli/map-workspaces over a tree built from the case, unconfined. The
+// ignored test in src/tailors/node/npm_members/ builds each tree again and
+// holds ward's sandboxed run of map-workspaces, symlink rule included, to
+// these lists.
 //
 //   node tools/npm_workspace_corpus.js <npm's node_modules directory>
 //
@@ -22,7 +23,7 @@ if (!npmModules) {
   process.exit(2)
 }
 const mapWorkspaces = require(path.join(npmModules, '@npmcli/map-workspaces'))
-const corpusPath = path.join(__dirname, '..', 'src/tailors/node/workspace_glob/corpus.json')
+const corpusPath = path.join(__dirname, '..', 'src/tailors/node/npm_members/corpus.json')
 
 async function run (testCase) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ward-ws-corpus-'))

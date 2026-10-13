@@ -204,12 +204,17 @@ locally (an `npm-shrinkwrap.json`, the same format, is read first when both exis
 it); a pnpm v9/v6 or Yarn classic lockfile is imported by
 `lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
-`npm install --package-lock-only`. Before planning, `plan` and `sync`
+`npm install --package-lock-only`. npm's workspace members are read by
+npm itself: the `@npmcli/map-workspaces` bundled with the store node's npm
+runs in the sandbox, with no network and the project read-only, on the
+root's `workspaces` list, and its answer is the member set every npm
+check uses (lock freshness, the resolution record's inputs, which root a
+member's edit writes to). Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's, `peerDependencies` included), the
 root's `workspaces` as npm copies it into the lock, and every member npm's own `workspaces`
-expansion finds (less `!` patterns), pnpm's importer
+expansion finds, pnpm's importer
 specifiers, and Yarn classic's `name@spec` selectors (with no entry left
 that nothing depends on; a `link:` dependency, which Yarn classic never
 locks, is linked to its directory inside the project). A pnpm `file:`

@@ -957,6 +957,10 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("package-lock.json"), "{\"name\":\"ws\"}\n").unwrap();
+        // npm's members of that list, faked: the stand-in npm is not one.
+        let _npm = crate::tailors::node::npm_members::tests::fake_npm(&root, |_| {
+            vec!["packages/app".to_string(), "packages/util".to_string()]
+        });
         fs::write(root.join(".npmrc"), "fund=true\n").unwrap();
         fs::write(app.join(".npmrc"), "audit=true\n").unwrap();
         let host = TestHost {

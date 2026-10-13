@@ -34,15 +34,16 @@ pub mod tailor;
 mod archives;
 mod bins;
 mod classify;
+mod npm_members;
 mod plan;
 mod project;
 mod realize;
 mod script_view;
 mod unpack;
-mod workspace_glob;
 
 use bins::*;
 use classify::*;
+pub(crate) use npm_members::install as install_npm_members;
 pub use plan::*;
 pub use project::*;
 pub use realize::*;

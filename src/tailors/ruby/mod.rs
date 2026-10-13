@@ -1087,11 +1087,12 @@ pub fn realize_gems(
         let cached = |identity: &Identity| -> io::Result<Option<PathBuf>> {
             let lookup_inputs = crate::kernel::hostview::host_build_inputs;
             match cached_gems_object(store, activity, identity, lookup_inputs)? {
-                Some(id) => {
-                    crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+                // An `object-meta/2` record a stricter policy cannot judge
+                // is installed again under the same id.
+                Some(id) if crate::kernel::policy::check_cached_reusable(store, activity, &id)? => {
                     Ok(Some(store.object_path(&id)))
                 }
-                None => Ok(None),
+                _ => Ok(None),
             }
         };
         if let Some(path) = cached(&identity)? {

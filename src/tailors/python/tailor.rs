@@ -321,12 +321,9 @@ impl Tailor for Python {
         for p in list(eco, plan, "packages")? {
             let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
             let norm = name.to_ascii_lowercase().replace('_', "-");
-            let mut c = component(
-                &name,
-                &ver,
-                format!("pkg:pypi/{}@{}", purl_encode(&norm), purl_encode(&ver)),
-                eco,
-            );
+            let mut purl = format!("pkg:pypi/{}@{}", purl_encode(&norm), purl_encode(&ver));
+            purl.push_str(&pypi_purl_qualifiers(eco, &p)?);
+            let mut c = component(&name, &ver, purl, eco);
             push_hash(&mut c, "SHA-256", &required(eco, &p, "sha256")?);
             out.push(c);
         }
@@ -396,4 +393,45 @@ fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
         }
     }
     Ok(request)
+}
+
+/// The purl qualifiers that say where a Python package came from when it
+/// is not the default index: a git package's repository and commit
+/// (`vcs_url`, and its subdirectory as the purl subpath), or the origin of
+/// a file served by another index (`repository_url`). The closure records
+/// each file's URL, not the index page that listed it, so the origin is the
+/// index as far as the record knows it.
+fn pypi_purl_qualifiers(eco: &str, package: &Value) -> io::Result<String> {
+    if let Some(git) = package.get("git").filter(|git| !git.is_null()) {
+        let git: crate::kernel::types::GitSource = serde_json::from_value(git.clone())
+            .map_err(|e| crate::kernel::cyclonedx::err(format!("{eco} closure: git: {e}")))?;
+        let mut qualifiers = format!(
+            "?vcs_url={}",
+            purl_encode(&format!("git+{}@{}", git.url, git.commit))
+        );
+        if let Some(subdirectory) = &git.subdirectory {
+            qualifiers.push('#');
+            qualifiers.push_str(&crate::kernel::cyclonedx::purl_encode_path(subdirectory));
+        }
+        return Ok(qualifiers);
+    }
+    let url = package["url"].as_str().unwrap_or_default();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Ok(String::new());
+    };
+    if scheme != "https" && scheme != "http" {
+        return Ok(String::new());
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = host_port.split(':').next().unwrap_or_default();
+    if host.is_empty() || matches!(host, "files.pythonhosted.org" | "pypi.org") {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "?repository_url={}",
+        purl_encode(&format!("{scheme}://{host_port}"))
+    ))
 }

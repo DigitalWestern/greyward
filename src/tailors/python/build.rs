@@ -1094,8 +1094,9 @@ pub(crate) fn build_sdist_wheel_at_depth(
     let fast_identity = sdist_identity(platform, pkg, &python);
     if fast_sdist {
         let fast_id = fast_identity.object_id();
-        if store.has_with_activity(activity, &fast_id)? {
-            crate::kernel::policy::check_cached_with_activity(store, activity, &fast_id)?;
+        if store.has_with_activity(activity, &fast_id)?
+            && crate::kernel::policy::check_cached_reusable(store, activity, &fast_id)?
+        {
             return Ok(SdistWheel {
                 path: find_wheel(&store.object_path(&fast_id))?,
                 host_inputs: None,
@@ -1136,12 +1137,15 @@ pub(crate) fn build_sdist_wheel_at_depth(
         native_libs_id.as_deref(),
     )?;
     if let Some(cached) = sdist_view::cached_object(store, activity, &identity)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &cached.id)?;
-        let _ = crate::kernel::store::remove_tree(&work);
-        return Ok(SdistWheel {
-            path: find_wheel(&store.object_path(&cached.id))?,
-            host_inputs: cached.host_inputs,
-        });
+        // An `object-meta/2` wheel a stricter policy cannot judge is built
+        // again under the same id.
+        if crate::kernel::policy::check_cached_reusable(store, activity, &cached.id)? {
+            let _ = crate::kernel::store::remove_tree(&work);
+            return Ok(SdistWheel {
+                path: find_wheel(&store.object_path(&cached.id))?,
+                host_inputs: cached.host_inputs,
+            });
+        }
     }
 
     let Toolchains {

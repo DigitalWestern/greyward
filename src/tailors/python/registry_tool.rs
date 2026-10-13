@@ -127,6 +127,7 @@ impl RegistryTool for PythonTool {
                     "requirements.in",
                     "requirements.txt",
                     pin.version,
+                    python::door::COMPILE_COMMAND,
                 ),
                 index: python::door::Index::PipCompile,
                 outputs: vec![PathBuf::from("requirements.txt")],

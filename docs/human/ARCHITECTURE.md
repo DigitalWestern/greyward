@@ -89,7 +89,7 @@ project contains. Greyward's own state is walked one component at a time with
 symlink is refused rather than followed: closures (read for the exception
 summary and root registration, and written),
 `.greyward/policy.toml`, the plan and setup.py caches, the Python manifest
-snapshots and lock stamp, `.greyward/cargo-home` (`greyward-config.toml` and the 0755
+snapshots, `.greyward/cargo-home` (`greyward-config.toml` and the 0755
 `cargo` shim), the `.venv` and `node_modules` links (`replace_symlink`,
 which publishes a new link with an exclusive rename so a real entry that
 appears meanwhile is refused, not replaced), and a real `.venv` or
@@ -323,9 +323,9 @@ place of uv's command line (`--custom-compile-command`), so the same
 resolution writes the same bytes on every machine. Python's resolution
 outputs are `pyproject.toml`, `uv.lock`, `requirements.in`,
 `requirements.txt`, `requirements.lock.txt`, and every uv workspace
-member's `pyproject.toml`; its inputs are `setup.cfg`, `setup.py`, and
-every file a requirements file includes inside the project
-(`tailors/python/resolve.rs`).
+member's `pyproject.toml`; its inputs are `setup.cfg`, `setup.py`,
+every file a requirements file includes inside the project, and every
+file setup.cfg names with `file:` (`tailors/python/resolve.rs`).
 
 `targets`, `components` and `profile` in `rust-toolchain(.toml)` are lock
 rows (`toolchain.targets`, `toolchain.components`, `toolchain.profile`):

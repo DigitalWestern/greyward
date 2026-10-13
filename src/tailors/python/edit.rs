@@ -163,7 +163,15 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
                 EditVerb::Update => {}
             }
             let upgrade = upgrade_flags(verb, names);
-            uv_compile(edit, door, &input, &output, &upgrade)?;
+            uv_compile(
+                edit,
+                door,
+                &input,
+                &output,
+                &upgrade,
+                door::COMPILE_COMMAND,
+                None,
+            )?;
             Ok(vec![
                 "requirements.in".to_string(),
                 "requirements.txt".to_string(),
@@ -186,18 +194,26 @@ fn edit_files(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Res
             let mut files = vec![file];
             let external = resolve::has_external_includes(&ProjectRoot::open(project)?)?;
             if verb == EditVerb::Update && lock.is_file() && !external {
-                uv_compile(edit, door, &path, &lock, &upgrade_flags(verb, names))?;
+                // The header names the source these inputs give, as the
+                // sync's own compile does, so the next sync reads this lock,
+                // and a lock that lost a hash pin is never published.
+                let toolchain = edit.host.toolchain(edit.project, "python")?;
+                let (command, check) =
+                    super::inputs::lock_command(&ProjectRoot::open(project)?, &toolchain, door)?;
+                uv_compile(
+                    edit,
+                    door,
+                    &path,
+                    &lock,
+                    &upgrade_flags(verb, names),
+                    &command,
+                    Some(check),
+                )?;
                 files.push("requirements.lock.txt".to_string());
-            } else {
-                // The ordinary sync re-locks when the source hash changes; a
-                // stale stamp from an unchanged source (update with no lock
-                // yet) is cleared so sync resolves afresh. Through the held
-                // project descriptor, so a symlinked `.greyward` cannot redirect
-                // the unlink outside the project.
-                ProjectRoot::open(project)?.remove_file(Path::new(".greyward/lock-source.hash"))?;
-                if verb == EditVerb::Update {
-                    files.push("(re-locks on sync)".to_string());
-                }
+            } else if verb == EditVerb::Update && !lock.is_file() {
+                // The ordinary sync compiles a lock that is missing, and
+                // re-locks one whose header names other inputs.
+                files.push("(locks on sync)".to_string());
             }
             Ok(files)
         }
@@ -500,6 +516,7 @@ fn edit_run(
     args: Vec<OsString>,
     index: Index,
     what: &str,
+    check: Option<door::OutputCheck>,
 ) -> io::Result<()> {
     let held = ProjectRoot::open(lock_root)?;
     let outputs = resolve::resolution_outputs(&held)?;
@@ -530,6 +547,7 @@ fn edit_run(
             target: UvTarget::Project {
                 record,
                 slot: Default::default(),
+                check,
             },
             builds: Builds::Probe,
             capture: false,
@@ -541,13 +559,16 @@ fn edit_run(
 }
 
 /// Recompile `input` into `output` (both in the project) with `extra`
-/// (the upgrade flags), the same compile the missing-lock door runs.
+/// (the upgrade flags), the same compile the missing-lock door runs, its
+/// header naming `command`.
 fn uv_compile(
     edit: &ManifestEdit<'_>,
     door: &mut ResolutionDoor<'_>,
     input: &Path,
     output: &Path,
     extra: &[String],
+    command: &str,
+    check: Option<door::OutputCheck>,
 ) -> io::Result<()> {
     let held = ProjectRoot::open(edit.project)?;
     if resolve::has_external_includes(&held)? {
@@ -565,7 +586,7 @@ fn uv_compile(
             .to_string_lossy()
             .into_owned()
     };
-    let mut args = resolve::compile_args(&name(input), &name(output), &version);
+    let mut args = resolve::compile_args(&name(input), &name(output), &version, command);
     args.extend(extra.iter().map(OsString::from));
     edit_run(
         door,
@@ -575,6 +596,7 @@ fn uv_compile(
         args,
         Index::PipCompile,
         "store uv pip compile",
+        check,
     )
 }
 
@@ -621,7 +643,16 @@ fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resu
         .ok()
         .filter(|relative| !relative.as_os_str().is_empty())
         .map(Path::to_path_buf);
-    edit_run(door, &uv, &lock_root, cwd, args, Index::Project, "store uv")?;
+    edit_run(
+        door,
+        &uv,
+        &lock_root,
+        cwd,
+        args,
+        Index::Project,
+        "store uv",
+        None,
+    )?;
     Ok(vec!["pyproject.toml".to_string(), "uv.lock".to_string()])
 }
 

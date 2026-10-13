@@ -668,26 +668,40 @@ pub fn manifest_path_dependencies(manifest: &Path) -> io::Result<Vec<String>> {
     path_dependencies(manifest, &Bound::new(dir)?)
 }
 
-/// The `path` of every dependency-like entry in `manifest`: the
-/// dependency tables (also under `target.<cfg>` and `workspace`),
-/// `[patch.<source>]`, and `[replace]`. `[lib]` and `[[bin]]` paths name
-/// files of the package itself and are not read. A manifest that does not
-/// parse is left for cargo to report.
+/// The `path` of every dependency-like entry in `manifest`
+/// ([`dependency_entries`]). `[lib]` and `[[bin]]` paths name files of the
+/// package itself and are not read. A manifest that does not parse is left
+/// for cargo to report.
 fn path_dependencies(manifest: &Path, keys: &Bound) -> io::Result<Vec<String>> {
-    const TABLES: [&str; 5] = [
-        "dependencies",
-        "dev-dependencies",
-        "build-dependencies",
-        "patch",
-        "replace",
-    ];
     keys.refuse_if_key(manifest)?;
     let text = std::fs::read_to_string(manifest)?;
     let Ok(value) = toml::from_str::<toml::Table>(&text) else {
         return Ok(Vec::new());
     };
-    let mut paths = Vec::new();
-    let mut tables: Vec<&toml::Table> = vec![&value];
+    Ok(dependency_entries(&value)
+        .into_iter()
+        .filter_map(|(_, entry)| entry.get("path").and_then(|p| p.as_str()))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Every dependency-like entry of a manifest, with the name it is listed
+/// under: the dependency tables (`dependencies`, `dev-dependencies`,
+/// `build-dependencies` and their underscore spellings, also under
+/// `target.<triple or cfg>` and `workspace`), `[patch.<source>]`, and
+/// `[replace]`.
+fn dependency_entries(value: &toml::Table) -> Vec<(&str, &toml::Table)> {
+    const TABLES: [&str; 7] = [
+        "dependencies",
+        "dev-dependencies",
+        "dev_dependencies",
+        "build-dependencies",
+        "build_dependencies",
+        "patch",
+        "replace",
+    ];
+    let mut found = Vec::new();
+    let mut tables: Vec<&toml::Table> = vec![value];
     if let Some(workspace) = value.get("workspace").and_then(|w| w.as_table()) {
         tables.push(workspace);
     }
@@ -700,20 +714,82 @@ fn path_dependencies(manifest: &Path, keys: &Bound) -> io::Result<Vec<String>> {
                 continue;
             };
             // `[patch.<source>]` nests one level deeper than the others.
-            let mut stack: Vec<&toml::Value> = entries.values().collect();
-            while let Some(entry) = stack.pop() {
+            let mut stack: Vec<(&str, &toml::Value)> = entries
+                .iter()
+                .map(|(key, entry)| (key.as_str(), entry))
+                .collect();
+            while let Some((key, entry)) = stack.pop() {
                 let Some(entry) = entry.as_table() else {
                     continue;
                 };
-                match entry.get("path").and_then(|p| p.as_str()) {
-                    Some(path) => paths.push(path.to_string()),
-                    None if name == "patch" => stack.extend(entry.values()),
-                    None => {}
+                if name == "patch" && !entry.contains_key("path") && !is_dependency(entry) {
+                    stack.extend(entry.iter().map(|(key, entry)| (key.as_str(), entry)));
+                } else {
+                    found.push((key, entry));
                 }
             }
         }
     }
-    Ok(paths)
+    found
+}
+
+/// Whether a table under `[patch.<source>]` is a dependency rather than
+/// the source's table of them.
+fn is_dependency(entry: &toml::Table) -> bool {
+    [
+        "version",
+        "git",
+        "registry",
+        "registry-index",
+        "package",
+        "branch",
+        "tag",
+        "rev",
+    ]
+    .iter()
+    .any(|key| entry.contains_key(*key))
+}
+
+/// Refuse a dependency's `registry-index` that is not a network index
+/// ([`network_url`]) in any manifest a cargo starting at `lock_root` reads:
+/// every `Cargo.toml` under it ([`manifests_under`]) and under each path
+/// dependency or member outside it ([`path_dependency_roots`]), in every
+/// dependency table ([`dependency_entries`]). A manifest names one with no
+/// config at all, and cargo would read a file index and the archives its
+/// `config.json` names during lock generation or an update, with no proxy
+/// check, before attest could refuse the lock. Checked before cargo
+/// starts, as the config files are.
+fn refuse_manifest_registry_indexes(lock_root: &Path) -> io::Result<()> {
+    let mut manifests = manifests_under(lock_root)?;
+    for root in path_dependency_roots(lock_root)? {
+        manifests.extend(manifests_under(&root)?);
+    }
+    let keys = Bound::new(lock_root)?;
+    for manifest in manifests {
+        keys.refuse_if_key(&manifest)?;
+        let text = std::fs::read_to_string(&manifest)?;
+        let Ok(value) = toml::from_str::<toml::Table>(&text) else {
+            continue;
+        };
+        for (name, entry) in dependency_entries(&value) {
+            let Some(url) = entry.get("registry-index").and_then(|url| url.as_str()) else {
+                continue;
+            };
+            if !network_url(url) {
+                return Err(crate::kernel::error::refused(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} names registry-index {url:?} for {name}; ward resolves a \
+                         dependency only from a registry index over https (sparse+https://, \
+                         https://) or a git index over ssh:// or git://, since a file or \
+                         path index is read without the proxy that checks every index",
+                        manifest.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A workspace's members inside its root, as cargo 1.98 finds them.
@@ -1302,6 +1378,7 @@ fn run_cargo_with(
     let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
     refuse_unneutralized_settings(&files)?;
     record_index_transports(&files)?;
+    refuse_manifest_registry_indexes(run.lock_root)?;
     let registries = configured_registries(run.lock_root)?;
     let mut confined = cargo_confined(&run, publish, &registries)?;
     if let Some(homes) = homes {
@@ -2333,6 +2410,81 @@ mod tests {
             "{error}"
         );
         assert!(!ran.exists(), "the project's provider ran");
+    }
+
+    /// A dependency's `registry-index` in any manifest cargo reads (the
+    /// root, a member, its target-specific and build or dev tables, a
+    /// patch) is held to the network rule before cargo starts: lock
+    /// generation would otherwise read a file index and its archives.
+    #[test]
+    fn run_cargo_refuses_a_manifest_registry_index_before_cargo_starts() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-door-registry-index");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        let store = crate::kernel::store::Store::for_test(temp.0.join("absent-store"));
+        let run = |root: &Path| {
+            let mut scope = crate::kernel::testutil::DoorScope::new();
+            let mut door = scope.door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::MissingLock,
+            );
+            run_cargo(
+                &mut door,
+                CargoRun {
+                    rust_obj: Path::new("/nonexistent/rust"),
+                    lock_root: root,
+                    args: &["generate-lockfile"],
+                    publish: CargoPublish::Detached {
+                        outputs: Vec::new(),
+                    },
+                },
+            )
+            .map(drop)
+            .unwrap_err()
+            .to_string()
+        };
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"m\"]\n\
+             [workspace.dependencies]\nw = { version = \"1\", registry-index = \"https://w.test/index\" }\n",
+        )
+        .unwrap();
+        for (table, url) in [
+            (
+                "[target.'cfg(unix)'.build-dependencies]",
+                "file:///ws/index",
+            ),
+            ("[dev_dependencies]", "/ws/index"),
+            ("[dependencies]", "sparse+file:///ws/index"),
+            ("[patch.crates-io]", "file:///ws/index"),
+        ] {
+            std::fs::write(
+                root.join("m/Cargo.toml"),
+                format!(
+                    "[package]\nname = \"m\"\nversion = \"0.1.0\"\n\
+                     {table}\nx = {{ version = \"1\", registry-index = \"{url}\" }}\n"
+                ),
+            )
+            .unwrap();
+            let error = run(&root);
+            assert!(
+                error.contains("registry-index") && error.contains(url),
+                "{table}: {error}"
+            );
+            assert!(error.contains("m/Cargo.toml"), "{table}: {error}");
+        }
+        // A network index passes the check (cargo then fails on the
+        // absent toolchain, which is not this check's error).
+        std::fs::write(
+            root.join("m/Cargo.toml"),
+            "[package]\nname = \"m\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nx = { version = \"1\", registry-index = \"sparse+https://x.test/\" }\n",
+        )
+        .unwrap();
+        assert!(!run(&root).contains("registry-index"));
     }
 
     #[test]

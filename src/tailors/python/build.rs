@@ -200,15 +200,15 @@ fn wrap_sandbox_build_error_with_tail(
             "\nbuild stderr was relayed by the sandbox API and was not available for inclusion"
                 .into()
         });
-    io::Error::new(
-        error.kind(),
-        format!(
-            "sandboxed build of {}=={} failed: {error}\n\
-             (network is denied during builds; setup_requires in legacy setup.py \
-             is not handled){diagnostics}",
-            pkg.name, pkg.version
-        ),
-    )
+    let message = format!(
+        "sandboxed build of {}=={} failed: {error}\n\
+         (network is denied during builds; setup_requires in legacy setup.py \
+         is not handled){diagnostics}",
+        pkg.name, pkg.version
+    );
+    // The original stays inside, so a sandbox that could not be set up is
+    // still one to the fallback (#679).
+    crate::kernel::error::describe(error, message)
 }
 
 fn build_toolchain_plan(python_version: &str) -> Plan {

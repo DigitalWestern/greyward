@@ -204,10 +204,10 @@ pub(crate) fn attest_project(
         return Err(crate::kernel::error::refused(
             io::ErrorKind::PermissionDenied,
             format!(
-                "cargo read {} in {} from a local directory rather than its own download, \
-                 though Cargo.lock pins {them} to a registry or a git commit, so the lock is \
-                 not attested; a `paths` override, a directory source or another \
-                 configuration swapped {them} in",
+                "cargo read {} in {} from a local directory or a file-backed registry rather \
+                 than its own network download, though Cargo.lock pins {them} to a registry or \
+                 a git commit, so the lock is not attested; a `paths` override, a directory \
+                 source, a `file://` registry index or another configuration swapped {them} in",
                 swapped.join(", "),
                 project.path().display(),
             ),
@@ -227,8 +227,12 @@ pub(crate) fn attest_project(
 /// metadata does not show a replacement (a directory source replacing
 /// crates.io keeps the registry's id), and metadata prints no checksum, so
 /// where cargo read the crate is the evidence: a `paths` override or a
-/// directory source reads it from elsewhere. Workspace members and path
-/// dependencies have no source in either.
+/// directory source reads it from elsewhere. A registry crate whose lock
+/// source is not a network registry ([`cargo_door::network_url`]: a
+/// manifest's `registry-index = "file://..."` needs no config) is named as
+/// well, since cargo extracts a file registry's archives into the same
+/// `registry/src`. Workspace members and path dependencies have no source
+/// in either.
 fn path_resolved_locked_packages(
     metadata: &[u8],
     lock: &str,
@@ -270,7 +274,15 @@ fn path_resolved_locked_packages(
                 "registry/src"
             };
             let read_from = package["manifest_path"].as_str().map(Path::new);
-            let from_cache = !package["source"].is_null()
+            // A file-backed registry is extracted into registry/src like a
+            // download, though no network registry served it.
+            let from_network = source.starts_with("git+")
+                || source
+                    .strip_prefix("registry+")
+                    .is_some_and(cargo_door::network_url)
+                || source.starts_with("sparse+") && cargo_door::network_url(source);
+            let from_cache = from_network
+                && !package["source"].is_null()
                 && read_from.is_some_and(|path| {
                     homes.iter().any(|home| path.starts_with(home.join(cache)))
                 });
@@ -356,6 +368,19 @@ mod tests {
         );
         assert_eq!(check(&crossed).unwrap(), ["itoa@1.0.18", "leaf@0.1.0"]);
         assert!(check(b"not json").is_err());
+        // A registry read from files (a manifest's `registry-index =
+        // "file://..."` needs no config) is extracted into the run's own
+        // registry/src like a download, but no network registry served it.
+        let file_lock = lock.replace(
+            "registry+https://github.com/rust-lang/crates.io-index",
+            "registry+file:///ws/index",
+        );
+        let file_registry = serde_json::json!("registry+file:///ws/index");
+        let from_files = metadata((&file_registry, in_registry), (&git, in_checkouts));
+        assert_eq!(
+            path_resolved_locked_packages(&from_files, &file_lock, &homes).unwrap(),
+            ["itoa@1.0.18"]
+        );
     }
 
     /// Path dependencies inside the workspace are implicit members: their

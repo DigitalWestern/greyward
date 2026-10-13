@@ -47,6 +47,16 @@ use std::path::Path;
 ///   flags), so it is refused with it. Other flags (`--manifest-path`,
 ///   `--target-dir`) change what is built or where, not which sources or
 ///   programs ward forces, and stay allowed.
+/// - A registry, index or source URL (`registry.index`,
+///   `registries.<name>.index`, `[source.<name>] registry` or `git`) that
+///   is not a network one ([`network_url`]): `file://`, a bare path,
+///   `sparse+file://`, `http://`. git and cargo read a file-backed index
+///   and its `dl` archives without contacting the proxy, so neither the
+///   proxy's index check (`unattested-index`) nor its git row sees them,
+///   and the archives are extracted into the run's own `registry/src`
+///   like a download. An `ssh://` or `git://` index stays allowed, its
+///   host checked as a git source's is; an ssh one is recorded as
+///   `host-git-transport` by the sync ([`index_transports`]).
 /// - An `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`):
 ///   cargo sets `[env]` for every program it starts, the `rustc -vV`
 ///   probe during resolution included, so `LD_PRELOAD` loads a project
@@ -64,13 +74,13 @@ pub fn refuse_unneutralized_settings(files: &[ConfigFile]) -> io::Result<()> {
             format!(
                 "{} sets {}; ward does not run cargo with a project configuration that \
                  replaces a locked crate with files the project chose (`paths`, a directory \
-                 or local-registry source, a change to ward's {} source), names a \
-                 credential provider, adds `--config` or `-Z` through an alias, or sets a \
-                 dynamic-loader or ward-forced variable in `[env]`, since no setting of \
-                 ward's can undo any of these. Remove {} (a `[patch]` table in Cargo.toml \
-                 overrides a crate where the lock records it, a network registry mirror \
-                 stays allowed, and credential providers belong in your own \
-                 ~/.cargo/config.toml)",
+                 or local-registry source, a registry or index that is not an https, ssh or \
+                 git URL, a change to ward's {} source), names a credential provider, adds \
+                 `--config` or `-Z` through an alias, or sets a dynamic-loader or \
+                 ward-forced variable in `[env]`, since no setting of ward's can undo any of these. \
+                 Remove {} (a `[patch]` table in Cargo.toml overrides a crate where the \
+                 lock records it, a registry mirror over https stays allowed, and \
+                 credential providers belong in your own ~/.cargo/config.toml)",
                 file.real.display(),
                 found.join(", "),
                 VENDOR_SOURCE,
@@ -136,6 +146,11 @@ fn unneutralized_keys(table: &toml::Table, sources: &SourceGraph) -> Vec<String>
             found.push(format!("alias.{name}"));
         }
     }
+    for (key, url) in url_settings(table) {
+        if !network_url(url) {
+            found.push(key);
+        }
+    }
     let forced = forced_env_names();
     for name in section("env").into_iter().flatten().map(|(name, _)| name) {
         if name.starts_with("LD_")
@@ -146,6 +161,92 @@ fn unneutralized_keys(table: &toml::Table, sources: &SourceGraph) -> Vec<String>
         }
     }
     found
+}
+
+/// Every registry, index and source URL a config table sets, with its key
+/// as cargo spells it: `registry.index`, `registries.<name>.index`, and a
+/// `[source.<name>]`'s `registry` and `git`.
+fn url_settings(table: &toml::Table) -> Vec<(String, &str)> {
+    let section = |name: &str| table.get(name).and_then(|value| value.as_table());
+    fn text<'t>(row: &'t toml::Table, key: &str) -> Option<&'t str> {
+        row.get(key).and_then(|value| value.as_str())
+    }
+    let mut found = Vec::new();
+    if let Some(url) = section("registry").and_then(|registry| text(registry, "index")) {
+        found.push(("registry.index".to_string(), url));
+    }
+    for (name, row) in section("registries").into_iter().flatten() {
+        if let Some(url) = row.as_table().and_then(|row| text(row, "index")) {
+            found.push((format!("registries.{name}.index"), url));
+        }
+    }
+    for (name, row) in section("source").into_iter().flatten() {
+        let Some(row) = row.as_table() else {
+            continue;
+        };
+        for key in ["registry", "git"] {
+            if let Some(url) = text(row, key) {
+                found.push((format!("source.{name}.{key}"), url));
+            }
+        }
+    }
+    found
+}
+
+/// Whether a registry, index or source URL is fetched over the network:
+/// `https://` or `sparse+https://`, or a git index over `ssh://` or
+/// `git://` whose host does not look like an option (ssh would take it as
+/// one, [`gitsrc::option_looking_authority`](crate::kernel::gitsrc::option_looking_authority)).
+/// The scheme is matched in any case, as cargo's URL parser lowercases it.
+pub fn network_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("sparse+https://") {
+        return true;
+    }
+    (lower.starts_with("ssh://") || lower.starts_with("git://"))
+        && !crate::kernel::gitsrc::option_looking_authority(url)
+}
+
+/// `host-git-transport` for each git index or source the files reach over
+/// ssh, as a git dependency over ssh records it
+/// ([`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception)):
+/// cargo's git dials it with this machine's ssh configuration and agent,
+/// not through the proxy. `git://` offers no credential and records
+/// nothing, as for a git dependency. The sync and the resolution door
+/// record what this returns; it does not judge the URL (a refused one is
+/// refused by [`refuse_unneutralized_settings`] first).
+pub fn index_transports(files: &[ConfigFile]) -> Vec<crate::kernel::policy::Exception> {
+    let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
+    for file in files {
+        for (_, url) in url_settings(&file.table) {
+            // The scheme in any case, as cargo reads it.
+            let Some(rest) = url.get(6..).filter(|_| {
+                url.get(..6)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
+            }) else {
+                continue;
+            };
+            let source = crate::kernel::gitsrc::GitSource {
+                url: format!("ssh://{rest}"),
+                commit: "0".repeat(40),
+                subdirectory: None,
+            };
+            if let Some(exception) = crate::kernel::gitsrc::transport_exception(&source) {
+                if !found.contains(&exception) {
+                    found.push(exception);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Record [`index_transports`] into the current attribution.
+pub fn record_index_transports(files: &[ConfigFile]) -> io::Result<()> {
+    for exception in index_transports(files) {
+        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
+    Ok(())
 }
 
 /// Every `[source.<name>]` the files define, so a `replace-with` chain can

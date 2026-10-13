@@ -45,7 +45,7 @@ pub fn is_safe_component(value: &str) -> bool {
 /// `normalize_url` turns `-oProxyCommand=x:repo` into
 /// `ssh://-oProxyCommand=x/repo`, so a leading dash has to be caught on the
 /// authority, not only on the whole URL.
-fn option_looking_authority(url: &str) -> bool {
+pub(crate) fn option_looking_authority(url: &str) -> bool {
     let Some((_, rest)) = url.split_once("://") else {
         return false;
     };
@@ -139,7 +139,7 @@ pub fn record_transport(source: &GitSource) -> io::Result<()> {
 
 /// The `host-git-transport` exception [`record_transport`] records for
 /// `source`, if its transport is one that records.
-fn transport_exception(source: &GitSource) -> Option<crate::kernel::policy::Exception> {
+pub(crate) fn transport_exception(source: &GitSource) -> Option<crate::kernel::policy::Exception> {
     let detail = if source.url.starts_with("ssh://") {
         "fetched over ssh from this machine, offering its ssh agent's keys under its ssh \
          configuration"

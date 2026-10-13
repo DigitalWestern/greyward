@@ -465,6 +465,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
     locked name. A project vendored with `cargo vendor` must drop that config: Greyward
     vendors the lock itself. A network mirror (`[source.<name>] registry`, a chain of them)
     stays allowed, since cargo checks each downloaded crate against the lock's checksum;
+  - a registry, index or source URL that is not `https://` or `sparse+https://`, or a git
+    index over `ssh://` or `git://`: a `file://` or path index (and the archives its
+    `config.json` points at) is read without Greyward's proxy, so its index and git checks never
+    run. `http://` mirrors are refused too. An ssh index records `host-git-transport`, as an
+    ssh git dependency does;
   - an `[alias]` whose expansion holds `--config` or `-Z`, which `ward run`'s wrapper would
     not see (it refuses `--config` on the command line);
   - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`) or a variable Greyward
@@ -474,7 +479,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `ward attest` also refuses a lock when `cargo metadata` shows a crate the lock pins to a
   registry or a commit read from anywhere but cargo's own download of it. Metadata prints no
   checksum and keeps the registry's source id for a directory replacement, so where cargo
-  read the crate is the check. `ward run` checks from the directory it starts in up to the
+  read the crate is the check. It also refuses a lock whose registry is not a network one,
+  since a manifest's `registry-index = "file://..."` reaches a file index with no config. `ward run` checks from the directory it starts in up to the
   workspace root, and the project's `.greyward/cargo-home` config, which is cargo's home
   there, not the directories above the workspace. Authenticated alternative registries fail, as the
   sandbox gets no token. Path dependencies outside the workspace root are found from the

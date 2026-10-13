@@ -471,7 +471,10 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
-pub use super::cargo_settings::{forced_env_names, refuse_unneutralized_settings};
+pub use super::cargo_settings::{
+    forced_env_names, index_transports, network_url, record_index_transports,
+    refuse_unneutralized_settings,
+};
 
 /// [`refuse_unneutralized_settings`] for cargo's configuration in each of
 /// `dirs`, every file read through `bound` ([`config_files`]).
@@ -1291,7 +1294,11 @@ fn run_cargo_with(
     );
     // The lock root is where cargo starts, and inside the sandbox the only
     // directory of its configuration chain that holds the project's files.
-    refuse_project_config([run.lock_root], &Bound::new(run.lock_root)?)?;
+    // An ssh index there is this machine's git transport, recorded as a
+    // git dependency's is.
+    let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
+    refuse_unneutralized_settings(&files)?;
+    record_index_transports(&files)?;
     let registries = configured_registries(run.lock_root)?;
     let mut confined = cargo_confined(&run, publish, &registries)?;
     if let Some(homes) = homes {
@@ -1947,6 +1954,43 @@ mod tests {
                 "[env]\nCARGO_HOME = \"evil\"\n".to_string(),
                 "env.CARGO_HOME",
             ),
+            // A registry, index or source read from files rather than over
+            // the network: git and cargo read them without the proxy, so no
+            // index or git check of ward's sees them.
+            (
+                "[source.crates-io]\nreplace-with = \"filereg\"\n\
+                 [source.filereg]\nregistry = \"file:///project/index\"\n"
+                    .to_string(),
+                "source.filereg.registry",
+            ),
+            (
+                "[registries.evil]\nindex = \"file:///project/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registries.evil]\nindex = \"/project/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registries.evil]\nindex = \"sparse+file:///project/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registry]\nindex = \"FILE:///project/index\"\n".to_string(),
+                "registry.index",
+            ),
+            (
+                "[source.g]\ngit = \"file:///project/repo\"\n".to_string(),
+                "source.g.git",
+            ),
+            (
+                "[registries.evil]\nindex = \"http://evil.test/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registries.evil]\nindex = \"ssh://-oProxyCommand=evil/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
         ] {
             let error = check(&text).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{key}");
@@ -1996,12 +2040,56 @@ mod tests {
              [registry]\ndefault = \"internal\"\n"
                 .to_string(),
             "[alias]\nt = \"test --workspace\"\nr = [\"run\", \"--release\"]\n".to_string(),
+            // Network indexes: https, sparse over https, and a git index
+            // over ssh or git.
+            "[registries.a]\nindex = \"https://git.internal.test/index\"\n\
+             [registries.b]\nindex = \"ssh://git@git.internal.test/index\"\n\
+             [registries.c]\nindex = \"git://git.internal.test/index\"\n\
+             [registry]\nindex = \"https://github.com/rust-lang/crates.io-index\"\n\
+             [source.g]\ngit = \"https://git.internal.test/repo\"\n"
+                .to_string(),
             "[env]\nMY_SETTING = \"1\"\nOPENSSL_DIR = { value = \"/opt\", force = true }\n"
                 .to_string(),
             String::new(),
         ] {
             check(&allowed).unwrap_or_else(|error| panic!("{allowed}: {error}"));
         }
+    }
+
+    /// A git index over ssh is recorded as `host-git-transport`, as a git
+    /// dependency over ssh is: cargo's git reaches it with this machine's
+    /// ssh configuration and agent, not through the proxy. https and git
+    /// indexes record nothing.
+    #[test]
+    fn an_ssh_index_is_a_host_git_transport() {
+        let temp = TempDir::named("cargo-index-transport");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[registries.a]\nindex = \"ssh://git@git.internal.test/index\"\n\
+             [registries.b]\nindex = \"git://git.internal.test/index\"\n\
+             [registries.c]\nindex = \"sparse+https://internal.test/\"\n\
+             [source.m]\nregistry = \"ssh://git@git.internal.test/mirror\"\n",
+        )
+        .unwrap();
+        let files = config_files(&root, &Bound::new(&root).unwrap()).unwrap();
+        let found: Vec<(String, String)> = index_transports(&files)
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "ssh://git@git.internal.test/index",
+                "ssh://git@git.internal.test/mirror"
+            ]
+            .map(|url| (
+                crate::kernel::policy::HOST_GIT_TRANSPORT.to_string(),
+                url.to_string()
+            ))
+            .to_vec()
+        );
     }
 
     /// The door refuses a project credential provider before cargo starts:

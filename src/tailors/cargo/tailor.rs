@@ -56,11 +56,15 @@ fn realize_and_project(
     workspace.check_still_named()?;
     // Refused here as well as where cargo starts, so a sync stops on it
     // rather than leave a cargo-home that `ward run` and `ward build` refuse.
-    cargo::refuse_project_cargo_config(
+    // An ssh index the configuration names is recorded into the sync's
+    // closure, as a git dependency's transport is.
+    for exception in cargo::refuse_project_cargo_config(
         workspace.path(),
         workspace.path(),
         Some(&workspace.path().join(".greyward/cargo-home")),
-    )?;
+    )? {
+        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
     if fresh {
         workspace.remove_dir_all(Path::new(".greyward/cargo-home"))?;
     }

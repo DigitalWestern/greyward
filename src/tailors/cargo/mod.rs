@@ -226,14 +226,18 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
 /// project's own (`.greyward/cargo-home`, under `ward run`): cargo reads
 /// `config.toml` and `config` there as well, so they are checked the same
 /// way. Each file is followed wherever it leads, as the cargo that reads
-/// it follows it; only the signing key is refused.
+/// it follows it; only the signing key is refused. Returns the
+/// `host-git-transport` exceptions of the ssh indexes the files name
+/// ([`cargo_door::index_transports`]), for a sync to record; `ward run`
+/// and the offline build have no attribution and read none.
 ///
 /// [`cargo_door::refuse_unneutralized_settings`]: crate::kernel::provider::cargo_door::refuse_unneutralized_settings
+/// [`cargo_door::index_transports`]: crate::kernel::provider::cargo_door::index_transports
 pub(crate) fn refuse_project_cargo_config(
     root: &Path,
     dir: &Path,
     home: Option<&Path>,
-) -> io::Result<()> {
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
     use crate::kernel::provider::cargo_door;
     let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (root, dir) = (real(root), real(dir));
@@ -252,7 +256,8 @@ pub(crate) fn refuse_project_cargo_config(
     if let Some(home) = home {
         files.extend(cargo_door::cargo_home_config_files(home, &bound)?);
     }
-    cargo_door::refuse_unneutralized_settings(&files)
+    cargo_door::refuse_unneutralized_settings(&files)?;
+    Ok(cargo_door::index_transports(&files))
 }
 
 /// Project Cargo with a writable home, forced directory-source replacement,

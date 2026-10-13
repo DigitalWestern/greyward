@@ -1,7 +1,5 @@
 //! `GREYWARD_STORE` handling (kernel store): the process-global lock tests
-//! take around the variable, and the home lookup the default location uses.
-
-use super::*;
+//! take around the variable. The home lookup is `kernel::home`.
 
 /// Serializes every test that sets or clears `GREYWARD_STORE`. The variable is
 /// process-global, so an unguarded test clearing it mid-run sends a guarded one
@@ -11,7 +9,3 @@ use super::*;
 /// failing test does not cascade into every other holder.
 #[cfg(test)]
 pub(crate) static STORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(super) fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").expect("HOME set"))
-}

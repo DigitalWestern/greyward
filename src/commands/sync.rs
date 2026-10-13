@@ -521,8 +521,8 @@ fn print_signing_notice(store: &store::Store) {
 /// Where the fix line tells a solo user to keep a key: next to the store's
 /// default home, so the same path works on every machine they set up.
 fn default_signing_key() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    home.unwrap_or_else(|| PathBuf::from("~"))
+    crate::kernel::home::home()
+        .unwrap_or_else(|_| PathBuf::from("~"))
         .join(".greyward")
         .join("signing.key")
 }

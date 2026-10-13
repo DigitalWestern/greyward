@@ -67,6 +67,8 @@ the tool's own arguments):
 ENVIRONMENT:
   GREYWARD_STORE           store root (default ~/.greyward/store)
   GREYWARD_STRICT=1        refuse every policy exception, like 'ward --strict'
+                           (1, true, yes; 0, false, no or empty for none;
+                           any other value exits 2)
   GREYWARD_POLICY          policy file used instead of ~/.greyward/policy.toml
   GREYWARD_SIGNING_KEY     key file that signs closures and resolution records
   NO_COLOR            plain output, like --no-color
@@ -725,7 +727,14 @@ judges the exceptions it records against the policy chain (`GREYWARD_POLICY` or
 project or `--policy` file can add denials and drop trusted keys, never the
 reverse; a `--policy` file that is missing or malformed is a usage error
 (exit 2), never ignored, so CI can tell an operator mistake from a denied
-build.
+build. The other settings fail closed the same way: a `GREYWARD_STRICT`
+value other than `1`, `true`, `yes`, `0`, `false`, `no` or empty (any case)
+is a usage error (exit 2) for every command but `doctor`, which reports it;
+a `~/.greyward/policy.toml` that is a symlink to a missing file is an error
+rather than no policy; and with `GREYWARD_POLICY` unset, a `HOME` that is
+unset or not absolute is refused, since an empty one would make the
+project's own `.greyward/policy.toml` the machine policy. `HOME` is held to
+the same rule wherever ward reads it: the store's default location and `x`.
 
 What a pass proves: every closure file carries a valid signature from a key
 the machine policy trusts (when the policy has a `[signing]` table; see
@@ -1140,8 +1149,30 @@ resolution tool unless metadata preparation or resolution is needed.
 
 **gc** follows every registered project closure and removes unreferenced
 store objects, stale artifacts (retention `--keep-days <n>`), and stale
-staging; objects touched in the last ten minutes are always kept so a
-concurrent sync cannot lose one. Sharp edges:
+staging. A sweep holds the store's exclusive lease, so no sync, build or
+`ward run` works in the store while it runs, and none of them can lose an
+object to it; objects touched in the last ten minutes are kept as well, as a
+margin for a ward from before the lease. Sharp edges:
+
+- A sweep needs the store to itself. While another Greyward job holds the
+  store, `ward gc` removes nothing, prints `ward: cleanup skipped: a Greyward
+  job is using this store: <command> (pid <n>)` naming each job, and exits 0.
+  `ward run` holds its shared lease for as long as its child runs, because a
+  later sync rewrites the project's root record and only the lease keeps the
+  running env's objects in the store; so a long `ward run` (a dev server, a
+  notebook) keeps every `ward gc`, a cron one too, from reclaiming anything
+  until it exits. The other way round, a new `ward run` or sync waits while a
+  sweep runs. Each held lease leaves a one-line note under `<store>/jobs/`
+  that its own process removes; a note a killed ward left is removed by the
+  next one.
+
+- A ward killed while writing a project file can leave a temporary beside
+  it, named `.greyward-tmp.lk-<32 hex>` (a link's also has a `.lock` file).
+  The next publication into that directory removes it once it is ten
+  minutes old and the lock its writer held is free. Temporaries from wards
+  before this release (`.greyward-tmp.<32 hex>`, without `lk-`) are not
+  removed automatically and are safe to delete once no older ward is
+  running.
 
 - `--forget <key>...` removes protection records by the exact keys printed
   by `ward store roots` (`<40-hex key>  <path>`, one line each), matched
@@ -1186,7 +1217,13 @@ concurrent sync cannot lose one. Sharp edges:
   record, root and forest, and keeps the download cache, `backups/` and the
   run homes, so the next sync in each project rebuilds from the cache
   rather than the network where it can. It never reads the marker, so it
-  works on any store, readable or not. It refuses while another Greyward job is
+  works on any store, readable or not. Under `tmp/` it removes only the
+  temporaries ward names there. It refuses a directory that is not a store
+  at all: one with no current marker and nothing a ward stores (no empty
+  lease file, no object record that parses, nothing reached through a
+  link), such as a `GREYWARD_STORE` pointed at a home or a project by
+  mistake, even with a `format` file of its own. Every other command refuses that directory as well,
+  without a `fix:` line, and creates nothing in it. It refuses while another Greyward job is
   using the store, takes `--dry-run` (which lists what it would remove and
   writes nothing) and no other option. A reset that is interrupted leaves
   a store with no marker, which is still refused: run it again.

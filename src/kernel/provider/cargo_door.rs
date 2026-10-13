@@ -2053,6 +2053,29 @@ mod tests {
                 "[build]\nrustflags = [\"-Copt-level=2\", \"-Z\", \"x\"]\n".to_string(),
                 "build.rustflags",
             ),
+            // Short options cluster as getopts reads them: `-g` then `-Z`,
+            // its value the rest of the word or the next one; an unknown
+            // short option fails closed.
+            (
+                "[build]\nrustflags = [\"-gZcodegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-gZ\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-OgCcodegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-gC\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-gq\"]\n".to_string(),
+                "build.rustflags",
+            ),
             (
                 "[env]\nRUSTFLAGS = \"-Copt-level=2 -Zcodegen-backend=x\"\n".to_string(),
                 "env.RUSTFLAGS",
@@ -2134,6 +2157,11 @@ mod tests {
              rustflags = \"--remap-path-prefix=/home/x/codegen-backend=/src\"\n\
              [env]\nRUSTFLAGS = \"--remap-path-prefix /x/codegen-backend=/src -L /x/-Zdir\"\n\
              CARGO_ENCODED_RUSTFLAGS = \"--cfg\\u001ffeature=\\\"codegen-backend\\\"\"\n"
+                .to_string(),
+            // Flag-only short options cluster; a value-taking one keeps
+            // the rest of its word, or the next word, as its value.
+            "[build]\nrustflags = [\"-gO\", \"-Dwarnings\", \"-L\", \"native=/x/-Zdir\", \
+             \"-lstatic=z\", \"-Wunused\", \"-Cdebuginfo=1\"]\n"
                 .to_string(),
             "[env]\nMY_SETTING = \"1\"\nOPENSSL_DIR = { value = \"/opt\", force = true }\n"
                 .to_string(),

@@ -24,13 +24,21 @@ pub(super) struct HeldRoot {
     /// Where the sandbox shows it: the canonical path it was opened at.
     pub(super) dest: PathBuf,
     dir: fs::File,
-    /// The descriptor number bubblewrap receives it at, for a root it
-    /// binds (`None` for a working directory that is no declared root).
+    /// Whether bubblewrap binds it (not for a working directory that is no
+    /// declared root).
+    bound: bool,
+    /// The descriptor number bubblewrap receives it at, once `pin` chose it.
     target: Option<RawFd>,
+    /// Whether `target` is only the child's (`pin`'s fallback), so the
+    /// descriptor is moved onto it there.
+    moved: bool,
+    /// The copy of `dir` that holds `target` here, when `dir` is elsewhere.
+    _pinned: Option<std::os::fd::OwnedFd>,
 }
 
-/// The first descriptor number a held root is passed at. The shell that
-/// closes them reads one digit, so at most seven are passed.
+/// The descriptor numbers a held root is passed at. The shell that closes
+/// them reads one digit (dash: `exec 12<&-` is "exec: 12: not found"), so
+/// at most seven are passed.
 const HELD_FD_FIRST: RawFd = 3;
 const HELD_FD_LAST: RawFd = 9;
 /// The lowest number the `--args` descriptor may have: past every held
@@ -41,7 +49,7 @@ const ARGS_FD_FLOOR: RawFd = HELD_FD_LAST + 1;
 impl HeldRoots {
     pub(super) fn resolve(sandbox: &Sandbox<'_>, cwd: &Path) -> io::Result<Self> {
         let mut held = Self::default();
-        let mut next = HELD_FD_FIRST;
+        let mut bound = 0;
         for path in sandbox.read.iter().chain(&sandbox.write) {
             if held.find(path).is_some() {
                 continue;
@@ -49,7 +57,7 @@ impl HeldRoots {
             let Some((dir, dest)) = crate::kernel::fsroot::held_root_for(path)? else {
                 continue;
             };
-            if next > HELD_FD_LAST {
+            if bound > HELD_FD_LAST - HELD_FD_FIRST {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!(
@@ -62,9 +70,12 @@ impl HeldRoots {
                 requested: path.to_path_buf(),
                 dest,
                 dir,
-                target: Some(next),
+                bound: true,
+                target: None,
+                moved: false,
+                _pinned: None,
             });
-            next += 1;
+            bound += 1;
         }
         if held.find(cwd).is_none() {
             if let Some((dir, dest)) = crate::kernel::fsroot::held_root_for(cwd)? {
@@ -72,7 +83,10 @@ impl HeldRoots {
                     requested: cwd.to_path_buf(),
                     dest,
                     dir,
+                    bound: false,
                     target: None,
+                    moved: false,
+                    _pinned: None,
                 });
             }
         }
@@ -126,11 +140,63 @@ impl HeldRoots {
         }
     }
 
-    /// `(source, target)` for every root bubblewrap binds.
-    pub(super) fn passed(&self) -> Vec<(RawFd, RawFd)> {
+    /// Choose the number each bound root is passed at, just before the
+    /// spawn. A number this process holds open cannot be one std allocates
+    /// for the spawn's own pipes (its error channel among them), so nothing
+    /// in the child is moved onto it: `dir` itself when it is numbered 3 to
+    /// 9, else a close-on-exec copy at the lowest free number from 3, kept
+    /// open here. When 3 to 9 are all taken here, std's pipes land above
+    /// them too, and the descriptor is moved onto a number in the child as
+    /// before; only another thread closing one of them before the spawn
+    /// could then put a pipe there.
+    pub(super) fn pin(&mut self) -> io::Result<()> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let mut taken = Vec::new();
+        for root in self.roots.iter_mut().filter(|root| root.bound) {
+            let fd = root.dir.as_raw_fd();
+            let number = if (HELD_FD_FIRST..=HELD_FD_LAST).contains(&fd) {
+                fd
+            } else {
+                // SAFETY: F_DUPFD_CLOEXEC only reads `dir`, open here.
+                let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, HELD_FD_FIRST) };
+                if copy < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: `copy` was just duplicated and nothing else owns it.
+                let copy = unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) };
+                if copy.as_raw_fd() <= HELD_FD_LAST {
+                    let number = copy.as_raw_fd();
+                    root._pinned = Some(copy);
+                    number
+                } else {
+                    root.moved = true;
+                    (HELD_FD_FIRST..=HELD_FD_LAST)
+                        .find(|number| !taken.contains(number))
+                        .expect("at most seven roots are bound")
+                }
+            };
+            taken.push(number);
+            root.target = Some(number);
+        }
+        Ok(())
+    }
+
+    /// The numbers the bound roots keep in the child as they are here.
+    pub(super) fn in_place(&self) -> Vec<RawFd> {
+        self.roots
+            .iter()
+            .filter(|root| !root.moved)
+            .filter_map(|root| root.target)
+            .collect()
+    }
+
+    /// `(source, target)` for every bound root moved onto its number in
+    /// the child (`pin`'s fallback).
+    pub(super) fn moved(&self) -> Vec<(RawFd, RawFd)> {
         use std::os::fd::AsRawFd as _;
         self.roots
             .iter()
+            .filter(|root| root.moved)
             .filter_map(|root| Some((root.dir.as_raw_fd(), root.target?)))
             .collect()
     }
@@ -206,10 +272,12 @@ pub(crate) fn pass_fds(command: &mut Command, fds: Vec<(RawFd, RawFd)>) {
 
 #[cfg(test)]
 thread_local! {
-    /// An engine `Sandbox::bwrap` runs on this thread in place of the
-    /// preflight's, for a test of an engine gone after the preflight.
-    pub(super) static ENGINE_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
+    /// Called by `Sandbox::bwrap` on this thread once the roots are
+    /// resolved, for the engine it runs in place of the preflight's: a test
+    /// of an engine gone after the preflight, which may change this
+    /// process's descriptors first.
+    pub(super) static ENGINE_OVERRIDE: std::cell::RefCell<Option<Box<dyn FnMut() -> PathBuf>>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Refuse a command line holding a NUL byte: in the `--args` data it
@@ -299,19 +367,28 @@ pub(super) fn args_file(args: &[std::ffi::OsString]) -> io::Result<fs::File> {
 /// would report none. Returns the number.
 pub(super) fn pass_in_place(command: &mut Command, file: &fs::File) -> RawFd {
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::process::CommandExt as _;
     let fd = file.as_raw_fd();
-    // SAFETY: the closure calls only fcntl, async-signal-safe, on a
-    // descriptor `file` keeps open until the child is spawned.
+    keep_in_place(command, vec![fd]);
+    fd
+}
+
+/// Clear close-on-exec on each of `fds` in the child, after
+/// `bwrap_command` set it on everything: each reaches the command at the
+/// number it has here, which this process keeps open until the spawn.
+pub(super) fn keep_in_place(command: &mut Command, fds: Vec<RawFd>) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: the closure calls only fcntl, async-signal-safe, on a vector
+    // allocated before fork.
     unsafe {
         command.pre_exec(move || {
-            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                return Err(io::Error::last_os_error());
+            for fd in &fds {
+                if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             Ok(())
         });
     }
-    fd
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -46,19 +46,28 @@ struct LockSource {
     /// sha256 hex of the requirements text uv was handed and, when uv
     /// reads a project file, every file of its include tree.
     inputs: String,
+    /// For a dynamic setup.py whose probe failed: the requirements file
+    /// the lock was compiled from instead, relative to the project. Its
+    /// name is part of `inputs` too ([`setup_source_digest`]).
+    source: Option<String>,
 }
 
 impl LockSource {
     /// The header command uv writes into the lock: ward's own, then what it
     /// was compiled from, after a `#` so it reads as a note.
     fn command(&self) -> String {
-        format!(
+        let mut command = format!(
             "{} # {LOCK_SOURCE} platform={} python={} inputs=sha256:{}",
             python::door::COMPILE_COMMAND,
             self.platform,
             self.python,
             self.inputs
-        )
+        );
+        if let Some(source) = &self.source {
+            command.push_str(" source=");
+            command.push_str(&encode_source(source));
+        }
+        command
     }
 
     /// The source a lock's header names, or `None` for a lock without
@@ -74,13 +83,21 @@ impl LockSource {
         let platform = fields.next()?.strip_prefix("platform=")?;
         let python = fields.next()?.strip_prefix("python=")?;
         let inputs = fields.next()?.strip_prefix("inputs=sha256:")?;
-        if fields.next().is_some() || [platform, python, inputs].contains(&"") {
+        let source = match fields.next() {
+            Some(field) => Some(decode_source(field.strip_prefix("source=")?)?),
+            None => None,
+        };
+        if fields.next().is_some()
+            || [platform, python, inputs].contains(&"")
+            || source.as_deref() == Some("")
+        {
             return None;
         }
         Some(Self {
             platform: platform.into(),
             python: python.into(),
             inputs: inputs.into(),
+            source,
         })
     }
 
@@ -97,12 +114,72 @@ impl LockSource {
                 "it was compiled for Python {}, and this project now uses {}",
                 self.python, current.python
             ))
+        } else if self.source != current.source {
+            let named = |source: &Option<String>| {
+                source
+                    .clone()
+                    .unwrap_or_else(|| "what setup.py egg_info gives".to_string())
+            };
+            Some(format!(
+                "it was compiled from {}, and the requirements now come from {}",
+                named(&self.source),
+                named(&current.source)
+            ))
         } else if self.inputs != current.inputs {
             Some("the requirements changed after it was compiled".into())
         } else {
             None
         }
     }
+}
+
+/// A project-relative path as one space-free header field: every byte
+/// outside `[A-Za-z0-9._/+-]` as `%XX`.
+fn encode_source(source: &str) -> String {
+    let mut encoded = String::new();
+    for byte in source.bytes() {
+        if byte.is_ascii_alphanumeric() || b"._/+-".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// [`encode_source`] read back, or `None` for a field it never writes.
+fn decode_source(field: &str) -> Option<String> {
+    let mut bytes = Vec::new();
+    let mut rest = field.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &tail[2..];
+        } else if byte.is_ascii_alphanumeric() || b"._/+-".contains(&byte) {
+            bytes.push(byte);
+            rest = tail;
+        } else {
+            return None;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The `inputs` digest of a dynamic setup.py's lock: the files that
+/// declare its requirements ([`setup_inputs_digest`]) and, when its probe
+/// failed, the requirements file the lock was compiled from instead.
+fn setup_source_digest(declared: &str, fallback: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"setup-source/1\0");
+    hasher.update(declared.as_bytes());
+    hasher.update([0]);
+    if let Some(fallback) = fallback {
+        hasher.update(b"fallback\0");
+        hasher.update(fallback.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 pub fn planner_input_hash(
@@ -245,6 +322,9 @@ struct Inputs {
     /// For a dynamic setup.py: the digest of the files that declare its
     /// requirements, which its lock's source names ([`setup_inputs_digest`]).
     setup_inputs: Option<String>,
+    /// For a dynamic setup.py whose probe failed: the requirements file
+    /// its lock is compiled from instead, which the header names.
+    setup_fallback: Option<String>,
     /// The committed lock names these setup files as its source, so the
     /// probe did not run: the requirements are the lock's.
     fresh_setup_lock: bool,
@@ -308,54 +388,105 @@ impl Inputs {
         let mut manifest = manifest::discover(platform, project, version)?;
         let mut selection = pyselect::locked(platform, version, &manifest.python)?;
         let mut setup_inputs = None;
+        let mut setup_fallback: Option<String> = None;
         let mut fresh_setup_lock = false;
+        // setup.py's requirements came from its metadata cache.
+        let mut setup_read = false;
+        // The permission to use what setup.py gave was checked already.
+        let mut attributed = false;
         if manifest.requires_setup() {
-            let source = LockSource {
-                platform: platform.triple().to_string(),
-                python: version.to_string(),
-                inputs: setup_inputs_digest(project, &manifest)?,
-            };
+            let declared = setup_inputs_digest(project, &manifest)?;
             let lock = match reading {
                 Reading::Plan => project.read_input_string(Path::new(LOCK))?,
                 Reading::Prepare | Reading::Probe => {
                     project.read_input_string(Path::new(LOCK)).ok().flatten()
                 }
             };
-            match lock.as_deref().and_then(LockSource::of_lock) {
-                Some(found) if found == source => {
-                    // A direct reference is recorded from the requirements
-                    // setup.py states, which only the probe gives; a lock
-                    // with none plans with no probe at all.
-                    fresh_setup_lock = reading != Reading::Probe
-                        && lock
-                            .as_deref()
-                            .is_some_and(|lock| pypi::skippable_specs(lock).is_empty());
+            let found = lock.as_deref().and_then(LockSource::of_lock);
+            // A fallback the header names counts only when it is the file
+            // the probe falls back on here.
+            let fallback = match found.as_ref().and_then(|found| found.source.clone()) {
+                Some(named) if manifest.dynamic_dependencies => {
+                    manifest::resolution_requirements_source(project)?
+                        .map(|path| {
+                            path.strip_prefix(project.path())
+                                .unwrap_or(&path)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .filter(|candidate| *candidate == named)
+                }
+                _ => None,
+            };
+            let expected = LockSource {
+                platform: platform.triple().to_string(),
+                python: version.to_string(),
+                inputs: setup_source_digest(&declared, fallback.as_deref()),
+                source: fallback,
+            };
+            match found {
+                Some(found) if found == expected => {
+                    setup_fallback = expected.source.clone();
+                    let direct = lock
+                        .as_deref()
+                        .is_some_and(|lock| !pypi::skippable_specs(lock).is_empty());
+                    match reading {
+                        // The compile input is what the probe gives.
+                        Reading::Probe => {}
+                        // A direct reference is recorded from setup.py's own
+                        // words, which `prepare` probes for, as before.
+                        Reading::Prepare if direct && setup_fallback.is_none() => {}
+                        // Planning reads them from the metadata cache
+                        // `prepare` wrote, and never runs setup.py: with no
+                        // cache (a fresh checkout under --frozen), the lock
+                        // is used as it is.
+                        Reading::Plan if direct && setup_fallback.is_none() => {
+                            setup_read = manifest.read_setup_cache(project, selected, door)?;
+                            attributed = true;
+                            fresh_setup_lock = !setup_read;
+                        }
+                        _ => fresh_setup_lock = true,
+                    }
                 }
                 Some(found) if reading == Reading::Plan => {
                     let why = found
-                        .difference(&source)
+                        .difference(&expected)
                         .unwrap_or_else(|| "its source differs".to_string());
                     return Err(stale_lock(project, &manifest.input, &why));
                 }
                 _ => {}
             }
-            setup_inputs = Some(source.inputs);
+            setup_inputs = Some(declared);
         }
         if fresh_setup_lock {
             // The lock was compiled from what setup.py egg_info gave for
             // these very files, so it is read without running the project's
             // code again. It still came from that code: the permission is
             // checked as a metadata cache hit checks it.
-            door.attribution().record(
-                crate::kernel::policy::RESOLUTION_BUILD,
-                "setup.py",
-                "dependencies prepared by setup.py egg_info (confined), read from the \
-                 requirements.lock.txt compiled from these setup files",
-            )?;
+            if !attributed {
+                door.attribution().record(
+                    crate::kernel::policy::RESOLUTION_BUILD,
+                    "setup.py",
+                    "dependencies prepared by setup.py egg_info (confined), read from the \
+                     requirements.lock.txt compiled from these setup files",
+                )?;
+            }
+            if setup_fallback.is_some() {
+                // Compiled from the requirements file the probe fell back
+                // on: read it, with nothing run, for its hash pins.
+                if let Some(mut fallback) = manifest::dynamic_requirements_fallback(project)? {
+                    fallback.python = manifest.python.clone();
+                    manifest = fallback;
+                }
+            }
             manifest
                 .provenance
                 .push_str(" (dependencies from requirements.lock.txt)");
+        } else if setup_read {
+            selection = pyselect::locked(platform, version, &manifest.python)?;
         } else if manifest.requires_setup() {
+            // The probe decides afresh whether it falls back.
+            setup_fallback = None;
             let dynamic_dependencies = manifest.dynamic_dependencies;
             let completed = match reading {
                 Reading::Plan => manifest.read_setup(project, selected, door),
@@ -380,6 +511,7 @@ impl Inputs {
                     warn_setup_fallback(&error);
                 }
                 fallback.python = manifest.python.clone();
+                setup_fallback = Some(fallback.input.clone());
                 manifest = fallback;
             }
             // The probe may have added a `requires-python` the lock never
@@ -408,6 +540,7 @@ impl Inputs {
             resolver_source,
             as_is,
             setup_inputs,
+            setup_fallback,
             fresh_setup_lock,
         })
     }
@@ -493,11 +626,12 @@ impl Inputs {
         platform: Platform,
     ) -> io::Result<LockSource> {
         use sha2::{Digest, Sha256};
-        if let Some(inputs) = &self.setup_inputs {
+        if let Some(declared) = &self.setup_inputs {
             return Ok(LockSource {
                 platform: platform.triple().to_string(),
                 python: selected.version("cpython")?.to_string(),
-                inputs: inputs.clone(),
+                inputs: setup_source_digest(declared, self.setup_fallback.as_deref()),
+                source: self.setup_fallback.clone(),
             });
         }
         let mut hasher = Sha256::new();
@@ -518,6 +652,7 @@ impl Inputs {
             platform: platform.triple().to_string(),
             python: selected.version("cpython")?.to_string(),
             inputs: hex::encode(hasher.finalize()),
+            source: None,
         })
     }
 
@@ -738,6 +873,11 @@ pub fn read_plan(
             let lock = require_lock(project)?;
             let source = inputs.lock_source(project, selected, platform)?;
             inputs.check_lock(project, &lock, &source, platform)?;
+            if inputs.fresh_setup_lock && inputs.setup_fallback.is_none() {
+                // setup.py did not run, so its direct references are the
+                // ones the lock compiled from it holds.
+                record_skippable_specs(&lock)?;
+            }
             // The plan cache keys on the narrowed text, so a plan made from
             // the lock's wider set of files is never reused.
             let pins = inputs.hash_pins(project, version, platform)?;
@@ -1118,6 +1258,7 @@ mod tests {
             platform: "x86_64-unknown-linux-gnu".into(),
             python: "3.12.14".into(),
             inputs: "ab".repeat(32),
+            source: None,
         };
         let header = format!(
             "# This file was autogenerated by uv via the following command:\n#    {}\n",
@@ -1159,6 +1300,28 @@ mod tests {
             inputs.difference(&source).unwrap(),
             "the requirements changed after it was compiled"
         );
+        // A setup.py fallback is named, a space and all, and read back.
+        let fallback = LockSource {
+            source: Some("requirements/cpu 2.txt".into()),
+            ..source.clone()
+        };
+        assert!(fallback
+            .command()
+            .ends_with(" source=requirements/cpu%202.txt"));
+        let header = format!("#    {}\n", fallback.command());
+        assert_eq!(LockSource::of_lock(&header), Some(fallback.clone()));
+        assert_eq!(
+            fallback.difference(&source).unwrap(),
+            "it was compiled from requirements/cpu 2.txt, and the requirements now come \
+             from what setup.py egg_info gives"
+        );
+        for other in [
+            "#    ward # lock-source/1 platform=a python=b inputs=sha256:c source=\n",
+            "#    ward # lock-source/1 platform=a python=b inputs=sha256:c origin=x\n",
+            "#    ward # lock-source/1 platform=a python=b inputs=sha256:c source=a%2\n",
+        ] {
+            assert_eq!(LockSource::of_lock(other), None, "{other}");
+        }
     }
 
     #[test]
@@ -1876,7 +2039,8 @@ mod tests {
         let source = LockSource {
             platform: platform.triple().to_string(),
             python: version,
-            inputs: setup_inputs_digest(&project, &manifest).unwrap(),
+            inputs: setup_source_digest(&setup_inputs_digest(&project, &manifest).unwrap(), None),
+            source: None,
         };
         std::fs::write(
             dir.join(LOCK),
@@ -1928,6 +2092,127 @@ mod tests {
         );
         assert_eq!(tree(&dir), before_stale, "a stale check wrote a file");
         assert_ne!(before, before_stale);
+    }
+
+    /// A dynamic project whose setup.py probe fails is locked from the
+    /// requirements file it falls back on, and the header names that file.
+    /// Reusing the lock reads it again, with nothing run, so its hash pins
+    /// still narrow what planning may pick (#689).
+    #[test]
+    fn a_setup_py_lock_from_its_fallback_keeps_the_fallback_pins() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let temp = crate::kernel::testutil::TempDir::new();
+        let dir = temp.0.join("proj");
+        std::fs::create_dir_all(dir.join("requirements")).unwrap();
+        std::fs::write(
+            dir.join("pyproject.toml"),
+            "[project]\nname = \"pkg\"\nversion = \"1\"\ndynamic = [\"dependencies\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("setup.py"),
+            "from setuptools import setup\nsetup()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("requirements/cpu.txt"),
+            format!("six==1.* --hash=sha256:{a}\n"),
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&dir).unwrap();
+        let platform = Platform::host().unwrap();
+
+        // No lock, and the probe fails: the fallback is what is compiled.
+        let probed = planning_inputs(&dir).unwrap();
+        assert_eq!(
+            probed.setup_fallback.as_deref(),
+            Some("requirements/cpu.txt")
+        );
+        let source = probed.lock_source(&project, &selected(), platform).unwrap();
+        assert_eq!(source.source.as_deref(), Some("requirements/cpu.txt"));
+        let lock = format!("six==1.17.0 --hash=sha256:{a} --hash=sha256:{b}\n");
+        std::fs::write(
+            dir.join(LOCK),
+            format!(
+                "# This file was autogenerated by uv via the following command:\n#    {}\n{lock}",
+                source.command()
+            ),
+        )
+        .unwrap();
+
+        let reused = planning_inputs(&dir).unwrap();
+        assert!(reused.fresh_setup_lock);
+        assert_eq!(
+            reused.lock_source(&project, &selected(), platform).unwrap(),
+            source
+        );
+        let pins = reused.hash_pins(&project, "3.12.0", platform).unwrap();
+        assert_eq!(pins.len(), 1, "{pins:?}");
+        assert_eq!(pins[0].file, "requirements/cpu.txt");
+        assert_eq!(
+            pypi::narrow_to_pins(&lock, &pins),
+            format!("six==1.17.0 --hash=sha256:{a}\n")
+        );
+    }
+
+    /// A matching lock with a direct reference is planned from as it is:
+    /// setup.py never runs, so a frozen sync on a fresh checkout (no
+    /// metadata cache) uses the lock. `prepare` still runs setup.py for
+    /// it, to record the reference in setup.py's own words.
+    #[test]
+    fn a_setup_py_lock_with_a_direct_reference_plans_with_no_probe() {
+        let temp = crate::kernel::testutil::TempDir::new();
+        let dir = temp.0.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("setup.py"),
+            "from setuptools import setup\nsetup(name='pkg', install_requires=['six', \
+             'wheelpkg @ https://files.example/wheelpkg-1.0-py3-none-any.whl'])\n",
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&dir).unwrap();
+        let platform = Platform::host().unwrap();
+        let version = selected().version("cpython").unwrap().to_string();
+        let manifest = manifest::discover(platform, &project, &version).unwrap();
+        let source = LockSource {
+            platform: platform.triple().to_string(),
+            python: version,
+            inputs: setup_source_digest(&setup_inputs_digest(&project, &manifest).unwrap(), None),
+            source: None,
+        };
+        std::fs::write(
+            dir.join(LOCK),
+            format!(
+                "#    {}\nsix==1.17.0 --hash=sha256:{}\n\
+                 wheelpkg @ https://files.example/wheelpkg-1.0-py3-none-any.whl\n",
+                source.command(),
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        let before = tree(&dir);
+        let inputs = planning_inputs(&dir).unwrap();
+        assert!(inputs.fresh_setup_lock);
+        assert_eq!(
+            inputs.pins(&project).unwrap(),
+            Pins::Lock { repinned: false }
+        );
+        assert_eq!(tree(&dir), before, "planning wrote a file");
+
+        let store = store::Store::for_test(dir.with_extension("absent-store"));
+        let prepared = Inputs::discover(
+            &project,
+            &selected(),
+            &mut crate::kernel::testutil::DoorScope::new().door(
+                &store,
+                &crate::kernel::testutil::detached_lease().1,
+                platform,
+                DoorKind::Planner,
+            ),
+            false,
+            Reading::Prepare,
+        );
+        assert!(prepared.is_err(), "prepare did not run setup.py");
     }
 
     /// uv generates hashes without checking the ones its input wrote, so

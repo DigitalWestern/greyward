@@ -330,6 +330,105 @@ struct Inputs {
     fresh_setup_lock: bool,
 }
 
+/// What a dynamic setup.py's committed lock says before setup.py runs
+/// ([`SetupLock::check`]).
+#[derive(Debug, Default)]
+struct SetupLock {
+    /// The digest of the files that declare the requirements
+    /// ([`setup_inputs_digest`]).
+    inputs: Option<String>,
+    /// The requirements file a matching lock was compiled from instead.
+    fallback: Option<String>,
+    /// A matching lock is planned from with no probe.
+    fresh: bool,
+    /// setup.py's requirements came from its metadata cache.
+    read: bool,
+    /// The permission to use what setup.py gave was checked already.
+    attributed: bool,
+}
+
+impl SetupLock {
+    /// Check the committed lock of the setup.py `manifest` against the
+    /// files that declare its requirements, with nothing run. Planning
+    /// refuses a lock that names other inputs as stale; a matching one is
+    /// planned from as it is, or, for a direct reference, from setup.py's
+    /// metadata cache when there is one ([`Reading`]).
+    fn check(
+        project: &ProjectRoot,
+        selected: &Selected,
+        door: &mut ResolutionDoor<'_>,
+        manifest: &mut manifest::Manifest,
+        reading: Reading,
+    ) -> io::Result<Self> {
+        let platform = door.platform();
+        let version = selected.version("cpython")?;
+        let mut checked = Self::default();
+        let declared = setup_inputs_digest(project, manifest)?;
+        let lock = match reading {
+            Reading::Plan => project.read_input_string(Path::new(LOCK))?,
+            Reading::Prepare | Reading::Probe => {
+                project.read_input_string(Path::new(LOCK)).ok().flatten()
+            }
+        };
+        let found = lock.as_deref().and_then(LockSource::of_lock);
+        // A fallback the header names counts only when it is the file the
+        // probe falls back on here.
+        let fallback = match found.as_ref().and_then(|found| found.source.clone()) {
+            Some(named) if manifest.dynamic_dependencies => {
+                manifest::resolution_requirements_source(project)?
+                    .map(|path| {
+                        path.strip_prefix(project.path())
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .filter(|candidate| *candidate == named)
+            }
+            _ => None,
+        };
+        let expected = LockSource {
+            platform: platform.triple().to_string(),
+            python: version.to_string(),
+            inputs: setup_source_digest(&declared, fallback.as_deref()),
+            source: fallback,
+        };
+        match found {
+            Some(found) if found == expected => {
+                checked.fallback = expected.source.clone();
+                let direct = lock
+                    .as_deref()
+                    .is_some_and(|lock| !pypi::skippable_specs(lock).is_empty());
+                match reading {
+                    // The compile input is what the probe gives.
+                    Reading::Probe => {}
+                    // A direct reference is recorded from setup.py's own
+                    // words, which `prepare` probes for, as before.
+                    Reading::Prepare if direct && checked.fallback.is_none() => {}
+                    // Planning reads them from the metadata cache `prepare`
+                    // wrote, and never runs setup.py: with no cache (a
+                    // fresh checkout under --frozen), the lock is used as
+                    // it is.
+                    Reading::Plan if direct && checked.fallback.is_none() => {
+                        checked.read = manifest.read_setup_cache(project, selected, door)?;
+                        checked.attributed = true;
+                        checked.fresh = !checked.read;
+                    }
+                    _ => checked.fresh = true,
+                }
+            }
+            Some(found) if reading == Reading::Plan => {
+                let why = found
+                    .difference(&expected)
+                    .unwrap_or_else(|| "its source differs".to_string());
+                return Err(stale_lock(project, &manifest.input, &why));
+            }
+            _ => {}
+        }
+        checked.inputs = Some(declared);
+        Ok(checked)
+    }
+}
+
 /// What discovery is for, which decides when a dynamic setup.py runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reading {
@@ -387,77 +486,17 @@ impl Inputs {
         let version = selected.version("cpython")?;
         let mut manifest = manifest::discover(platform, project, version)?;
         let mut selection = pyselect::locked(platform, version, &manifest.python)?;
-        let mut setup_inputs = None;
-        let mut setup_fallback: Option<String> = None;
-        let mut fresh_setup_lock = false;
-        // setup.py's requirements came from its metadata cache.
-        let mut setup_read = false;
-        // The permission to use what setup.py gave was checked already.
-        let mut attributed = false;
-        if manifest.requires_setup() {
-            let declared = setup_inputs_digest(project, &manifest)?;
-            let lock = match reading {
-                Reading::Plan => project.read_input_string(Path::new(LOCK))?,
-                Reading::Prepare | Reading::Probe => {
-                    project.read_input_string(Path::new(LOCK)).ok().flatten()
-                }
-            };
-            let found = lock.as_deref().and_then(LockSource::of_lock);
-            // A fallback the header names counts only when it is the file
-            // the probe falls back on here.
-            let fallback = match found.as_ref().and_then(|found| found.source.clone()) {
-                Some(named) if manifest.dynamic_dependencies => {
-                    manifest::resolution_requirements_source(project)?
-                        .map(|path| {
-                            path.strip_prefix(project.path())
-                                .unwrap_or(&path)
-                                .to_string_lossy()
-                                .into_owned()
-                        })
-                        .filter(|candidate| *candidate == named)
-                }
-                _ => None,
-            };
-            let expected = LockSource {
-                platform: platform.triple().to_string(),
-                python: version.to_string(),
-                inputs: setup_source_digest(&declared, fallback.as_deref()),
-                source: fallback,
-            };
-            match found {
-                Some(found) if found == expected => {
-                    setup_fallback = expected.source.clone();
-                    let direct = lock
-                        .as_deref()
-                        .is_some_and(|lock| !pypi::skippable_specs(lock).is_empty());
-                    match reading {
-                        // The compile input is what the probe gives.
-                        Reading::Probe => {}
-                        // A direct reference is recorded from setup.py's own
-                        // words, which `prepare` probes for, as before.
-                        Reading::Prepare if direct && setup_fallback.is_none() => {}
-                        // Planning reads them from the metadata cache
-                        // `prepare` wrote, and never runs setup.py: with no
-                        // cache (a fresh checkout under --frozen), the lock
-                        // is used as it is.
-                        Reading::Plan if direct && setup_fallback.is_none() => {
-                            setup_read = manifest.read_setup_cache(project, selected, door)?;
-                            attributed = true;
-                            fresh_setup_lock = !setup_read;
-                        }
-                        _ => fresh_setup_lock = true,
-                    }
-                }
-                Some(found) if reading == Reading::Plan => {
-                    let why = found
-                        .difference(&expected)
-                        .unwrap_or_else(|| "its source differs".to_string());
-                    return Err(stale_lock(project, &manifest.input, &why));
-                }
-                _ => {}
-            }
-            setup_inputs = Some(declared);
-        }
+        let SetupLock {
+            inputs: setup_inputs,
+            fallback: mut setup_fallback,
+            fresh: fresh_setup_lock,
+            read: setup_read,
+            attributed,
+        } = if manifest.requires_setup() {
+            SetupLock::check(project, selected, door, &mut manifest, reading)?
+        } else {
+            SetupLock::default()
+        };
         if fresh_setup_lock {
             // The lock was compiled from what setup.py egg_info gave for
             // these very files, so it is read without running the project's

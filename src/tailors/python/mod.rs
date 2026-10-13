@@ -176,6 +176,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     };
     let wheel_plan = Plan {
         packages: vec![LockedPackage {
+            index: None,
             name: "example".into(),
             version: "1.0.0".into(),
             filename: "example-1.0.0-py3-none-any.whl".into(),

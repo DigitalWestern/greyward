@@ -886,14 +886,14 @@ mod tests {
         let reason = check_identity_grammar(&node_darwin_native).unwrap_err();
         assert!(reason.contains("Node native platform relation"), "{reason}");
 
-        let python_env = case_with_input(&linux, "python-env", Some("python-env/3"), "native_libs");
+        let python_env = case_with_input(&linux, "python-env", Some("python-env/4"), "native_libs");
         assert_relation_breaks(
             &python_env,
             &["pkg:matrix-python-native"],
             "Python environment native_libs/pkg relation",
         );
         let mut orphan_native =
-            case_with_input(&linux, "python-env", Some("python-env/3"), "pkg:example");
+            case_with_input(&linux, "python-env", Some("python-env/4"), "pkg:example");
         orphan_native
             .inputs
             .insert("native_libs".into(), "native-libs-object".into());
@@ -903,7 +903,7 @@ mod tests {
             "{reason}"
         );
         let mut python_darwin_native =
-            case_with_input(&darwin, "python-env", Some("python-env/3"), "pkg:example");
+            case_with_input(&darwin, "python-env", Some("python-env/4"), "pkg:example");
         python_darwin_native
             .inputs
             .insert("pkg:example".into(), "Sdist:fixture".into());
@@ -983,7 +983,7 @@ mod tests {
             .iter()
             .find(|identity| {
                 identity.kind == "python-env"
-                    && schema_input_of(identity) == Some("python-env/3")
+                    && schema_input_of(identity) == Some("python-env/4")
                     && !identity.inputs.keys().any(|key| key.starts_with("pkg:"))
             })
             .expect("empty Python environment matrix case");
@@ -991,7 +991,7 @@ mod tests {
             .iter()
             .find(|identity| {
                 identity.kind == "python-env"
-                    && schema_input_of(identity) == Some("python-env/3")
+                    && schema_input_of(identity) == Some("python-env/4")
                     && identity
                         .inputs
                         .values()
@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn python_env_native_libs_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let native = case_with_input(&linux, "python-env", Some("python-env/3"), "native_libs");
+        let native = case_with_input(&linux, "python-env", Some("python-env/4"), "native_libs");
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
 

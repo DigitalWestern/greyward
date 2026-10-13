@@ -8,7 +8,7 @@ use crate::kernel::types::Identity;
 pub static KINDS: &[ObjectKind] = &[
     ObjectKind {
         kind: "python-env",
-        schema: Some("python-env/3"),
+        schema: Some("python-env/4"),
         live_required: &[
             "schema",
             "store_root",
@@ -23,7 +23,7 @@ pub static KINDS: &[ObjectKind] = &[
             "host_inputs",
             "pkg:",
         ],
-        live_contract: Some(python_env_v3_contract),
+        live_contract: Some(python_env_v4_contract),
     },
     ObjectKind {
         kind: "sdist-build",
@@ -169,6 +169,34 @@ fn python_env_v3_contract(identity: &Identity) -> Result<(), String> {
             "Python environment native decision: native {native:?} does not match the \
              {expected:?} this identity's native_libs input implies"
         ));
+    }
+    Ok(())
+}
+
+/// `python-env/3` keyed a wheel by its hash alone, so a lock that renamed
+/// the same bytes to another release reused the environment built under the
+/// old name (#688). `/4` ends every `pkg:` value with `|<version>|<filename>`
+/// as the lock names them, after every `/3` relation. No producer writes `/3`
+/// any more, so a `/3` environment is never a cache hit and is rebuilt once.
+fn python_env_v4_contract(identity: &Identity) -> Result<(), String> {
+    python_env_v3_contract(identity)?;
+    for (key, value) in &identity.inputs {
+        let Some(name) = key.strip_prefix("pkg:") else {
+            continue;
+        };
+        let mut fields = value.rsplitn(3, '|');
+        let (filename, version, artifact) = (fields.next(), fields.next(), fields.next());
+        let named = matches!(
+            (artifact, version, filename),
+            (Some(artifact), Some(version), Some(filename))
+                if !artifact.is_empty() && !version.is_empty() && !filename.is_empty()
+        );
+        if !named {
+            return Err(format!(
+                "Python environment package {name}: {value:?} does not end with the \
+                 |<version>|<filename> the lock names"
+            ));
+        }
     }
     Ok(())
 }

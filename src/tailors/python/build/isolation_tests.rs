@@ -21,6 +21,7 @@ mod tests {
         sha256: &str,
     ) -> LockedPackage {
         LockedPackage {
+            index: None,
             name: name.into(),
             version: version.into(),
             filename: filename.into(),
@@ -36,6 +37,7 @@ mod tests {
             ecosystem: "python".into(),
             python_version: "3.12.14".into(),
             packages: vec![LockedPackage {
+                index: None,
                 name: "numpy".into(),
                 version: "1.26.4".into(),
                 filename: "numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.whl".into(),

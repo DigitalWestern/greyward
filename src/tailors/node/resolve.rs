@@ -254,6 +254,13 @@ pub(crate) fn npm_manifest_members(root: &ProjectRoot) -> io::Result<Vec<String>
     Ok(npm_manifest_membership(root)?.members)
 }
 
+/// The members of [`npm_manifest_members`] as npm's `[name, directory]`
+/// pairs, in npm's order: the name is the one npm links the member under,
+/// `node_modules/<name>`, so a lock records it there.
+pub(crate) fn npm_manifest_named(root: &ProjectRoot) -> io::Result<Vec<(String, String)>> {
+    Ok(npm_manifest_membership(root)?.named)
+}
+
 /// Record, as a skipped requirement, each directory npm takes as a member
 /// through a symlink that leads outside the project: ward reads a member
 /// from inside the project only, so it leaves the directory out of the

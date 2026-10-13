@@ -82,16 +82,12 @@ pub fn check_lock_freshness(project: &ProjectRoot, plan: &NpmPlan) -> io::Result
             } else {
                 &NPM
             };
-            npm_members(
-                &node::resolve::npm_manifest_members(project)?,
-                &plan.workspaces,
-                format,
-            )?;
-            npm_lock(
-                format,
-                &inputs::read_input(project, format.lock)?,
-                &read_manifests(project, &plan.workspaces)?,
-            )
+            let named = node::resolve::npm_manifest_named(project)?;
+            let members: Vec<String> = named.iter().map(|(_, dir)| dir.clone()).collect();
+            npm_members(&members, &plan.workspaces, format)?;
+            let lock = inputs::read_input(project, format.lock)?;
+            npm_member_links(&named, &lock, format)?;
+            npm_lock(format, &lock, &read_manifests(project, &plan.workspaces)?)
         }
         "pnpm-lock.yaml" => {
             let lock = inputs::read_input(project, PNPM.lock)?;
@@ -230,6 +226,41 @@ pub(crate) fn npm_members(
         )),
         None => Ok(()),
     }
+}
+
+/// Each npm member's link in the lock: npm installs a member as the symlink
+/// `node_modules/<name>` to its directory and records it as
+/// `{"resolved": "<dir>", "link": true}` under that key, `<name>` being the
+/// member's package.json `name` (its directory's last component when it has
+/// none). A member renamed since the lock was written has no link under its
+/// name, so the lock still links the old one and `npm ci` would not match.
+pub(crate) fn npm_member_links(
+    named: &[(String, String)],
+    lock: &str,
+    format: &LockFormat,
+) -> io::Result<()> {
+    let lock: Value = serde_json::from_str(lock).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {error}", format.lock),
+        )
+    })?;
+    for (name, dir) in named {
+        let entry = &lock["packages"][format!("node_modules/{name}").as_str()];
+        if entry["link"] != Value::Bool(true) || entry["resolved"].as_str() != Some(dir) {
+            return Err(crate::kernel::error::stale(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} names the npm workspace member {name:?} but {} does not link \
+                     node_modules/{name} to {dir}; regenerate the lock ({})",
+                    manifest_path(dir),
+                    format.lock,
+                    format.regenerate
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A manifest's dependency map for `field` as name -> specifier.
@@ -784,7 +815,7 @@ dependencies:
         let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-members");
         let workspaces = r#"["packages/*","!packages/skip"]"#;
         let lock = format!(
-            r#"{{"lockfileVersion":3,"packages":{{"":{{"name":"p","workspaces":{workspaces}}},"packages/a":{{}}}}}}"#
+            r#"{{"lockfileVersion":3,"packages":{{"":{{"name":"p","workspaces":{workspaces}}},"node_modules/a":{{"resolved":"packages/a","link":true}},"node_modules/b":{{"resolved":"packages/b","link":true}},"packages/a":{{}}}}}}"#
         );
         let project = npm_workspace(
             &scratch.0,
@@ -812,6 +843,36 @@ dependencies:
             &npm_plan("package-lock.json", &["packages/a", "packages/b"]),
         )
         .unwrap();
+    }
+
+    /// A member renamed since the lock was written (its directory the same,
+    /// its package.json `name` changed) is a stale lock: the lock links the
+    /// old name, and `npm ci` would link the new one (#694).
+    #[test]
+    fn an_npm_lock_linking_a_member_by_its_old_name_is_stale() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-renamed");
+        let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]},"node_modules/a":{"resolved":"packages/lib","link":true},"packages/lib":{"name":"a"}}}"#;
+        let project = npm_workspace(
+            &scratch.0,
+            r#"["packages/*"]"#,
+            &["packages/lib"],
+            "package-lock.json",
+            lock,
+        );
+        let plan = npm_plan("package-lock.json", &["packages/lib"]);
+        let named = |name: &'static str| {
+            node::npm_members::tests::fake_npm_named(&scratch.0, move |_| {
+                vec![(name.to_string(), "packages/lib".to_string())]
+            })
+        };
+        let npm = named("a");
+        check_lock_freshness(&project, &plan).unwrap();
+        drop(npm);
+        let _npm = named("b");
+        assert_eq!(
+            message(check_lock_freshness(&project, &plan)),
+            "packages/lib/package.json names the npm workspace member \"b\" but package-lock.json does not link node_modules/b to packages/lib; regenerate the lock (npm install --package-lock-only)"
+        );
     }
 
     /// npm copies the root `workspaces` into `packages[""]`, so a pattern
@@ -845,7 +906,7 @@ dependencies:
             r#"["packages/*"]"#,
             &["packages/a"],
             "npm-shrinkwrap.json",
-            r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]}}}"#,
+            r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]},"node_modules/a":{"resolved":"packages/a","link":true}}}"#,
         );
         let _npm =
             node::npm_members::tests::fake_npm(&scratch.0, |_| vec!["packages/a".to_string()]);

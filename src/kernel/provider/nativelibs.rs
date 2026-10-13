@@ -8,6 +8,7 @@
 //! touches the store or network.
 
 use crate::kernel::activity::StoreActivity;
+use crate::kernel::archive::{ZipReader, MAX_ARCHIVE_BYTES};
 use crate::kernel::fetch::{download_verified_held, Digest as FetchDigest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
@@ -15,10 +16,9 @@ use crate::kernel::types::Identity;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use zip::ZipArchive;
 
 pub const NATIVE_LIBS_VERSION: &str = "3";
 const CONDA_BASE: &str = "https://conda.anaconda.org/conda-forge";
@@ -711,35 +711,30 @@ fn extract_conda(
     package_root: &Path,
     info_root: &Path,
 ) -> io::Result<()> {
-    let file = File::open(archive)?;
-    let mut zip = ZipArchive::new(file).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("read {} as .conda zip: {e}", archive.display()),
-        )
-    })?;
+    // The outer `.conda` layer is a zip: read under the kernel's zip rules
+    // (#675), so its members yield exactly the bytes they declare, within
+    // the budget a tarball gets.
+    let mut zip = ZipReader::open(archive, MAX_ARCHIVE_BYTES)
+        .map_err(|e| invalid_conda(format!("read {} as .conda zip: {e}", archive.display())))?;
     let mut pkg = None;
     let mut info = None;
-    for index in 0..zip.len() {
-        let entry = zip.by_index(index).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("read .conda entry {index}: {e}"),
-            )
-        })?;
-        let name = entry.name().to_string();
+    for member in zip.members() {
+        let name = &member.name;
         if name.starts_with("pkg-") && name.ends_with(".tar.zst") {
-            pkg = Some(name);
+            pkg = Some(member.clone());
         } else if name.starts_with("info-") && name.ends_with(".tar.zst") {
-            info = Some(name);
+            info = Some(member.clone());
         }
     }
     let pkg = pkg.ok_or_else(|| invalid_conda("missing pkg-*.tar.zst"))?;
     let info = info.ok_or_else(|| invalid_conda("missing info-*.tar.zst"))?;
     let pkg_zst = package_root.with_extension("pkg.tar.zst");
     let info_zst = info_root.with_extension("info.tar.zst");
-    unzip_member(archive, &pkg, &pkg_zst, CONDA_STAGE_CAP)?;
-    unzip_member(archive, &info, &info_zst, CONDA_STAGE_CAP)?;
+    for (member, destination) in [(&pkg, &pkg_zst), (&info, &info_zst)] {
+        let mut out = File::create(destination)?;
+        zip.copy(member, CONDA_STAGE_CAP, &mut out)
+            .map_err(|e| invalid_conda(format!("read {}: {e}", member.name)))?;
+    }
     let pkg_tar = pkg_zst.with_extension("tar");
     let info_tar = info_zst.with_extension("tar");
     zstd_decompress(activity, &pkg_zst, &pkg_tar, CONDA_STAGE_CAP)?;
@@ -759,24 +754,6 @@ fn extract_conda(
 /// header and its padding (a million members' worth), and a compression
 /// bomb stops here rather than filling the disk first (#708).
 const CONDA_STAGE_CAP: u64 = 2 * crate::kernel::archive::MAX_ARCHIVE_BYTES;
-
-/// Stream `member` of the zip at `archive` to `destination`, refusing one
-/// past `cap` bytes.
-fn unzip_member(archive: &Path, member: &str, destination: &Path, cap: u64) -> io::Result<()> {
-    let file = File::open(archive)?;
-    let mut zip = ZipArchive::new(file).map_err(|e| invalid_conda(format!("read zip: {e}")))?;
-    let entry = zip
-        .by_name(member)
-        .map_err(|e| invalid_conda(format!("read {member}: {e}")))?;
-    let mut output = File::create(destination)?;
-    let written = io::copy(&mut entry.take(cap + 1), &mut output)?;
-    if written > cap {
-        return Err(invalid_conda(format!(
-            "{member} is over the {cap}-byte cap; refusing to extract"
-        )));
-    }
-    Ok(())
-}
 
 /// Decompress `input` to `output` with the host's zstd, which stops at
 /// `cap` bytes of output: the child's file size limit makes the write past
@@ -1545,9 +1522,15 @@ mod tests {
         std::io::Write::write_all(&mut zip, &[7u8; 4096]).unwrap();
         zip.finish().unwrap();
         let staged = scratch.0.join("staged");
-        let error = unzip_member(&archive, "pkg-p.tar.zst", &staged, 1024).unwrap_err();
-        assert!(error.to_string().contains("1024-byte cap"), "{error}");
-        unzip_member(&archive, "pkg-p.tar.zst", &staged, 4096).unwrap();
+        let mut reader = ZipReader::open(&archive, 1 << 20).unwrap();
+        let member = reader.members()[0].clone();
+        let error = reader
+            .copy(&member, 1024, &mut File::create(&staged).unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("1024 byte read cap"), "{error}");
+        reader
+            .copy(&member, 4096, &mut File::create(&staged).unwrap())
+            .unwrap();
         assert_eq!(fs::read(&staged).unwrap().len(), 4096);
 
         if !Path::new("/usr/bin/zstd").is_file() {

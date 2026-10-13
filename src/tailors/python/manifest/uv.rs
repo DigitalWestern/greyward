@@ -220,7 +220,7 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
             // is recorded skipped, and uv writes its files by path or with
             // no location at all, so they are not read.
             let files = if registry {
-                uv_files(name, table)?
+                uv_files(name, version, table)?
             } else {
                 Vec::new()
             };
@@ -240,7 +240,7 @@ pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
 
 /// A registry package's `sdist` and `wheels`, each with the URL and sha256
 /// it is fetched and checked by.
-fn uv_files(name: &str, table: &toml::Table) -> io::Result<Vec<UvFile>> {
+fn uv_files(name: &str, version: &str, table: &toml::Table) -> io::Result<Vec<UvFile>> {
     let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
     let mut files = Vec::new();
     if let Some(sdist) = table.get("sdist") {
@@ -265,6 +265,19 @@ fn uv_files(name: &str, table: &toml::Table) -> io::Result<Vec<UvFile>> {
                 invalid(format!("uv.lock {name} wheel lacks a URL and sha256 hash"))
             })?);
         }
+    }
+    // Every file must be this package at this version, as uv itself
+    // requires: the hash only proves the bytes are the ones the URL named,
+    // and a URL naming another release would install it under this
+    // entry's name and version (#688).
+    for file in &files {
+        crate::tailors::python::pypi::check_filename(
+            &file.filename,
+            file.kind,
+            name,
+            Some(version),
+        )
+        .map_err(|e| invalid(format!("uv.lock {name}: {e}")))?;
     }
     Ok(files)
 }
@@ -443,6 +456,7 @@ pub(super) fn uv_lock_manifest(
         let Some(locked) = locked_from_uv_package(package, &tag, platform, glibc) else {
             return Ok(None);
         };
+        record_uv_file_host(&locked)?;
         output.push(locked);
     }
     if output.is_empty() {
@@ -636,6 +650,28 @@ fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
     Ok(false)
 }
 
+/// The index a registry package names, when it is not the public PyPI.
+fn uv_index(package: &UvPackage) -> Option<String> {
+    match uv_source(&package.source) {
+        Some(UvSource::Registry(url)) if !url.is_empty() && !is_public_pypi_url(&url) => Some(url),
+        _ => None,
+    }
+}
+
+/// A package locked from the public index whose chosen file is served from
+/// somewhere else: the lock says PyPI, the bytes come from another host, so
+/// it is attested no better than a private index's (#688).
+fn record_uv_file_host(locked: &LockedPackage) -> io::Result<()> {
+    if locked.index.is_none() && !is_public_pypi_url(&locked.url) {
+        crate::kernel::policy::record(
+            crate::kernel::policy::UNATTESTED_INDEX,
+            &locked.name,
+            "uv lock package names the public index, but its file is served from another host",
+        )?;
+    }
+    Ok(())
+}
+
 /// Choose the host-compatible file for `package`. `None` means the lock has
 /// nothing this host can install.
 fn locked_from_uv_package(
@@ -671,6 +707,7 @@ fn locked_from_uv_package(
         .map(|f| f.kind)
         .unwrap_or(ArtifactKind::Wheel);
     Some(LockedPackage {
+        index: uv_index(package),
         name: package.name.clone(),
         version: package.version.clone(),
         filename: file.filename.clone(),

@@ -1995,6 +1995,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_inherited_directory_and_socket_fds_are_closed() {
         if !linux_ready("linux_inherited_directory_and_socket_fds_are_closed") {
@@ -2772,6 +2773,7 @@ mod tests {
         assert!(report.contains("1 passed"), "{report}");
     }
 
+    #[cfg(target_os = "linux")]
     const STARTUP_FILE_CHILD: &str = "GREYWARD_TEST_STARTUP_FILE_SCRATCH";
 
     /// The shell that closes the held descriptors runs no startup file
@@ -2781,6 +2783,7 @@ mod tests {
     /// above 9 (bash closes it) and below (the system shell does), the home
     /// a writable root. Run in a child of this binary, which starts with
     /// only the standard descriptors.
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_the_closing_shell_reads_no_startup_file() {
         use std::os::fd::{AsRawFd as _, OwnedFd};

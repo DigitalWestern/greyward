@@ -590,6 +590,13 @@ pub use super::keyscrub::{scrub_signing_key, signing_key_secrets, Scrubber};
 
 pub type FileId = (u64, u64);
 
+/// The [`FileId`] of a `stat`. `st_dev` is an `i32` on macOS and a `u64` on
+/// Linux; the cast lives here so no call site has to remember it.
+#[allow(clippy::unnecessary_cast)]
+pub fn file_id(stat: &libc::stat) -> FileId {
+    (stat.st_dev as u64, stat.st_ino as u64)
+}
+
 /// The identities of the signing-key files that exist ([`signing_key_paths`],
 /// symlinks followed): what "is the signing key" is decided by, so a hard
 /// link or another spelling is the key too.

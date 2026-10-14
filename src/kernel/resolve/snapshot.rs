@@ -28,7 +28,7 @@
 //! discarded. Anything else, and always a new `.git`, a change under
 //! `.git/hooks`, or a change under `.greyward`, fails the door naming the paths.
 
-use super::confine::FileId;
+use super::confine::{self, FileId};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::store::{self, Store};
@@ -965,7 +965,7 @@ fn copy_file(
     }
     // Decided on the open file itself, so no rename in between can slip
     // the key past it.
-    if forbidden.contains(&(stat.st_dev, stat.st_ino)) {
+    if forbidden.contains(&confine::file_id(&stat)) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(

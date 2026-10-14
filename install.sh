@@ -550,11 +550,21 @@ case "$VERSION" in
         tag="${GREYWARD_LATEST_TAG:-}"
         if [ -z "$tag" ]; then
             latest_url="${GREYWARD_LATEST_URL:-https://github.com/$REPO/releases/latest/download/LATEST}"
-            fetch "$latest_url" "$tmp/LATEST" \
-                || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
-            fetch "$latest_url.sig" "$tmp/LATEST.sig" \
-                || fail "$latest_url has no signature next to it; refusing to trust it. Name a release with --version=<tag>"
-            verify_sig "$tmp/LATEST" "$tmp/LATEST.sig" \
+            # Twice at most: the latest release can change between the two
+            # downloads (another release becoming latest), and then the
+            # pair is read again from the start.
+            latest_signed=0
+            for _ in 1 2; do
+                fetch "$latest_url" "$tmp/LATEST" \
+                    || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
+                fetch "$latest_url.sig" "$tmp/LATEST.sig" \
+                    || fail "$latest_url has no signature next to it; refusing to trust it. Name a release with --version=<tag>"
+                if verify_sig "$tmp/LATEST" "$tmp/LATEST.sig"; then
+                    latest_signed=1
+                    break
+                fi
+            done
+            [ "$latest_signed" = 1 ] \
                 || fail "$latest_url is not signed by ward's release key ($RELEASE_KEY); refusing to trust it. Name a release with --version=<tag>"
             # Exactly one line, the tag and its newline, and the tag a
             # v-prefixed SemVer 2.0 version: anything else is refused.

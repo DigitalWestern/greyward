@@ -169,7 +169,7 @@ reconcile_latest() {
     # valid signature, written otherwise.
     mkdir -p "$work/latest"
     rm -f "$work/latest/"*
-    if grep -qx "asset $top LATEST" <<<"$listing" && grep -qx "asset $top LATEST.sig" <<<"$listing"; then
+    if grep -Fxq "asset $top LATEST" <<<"$listing" && grep -Fxq "asset $top LATEST.sig" <<<"$listing"; then
         gh release download "$top" --repo "$REPO" --dir "$work/latest" --pattern LATEST --pattern LATEST.sig
     fi
     if [ -f "$work/latest/LATEST" ] && [ "$(cat "$work/latest/LATEST")" = "$top" ] \
@@ -223,7 +223,7 @@ names="$(gh release view "$tag" --repo "$REPO" --json assets -q '.assets[].name'
 if grep -q '\.sig$' <<<"$names"; then
     die "release $tag already carries .sig files; nothing is replaced"
 fi
-if grep -qx 'LATEST' <<<"$names"; then
+if grep -Fxq 'LATEST' <<<"$names"; then
     die "release $tag already carries a LATEST; nothing is replaced"
 fi
 archives="$(grep -E '^greyward-[A-Za-z0-9_.-]+\.tar\.gz$' <<<"$names" || true)"

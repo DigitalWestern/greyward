@@ -384,12 +384,18 @@ mod tests {
                    github.com/google/uuid v1.6.0/go.mod h1:def=\n\
                    golang.org/x/sync v0.9.0/go.mod h1:ghi=\n";
         assert_eq!(
-            crate::tailors::go::tool::go_sum_modules(sum),
+            crate::tailors::go::tool::go_sum_modules(sum).unwrap(),
             [crate::kernel::resolve::age::LockedPackage::new(
                 "github.com/google/uuid",
                 "v1.6.0"
             )]
         );
+        let error = crate::tailors::go::tool::go_sum_modules(
+            "github.com/google/uuid v1.6.0 h1:abc=\ngithub.com/evil/pkg v1.0.0\n",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("line 2"), "{error}");
     }
 
     #[test]

@@ -768,6 +768,7 @@ mod tests {
     #[test]
     fn npm_runs_with_the_session_and_forced_flags_only() {
         let _serial = policy::attribution_test_lock();
+        let _policy = stand_in_policy();
         let Some(harness) = node_harness("npm_runs_with_the_session_and_forced_flags_only", "npm")
         else {
             return;
@@ -877,6 +878,18 @@ mod tests {
     /// `package.json` that has `workspaces`, and write the lock there, with
     /// its argv, environment, and working directory. Committed under the
     /// runtime identity, so `realize_runtime` returns it.
+    /// The stand-in npm writes its argv where the lock goes, which no lock
+    /// reader can read: these runs turn `young-package` off, so the door
+    /// does not read that lock for it.
+    fn stand_in_policy() -> policy::PolicyScope {
+        policy::PolicyScope::install(Policy {
+            packages: Some(policy::Packages {
+                min_age_days: Some(0),
+            }),
+            ..Policy::default()
+        })
+    }
+
     fn plant_stand_in_npm(harness: &Harness) {
         let platform = Platform::host().unwrap();
         let selected = crate::tailors::node::shipped_selection().unwrap();
@@ -933,6 +946,7 @@ mod tests {
     #[test]
     fn an_npm_workspace_member_edit_runs_in_the_member_at_the_root() {
         let _serial = policy::attribution_test_lock();
+        let _policy = stand_in_policy();
         let Some(harness) = node_harness(
             "an_npm_workspace_member_edit_runs_in_the_member_at_the_root",
             "npm",

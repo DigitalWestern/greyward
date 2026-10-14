@@ -62,6 +62,13 @@ jobs:
             exit 1
           fi
 
+      # The Go checksum-database head the binary carries dates every Go
+      # version on a fresh store (LIMITATIONS.md), so a release ships a
+      # recent one: regenerate it with tools/sumdb_seed.py before tagging.
+      - name: Check the Go checksum-database seed
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python3 tools/sumdb_seed.py --check
+
       # rust-toolchain.toml names the compiler; with no argument rustup
       # installs exactly that one, the same compiler ci.yml tested.
       - name: Install Rust

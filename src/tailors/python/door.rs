@@ -994,6 +994,158 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
         done();
     }
 
+    /// A wheel of `demo` 1.0 with nothing in it but its metadata.
+    fn demo_wheel() -> Vec<u8> {
+        use std::io::Write as _;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in [
+            ("demo/__init__.py", ""),
+            (
+                "demo-1.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: demo\nVersion: 1.0\n",
+            ),
+            (
+                "demo-1.0.dist-info/WHEEL",
+                "Wheel-Version: 1.0\nGenerator: ward-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            ),
+            ("demo-1.0.dist-info/RECORD", ""),
+        ] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// uv resolves against a configured registry that requires a token: it
+    /// is told that registry's URL alone, the proxy adds the token upstream,
+    /// every request lands under the registry's root, and the token is in
+    /// neither the lock nor the ledger. PyPI is never asked.
+    #[test]
+    #[ignore = "realizes the store uv and CPython over the network"]
+    fn uv_resolves_against_an_authenticated_configured_registry() {
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        use sha2::{Digest as _, Sha256};
+        const TOKEN: &str = "corp-secret-token-0451";
+        let _serial = policy::attribution_test_lock();
+        let label = "uv_resolves_against_an_authenticated_configured_registry";
+        let Some(relay) = relay(label) else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
+        let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
+        reach.request_timeout = std::time::Duration::from_secs(20);
+        let harness: &'static Harness = Box::leak(Box::new(Harness::with(label, reach)));
+        PROXY_FOR_TEST.with(|slot| slot.set(Some(&harness.proxy)));
+        let port = harness.upstream.port();
+        let wheel = demo_wheel();
+        let page = format!(
+            "<html><body><a href=\"../../packages/demo-1.0-py3-none-any.whl#sha256={}\">demo-1.0-py3-none-any.whl</a></body></html>",
+            hex::encode(Sha256::digest(&wheel))
+        );
+        let authorized = |body: &[u8], kind: &str| Behavior::Authorized {
+            value: format!("Bearer {TOKEN}"),
+            reply: Reply::new(200, body).header("Content-Type", kind),
+        };
+        harness.upstream.set(
+            "/repo/pypi/simple/demo/",
+            authorized(page.as_bytes(), "text/html"),
+        );
+        harness.upstream.set(
+            "/repo/pypi/packages/demo-1.0-py3-none-any.whl",
+            authorized(&wheel, "application/octet-stream"),
+        );
+        let temp = TempDir::named("uv-configured-registry");
+        let token_file = temp.0.join("token");
+        fs::write(&token_file, TOKEN).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let text = format!(
+            r#"
+[credentials.corp]
+file = "{}"
+
+[[registry]]
+name = "corp"
+ecosystem = "python"
+url = "https://registry.test:{port}/repo/pypi/simple/"
+root = "https://registry.test:{port}/repo/pypi/"
+credential = "corp"
+
+[sources]
+python = ["corp"]
+"#,
+            token_file.display()
+        );
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, &text).unwrap();
+        let mut machine = Policy::default();
+        policy::merge_file(&mut machine, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+
+        let uv = store_uv(harness);
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("requirements.in"), "demo==1.0\n").unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let (report, recorded) = through_door(
+            harness,
+            DoorKind::MissingLock,
+            UvRun {
+                uv: &uv,
+                lock_root: &dir,
+                cwd: None,
+                args: super::super::resolve::compile_args(
+                    "requirements.in",
+                    "requirements.lock.txt",
+                    "3.12",
+                    COMPILE_COMMAND,
+                ),
+                index: Index::PipCompile,
+                outputs: super::super::resolve::resolution_outputs(&held).unwrap(),
+                target: UvTarget::Project {
+                    record: None,
+                    slot: Default::default(),
+                    check: None,
+                },
+                builds: Builds::Probe,
+                capture: true,
+                policy: Some(machine),
+            },
+        );
+        done();
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let lock = fs::read_to_string(dir.join("requirements.lock.txt")).unwrap();
+        assert!(lock.contains("demo==1.0"), "{lock}");
+        assert!(!lock.contains(TOKEN), "{lock}");
+        let entries = ledger_entries(harness, &report);
+        assert!(!entries.is_empty());
+        let root = format!("https://registry.test:{port}/repo/pypi/");
+        for entry in &entries {
+            assert!(entry.url.starts_with(&root), "{entries:?}");
+        }
+        assert!(!format!("{entries:?}").contains(TOKEN));
+        assert!(!stderr(&report).contains(TOKEN));
+        let seen = harness.upstream.seen();
+        assert!(seen
+            .iter()
+            .any(|request| request.target.contains("demo-1.0")));
+        for request in &seen {
+            assert!(request.target.starts_with("/repo/pypi/"), "{seen:?}");
+            assert_eq!(
+                request.headers.get("authorization"),
+                Some(format!("Bearer {TOKEN}").as_str()),
+                "{seen:?}"
+            );
+        }
+    }
+
     /// A requirement with no wheel at all (docopt 0.6.2, sdist only): the
     /// probe stops at it, and with `resolution-build` denied the door fails
     /// naming it and nothing lands. (The allowed rerun would fetch the

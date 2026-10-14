@@ -217,6 +217,48 @@ mod tests {
         assert!(!Arc::ptr_eq(&a, clients.public()));
     }
 
+    /// A private-network registry's client reaches a private address; the
+    /// public client every git fetch and unattested host uses still refuses
+    /// one, in the same process, after the private client was built.
+    #[test]
+    fn a_private_registry_leaves_the_public_client_refusing_private_hosts() {
+        use crate::kernel::fetch::pinned::PinnedRequest;
+        use crate::kernel::resolve::testing::Answers;
+        use crate::kernel::testutil::upstream::{Behavior, FixtureCa, FixtureUpstream, Reply};
+        let ca = FixtureCa::new();
+        let upstream = FixtureUpstream::start(&ca, &["nexus.corp.test", "git.corp.test"]);
+        upstream.set("/ok", Behavior::Reply(Reply::new(200, b"ok")));
+        let fixture = upstream.address();
+        let clients = Clients::new(ClientBase {
+            roots: ca.roots(),
+            lookup: Arc::new(Answers::new(|_, _| vec!["10.1.2.3".parse().unwrap()])),
+            connect_timeout: Duration::from_secs(2),
+            io_timeout: Duration::from_secs(2),
+            allow_loopback: false,
+            connect_to: Some(Arc::new(move |_| fixture)),
+        })
+        .unwrap();
+        let get = |client: &PinnedClient, host: &str| {
+            client
+                .send(&PinnedRequest {
+                    method: "GET",
+                    url: &format!("https://{host}:{}/ok", fixture.port()),
+                    headers: &[],
+                    body: None,
+                })
+                .map(|response| response.status)
+        };
+        let private = clients
+            .for_spec(&ClientSpec {
+                ca: None,
+                network: NetworkMode::Private,
+            })
+            .unwrap();
+        assert_eq!(get(&private, "nexus.corp.test").ok(), Some(200));
+        assert!(get(clients.public(), "git.corp.test").is_err());
+        assert_eq!(upstream.hits("/ok"), 1);
+    }
+
     #[test]
     fn a_ca_file_must_hold_a_certificate() {
         let temp = crate::kernel::testutil::TempDir::new();

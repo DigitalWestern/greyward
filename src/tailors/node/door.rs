@@ -1249,6 +1249,191 @@ mod tests {
         }));
     }
 
+    /// npm resolves against two configured registries that each require
+    /// their own token: the default one and one for the `@team` scope. Each
+    /// packument goes to its registry with that registry's token, which is
+    /// in neither the lock nor the ledger, and npmjs is never asked. A
+    /// `.npmrc` that sends another scope elsewhere is refused before npm
+    /// starts.
+    #[test]
+    #[ignore = "realizes the store Node over the network"]
+    fn npm_resolves_against_authenticated_configured_registries() {
+        use sha2::{Digest as _, Sha512};
+        const CORP: &str = "corp-secret-token-0451";
+        const TEAM: &str = "team-secret-token-0452";
+        let _serial = policy::attribution_test_lock();
+        let label = "npm_resolves_against_authenticated_configured_registries";
+        let Some(relay) = relay(label) else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
+        let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
+        reach.request_timeout = std::time::Duration::from_secs(10);
+        let harness: &'static Harness = Box::leak(Box::new(Harness::with(label, reach)));
+        PROXY_FOR_TEST.with(|slot| slot.set(Some(&harness.proxy)));
+        let port = harness.upstream.port();
+        let base = format!("https://registry.test:{port}");
+        let packument = |name: &str, version: &str, tarball: &str, bytes: &[u8]| {
+            serde_json::json!({
+                "name": name,
+                "dist-tags": {"latest": version},
+                "versions": {version: {
+                    "name": name,
+                    "version": version,
+                    "dist": {
+                        "tarball": tarball,
+                        "integrity": format!(
+                            "sha512-{}",
+                            crate::kernel::base64::encode(&Sha512::digest(bytes))
+                        ),
+                    },
+                }},
+            })
+            .to_string()
+        };
+        let authorized = |token: &str, body: &[u8]| Behavior::Authorized {
+            value: format!("Bearer {token}"),
+            reply: Reply::new(200, body).header("Content-Type", "application/json"),
+        };
+        let widget_url = format!("{base}/repo/npm/widget/-/widget-1.0.0.tgz");
+        let gadget_url = format!("{base}/repo/team-npm/@team/gadget/-/gadget-2.0.0.tgz");
+        let up = &harness.upstream;
+        up.set(
+            "/repo/npm/widget",
+            authorized(
+                CORP,
+                packument("widget", "1.0.0", &widget_url, b"widget").as_bytes(),
+            ),
+        );
+        up.set(
+            "/repo/npm/widget/-/widget-1.0.0.tgz",
+            authorized(CORP, b"widget"),
+        );
+        up.set(
+            "/repo/team-npm/@team%2fgadget",
+            authorized(
+                TEAM,
+                packument("@team/gadget", "2.0.0", &gadget_url, b"gadget").as_bytes(),
+            ),
+        );
+        up.set(
+            "/repo/team-npm/@team/gadget/-/gadget-2.0.0.tgz",
+            authorized(TEAM, b"gadget"),
+        );
+        let temp = TempDir::named("npm-configured-registries");
+        let token = |name: &str, value: &str| {
+            let path = temp.0.join(name);
+            fs::write(&path, value).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            path.display().to_string()
+        };
+        let text = format!(
+            r#"
+[credentials.corp]
+file = "{}"
+
+[credentials.team]
+file = "{}"
+
+[[registry]]
+name = "corp"
+ecosystem = "node"
+url = "{base}/repo/npm/"
+credential = "corp"
+
+[[registry]]
+name = "team"
+ecosystem = "node"
+url = "{base}/repo/team-npm/"
+credential = "team"
+scopes = ["@team"]
+
+[sources]
+node = ["team", "corp"]
+"#,
+            token("corp", CORP),
+            token("team", TEAM)
+        );
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, &text).unwrap();
+        let mut machine = Policy::default();
+        policy::merge_file(&mut machine, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+
+        let node_obj = store_node(harness);
+        let project_dir = project(
+            &temp.0.join("project"),
+            "\"widget\": \"1.0.0\", \"@team/gadget\": \"2.0.0\"",
+        );
+        fs::write(
+            project_dir.join(".npmrc"),
+            "registry=https://evil.test/\n@team:registry=https://evil.test/\n",
+        )
+        .unwrap();
+        let (report, recorded) = through_door(
+            harness,
+            DoorKind::MissingLock,
+            machine.clone(),
+            lock_only_run(&node_obj, &project_dir),
+        );
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let lock = fs::read_to_string(project_dir.join("package-lock.json")).unwrap();
+        assert!(lock.contains(&widget_url), "{lock}");
+        assert!(lock.contains(&gadget_url), "{lock}");
+        assert!(!lock.contains(CORP) && !lock.contains(TEAM), "{lock}");
+        let entries = ledger_entries(harness, &report);
+        assert!(!entries.is_empty());
+        for entry in &entries {
+            assert!(
+                entry.url.starts_with(&format!("{base}/repo/npm/"))
+                    || entry.url.starts_with(&format!("{base}/repo/team-npm/")),
+                "{entries:?}"
+            );
+        }
+        let shown = format!("{entries:?}{}", stderr(&report));
+        assert!(!shown.contains(CORP) && !shown.contains(TEAM));
+        let seen = harness.upstream.seen();
+        assert!(
+            seen.iter().any(|r| r.target == "/repo/npm/widget"),
+            "{seen:?}"
+        );
+        for request in &seen {
+            let token = if request.target.starts_with("/repo/team-npm/") {
+                TEAM
+            } else {
+                assert!(request.target.starts_with("/repo/npm/"), "{seen:?}");
+                CORP
+            };
+            assert_eq!(
+                request.headers.get("authorization"),
+                Some(format!("Bearer {token}").as_str()),
+                "{seen:?}"
+            );
+        }
+
+        fs::write(
+            project_dir.join(".npmrc"),
+            "@other:registry=https://evil.test/\n",
+        )
+        .unwrap();
+        let mut run = lock_only_run(&node_obj, &project_dir);
+        run.policy = Some(machine);
+        let refused = match node_confined(
+            &run,
+            Publish::Detached {
+                outputs: Vec::new(),
+            },
+        ) {
+            Ok(_) => panic!("an unlisted .npmrc scope registry was accepted"),
+            Err(error) => error.to_string(),
+        };
+        done();
+        assert!(refused.contains("@other:registry"), "{refused}");
+        assert!(refused.contains("fix:"), "{refused}");
+    }
+
     /// The child npm pacote starts for a git dependency (`npm install
     /// --force` with its own flags, `GitFetcher`'s `npmInstallCmd` and
     /// `npmCliConfig`) keeps audit, fund and the update notifier off under

@@ -549,6 +549,20 @@ impl Exchange<'_> {
                 }
             };
             hops.push(self.redacted(&next));
+            // A configured registry's redirect stays with that registry:
+            // under its root or on its own files origins, never another
+            // registry's root on the same host.
+            if let Some(scope) = self.route.scope() {
+                if !scope.owns(next.as_str()) {
+                    let why = format!(
+                        "redirect to {} leaves registry {} (its root {} and its files origins)",
+                        self.redacted(&next),
+                        scope.registry,
+                        scope.root
+                    );
+                    return Err((Failure::Redirect(why), hops));
+                }
+            }
             if !self.permitted.allows(&next) {
                 let why = format!(
                     "redirect to {} is not a permitted endpoint",
@@ -813,7 +827,8 @@ impl Exchange<'_> {
             ..
         } = cached;
         let body = if success && !self.head_only() {
-            self.state.add_claims(protocol.claims(url, &upstream));
+            self.state
+                .add_claims(self.route.claim_scope(), protocol.claims(url, &upstream));
             let before = upstream.len();
             match protocol.rewrite(url, upstream, self.address) {
                 Ok(body) => {
@@ -858,12 +873,23 @@ impl Exchange<'_> {
         let record = Record::new(class.as_str(), self.method, self.redacted(url))
             .keeping(self.keys())
             .resolved();
-        match self.state.claimed(url) {
+        match self.state.claimed(self.route.claim_scope(), url) {
             Claimed::Conflict(why) => {
                 self.state.hard_failure(why.clone());
                 self.fail(out, record, 502, why)
             }
             Claimed::One(claim) => self.claimed_artifact(url, claim, record, out),
+            // A configured registry chooses its own artifact URLs, so only
+            // its own metadata can name one: nothing unclaimed is fetched.
+            Claimed::None if self.route.scope().is_some() => {
+                let scope = self.route.scope().expect("checked");
+                let why = format!(
+                    "{} is not listed with a digest by registry {}'s metadata in this run; ward \
+                     fetches only files a registry page or packument names with a digest",
+                    record.url, scope.registry
+                );
+                self.refuse(out, record, 403, &why)
+            }
             Claimed::None => self.unclaimed_artifact(url, record, out),
         }
     }

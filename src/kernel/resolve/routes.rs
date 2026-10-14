@@ -164,9 +164,9 @@ impl Permitted {
         }
     }
 
-    /// Tests only: a fixture host on its ephemeral port.
-    #[cfg(test)]
-    pub(crate) fn with_origin(mut self, host: &str, port: u16) -> Self {
+    /// The set with one more origin: a configured registry's (from
+    /// machine policy), or in tests a fixture host on its ephemeral port.
+    pub fn with_origin(mut self, host: &str, port: u16) -> Self {
         self.origins.insert((host.to_string(), port));
         self
     }
@@ -500,6 +500,72 @@ pub trait RegistryProtocol: Send + Sync {
 pub struct Route {
     pub protocol: Arc<dyn RegistryProtocol>,
     pub endpoints: Vec<Endpoint>,
+    /// A configured registry's route: the URLs it owns.
+    scope: Option<RouteScope>,
+}
+
+/// The URLs a configured registry's route owns: those under its root, and
+/// those on its own `files` origins. Every check that asks which registry
+/// a URL belongs to asks [`covers`] against these, on the raw spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteScope {
+    /// The registry's name, for error text.
+    pub registry: String,
+    /// The registry's `url`, normalized.
+    pub url: String,
+    pub root: String,
+    /// `https://host[:port]/` download-only origins.
+    pub files: Vec<String>,
+}
+
+impl RouteScope {
+    /// Whether `raw` is under the root.
+    pub fn under_root(&self, raw: &str) -> bool {
+        covers::covers(&self.root, raw)
+    }
+
+    /// Whether `raw` is on one of the `files` origins.
+    pub fn on_files(&self, raw: &str) -> bool {
+        self.files.iter().any(|files| covers::covers(files, raw))
+    }
+
+    /// Whether the route owns `raw`: under its root or on its `files`.
+    pub fn owns(&self, raw: &str) -> bool {
+        self.under_root(raw) || self.on_files(raw)
+    }
+}
+
+/// The route that serves `raw` (a URL as the tool or a redirect spelled
+/// it): the configured route with the longest root that covers it, else a
+/// configured route whose `files` origin covers it, else a public route on
+/// its origin. A URL on a configured registry's host but outside every root
+/// is no configured route's.
+pub fn route_for<'a>(routes: &'a [Route], raw: &str) -> Option<&'a Route> {
+    let configured = routes
+        .iter()
+        .filter_map(|route| {
+            let scope = route.scope.as_ref()?;
+            scope
+                .under_root(raw)
+                .then(|| (covers::root_len(&scope.root), route))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, route)| route);
+    if configured.is_some() {
+        return configured;
+    }
+    if let Some(route) = routes.iter().find(|route| {
+        route
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.on_files(raw))
+    }) {
+        return Some(route);
+    }
+    let url = Url::parse(raw).ok()?;
+    routes.iter().find(|route| {
+        route.scope.is_none() && route.endpoints.iter().any(|endpoint| endpoint.serves(&url))
+    })
 }
 
 /// A compiled-in protocol, shared as an instance.
@@ -578,7 +644,48 @@ impl Route {
         Ok(Route {
             protocol,
             endpoints,
+            scope: None,
         })
+    }
+
+    /// A configured registry's route: `endpoints` must include the root's
+    /// origin and every `files` origin, and nothing else.
+    pub fn configured(
+        protocol: Arc<dyn RegistryProtocol>,
+        scope: RouteScope,
+        endpoints: Vec<Endpoint>,
+    ) -> io::Result<Route> {
+        let mut route = Route::instance(protocol, endpoints)?;
+        let origins: BTreeSet<String> = route.endpoints.iter().map(Endpoint::origin).collect();
+        let mut wanted = BTreeSet::from([origin_of(&scope.root)]);
+        wanted.extend(scope.files.iter().map(|files| origin_of(files)));
+        if origins != wanted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "route {} for registry {} has endpoints {origins:?}, not its root and files origins {wanted:?}",
+                    route.protocol.route_id(),
+                    scope.registry
+                ),
+            ));
+        }
+        route.scope = Some(scope);
+        Ok(route)
+    }
+
+    /// The configured registry this route serves, if any.
+    pub fn scope(&self) -> Option<&RouteScope> {
+        self.scope.as_ref()
+    }
+
+    /// The scope claims are learned and looked up in: a configured route's
+    /// claims are its own, so one registry's metadata never admits a URL
+    /// for another; the public routes share one scope, as before.
+    pub(crate) fn claim_scope(&self) -> &str {
+        match &self.scope {
+            Some(_) => self.protocol.route_id(),
+            None => "",
+        }
     }
 
     /// Where `path` goes, after the kernel's grammar check and the origin
@@ -661,6 +768,12 @@ impl Route {
     pub(crate) fn endpoint_for(&self, url: &Url) -> Option<&Endpoint> {
         self.endpoints.iter().find(|endpoint| endpoint.serves(url))
     }
+}
+
+/// `https://host[:port]` of a normalized URL, as [`Endpoint::origin`]
+/// spells it.
+fn origin_of(url: &str) -> String {
+    crate::kernel::registries::config::origin_of(url).to_string()
 }
 
 /// A protocol's error text with any echo of the raw mirror path (or its

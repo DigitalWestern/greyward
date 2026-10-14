@@ -22,6 +22,8 @@
 //! hosts or git fetches (see `kernel::resolve::intercept`).
 
 use crate::kernel::fetch::Digest;
+use crate::kernel::registries::config::Registry;
+use crate::kernel::registries::covers;
 use crate::kernel::resolve::routes::{
     Claim, Endpoint, RegistryProtocol, RequestClass, Route, Upstream,
 };
@@ -87,33 +89,9 @@ impl RegistryProtocol for PypiRegistry {
         if url.host_str() != Some(INDEX_HOST) || !url.path().starts_with("/simple/") {
             return Vec::new();
         }
-        let Ok(text) = std::str::from_utf8(body) else {
-            return Vec::new();
-        };
-        let files = match serde_json::from_str::<serde_json::Value>(text) {
-            Ok(page) => json_files(&page),
-            Err(_) => html_files(text),
-        };
-        let mut claims = Vec::new();
-        for file in files {
-            let Ok(target) = url.join(&file.href) else {
-                continue;
-            };
-            let mut target = target;
-            target.set_fragment(None);
-            if target.host_str() != Some(FILES_HOST) || check_file_path(target.path()).is_err() {
-                continue;
-            }
-            if let Some(claim) = strongest(&file.hashes) {
-                claims.push((target.clone(), claim));
-            }
-            if let Some(claim) = strongest(&file.metadata) {
-                if let Ok(metadata) = Url::parse(&format!("{target}{METADATA_SUFFIX}")) {
-                    claims.push((metadata, claim));
-                }
-            }
-        }
-        claims
+        page_claims(url, body, |target| {
+            target.host_str() == Some(FILES_HOST) && check_file_path(target.path()).is_ok()
+        })
     }
 
     /// PyPI publishes a digest for every file it serves.
@@ -337,6 +315,108 @@ fn check_file_path(path: &str) -> Result<(), String> {
         return Err(format!("{file:?} is not a distribution file"));
     }
     Ok(())
+}
+
+/// A configured Python registry's simple API (PEP 503 and 691), as a
+/// route of its own (docs/agent/DESIGNS.md §4 "The proxy"). Its grammar
+/// decides metadata only: `<url><project>/` is a project page, read for
+/// claims exactly as PyPI's is. Every other URL the route owns is a file,
+/// wherever the registry put it (Nexus links `../../packages/...`,
+/// CodeArtifact pre-signed URLs), and is fetched only when this registry's
+/// own pages claimed it with a digest.
+pub struct ConfiguredSimple {
+    id: String,
+    base: String,
+}
+
+impl ConfiguredSimple {
+    pub fn new(registry: &Registry) -> ConfiguredSimple {
+        ConfiguredSimple {
+            id: format!("{ROUTE_ID}-{}", registry.name),
+            base: registry.url.clone(),
+        }
+    }
+
+    /// Whether `url` is a project page (or the index root) of this registry.
+    fn is_page(&self, url: &Url) -> bool {
+        if url.query().is_some() || !covers::covers(&self.base, url.as_str()) {
+            return false;
+        }
+        let base_path = Url::parse(&self.base).map(|base| base.path().to_string());
+        let Ok(base_path) = base_path else {
+            return false;
+        };
+        let Some(rest) = url.path().strip_prefix(&base_path) else {
+            return false;
+        };
+        let name = rest.strip_suffix('/').unwrap_or(rest);
+        name.is_empty() || check_name(name).is_ok()
+    }
+}
+
+impl RegistryProtocol for ConfiguredSimple {
+    fn route_id(&self) -> &str {
+        &self.id
+    }
+
+    /// Reached only through interception, never as a mirror path.
+    fn upstream(&self, _endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+        Err(refused(
+            path,
+            "a configured registry is not served as a mirror",
+        ))
+    }
+
+    fn classify(&self, url: &Url) -> RequestClass {
+        if self.is_page(url) {
+            RequestClass::Index
+        } else {
+            RequestClass::Artifact
+        }
+    }
+
+    fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)> {
+        if !self.is_page(url) {
+            return Vec::new();
+        }
+        page_claims(url, body, |_| true)
+    }
+
+    fn expects_claim(&self, _url: &Url) -> bool {
+        true
+    }
+}
+
+/// Every file a project page at `url` lists that `keep` accepts, claimed
+/// by its strongest hash, and its core metadata by the hash the page gives
+/// for it. Relative links resolve against the page's URL.
+fn page_claims(url: &Url, body: &[u8], keep: impl Fn(&Url) -> bool) -> Vec<(Url, Claim)> {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return Vec::new();
+    };
+    let files = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(page) => json_files(&page),
+        Err(_) => html_files(text),
+    };
+    let mut claims = Vec::new();
+    for file in files {
+        let Ok(mut target) = url.join(&file.href) else {
+            continue;
+        };
+        target.set_fragment(None);
+        if !keep(&target) {
+            continue;
+        }
+        if let Some(claim) = strongest(&file.hashes) {
+            claims.push((target.clone(), claim));
+        }
+        if let Some(claim) = strongest(&file.metadata) {
+            let mut metadata = target.clone();
+            metadata.set_path(&format!("{}{METADATA_SUFFIX}", target.path()));
+            claims.push((metadata, claim));
+        }
+    }
+    claims
 }
 
 /// The PyPI route: the index and the file host.
@@ -590,5 +670,357 @@ mod tests {
         assert!(strongest(&pairs(&[("sha1", &"f".repeat(40))]))
             .unwrap()
             .is_weak());
+    }
+
+    /// A configured registry through interception, against an
+    /// authenticated fixture (docs/agent/DESIGNS.md §4 "Test plan", proxy).
+    mod configured {
+        use super::*;
+        use crate::kernel::policy::{self, Policy, SourceOrigin};
+        use crate::kernel::registries::config::Ecosystem;
+        use crate::kernel::registries::route as registry_route;
+        use crate::kernel::resolve::routes::Permitted;
+        use crate::kernel::resolve::session::{Intercept, Mode, SessionReport};
+        use crate::kernel::resolve::testing::{open_tunnel, tunnel_request, Harness, TlsTunnel};
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        use sha2::{Digest as _, Sha256};
+        use std::path::Path;
+        use std::sync::Arc;
+
+        const CORP_TOKEN: &str = "corp-token-0123456789abcdef";
+        const TEAM_TOKEN: &str = "team-token-fedcba9876543210";
+
+        fn sha(body: &[u8]) -> String {
+            hex::encode(Sha256::digest(body))
+        }
+
+        fn token_file(dir: &Path, name: &str, value: &str) -> String {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join(name);
+            std::fs::write(&path, value).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            path.display().to_string()
+        }
+
+        /// The machine policy: `corp` (root `/repo/pypi/`, files on
+        /// other.test) and `team`, whose root nests inside corp's.
+        fn machine(port: u16, corp_file: &str, team_file: &str) -> Policy {
+            let text = format!(
+                r#"
+[credentials.corp]
+file = "{corp_file}"
+
+[credentials.team]
+file = "{team_file}"
+
+[[registry]]
+name = "corp"
+ecosystem = "python"
+url = "https://registry.test:{port}/repo/pypi/simple/"
+root = "https://registry.test:{port}/repo/pypi/"
+credential = "corp"
+files = ["https://other.test:{port}/"]
+
+[[registry]]
+name = "team"
+ecosystem = "python"
+url = "https://registry.test:{port}/repo/pypi/team/simple/"
+root = "https://registry.test:{port}/repo/pypi/team/"
+credential = "team"
+
+[sources]
+python = ["corp", "team"]
+"#
+            );
+            let path = Path::new("/machine/policy.toml");
+            let parsed = policy::parse_file(path, &text).unwrap();
+            let mut merged = Policy::default();
+            policy::merge_file(&mut merged, &parsed, SourceOrigin::Machine, path).unwrap();
+            merged
+        }
+
+        fn session(
+            harness: &Harness,
+            policy: Policy,
+        ) -> (
+            crate::kernel::resolve::proxy::Session,
+            crate::kernel::resolve::routes::ProxyAddress,
+        ) {
+            let sources = policy.registries.ecosystem(Ecosystem::Python);
+            let mut routes = Vec::new();
+            let mut permitted = Permitted::compiled();
+            for registry in sources.registries() {
+                routes.push(
+                    registry_route::route(
+                        Arc::new(ConfiguredSimple::new(registry)),
+                        registry,
+                        &policy.registries,
+                    )
+                    .unwrap(),
+                );
+                permitted = registry_route::permit(permitted, registry);
+            }
+            let mut config = harness.config(policy.clone(), Mode::Online);
+            config.ecosystem = "python".into();
+            config.intercept = Intercept::Tls;
+            config.routes = routes;
+            config.permitted = permitted;
+            harness.open(config)
+        }
+
+        fn tunnel(
+            harness: &Harness,
+            address: &crate::kernel::resolve::routes::ProxyAddress,
+            host: &str,
+        ) -> (TlsTunnel, String) {
+            let authority = format!("{host}:{}", harness.upstream.port());
+            let roots = harness.proxy.authority().roots();
+            (
+                open_tunnel(address, &authority, host, roots, &[]).unwrap(),
+                authority,
+            )
+        }
+
+        fn get(tunnel: &mut TlsTunnel, authority: &str, path: &str) -> (u16, Vec<u8>) {
+            let head = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\n");
+            let response = tunnel_request(tunnel, &head, b"");
+            (response.status, response.body)
+        }
+
+        fn bearer(token: &str) -> String {
+            format!("Bearer {token}")
+        }
+
+        fn leaks(report: &SessionReport, token: &str) -> bool {
+            format!("{:?}", report.ledger).contains(token)
+                || format!("{:?}", report.facts).contains(token)
+                || format!("{:?}", report.diagnostics).contains(token)
+        }
+
+        #[test]
+        fn a_configured_registry_is_served_by_claim_with_its_credential_under_its_root_only() {
+            let harness = Harness::new("configured-python");
+            let port = harness.upstream.port();
+            let temp = crate::kernel::testutil::TempDir::new();
+            let corp_file = token_file(&temp.0, "corp", CORP_TOKEN);
+            let team_file = token_file(&temp.0, "team", TEAM_TOKEN);
+            let sdist = b"demo sdist bytes";
+            let wheel = b"demo wheel bytes";
+            let moved = b"redirected sdist bytes";
+            let page = format!(
+                "<html><body>\n\
+                 <a href=\"../../packages/demo-1.0.tar.gz#sha256={}\">demo-1.0.tar.gz</a>\n\
+                 <a href=\"https://other.test:{port}/blob/demo-1.0-py3-none-any.whl#sha256={}\">w</a>\n\
+                 <a href=\"/repo/pypi/team/packages/stolen.tar.gz#sha256={}\">s</a>\n\
+                 <a href=\"../../packages/moved.tar.gz#sha256={}\">m</a>\n\
+                 <a href=\"../../packages/escape.tar.gz#sha256={}\">e</a>\n\
+                 <a href=\"../../packages/nodigest.tar.gz\">n</a>\n\
+                 </body></html>",
+                sha(sdist),
+                sha(wheel),
+                sha(sdist),
+                sha(moved),
+                sha(b"escape bytes"),
+            );
+            let corp = |body: &[u8]| Behavior::Authorized {
+                value: bearer(CORP_TOKEN),
+                reply: Reply::new(200, body),
+            };
+            let up = &harness.upstream;
+            up.set("/repo/pypi/simple/demo/", corp(page.as_bytes()));
+            up.set("/repo/pypi/packages/demo-1.0.tar.gz", corp(sdist));
+            up.set("/repo/pypi/packages/nodigest.tar.gz", corp(sdist));
+            up.set(
+                "/blob/demo-1.0-py3-none-any.whl",
+                Behavior::Reply(Reply::new(200, wheel)),
+            );
+            up.set(
+                "/repo/pypi/packages/moved.tar.gz",
+                Behavior::Authorized {
+                    value: bearer(CORP_TOKEN),
+                    reply: Reply::new(302, b"").header(
+                        "Location",
+                        &format!("https://other.test:{port}/blob/moved.tar.gz"),
+                    ),
+                },
+            );
+            up.set(
+                "/blob/moved.tar.gz",
+                Behavior::Reply(Reply::new(200, moved)),
+            );
+            up.set(
+                "/repo/pypi/packages/escape.tar.gz",
+                Behavior::Authorized {
+                    value: bearer(CORP_TOKEN),
+                    reply: Reply::new(302, b"")
+                        .header("Location", &format!("https://third.test:{port}/x.tar.gz")),
+                },
+            );
+            up.set(
+                "/repo/pypi/team/packages/stolen.tar.gz",
+                Behavior::Reply(Reply::new(200, sdist)),
+            );
+            up.set(
+                "/repo/pypi/team/simple/demo/",
+                Behavior::Authorized {
+                    value: bearer(TEAM_TOKEN),
+                    reply: Reply::new(200, b"<html></html>"),
+                },
+            );
+            up.set("/repo/other/x", Behavior::Reply(Reply::new(200, b"x")));
+            up.set("/x", Behavior::Reply(Reply::new(200, b"x")));
+
+            let (session, address) = session(&harness, machine(port, &corp_file, &team_file));
+            let (mut index, authority) = tunnel(&harness, &address, "registry.test");
+            assert_eq!(
+                get(&mut index, &authority, "/repo/pypi/simple/demo/").0,
+                200
+            );
+            assert_eq!(
+                get(
+                    &mut index,
+                    &authority,
+                    "/repo/pypi/packages/demo-1.0.tar.gz"
+                ),
+                (200, sdist.to_vec())
+            );
+            // A claimed file whose 302 leads to the registry's files origin:
+            // served, and the credential stays behind.
+            assert_eq!(
+                get(&mut index, &authority, "/repo/pypi/packages/moved.tar.gz"),
+                (200, moved.to_vec())
+            );
+            // A redirect anywhere else is refused.
+            assert_eq!(
+                get(&mut index, &authority, "/repo/pypi/packages/escape.tar.gz").0,
+                403
+            );
+            // Nothing the registry's pages did not claim is fetched.
+            assert_eq!(
+                get(
+                    &mut index,
+                    &authority,
+                    "/repo/pypi/packages/unlisted.tar.gz"
+                )
+                .0,
+                403
+            );
+            assert_eq!(
+                get(
+                    &mut index,
+                    &authority,
+                    "/repo/pypi/packages/nodigest.tar.gz"
+                )
+                .0,
+                403
+            );
+            // A URL under team's (longer) root is team's: corp's claim for it
+            // does not count, and corp's credential is never sent there.
+            assert_eq!(
+                get(
+                    &mut index,
+                    &authority,
+                    "/repo/pypi/team/packages/stolen.tar.gz"
+                )
+                .0,
+                403
+            );
+            // Team's own pages get team's credential.
+            assert_eq!(
+                get(&mut index, &authority, "/repo/pypi/team/simple/demo/").0,
+                200
+            );
+            // Another path on the same host is no registry's: refused hard.
+            assert_eq!(get(&mut index, &authority, "/repo/other/x").0, 403);
+            drop(index);
+            let (mut files, files_authority) = tunnel(&harness, &address, "other.test");
+            assert_eq!(
+                get(
+                    &mut files,
+                    &files_authority,
+                    "/blob/demo-1.0-py3-none-any.whl"
+                ),
+                (200, wheel.to_vec())
+            );
+            drop(files);
+            let (mut third, third_authority) = tunnel(&harness, &address, "third.test");
+            assert_eq!(get(&mut third, &third_authority, "/x").0, 403);
+            drop(third);
+            let report = session.finish();
+
+            for unfetched in [
+                "/repo/pypi/packages/unlisted.tar.gz",
+                "/repo/pypi/packages/nodigest.tar.gz",
+                "/repo/pypi/team/packages/stolen.tar.gz",
+                "/repo/other/x",
+                "/x",
+            ] {
+                assert_eq!(up.hits(unfetched), 0, "{unfetched} reached upstream");
+            }
+            for seen in up.seen() {
+                let auth = seen.headers.get("authorization");
+                let expected = match seen.target.as_str() {
+                    t if t.starts_with("/repo/pypi/team/") => Some(bearer(TEAM_TOKEN)),
+                    t if t.starts_with("/repo/pypi/") => Some(bearer(CORP_TOKEN)),
+                    _ => None,
+                };
+                assert_eq!(auth, expected.as_deref(), "{} {:?}", seen.target, seen.sni);
+            }
+            // The two unlisted hosts or paths fail the door; nothing else does.
+            assert_eq!(report.facts.hard_failures.len(), 2, "{:?}", report.facts);
+            assert!(report
+                .facts
+                .hard_failures
+                .iter()
+                .all(|failure| failure.contains("fix:") && failure.contains("[corp, team]")));
+            assert!(report.facts.exceptions.is_empty(), "{:?}", report.facts);
+            assert!(!leaks(&report, CORP_TOKEN) && !leaks(&report, TEAM_TOKEN));
+        }
+
+        #[test]
+        fn an_unreadable_credential_is_a_hard_failure_and_sends_nothing() {
+            let harness = Harness::new("configured-python-nocred");
+            let port = harness.upstream.port();
+            let temp = crate::kernel::testutil::TempDir::new();
+            let missing = temp.0.join("missing-token").display().to_string();
+            harness.upstream.set(
+                "/repo/pypi/simple/demo/",
+                Behavior::Reply(Reply::new(200, b"<html></html>")),
+            );
+            let (session, address) = session(&harness, machine(port, &missing, &missing));
+            let (mut index, authority) = tunnel(&harness, &address, "registry.test");
+            assert_eq!(
+                get(&mut index, &authority, "/repo/pypi/simple/demo/").0,
+                502
+            );
+            drop(index);
+            let report = session.finish();
+            assert_eq!(harness.upstream.hits("/repo/pypi/simple/demo/"), 0);
+            assert_eq!(report.facts.hard_failures.len(), 1, "{:?}", report.facts);
+            assert!(
+                report.facts.hard_failures[0].contains("credential corp"),
+                "{:?}",
+                report.facts
+            );
+        }
+
+        #[test]
+        fn the_page_grammar_is_relative_to_the_registry_url() {
+            let registry = machine(8443, "/t", "/t");
+            let corp = registry.registries.registry("corp").unwrap();
+            let protocol = ConfiguredSimple::new(corp);
+            let base = "https://registry.test:8443/repo/pypi/simple/";
+            for (path, class) in [
+                ("demo/", RequestClass::Index),
+                ("Demo.Name_x/", RequestClass::Index),
+                ("", RequestClass::Index),
+                ("demo/demo-1.0.tar.gz", RequestClass::Artifact),
+                ("../packages/demo-1.0.tar.gz", RequestClass::Artifact),
+            ] {
+                let url = Url::parse(&format!("{base}{path}")).unwrap();
+                assert_eq!(protocol.classify(&url), class, "{path}");
+            }
+            assert_eq!(protocol.route_id(), "pypi-corp");
+        }
     }
 }

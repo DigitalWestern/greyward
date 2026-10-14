@@ -225,6 +225,14 @@ fn claim_key(url: &Url) -> String {
     url.to_string()
 }
 
+fn scoped_key(scope: &str, url: &Url) -> String {
+    if scope.is_empty() {
+        claim_key(url)
+    } else {
+        format!("{scope} {}", claim_key(url))
+    }
+}
+
 /// A fresh session token: 32 random bytes as hex.
 fn new_token() -> io::Result<String> {
     let mut bytes = [0u8; 32];
@@ -547,6 +555,23 @@ impl State {
         self.inner().diagnostics.port.get_or_insert(port);
     }
 
+    /// When this session's ecosystem has a configured registry list, the
+    /// list and where it came from; `None` for an ecosystem that keeps the
+    /// public registry with unattested hosts recorded.
+    pub(crate) fn enforced_sources(&self) -> Option<String> {
+        let ecosystem =
+            crate::kernel::registries::config::Ecosystem::parse(&self.config.ecosystem)?;
+        let sources = self.config.policy.registries.ecosystem(ecosystem);
+        sources.enforced.then(|| {
+            format!(
+                "[{}] ({}); fix: add the host's registry to the machine policy's [[registry]] and [sources].{}, or re-lock against a listed registry",
+                sources.names(),
+                sources.provenance(),
+                ecosystem.as_str()
+            )
+        })
+    }
+
     pub(crate) fn hard_failure(&self, text: String) {
         let text = self.clean(&text);
         let mut inner = self.inner();
@@ -608,16 +633,22 @@ impl State {
         }
     }
 
-    pub(crate) fn add_claims(&self, claims: Vec<(Url, Claim)>) {
+    /// Learn `claims` in `scope` ([`Route::claim_scope`]).
+    pub(crate) fn add_claims(&self, scope: &str, claims: Vec<(Url, Claim)>) {
         let mut inner = self.inner();
         for (url, claim) in claims {
-            inner.claims.entry(claim_key(&url)).or_default().add(&claim);
+            inner
+                .claims
+                .entry(scoped_key(scope, &url))
+                .or_default()
+                .add(&claim);
         }
     }
 
-    pub(crate) fn claimed(&self, url: &Url) -> Claimed {
+    /// What the metadata served in `scope` claims for `url`.
+    pub(crate) fn claimed(&self, scope: &str, url: &Url) -> Claimed {
         let inner = self.inner();
-        let Some(claims) = inner.claims.get(&claim_key(url)) else {
+        let Some(claims) = inner.claims.get(&scoped_key(scope, url)) else {
             return Claimed::None;
         };
         match claims.strongest() {

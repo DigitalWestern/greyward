@@ -408,11 +408,12 @@ pub(super) fn yarn_workspace_manifests(
                 "Yarn workspace {path:?} has a backslash in its path; rename the directory"
             )));
         }
-        let text = crate::tailors::node::inputs::read_input(
-            project,
-            Path::new(&path).join("package.json"),
-        )
-        .map_err(|error| err(format!("Yarn workspace {path}: read package.json: {error}")))?;
+        let text = crate::tailors::node::inputs::read_manifest(project, Path::new(&path))?
+            .ok_or_else(|| {
+                err(format!(
+                    "Yarn workspace {path}: read package.json: not found"
+                ))
+            })?;
         let package: JsonValue = serde_json::from_str(&text)
             .map_err(|error| err(format!("Yarn workspace {path}: package.json: {error}")))?;
         refuse_package_json_url_credentials(&format!("{path}/package.json"), &package)?;
@@ -728,16 +729,17 @@ fn yarn_link_dependencies(
             continue;
         }
         let manifest = crate::tailors::node::freshness::manifest_path(&target);
-        let deps = match project.read_input_string(Path::new(&manifest))? {
-            // A linked directory without a package.json depends on nothing.
-            None => Vec::new(),
-            Some(text) => {
-                let package: JsonValue = serde_json::from_str(&text)
-                    .map_err(|error| err(format!("{manifest}: {error}")))?;
-                refuse_package_json_url_credentials(&manifest, &package)?;
-                dependencies_of(&package, Some(&target), false)?
-            }
-        };
+        let deps =
+            match crate::tailors::node::inputs::read_manifest_at(project, Path::new(&manifest))? {
+                // A linked directory without a package.json depends on nothing.
+                None => Vec::new(),
+                Some(text) => {
+                    let package: JsonValue = serde_json::from_str(&text)
+                        .map_err(|error| err(format!("{manifest}: {error}")))?;
+                    refuse_package_json_url_credentials(&manifest, &package)?;
+                    dependencies_of(&package, Some(&target), false)?
+                }
+            };
         queue.extend(link_targets(deps.iter()));
         found.insert(target, deps);
     }
@@ -1048,7 +1050,7 @@ mod lock_shape_tests {
     fn an_integrity_with_no_supported_digest_is_malformed() {
         for integrity in [
             "md5-AAAAAAAAAAAAAAAAAAAAAA==",
-            "sha384-AAAA",
+            "sha224-AAAA",
             "",
             "sha5120-x",
         ] {
@@ -1101,6 +1103,8 @@ mod lock_shape_tests {
 
     #[test]
     fn an_optional_non_https_entry_is_dropped() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let _attribution = crate::kernel::policy::Attribution::open("node").unwrap();
         let plan = plan(
             &http_lock(),
             r#"{"dependencies":{"b":"1.0.0"},"optionalDependencies":{"a":"1.0.0"}}"#,
@@ -1108,6 +1112,18 @@ mod lock_shape_tests {
         .unwrap();
         let paths: Vec<&str> = plan.packages.iter().map(|p| p.path.as_str()).collect();
         assert_eq!(paths, vec!["node_modules/b"]);
+        // Left out, and recorded (#692).
+        let exceptions = crate::kernel::policy::drain();
+        assert_eq!(exceptions.len(), 1, "{exceptions:?}");
+        assert_eq!(
+            exceptions[0].kind,
+            crate::kernel::policy::REQUIREMENT_SKIPPED
+        );
+        assert_eq!(exceptions[0].subject, "a@1.0.0");
+        assert_eq!(
+            exceptions[0].detail,
+            "optional dependency left out: non-https resolved URL http://r/a-1.0.0.tgz"
+        );
     }
 
     fn credentials_lock() -> String {

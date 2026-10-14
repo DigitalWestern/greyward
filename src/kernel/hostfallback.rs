@@ -372,6 +372,7 @@ mod tests {
                 build: |view: HostView| {
                     views.push(view);
                     Err(match view {
+                        HostView::WholeHost => unreachable!("the fallback asks for no host view"),
                         HostView::RuntimeOnly => io::Error::other("lzma.h not found"),
                         HostView::Full => crate::kernel::error::sandbox_setup(io::Error::new(
                             io::ErrorKind::PermissionDenied,

@@ -15,9 +15,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// A requirement was skipped because it is project-local or a direct reference.
+/// A requirement was skipped: a Python requirement that is project-local or
+/// a direct reference, or an optional Node dependency ward cannot verify (no
+/// integrity, a non-https tarball, a local reference the lock cannot place),
+/// which is left out of the tree rather than installed unverified, or an npm
+/// workspace member reached through a symlink that leads outside the project.
 pub const REQUIREMENT_SKIPPED: &str = "requirement-skipped";
-/// Two wheels shipped the same path; the later wheel won.
+/// Two wheels shipped the same path (the later wheel won), or two Node
+/// packages in one `node_modules` claimed one bin name (the first kept it).
 pub const FILE_COLLISION: &str = "file-collision";
 /// An install lifecycle script failed but its extracted package was retained.
 pub const INSTALL_SCRIPT_FAILED: &str = "install-script-failed";

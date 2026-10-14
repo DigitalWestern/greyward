@@ -34,6 +34,7 @@ pub mod tailor;
 mod archives;
 mod bins;
 mod classify;
+mod npm_members;
 mod plan;
 mod project;
 mod realize;
@@ -42,6 +43,7 @@ mod unpack;
 
 use bins::*;
 use classify::*;
+pub(crate) use npm_members::install as install_npm_members;
 pub use plan::*;
 pub use project::*;
 pub use realize::*;
@@ -583,27 +585,43 @@ pub(crate) fn env_package_path(staged: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn env_node_modules_path(staged: &Path, path: &str) -> PathBuf {
-    match workspace_path(path) {
-        Some((workspace, _)) => staged
-            .join("workspaces")
-            .join(encode_workspace_path(workspace))
-            .join("node_modules"),
-        None => staged.join("node_modules"),
-    }
-}
-
 fn importer_relative_path(path: &str) -> &str {
     workspace_path(path)
         .map(|(_, relative)| relative)
         .unwrap_or(path)
 }
 
-fn is_importer_top_level(path: &str) -> bool {
-    importer_relative_path(path)
-        .matches("node_modules/")
-        .count()
-        == 1
+/// The regular files under a `directories.bin` folder, relative to it,
+/// in path order, as npm's `**` glob finds them: every depth, and no name
+/// that starts with a dot (a `.gitkeep`, a `.hidden/` folder) at any
+/// level. Symlinks are not followed. npm keys each by its basename, the
+/// last one it meets winning; its glob order is the filesystem's, so ward
+/// takes path order, the same on every machine.
+fn bin_directory_files(bin_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(relative) = stack.pop() {
+        let entries = match fs::read_dir(bin_dir.join(&relative)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_name().as_encoded_bytes().starts_with(b".") {
+                continue;
+            }
+            let path = relative.join(entry.file_name());
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 fn normalized_bin_path(path: &str) -> io::Result<PathBuf> {
@@ -626,6 +644,30 @@ fn normalized_bin_path(path: &str) -> io::Result<PathBuf> {
         return Err(err(format!("unsafe bin target {path:?}")));
     }
     Ok(normalized)
+}
+
+/// The package directory inside the realized git checkout `object`: the
+/// subdirectory `source` names, or the checkout itself. One rule for the
+/// placement and for the native classification, so a `binding.gyp` is
+/// looked for where the package is. The subdirectory must be plain names.
+pub(super) fn git_package_root(
+    object: &Path,
+    source: &crate::kernel::gitsrc::GitSource,
+) -> io::Result<PathBuf> {
+    let Some(subdir) = &source.subdirectory else {
+        return Ok(object.to_path_buf());
+    };
+    let relative = Path::new(subdir);
+    let plain = !subdir.is_empty()
+        && relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !plain {
+        return Err(err(format!(
+            "git subdirectory {subdir:?} is not a plain path inside the repository"
+        )));
+    }
+    Ok(object.join(relative))
 }
 
 /// Read npm's normalized bin forms from an extracted package. Lockfile bin
@@ -657,39 +699,21 @@ pub(crate) fn discover_package_bins(
                 return Ok(bins);
             };
             let directory = normalized_bin_path(directory)?;
-            let bin_dir = package_dir.join(&directory);
-            let entries = match fs::read_dir(&bin_dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(bins),
-                Err(error) => return Err(error),
-            };
-            let mut names = Vec::new();
-            for entry in entries {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    names.push((name, directory.join(entry.file_name())));
-                }
+            let mut found = BTreeMap::new();
+            for file in bin_directory_files(&package_dir.join(&directory))? {
+                let name = file
+                    .file_name()
+                    .expect("a walked file has a name")
+                    .to_string_lossy()
+                    .into_owned();
+                let path = directory.join(&file).to_string_lossy().replace('\\', "/");
+                found.insert(name, path);
             }
-            names.sort_by(|a, b| a.0.cmp(&b.0));
-            bins.extend(
-                names
-                    .into_iter()
-                    .map(|(name, path)| (name, path.to_string_lossy().replace('\\', "/"))),
-            );
+            bins.extend(found);
         }
     }
     bins.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(bins)
-}
-
-fn bin_link_target(path: &str, bin: &str) -> PathBuf {
-    Path::new("..").join(
-        Path::new(importer_relative_path(path))
-            .strip_prefix("node_modules/")
-            .unwrap_or_else(|_| Path::new(importer_relative_path(path)))
-            .join(bin),
-    )
 }
 
 /// A project-declared build input: a URL + sha256 that ward prefetches
@@ -1139,14 +1163,17 @@ mod tests {
         );
     }
 
-    /// `node-env/6` goldens, on both platforms, from fixed inputs: a fixed
+    /// `node-env/7` goldens, on both platforms, from fixed inputs: a fixed
     /// store root (a real identity input), two packages, one declared
     /// artifact and the shipped node-gyp Python. The identity constructor is
     /// a pure function of its platform argument, so the Darwin value is
     /// computed here and the macOS gate only confirms it.
     ///
-    /// `/6` is `/5` with only the schema string moved, and `/5` is `/4` plus
-    /// `gyp_python`: taking that input away and spelling
+    /// `/7` is `/6`, and `/6` is `/5`, with only the schema string moved
+    /// (each marks environments built by newer realization rules: the
+    /// tarball identity check for `/6`, the #695 bin and script rules for
+    /// `/7`), and `/5` is `/4` plus `gyp_python`: taking that input away and
+    /// spelling
     /// the schema `/4` gives back the `/4` goldens byte for byte, so nothing
     /// else moved. The `/3` spelling is a different object id again, and the
     /// two drifts `/3` could not see — one package or the declared artifact
@@ -1172,15 +1199,17 @@ mod tests {
             sha256: "a".repeat(64),
             path: ".npm/tool.tar.gz".into(),
         };
-        for (platform, golden, golden_v5, golden_v4) in [
+        for (platform, golden, golden_v6, golden_v5, golden_v4) in [
             (
                 Platform::X86_64UnknownLinuxGnu,
+                "989620fed5c51a8ad315d91a4490fb042bc48fc3-env-24.20.0",
                 "e21356a9cde5a63366b65c465e9e07d57e9963be-env-24.20.0",
                 "34962336b7a092e840ffe8827b41d3766ebec573-env-24.20.0",
                 "26333746f02786ed4d81de465ca6ee4c43e07000-env-24.20.0",
             ),
             (
                 Platform::Aarch64AppleDarwin,
+                "ffb759ab1c814be0e48e8b0377db36ae02b1a960-env-24.20.0",
                 "e5c0f487468afef198bae9bd7be4e6992d6c6576-env-24.20.0",
                 "a0aaa1a6f2b11c672252154e50b87ceba0c0eb37-env-24.20.0",
                 "aa486e4a07068ad33e42126fc5b58b042200b055-env-24.20.0",
@@ -1208,7 +1237,7 @@ mod tests {
                 &test_gyp_python_id(platform),
             )
             .unwrap();
-            assert_eq!(identity.inputs["schema"], "node-env/6");
+            assert_eq!(identity.inputs["schema"], "node-env/7");
             assert_eq!(identity.inputs["native"], realize::NATIVE_NONE);
             assert_eq!(
                 identity.inputs["gyp_python"],
@@ -1248,8 +1277,12 @@ mod tests {
                 assert!(crate::kernel::objmeta::check_identity_grammar(&stranger).is_err());
             }
 
-            // `/6` moved the schema string alone: spelled `/5`, the same
-            // identity is the `/5` golden byte for byte.
+            // `/7` and `/6` moved the schema string alone: spelled `/6` or
+            // `/5`, the same identity is that schema's golden byte for byte.
+            let mut v6 = identity.clone();
+            v6.inputs.insert("schema".into(), "node-env/6".into());
+            assert_eq!(v6.object_id(), golden_v6, "{}", platform.triple());
+            assert_ne!(v6.object_id(), identity.object_id());
             let mut v5 = identity.clone();
             v5.inputs.insert("schema".into(), "node-env/5".into());
             assert_eq!(v5.object_id(), golden_v5, "{}", platform.triple());
@@ -2231,6 +2264,46 @@ mod tests {
             discover_package_bins(r#"{"directories":{"bin":"cli"}}"#, "tool", &dir).unwrap(),
             vec![("a".into(), "cli/a".into()), ("b".into(), "cli/b".into())]
         );
+
+        // npm's `**` glob (#695): a dotfile is skipped, not refused, at any
+        // depth, and a file in a subdirectory is a bin keyed by its name.
+        fs::write(dir.join("cli/.gitkeep"), "").unwrap();
+        fs::create_dir_all(dir.join("cli/sub")).unwrap();
+        fs::write(dir.join("cli/sub/c"), "c").unwrap();
+        fs::create_dir_all(dir.join("cli/.hidden")).unwrap();
+        fs::write(dir.join("cli/.hidden/d"), "d").unwrap();
+        assert_eq!(
+            discover_package_bins(r#"{"directories":{"bin":"./cli"}}"#, "tool", &dir).unwrap(),
+            vec![
+                ("a".into(), "cli/a".into()),
+                ("b".into(), "cli/b".into()),
+                ("c".into(), "cli/sub/c".into()),
+            ]
+        );
+    }
+
+    /// A git dependency's package is the subdirectory its source names:
+    /// the placement and the native classification both look there.
+    #[test]
+    fn a_git_package_root_is_the_named_subdirectory_and_only_a_plain_one() {
+        let object = Path::new("/store/objects/abc");
+        let source = |subdirectory: Option<&str>| crate::kernel::gitsrc::GitSource {
+            url: "https://example.invalid/repo.git".into(),
+            commit: "a".repeat(40),
+            subdirectory: subdirectory.map(str::to_string),
+        };
+        assert_eq!(git_package_root(object, &source(None)).unwrap(), object);
+        assert_eq!(
+            git_package_root(object, &source(Some("packages/addon"))).unwrap(),
+            object.join("packages/addon")
+        );
+        for bad in ["", "../x", "/abs", "a/../../b", "./a"] {
+            let error = git_package_root(object, &source(Some(bad))).unwrap_err();
+            assert!(
+                error.to_string().contains("not a plain path"),
+                "{bad}: {error}"
+            );
+        }
     }
 
     #[test]

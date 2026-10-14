@@ -7,6 +7,7 @@
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod join;
+pub mod publication;
 pub mod records;
 pub mod status;
 pub mod toolchain;
@@ -343,7 +344,8 @@ fn write_closure_inner(
     let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
-    // them before anything of this sync becomes visible.
+    // them before anything of this sync becomes visible. What each producer
+    // checked while it built is proved again at the very end, below.
     toolchain::recheck_before_publication(project)?;
     if !body.is_object() {
         return Err(io::Error::new(
@@ -374,6 +376,8 @@ fn write_closure_inner(
         activity,
         Some(&mut refs),
     )?;
+    #[cfg(test)]
+    tests::after_join();
 
     // Hold the project directory open and publish through it. Every
     // component of `.greyward/closures/<ecosystem>.json` is walked with
@@ -407,11 +411,19 @@ fn write_closure_inner(
     // the current host. Additive field, schema unchanged.
     let platform = Platform::host()?.triple();
     check_closure_destination(project, &closure_path)?;
-    // Protect the complete object set before publishing the visible closure.
     let (objects, projections) = refs.into_record_parts();
     let project_lock = project_lock
         .as_ref()
         .expect("closure publication owns a project lock");
+    // The final sequence, in this order: prove again what each producer
+    // checked while it built (`publication`: a planted workspace link still
+    // reaches, inside the project, the directory it reached when planted),
+    // then register the store root protecting the complete object set, then
+    // sign and write the closure. It comes after the resolution join and
+    // every npm run above. Nothing may be inserted between the recheck and
+    // the register and sign calls: anything that runs there runs after the
+    // last look.
+    publication::run_publication_checks(project)?;
     store.register_root_parts_with_project_lock(
         activity,
         project,
@@ -944,9 +956,26 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt as _;
 
+    thread_local! {
+        static AFTER_JOIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `hook` on this thread once, right after the next closure
+    /// writer's resolution join.
+    pub(crate) fn run_after_join(hook: impl FnOnce() + 'static) {
+        AFTER_JOIN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn after_join() {
+        if let Some(hook) = AFTER_JOIN.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
     /// An empty store in its own scratch directory, which lives as long as
     /// the returned `TempDir`.
-    pub(super) fn test_store(label: &str) -> (TempDir, Store) {
+    pub(crate) fn test_store(label: &str) -> (TempDir, Store) {
         let temp = TempDir::named(&format!("{label}-store"));
         for sub in ["objects", "meta", "cache/sha256", "tmp"] {
             fs::create_dir_all(temp.0.join(sub)).unwrap();
@@ -1024,7 +1053,7 @@ mod tests {
 
     /// Publish a closure for `project` through `write_closure`, naming one
     /// complete test object, as a producer would.
-    fn publish_test_closure(
+    pub(crate) fn publish_test_closure(
         project: &Path,
         ecosystem: &str,
         store: &Store,
@@ -2278,4 +2307,11 @@ mod closure_object_tests {
             envelope["body"]
         );
     }
+}
+
+/// What a test elsewhere in the crate needs from the closure writer's
+/// tests: a store, a published closure, and a hook after the join.
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) use super::tests::{publish_test_closure, run_after_join, test_store};
 }

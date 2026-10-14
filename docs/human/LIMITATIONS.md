@@ -454,11 +454,27 @@ Selection covers every patch of each maintained CPython minor that python-build-
   restrictions, so nothing is filtered there at all. pnpm's `supportedArchitectures` setting
   (install optional packages for other platforms too) is not read: an optional package for
   another platform is always left out.
+- **Two Node packages that claim one bin name: the first keeps it.** Each package's bins are
+  linked into the `.bin` of the `node_modules` that holds it, a nested package's into its
+  parent's, as npm links them, and an install script's PATH lists every `.bin` from its own
+  package outwards. When two packages in one `node_modules` claim the same name (playwright and
+  @playwright/test both ship `playwright`), the first in lock order keeps it, as with npm, and
+  the closure records `file-collision` for the link with both package paths.
+- **An optional Node dependency Greyward cannot verify is left out, and recorded.** An
+  optional package with no integrity, a non-https tarball, or a local reference the lock cannot
+  place is not installed, whichever of `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock`
+  names it, and the closure records `requirement-skipped` for it, so `ward audit` and the SBOM
+  show it is missing. npm would install it unverified. A required one stops the sync.
 - **A `pnpm-workspace.yaml` whose `packages` Greyward cannot read refuses sync, edits, and
   `attest`** (an anchor, an alias, a block scalar, a mapping item): a resolution record names
   every workspace member's `package.json`, so a members list Greyward cannot read would leave a
   member uncovered. The refusal comes in preflight, before anything is realized; write
   `packages` as a plain list of patterns.
+- **An npm lock's `overrides` are not checked against package.json.** Before planning,
+  Greyward refuses a `package-lock.json` or `npm-shrinkwrap.json` whose dependency maps or root
+  `workspaces` disagree with the package.json files, or that misses a workspace member npm
+  itself finds for the root `workspaces` patterns. npm keeps no copy of `overrides` in the lock, so a changed
+  override is not seen until the lock is regenerated, as with `npm ci`.
 - **A pnpm lock is checked against the manifests, but not through `.pnpmfile.cjs`.** Before
   planning, Greyward refuses a `pnpm-lock.yaml` that is missing a workspace member
   `pnpm-workspace.yaml` names, or whose importers disagree with a package.json, applying the
@@ -469,6 +485,66 @@ Selection covers every patch of each maintained CPython minor that python-build-
   with no `packages` key (one that only holds settings) is read as naming no members, and a
   `packages` value that is not a plain list (an anchor, an alias) skips the member check with
   a note.
+- **Reading npm workspace members runs Node, and it sees the whole host read-only.**
+  Greyward does not match `workspaces` patterns itself: it asks the npm bundled with the
+  store Node (`@npmcli/map-workspaces`), so the member set is npm's own, extglobs, classes
+  and symlink rules included. Any command that reads a project whose root `package.json`
+  has a `workspaces` list (sync, `ward add`, `inspect`, `audit`, `join`, `attest`) realizes
+  that Node first, a download the first time. npm runs in the sandbox with no network and
+  nothing writable but its scratch directory, and with the whole host filesystem
+  read-only, so a symlink to anywhere resolves as it would unconfined. That view shows
+  every host file Greyward's own user can read except Greyward's signing keys, and every
+  host Unix socket: no socket scan can cover `/`, so the trust is in the tool, which is the
+  store's hash-checked npm reading the project's patterns as data and running none of the
+  project's code. The project itself is bound from the directory Greyward holds; a project
+  whose path was pointed elsewhere after Greyward opened it is refused. Nothing npm prints
+  reaches the terminal or a CI log: its output goes nowhere. Greyward keeps nothing npm
+  returns unchecked: for each directory npm names, Greyward reads that member's
+  `package.json` itself, beneath the project and the member's own directory, takes the
+  member's name from those bytes, and refuses if npm's name differs. Every failure (an npm
+  error of any kind, a directory or a `package.json` outside the project or the member, a
+  name that disagrees) gives one fixed message, "workspace members of
+  `<project>/package.json` could not be determined inside the project", followed by the
+  project's own declared patterns and nothing else: no npm code, no path npm found, no name.
+  So two failures that differ only in what a host file holds print the same bytes. Setting
+  `GREYWARD_DEBUG_NPM_MEMBERS=1` adds the reason, and that reason can quote a host file a
+  member's symlink reaches, so it is for debugging on your own machine, not for a shared CI
+  log. One signal remains: whether npm's patterns match anything outside the project at all
+  decides whether the members are determined, since a pattern that matches nothing there is
+  not an error. npm runs again for every question, and if its answer changes while one
+  command runs (a member added, removed or renamed during a sync, or listed in another
+  order), the command refuses rather than publish a record for the old set.
+- **A workspace member reached through a symlink out of the project is refused.** npm takes
+  a directory its `workspaces` patterns find through a symlink, wherever the symlink leads.
+  Greyward refuses the whole member set when npm returns one that leads outside the project
+  (or a pattern such as `../other/*` that climbs out of it), with the fixed message above,
+  since a resolution record names files inside the project only and what npm read there is
+  host data. Point the symlink inside the project, or remove the pattern that matches it. A
+  symlink out of the project that no pattern matches changes nothing.
+- **Workspace links are checked when they are planted and right before publication, not
+  afterwards.** A `node_modules` link to a workspace package is planted to the target's
+  symlink-free path, resolved through the held project descriptor. Every check of a link is
+  one step: the link's text, read in the store directory Greyward holds open for it, must
+  still be the text planted; that directory, walked down again with no symlink followed from
+  the deepest directory it shares with the project's path, must still be the one held (so a
+  forest moved and replaced with a symlink, which would make the same text climb from
+  somewhere else, is refused); the project must still be at its path; and the target is opened once from the held descriptor with `openat2`
+  (`RESOLVE_BENEATH`, so a symlink on the way that leads out of the project fails the open);
+  the directory opened must be the very one recorded when the link was planted. So a
+  directory on the way that a concurrent writer swapped for a symlink out of
+  the project, or moved out of the project and replaced with a symlink to its new place,
+  is caught, and the link is removed and the sync refused, and so is a directory moved out
+  and moved back in its place. The same check runs again as the last step before the store
+  registers the closure and signs it, after every npm run and every other ecosystem's
+  resolution has finished. The link itself cannot be opened from the project descriptor in one
+  step: it lives in the store, outside the project, and reaches the target by the project's
+  path. A link whose target no longer exists is removed and refused the same way. On a Linux
+  kernel older than 5.6 (no `openat2`) and on macOS, the target is walked one component at
+  a time from the held descriptor instead, which a concurrent swap between two steps can
+  outrun. Edits the project's owner makes to their own
+  tree after the sync (replacing a member directory with a symlink elsewhere) are outside
+  Greyward's guarantee: the link points at the project's own source, which its owner
+  controls, and the next sync checks it again.
 - **A workspace member whose `node_modules` holds files git tracks is not projected.** Some
   repositories commit a fixture `node_modules` (vite does). Greyward moves an npm-made
   `node_modules` into the store's backups before projecting, but moving a tracked one would

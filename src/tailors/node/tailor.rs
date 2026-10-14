@@ -29,6 +29,7 @@ use std::process::Command;
 
 const NODE_INPUTS: &[&str] = &[
     "package.json",
+    "npm-shrinkwrap.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
@@ -185,7 +186,7 @@ impl Tailor for Node {
     }
 
     fn input_files(&self) -> &'static str {
-        "package.json, package-lock.json, pnpm-lock.yaml, yarn.lock"
+        "package.json, package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, yarn.lock"
     }
 
     fn source_files(&self) -> &'static [SourceFile] {
@@ -317,7 +318,7 @@ impl Tailor for Node {
         node::freshness::check_lock_freshness(project, &plan)?;
         // package.json is read through the held descriptor; a lock-only
         // project has no "greyward" config to read.
-        let package_json = project.read_input_string(Path::new("package.json"))?;
+        let package_json = inputs::read_manifest(project, Path::new("."))?;
         let config = match &package_json {
             Some(pkg) => node::parse_greyward_config(pkg)?,
             None => node::GreywardConfig::default(),
@@ -663,7 +664,7 @@ fn record_skipped_project_scripts(
         .collect();
     for member in members {
         let manifest = Path::new(member).join("package.json");
-        if let Some(text) = project.read_input_string(&manifest)? {
+        if let Some(text) = inputs::read_manifest_at(project, &manifest)? {
             skipped.extend(skipped_project_scripts(
                 member,
                 &text,

@@ -586,6 +586,7 @@ mod tests {
                     assert_eq!(fs::read_dir(&home)?.count(), 0, "a home that is not empty");
                     seen.push(home.clone());
                     match view {
+                        HostView::WholeHost => unreachable!("the fallback asks for no host view"),
                         HostView::RuntimeOnly => {
                             fs::create_dir(home.join("tmp"))?;
                             fs::write(home.join("tmp/probe-result"), "yes")?;
@@ -706,6 +707,7 @@ mod tests {
                 build: move |view| {
                     views.push(view);
                     match view {
+                        HostView::WholeHost => unreachable!("the fallback asks for no host view"),
                         HostView::RuntimeOnly => failed("lzma.h not found"),
                         HostView::Full => full.take().expect("one full attempt"),
                     }

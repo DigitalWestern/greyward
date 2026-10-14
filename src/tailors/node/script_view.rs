@@ -277,6 +277,7 @@ impl PackageScripts<'_> {
         let mode = match view {
             HostView::Full => "sandboxed",
             HostView::RuntimeOnly => "sandboxed, C runtime only",
+            HostView::WholeHost => "sandboxed, whole host read-only",
         };
         for (phase, script) in self.phases {
             crate::kernel::ui::note(&format!("{} {}: {phase} ({mode})", p.name, p.version));

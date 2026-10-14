@@ -1028,7 +1028,7 @@ fn prebuilt_downloader_is_told_to_build_from_source() {
 
 /// A project that locks Python builds its native addons on that Python.
 /// node-gyp's interpreter is the project's CPython 3.13, not the shipped
-/// 3.12 a Node-only project gets, and the `node-env/5` identity names it,
+/// 3.12 a Node-only project gets, and the `node-env/7` identity names it,
 /// so the two projects never share an environment object.
 #[test]
 #[ignore]
@@ -1128,7 +1128,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
         )
         .unwrap();
         let inputs = &meta["identity"]["inputs"];
-        assert_eq!(inputs["schema"], "node-env/6");
+        assert_eq!(inputs["schema"], "node-env/7");
         assert!(
             inputs["gyp_python"]
                 .as_str()

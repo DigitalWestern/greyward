@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 mod held;
 mod observed;
 mod publish;
-use publish::{hold_link_temp, release_link_temp, remove_stale_temps};
+use publish::{hold_link_temp, link_target_at, release_link_temp, remove_stale_temps};
 mod rename_in;
 use held::HeldEntry;
 pub(crate) use held::{held_root_for, start_in};
@@ -292,6 +292,15 @@ impl ProjectRoot {
                 "{label} target contains a NUL byte; refusing to publish"
             ))
         })?;
+        // A link that already names `target` is the end state: leave it, so
+        // a sync that changed nothing makes no temporary, rename or fsync
+        // (#746). The link was published and its parent fsynced by the sync
+        // that made it.
+        if !absent
+            && link_target_at(parent_fd, name.as_bytes())?.as_deref() == Some(target.to_bytes())
+        {
+            return Ok(());
+        }
         let mut made = None;
         for _ in 0..TEMP_ATTEMPTS {
             let candidate = random_temp_name(name.as_bytes(), 0)?;
@@ -380,31 +389,13 @@ impl ProjectRoot {
         let parent_fd = held
             .as_ref()
             .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
-        let name = CString::new(name.as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
-        let mut buffer = vec![0u8; libc::PATH_MAX as usize + 1];
-        // SAFETY: parent_fd is open, name is NUL-terminated, and the buffer
-        // is writable for its whole length.
-        let length = unsafe {
-            libc::readlinkat(
-                parent_fd,
-                name.as_ptr(),
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
+        let target = link_target_at(parent_fd, name.as_bytes()).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("read link {}: {error}", display.display()),
             )
-        };
-        if length < 0 {
-            let error = io::Error::last_os_error();
-            return match error.raw_os_error() {
-                Some(libc::ENOENT) | Some(libc::EINVAL) => Ok(None),
-                _ => Err(io::Error::new(
-                    error.kind(),
-                    format!("read link {}: {error}", display.display()),
-                )),
-            };
-        }
-        buffer.truncate(length as usize);
-        Ok(Some(PathBuf::from(std::ffi::OsString::from_vec(buffer))))
+        })?;
+        Ok(target.map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes))))
     }
 
     /// Remove a project-relative symlink ward placed (a stale workspace
@@ -2903,6 +2894,37 @@ mod tests {
             let error = root.input_containment(Path::new(bad)).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{bad}");
         }
+    }
+
+    /// A link that already names its target is left as it is (#746): same
+    /// inode, no temporary. A different target still replaces it.
+    #[test]
+    fn a_link_already_at_its_target_is_not_replaced() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let env = temp.0.join("env");
+        let other = temp.0.join("other-env");
+        fs::create_dir_all(&env).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let inode = || fs::symlink_metadata(dir.join(".venv")).unwrap().ino();
+
+        root.replace_symlink(Path::new(".venv"), &env, ".venv")
+            .unwrap();
+        let first = inode();
+        root.replace_symlink(Path::new(".venv"), &env, ".venv")
+            .unwrap();
+        assert_eq!(inode(), first, "an unchanged link was replaced");
+        assert_eq!(fs::read_link(dir.join(".venv")).unwrap(), env);
+
+        root.replace_symlink(Path::new(".venv"), &other, ".venv")
+            .unwrap();
+        assert_ne!(inode(), first, "a changed link was not replaced");
+        assert_eq!(fs::read_link(dir.join(".venv")).unwrap(), other);
+        assert!(!entries(&dir)
+            .iter()
+            .any(|name| name.starts_with(".greyward-tmp")));
     }
 
     #[test]

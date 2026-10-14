@@ -955,6 +955,38 @@ one the lock pins. It is recorded before any gem is fetched. A policy that
 denies it, or `--strict`, refuses such a lock; `bundle lock
 --add-checksums` writes the section.
 
+`young-package` is recorded, under `name@version`, for a registry package
+a resolution locked less than `[packages] min_age_days` (7 by default)
+after it was published. It is judged once, when the lock is written (`ward
+add`, `ward update`, a missing-lock sync, `ward attest`), against the
+publish time the registry states and the time of that resolution, and it
+travels in the resolution record, so every later sync of the lock carries
+it. The detail names both times and the minimum:
+`published 2026-10-11T00:00:00Z, 24 hours before this resolution at
+2026-10-12T00:00:00Z; the minimum age is 7 days (the default)`. The publish
+time comes from the metadata the tool fetched; for a package it did not
+fetch metadata for, ward asks the registry itself, through the same proxy,
+and those lookups are in the record's ledger. When no publish time can be
+had, the detail says so: a policy that denies the kind refuses then too,
+and otherwise it is recorded. A policy that denies it refuses the
+resolution before the lock is written, names every young package, and
+says when resolving again would pass. The company template denies it.
+The machine policy sets the minimum (`[packages] min_age_days = 14`; `0`
+turns the check off). A project policy or `--policy` file can only raise
+it, never lower it below the machine's or the default.
+
+`lookalike-name` is recorded, under the package name, for a locked
+registry package whose name is one edit (a character added, removed,
+replaced, or two adjacent ones swapped) from one of its registry's 2,000
+most popular names without being that name: `one edit from popular
+package requests`. Names are compared the way the registry compares them
+(PyPI's PEP 503 normalization, crates.io's `-` equal to `_`, case ignored
+for npm, RubyGems and NuGet, a Go module without its `/vN` suffix), and
+names under five characters are not judged. Every sync records it again
+from the lock, and `ward add` warns before it edits the manifest. Git,
+path and other-index packages are not judged. The company template does
+not deny it: a fork or a plugin named after its host trips it too.
+
 A refusal names the knob that refused and the edit that lifts it, not just
 the kind: `policy denies weak-integrity: left-pad: sha1 integrity;
 'weak-integrity' is in the deny list in /etc/greyward/policy.toml; remove that

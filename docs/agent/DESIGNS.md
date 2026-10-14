@@ -1924,6 +1924,8 @@ on the thread that opened the attribution, records after the tool exits.
 | The door ran without a network fence (the `isolated` tier; see "Isolation tiers") | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
 | Metadata was served from last-good because the upstream was unreachable (offline or transport failure) | `stale-resolution` (**new**; subject = endpoint, detail = number of last-good responses) | the proxy answers 504 for any request it would otherwise serve last-good, so the door fails naming the first such URL | record; the entries are also marked `freshness: last-good` in the portable evidence, which the signature covers |
 | A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `ward attest` | record |
+| A locked registry version was published less than `[packages] min_age_days` (default 7) before the resolution, or its publish time could not be had | `young-package` (**new**; subject = `name@version`, detail = the publish time, the resolution time, and the minimum with its source) | the door fails after the tool exits and before the lock is published, naming every young package and the time after which resolving again passes; an unknown publish time refuses too | record in the resolution record, so every sync of the lock replays it |
+| A locked registry package's name is one edit (optimal string alignment) from one of its registry's 2,000 most popular names, compared after the registry's own normalization, and is not that name | `lookalike-name` (**new**; subject = the name, detail = `one edit from popular package <x>`; names under 5 characters are not judged) | the sync refuses to publish the closure | record at every closure publication; `ward add` warns before it edits the manifest |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
 | Integrity mismatch (bytes differ from the claimed digest) | not an exception | always a hard failure: 502 to the tool, door fails, nothing cached | no permissive path |
 
@@ -1988,7 +1990,9 @@ compiled in and is exactly today's forced public set: `pypi.org`,
 `files.pythonhosted.org`, `registry.npmjs.org`, `index.crates.io`,
 `static.crates.io`, `crates.io` (the download redirect), `proxy.golang.org`,
 `sum.golang.org`, `rubygems.org`, `index.rubygems.org`, `repo.hex.pm`,
-`api.nuget.org`, plus the hosts PR 0 saw the tools reach through the
+`api.nuget.org`, `hex.pm` (reached only by ward's own publish-time
+lookups for `young-package`, never by a tool: the Hex route refuses a
+tool request to it), plus the hosts PR 0 saw the tools reach through the
 door: `api.github.com` and `raw.githubusercontent.com` (uv's and cargo's
 GitHub shortcuts for git dependencies, which are git fetches and so
 `git-dependency`). No registry redirected to a CDN host in the census.

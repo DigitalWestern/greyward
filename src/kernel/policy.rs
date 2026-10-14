@@ -503,10 +503,10 @@ pub fn union(policy: &mut Policy, other: &Policy) {
 /// with it, so a working tree can drop keys but never vouch for its own.
 /// A scope with no `[signing]` table leaves the set unchanged, and a
 /// project or flag list seen before any machine declaration cannot
-/// initialize it: trust stays unconfigured. Used by `ward audit
-/// --policy` too, so the file handed to the gate can never loosen the
-/// machine or project policy.
-pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
+/// initialize it: trust stays unconfigured. It does not merge the
+/// registry tables: [`merge_file`], which every policy load goes through,
+/// merges them and then calls this.
+pub(crate) fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
     union(policy, other);
     match origin {
         SourceOrigin::Machine => {

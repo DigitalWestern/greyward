@@ -66,8 +66,10 @@ fn normalize_authority(authority: &str) -> String {
 }
 
 /// Every piece between `/` or `%2f` separators is non-empty (after the
-/// leading `/`), neither `.` nor `..`, holds no backslash, and carries no
-/// escape that decodes to `\`, `.` or `%`. Escapes must be well formed.
+/// leading `/`), neither `.` nor `..`, holds no backslash or `;` (a Java
+/// server drops a `;` path parameter before it normalizes, so `..;` would
+/// climb), and carries no escape that decodes to `\`, `.`, `%` or `;`.
+/// Escapes must be well formed.
 pub(crate) fn path_is_clean(path: &str) -> bool {
     if path.is_empty() {
         return true;
@@ -82,7 +84,12 @@ pub(crate) fn path_is_clean(path: &str) -> bool {
     // piece may be empty; every other piece may not.
     let rest = rest.strip_suffix('/').unwrap_or(rest);
     for piece in pieces(rest) {
-        if piece.is_empty() || piece == "." || piece == ".." || piece.contains('\\') {
+        if piece.is_empty()
+            || piece == "."
+            || piece == ".."
+            || piece.contains('\\')
+            || piece.contains(';')
+        {
             return false;
         }
         if !escapes_are_inert(piece) {
@@ -135,7 +142,7 @@ fn escapes_are_inert(piece: &str) -> bool {
             let Ok(decoded) = u8::from_str_radix(hex, 16) else {
                 return false;
             };
-            if matches!(decoded, b'/' | b'\\' | b'.' | b'%') || !hex.is_ascii() {
+            if matches!(decoded, b'/' | b'\\' | b'.' | b'%' | b';') || !hex.is_ascii() {
                 return false;
             }
             i += 3;
@@ -234,6 +241,9 @@ mod tests {
             "https://nexus.corp.example/repository/npm-proxy/a//b",
             "https://nexus.corp.example/repository/npm-proxy/a%2f%2fb",
             "https://nexus.corp.example/repository/npm-proxy/a%zz",
+            "https://nexus.corp.example/repository/npm-proxy/..;/npm-private/x.tgz",
+            "https://nexus.corp.example/repository/npm-proxy/..%3b/npm-private/x.tgz",
+            "https://nexus.corp.example/repository/npm-proxy/..%3B/npm-private/x.tgz",
         ] {
             assert!(!covers(ROOT, escape), "{escape}");
         }

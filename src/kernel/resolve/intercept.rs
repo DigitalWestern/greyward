@@ -397,6 +397,17 @@ fn hop_allowed(
             &git_subject(repository),
             "a redirect to a git fetch through the resolution proxy",
         ),
+        // An ecosystem with a configured registry list uses nothing else,
+        // after a redirect as on the first request.
+        Class::Unattested if state.enforced_sources().is_some() => {
+            let why = format!(
+                "a redirect led to {origin}, which is not served by any registry this machine's policy allows for {}: {}",
+                state.config.ecosystem,
+                state.enforced_sources().unwrap_or_default()
+            );
+            state.hard_failure(why.clone());
+            Err(why)
+        }
         Class::Unattested => state.check(
             policy::UNATTESTED_INDEX,
             &origin,

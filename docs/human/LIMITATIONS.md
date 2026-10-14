@@ -400,7 +400,14 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   The SBOM's purl `repository_url` still comes from the file's host, not the
   recorded registry. The machine policy that declares registries and credentials is
   whatever `GREYWARD_POLICY` or `$HOME` selects, the same gap as `[signing]`: whoever
-  controls the environment can replace it (#757).
+  controls the environment can replace it (#757). Artifacts a project declares for
+  its install scripts (a `greyward` artifact with its own sha256 in `package.json`)
+  are fetched from the URL the project names, not through the registry list: they are
+  not registry packages, and the declared hash pins them. The `.npmrc` check before
+  npm or pnpm starts reads the lock root's and the member's `.npmrc`, not registry
+  settings in `pnpm-workspace.yaml`; a scope pointed elsewhere there still fails, at
+  the proxy, with a less specific error. A wrong password on a configured registry
+  surfaces as the tool's own 401, with no `fix:` line.
 
 ## Python
 

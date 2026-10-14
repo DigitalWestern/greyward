@@ -227,6 +227,10 @@ deny = [
 # name = "corp-pypi"
 # ecosystem = "python"
 # url = "https://nexus.corp.example/repository/pypi-proxy/simple/"
+# root = "https://nexus.corp.example/repository/pypi-proxy/"
+#                                 # the files live beside simple/, so the
+#                                 # root (where the credential goes) is
+#                                 # the repository, not the index
 # credential = "corp"
 #
 # [[registry]]

@@ -84,8 +84,12 @@ fn serving_registry<'p>(
         .then(|| name.split_once('/').map(|(scope, _)| scope))
         .flatten();
     let scoped = scope.and_then(|scope| {
-        list.registries()
-            .find(|registry| registry.scopes.iter().any(|s| s == scope))
+        list.registries().find(|registry| {
+            registry
+                .scopes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(scope))
+        })
     });
     if scoped.is_some() {
         return Ok(scoped);

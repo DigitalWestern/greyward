@@ -44,10 +44,15 @@ pub fn source_for<'a>(
         )));
     }
     let list = sources.ecosystem(ecosystem);
+    // The longest root wins; on a tie the earlier entry does, as it does
+    // where a lock names an index.
     let by_root = list
         .registries()
         .filter(|registry| covers(&registry.root, url))
-        .max_by_key(|registry| root_len(&registry.root));
+        .fold(None::<&Registry>, |best, registry| match best {
+            Some(best) if root_len(&best.root) >= root_len(&registry.root) => Some(best),
+            _ => Some(registry),
+        });
     if let Some(registry) = by_root {
         return Ok(Served::Registry(registry));
     }

@@ -63,6 +63,11 @@ pub fn check<'a>(
             ),
         )
     };
+    if entry.file.is_empty() {
+        return Err(refused(
+            "the lock names no file, and no listed registry serves the package".into(),
+        ));
+    }
     let served = source_for(sources, ecosystem, entry.file).map_err(|_| {
         refused(format!(
             "{} is not under any listed registry",
@@ -83,8 +88,12 @@ pub fn check<'a>(
         ),
     };
     let scoped = scope_of(entry.name).and_then(|scope| {
-        list.registries()
-            .find(|registry| registry.scopes.iter().any(|s| s == scope))
+        list.registries().find(|registry| {
+            registry
+                .scopes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(scope))
+        })
     });
     let expected = named.or(scoped);
     match (served, expected) {
@@ -156,6 +165,15 @@ fn scope_of(name: &str) -> Option<&str> {
 pub fn same_url(a: &str, b: &str) -> bool {
     fn key(raw: &str) -> Option<(String, String, u16, Vec<String>)> {
         let url = url::Url::parse(raw).ok()?;
+        // A URL that carries a login, a query or a fragment names no listed
+        // registry: those are never part of a registry's URL.
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
         let mut segments: Vec<String> = url.path_segments()?.map(decode).collect();
         if segments.last().is_some_and(String::is_empty) {
             segments.pop();
@@ -297,6 +315,53 @@ node = {node}
             .unwrap(),
             "public"
         );
+        // A scope spelled in another case is still the scope's.
+        let error = verdict(
+            &policy,
+            "@CORP/widget",
+            None,
+            "https://nexus.corp.example/repository/npm/@CORP/widget/-/widget-1.0.0.tgz",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("belongs to registry gh"), "{error}");
+    }
+
+    /// Two registries may share a root; the earlier one serves it, as it
+    /// does when a lock names that URL as its index.
+    #[test]
+    fn a_shared_root_is_the_earlier_registrys() {
+        let text = r#"
+[[registry]]
+name = "first"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi/simple/"
+root = "https://nexus.corp.example/repository/pypi/"
+
+[[registry]]
+name = "second"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi/simple/"
+root = "https://nexus.corp.example/repository/pypi/"
+
+[sources]
+python = ["first", "second"]
+"#;
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, text).unwrap();
+        let mut policy = Policy::default();
+        policy::merge_file(&mut policy, &parsed, SourceOrigin::Machine, path).unwrap();
+        let verdict = check(
+            &policy.registries,
+            Ecosystem::Python,
+            &Entry {
+                name: "x",
+                index: Some("https://nexus.corp.example/repository/pypi/simple/"),
+                file: "https://nexus.corp.example/repository/pypi/packages/x-1.0.tar.gz",
+            },
+        )
+        .unwrap();
+        assert!(matches!(verdict, Verdict::Listed(registry) if registry.name == "first"));
     }
 
     #[test]
@@ -354,5 +419,16 @@ node = {node}
             "http://nexus.example/repo/",
             "https://nexus.example/repo/"
         ));
+        for spelled in [
+            "https://user:pass@nexus.example/repo/",
+            "https://token@nexus.example/repo/",
+            "https://nexus.example/repo/?x=1",
+            "https://nexus.example/repo/#top",
+        ] {
+            assert!(
+                !same_url(spelled, "https://nexus.example/repo/"),
+                "{spelled}"
+            );
+        }
     }
 }

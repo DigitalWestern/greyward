@@ -14,10 +14,22 @@ by position.
 
 ## Next up, in order
 
+Private registries come first (owner, 2026-10-14). Python and npm are
+built (#405 PR A, the foundation PR). Then:
+
+1. **#405 PR B: private registries for Go, Elixir, Ruby, Cargo and .NET**,
+   in that order, with the GitHub Packages CI lane under the DigitalWestern
+   org (`docs/agent/DESIGNS.md` §4 "Order").
+2. **#757: unconditional protected machine-policy loading**, so the
+   environment cannot replace the machine scope that declares registries,
+   credentials and trusted keys. WP3 PR 1 builds on it.
+3. **#404: WP3 PR 1**, catalog trust with Rust as the first provider, once
+   the owner approves Rust's trust root (§2 "Recommended first provider").
+
 The resolution proxy (#68) is built: every ecosystem resolves confined
 through it, and the door has no unsandboxed mode (#208). Left of it:
 
-1. **#201: docker and `greyward-isolate`.** The podman backend and `ward doctor
+4. **#201: docker and `greyward-isolate`.** The podman backend and `ward doctor
    --isolation` are built. Docker cannot pass the relay's descriptors
    into a container, and the setuid `greyward-isolate` helper needs a root
    install to build and test.
@@ -97,11 +109,7 @@ None open.
   rejection and offline policy freshness on 2026-10-14, with a recovery
   design for damaged rollback state written to meet the owner's
   requirement (§2 "Decided"). The owner also put private registries
-  first: the first #405 PR is the foundation PR (§2 "Order") and builds
-  the shared endpoint, trust and credential configuration. WP3 PR 1
-  starts after it merges, with Rust as the first provider once the owner
-  approves it and its trust root (the Rust release key, §2 "Recommended
-  first provider").
+  first: the order is under "Next up, in order" above.
 - **macOS arm64 gate. Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list

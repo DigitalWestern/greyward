@@ -108,8 +108,9 @@
     directory, as heavy.yml does: with `GREYWARD_SANDBOX_TESTS=required`,
     suites that open the store in-process (`native_libs`) panic without it.
   Clean up after yourself. Give each run its own fresh scratch directory,
-  for example `TMPDIR=$HOME/greyward-tmp/<branch-name>`. Once the checks pass,
-  delete that directory (`rm -rf "$HOME/greyward-tmp/<branch-name>"`), and
+  for example `TMPDIR=/home/ethan/greyward-tmp/<branch-name>` (write the
+  path out, see the shell-command rule below). Once the checks pass,
+  delete that directory (`rm -rf /home/ethan/greyward-tmp/<branch-name>`), and
   any `$HOME/greyward-tmp/run-*` directory you created. Do this before you
   report the work as done, so nobody has to clear disk space later.
   Delete only directories you created in this task: never
@@ -128,6 +129,44 @@
   If a failure only happens on the runner (a different Ubuntu version,
   AppArmor, the runner's disk) and cannot be reproduced here, say so in
   the pull request. Then one push to test the fix in the cloud is fine.
+
+- Write shell commands the worktree guard can check. A Claude subagent
+  started with `isolation: "worktree"` refuses any command it cannot
+  prove stays inside its worktree, and it refused 615 commands in 98
+  sessions between 2026-09-01 and 2026-10-13. What it refuses:
+  - A variable inside a path or an environment value:
+    `export TMPDIR=$HOME/greyward-tmp/x`, `GREYWARD_STORE=$T/store`,
+    `sed -n "$a,${b}p" "$f"`. Write the absolute path instead:
+    `export TMPDIR=/home/ethan/greyward-tmp/x && cargo test --locked`
+    passes.
+  - Setting `HOME` (81% refused), `bash -c '...'` (always refused),
+    `for`/`while` loops, shell functions, and process substitution
+    `<(...)`.
+  - Long one-liners that chain many commands with `;` around `git` or
+    `gh`, such as a loop over issue numbers with `echo` separators.
+  Plain `git -C <dir> ...` and `cd <dir> && git ...` pass. Run one plain
+  command per Bash call, or a short `&&` chain. A recipe
+  you need more than twice goes in `tools/*.sh` as a script with literal
+  arguments. If a command is refused, rewrite it in this form. Do not
+  retry variations of the same form.
+
+- Source paths move. `src/kernel/store.rs` is now the directory
+  `src/kernel/store/`, and other files have been split since the rename
+  from tog. Do not open a path from memory, an old issue, or an old
+  review. Find it first with `rg --files | rg <name>`. A missed path was
+  the most common failed read, 202 times in the same window.
+
+- Do not wait with `sleep`. Claude Code blocks `sleep N` polling, and a
+  sleep loop holds a turn open for nothing. Instead:
+  - A long local command (tests, the e2e suite, a build): run it in the
+    background (`run_in_background: true`). You are notified when it
+    exits.
+  - CI or review on a pull request: call T3's `watch_pull_request` and
+    end your turn. T3 wakes you when checks finish, someone comments, or
+    the branch conflicts.
+  - A delegated task or subagent: end your turn. T3 wakes you when it
+    finishes.
+  Do not chain short sleeps or `gh pr checks --watch` to get around this.
 
 # About Ethan
 

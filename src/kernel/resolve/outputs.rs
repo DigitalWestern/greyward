@@ -19,10 +19,13 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::resolve::snapshot::{self, Snapshot};
 use crate::kernel::store::{self, Store};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -466,7 +469,7 @@ mod tests {
         let (store, dir) = setup(&temp);
         let snapshot = snap(&store, &dir);
         let path = snapshot.lock_root().staged.join("package-lock.json");
-        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let fifo = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         // SAFETY: a NUL-terminated path in the test's own stage.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
         let message = copy(&store, &snapshot, &["package-lock.json"])

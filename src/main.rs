@@ -7,6 +7,8 @@ use greyward::kernel::ui;
 use std::process::exit;
 
 fn main() {
+    // First, while this is the only thread: reading the umask sets it.
+    greyward::kernel::resolve::transaction::record_startup_umask();
     // Before parsing: resolving a first word (`ward app.ts`) can already
     // read a project's toolchain sources.
     greyward::tailors::install_kernel_tables();

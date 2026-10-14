@@ -33,6 +33,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 bash tests/install.sh
 python3 tools/test_catalog.py
+python3 tools/popular.py --check
 RUSTFLAGS='--cfg ward_dead_code -D dead_code' CARGO_TARGET_DIR=target/dead-code cargo check --locked --lib
 ```
 

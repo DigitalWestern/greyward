@@ -74,6 +74,8 @@ jobs:
           python-version: "3.12"
       - name: Catalog generator (offline)
         run: python3 tools/test_catalog.py
+      - name: Popular-package lists (offline)
+        run: python3 tools/popular.py --check
 
   # Ubuntu 23.10 and later can deny unprivileged user namespaces to any
   # program without its own AppArmor profile

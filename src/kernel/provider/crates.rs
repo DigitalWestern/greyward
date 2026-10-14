@@ -543,20 +543,29 @@ fn realize_vendor_inner(
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
 }
 
-/// Record `git-dependency` and the transport of each git crate, before
-/// anything is fetched or a cached vendor object is reused: a policy
-/// denying either kind refuses here, a vendor object made before these
-/// were kept with it included.
+/// Record `git-dependency` for each git crate and the transports of the
+/// lock's git sources ([`transport_exceptions`](super::cargo_settings::transport_exceptions),
+/// the set every cargo path takes), before anything is fetched or a cached
+/// vendor object is reused: a policy denying either kind refuses here, a
+/// vendor object made before these were kept with it included.
 fn record_git_crates(crates: &[CargoCrate]) -> io::Result<Vec<crate::kernel::policy::Exception>> {
-    let mut recorded = Vec::new();
-    for krate in crates {
-        if let Some(git) = &krate.git {
-            let subject = format!("{}@{}", krate.name, krate.version);
-            recorded.extend(crate::kernel::gitsrc::record_git_dependency_kept(
-                &subject, &git.inner,
-            )?);
-        }
-    }
+    let git: Vec<(&CargoCrate, &CargoGitSource)> = crates
+        .iter()
+        .filter_map(|krate| Some((krate, krate.git.as_ref()?)))
+        .collect();
+    let mut recorded: Vec<crate::kernel::policy::Exception> = git
+        .iter()
+        .map(|(krate, git)| crate::kernel::policy::Exception {
+            kind: crate::kernel::policy::GIT_DEPENDENCY.into(),
+            subject: format!("{}@{}", krate.name, krate.version),
+            detail: format!("{} at {}", git.inner.url, git.inner.commit),
+        })
+        .collect();
+    recorded.extend(super::cargo_settings::transport_exceptions(
+        git.iter().map(|(_, git)| git.source.as_str()),
+        &[],
+    ));
+    super::cargo_settings::record_exceptions(&recorded)?;
     Ok(recorded)
 }
 
@@ -1128,5 +1137,47 @@ mod tests {
         fs::remove_file(tree.join("big")).unwrap();
         let (_, size) = inspect_crate(&tree, &hard_link_crate()).unwrap();
         assert_eq!(size, 2);
+    }
+
+    /// A sync from a committed lock records each git crate's transport from
+    /// the one cargo set, `git://` included, before anything is fetched or
+    /// a cached vendor object is reused, and a policy denying
+    /// `host-git-transport` refuses it.
+    #[test]
+    fn a_committed_git_protocol_crate_records_its_transport() {
+        use crate::kernel::policy::{self, Attribution, Policy, PolicyScope, HOST_GIT_TRANSPORT};
+        let _serial = policy::attribution_test_lock();
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let krate = CargoCrate {
+            name: "g".into(),
+            version: "1.0.0".into(),
+            sha256: String::new(),
+            url: String::new(),
+            git: parse_cargo_git_source(&format!("git+git://g.test/g#{commit}")),
+        };
+        assert!(krate.git.is_some());
+        let attribution = Attribution::open("cargo").unwrap();
+        let recorded = record_git_crates(std::slice::from_ref(&krate)).unwrap();
+        attribution.discard();
+        let found: Vec<(&str, &str)> = recorded
+            .iter()
+            .map(|e| (e.kind.as_str(), e.subject.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (policy::GIT_DEPENDENCY, "g@1.0.0"),
+                (HOST_GIT_TRANSPORT, "git://g.test/g")
+            ]
+        );
+
+        let _deny = PolicyScope::install(Policy {
+            deny: [HOST_GIT_TRANSPORT.to_string()].into_iter().collect(),
+            ..Policy::default()
+        });
+        let attribution = Attribution::open("cargo").unwrap();
+        let error = record_git_crates(std::slice::from_ref(&krate)).unwrap_err();
+        attribution.discard();
+        assert!(error.to_string().contains("host-git-transport"), "{error}");
     }
 }

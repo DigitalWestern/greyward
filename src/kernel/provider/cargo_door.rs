@@ -472,8 +472,8 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
 }
 
 pub use super::cargo_settings::{
-    cargo_locks, forced_env_names, index_transports, network_lock_source, network_url,
-    record_index_transports, refuse_lock_sources, refuse_unneutralized_settings,
+    cargo_locks, forced_env_names, lock_sources, network_lock_source, network_url,
+    record_exceptions, refuse_lock_sources, refuse_unneutralized_settings, transport_exceptions,
 };
 
 /// [`refuse_unneutralized_settings`] for cargo's configuration in each of
@@ -1301,20 +1301,10 @@ pub fn cargo_confined<'a>(
     confined.forced.cargo_registries = registries;
     confined.store_reads = vec![run.rust_obj.to_path_buf()];
     confined.extra_roots = path_dependency_roots(run.lock_root)?;
-    // The transports the configuration reaches (an ssh mirror replacing
-    // crates.io, which the lock still names as crates.io) are facts of the
-    // run: recorded under its policy with the lock's and the session's, and
-    // carried in the signed record. `run_cargo_with` records them once
-    // before cargo starts as well, so a policy denying them refuses early.
+    // The configuration cargo reads here: its transports (an ssh mirror
+    // replacing crates.io, which the lock still names as crates.io) join
+    // the lock's in the result check's one set.
     let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
-    confined.facts = index_transports(&files)
-        .into_iter()
-        .map(|exception| Fact {
-            kind: crate::kernel::policy::HOST_GIT_TRANSPORT,
-            subject: exception.subject,
-            detail: exception.detail,
-        })
-        .collect();
     // cargo's build output is not a resolution input.
     confined.exclude = vec![PathGlob::new("target")?];
     confined.routes = vec![crates_index::route()?];
@@ -1351,27 +1341,39 @@ pub fn cargo_confined<'a>(
     }
     // Every run (lock generation, an update, attest's metadata) is judged
     // by the locks it leaves, before anything is published.
+    // What it accepts, the transports of its locks and of the configuration
+    // ([`transport_exceptions`], one set) are facts of the run: the door
+    // records them under the run's policy (a deny refuses the run) with the
+    // session's, and carries them in the signed record.
     let locks = cargo_locks(run.args, &confined.outputs);
     confined.check = Some(Box::new(move |staged: &Staged<'_>| {
-        let mut facts: Vec<Fact> = Vec::new();
+        let mut sources: Vec<String> = Vec::new();
         for lock in &locks {
             let Some(bytes) = staged.read(lock)? else {
                 continue;
             };
-            for exception in refuse_lock_sources(&bytes)? {
-                let fact = Fact {
-                    kind: crate::kernel::policy::HOST_GIT_TRANSPORT,
-                    subject: exception.subject,
-                    detail: exception.detail,
-                };
-                if !facts.contains(&fact) {
-                    facts.push(fact);
-                }
-            }
+            sources.extend(refuse_lock_sources(&bytes)?);
         }
-        Ok(facts)
+        transport_exceptions(sources.iter().map(String::as_str), &files)
+            .into_iter()
+            .map(fact_of)
+            .collect()
     }));
     Ok(confined)
+}
+
+/// `exception` as a fact of the run, under the policy kind it names.
+fn fact_of(exception: crate::kernel::policy::Exception) -> io::Result<Fact> {
+    let kind = crate::kernel::policy::KINDS
+        .iter()
+        .copied()
+        .find(|kind| *kind == exception.kind)
+        .ok_or_else(|| io::Error::other(format!("unknown exception kind {}", exception.kind)))?;
+    Ok(Fact {
+        kind,
+        subject: exception.subject,
+        detail: exception.detail,
+    })
 }
 
 /// `--config` pairs, forced ones included, before the subcommand; a scratch
@@ -1437,7 +1439,7 @@ fn run_cargo_with(
     // git dependency's is.
     let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
     refuse_unneutralized_settings(&files)?;
-    record_index_transports(&files)?;
+    record_exceptions(&transport_exceptions([], &files))?;
     refuse_manifest_registry_indexes(run.lock_root)?;
     let registries = configured_registries(run.lock_root)?;
     let mut confined = cargo_confined(&run, publish, &registries)?;
@@ -2402,7 +2404,7 @@ mod tests {
         )
         .unwrap();
         let files = config_files(&root, &Bound::new(&root).unwrap()).unwrap();
-        let found: Vec<(String, String)> = index_transports(&files)
+        let found: Vec<(String, String)> = transport_exceptions([], &files)
             .into_iter()
             .map(|exception| (exception.kind, exception.subject))
             .collect();
@@ -2864,7 +2866,8 @@ mod tests {
              [[package]]\nname = \"i\"\nversion = \"1.0.0\"\n\
              source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
         );
-        let found = refuse_lock_sources(lock.as_bytes()).unwrap();
+        let sources = refuse_lock_sources(lock.as_bytes()).unwrap();
+        let found = transport_exceptions(sources.iter().map(String::as_str), &[]);
         let subjects: Vec<&str> = found.iter().map(|e| e.subject.as_str()).collect();
         assert_eq!(
             subjects,
@@ -2882,9 +2885,10 @@ mod tests {
     }
 
     /// An ssh mirror replacing crates.io is a transport the lock never
-    /// names (it still says crates.io): it is a fact of the confined run,
-    /// so the door records it under the run's policy with the lock's and
-    /// the session's and carries it into the signed record, each once.
+    /// names (it still says crates.io): the result check returns it in one
+    /// set with the lock's ([`transport_exceptions`]), which the door
+    /// records under the run's policy and carries into the signed record,
+    /// each once, the lock's first.
     #[test]
     fn a_config_transport_is_a_fact_of_the_confined_run() {
         let temp = TempDir::named("cargo-config-fact");
@@ -2917,17 +2921,30 @@ mod tests {
             &[],
         )
         .unwrap();
-        let facts: Vec<(&str, &str)> = confined
-            .facts
+        assert!(confined.facts.is_empty(), "{:?}", confined.facts);
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\
+             [[package]]\nname = \"g\"\nversion = \"1.0.0\"\n\
+             source = \"git+git://g.test/g#0123456789abcdef0123456789abcdef01234567\"\n\
+             [[package]]\nname = \"m\"\nversion = \"1.0.0\"\n\
+             source = \"registry+ssh://git@mirror.test/index\"\n",
+        )
+        .unwrap();
+        let facts = (confined.check.unwrap())(&Staged::in_dir(&root)).unwrap();
+        let facts: Vec<(&str, &str)> = facts
             .iter()
             .map(|fact| (fact.kind, fact.subject.as_str()))
             .collect();
         assert_eq!(
             facts,
-            [(
-                crate::kernel::policy::HOST_GIT_TRANSPORT,
-                "ssh://git@mirror.test/index"
-            )]
+            [
+                (crate::kernel::policy::HOST_GIT_TRANSPORT, "git://g.test/g"),
+                (
+                    crate::kernel::policy::HOST_GIT_TRANSPORT,
+                    "ssh://git@mirror.test/index"
+                )
+            ]
         );
     }
 

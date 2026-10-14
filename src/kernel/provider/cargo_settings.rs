@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 ///   and the archives are extracted into the run's own `registry/src`
 ///   like a download. An `ssh://` or `git://` index stays allowed, its
 ///   host checked as a git source's is; an ssh one is recorded as
-///   `host-git-transport` by the sync ([`index_transports`]).
+///   `host-git-transport` by the sync ([`transport_exceptions`]).
 /// - An `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`):
 ///   cargo sets `[env]` for every program it starts, the `rustc -vV`
 ///   probe during resolution included, so `LD_PRELOAD` loads a project
@@ -345,24 +345,58 @@ pub fn network_url(url: &str) -> bool {
         && !crate::kernel::gitsrc::option_looking_authority(url)
 }
 
-/// `host-git-transport` for each git index or source the files reach over
-/// ssh or the git protocol ([`cargo_transport`]): cargo's git dials it from
-/// this machine (over ssh with its ssh configuration and agent), not
-/// through the proxy. The sync and the resolution door
-/// record what this returns; it does not judge the URL (a refused one is
-/// refused by [`refuse_unneutralized_settings`] first).
-pub fn index_transports(files: &[ConfigFile]) -> Vec<crate::kernel::policy::Exception> {
-    let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
-    for file in files {
-        for (_, url) in url_settings(&file.table) {
-            if let Some(exception) = git_index(url).as_ref().and_then(cargo_transport) {
-                if !found.contains(&exception) {
-                    found.push(exception);
-                }
+/// The transport exceptions of a cargo run, from the one place ward
+/// computes them: each git repository or registry index that the lock's
+/// `source` strings (`lock_sources`) or the configuration `files` reach
+/// through this machine's git rather than the proxy, classified by
+/// [`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception)
+/// (`ssh://`, `file://`, `git://`), each once, the lock's first. Lock
+/// generation, an update and attest's metadata run (the door's result
+/// check), the sync from a committed lock (its vendoring and its
+/// configuration), the build and `ward run`, and Python's sdist lock,
+/// shipped, generated or cached, all take their set from here. It does not
+/// judge a URL: a refused one is refused first, by
+/// [`refuse_unneutralized_settings`] or [`refuse_lock_sources`].
+pub fn transport_exceptions<'s>(
+    lock_sources: impl IntoIterator<Item = &'s str>,
+    files: &[ConfigFile],
+) -> Vec<crate::kernel::policy::Exception> {
+    let mut reached: Vec<crate::kernel::gitsrc::GitSource> = lock_sources
+        .into_iter()
+        .filter_map(|source| {
+            if source.starts_with("git+") {
+                super::crates::parse_cargo_git_source(source).map(|git| git.inner)
+            } else {
+                source.strip_prefix("registry+").and_then(git_index)
             }
+        })
+        .collect();
+    for file in files {
+        reached.extend(
+            url_settings(&file.table)
+                .into_iter()
+                .filter_map(|(_, url)| git_index(url)),
+        );
+    }
+    let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
+    for exception in reached
+        .iter()
+        .filter_map(crate::kernel::gitsrc::transport_exception)
+    {
+        if !found.contains(&exception) {
+            found.push(exception);
         }
     }
     found
+}
+
+/// Record `exceptions` (a [`transport_exceptions`] set) into the current
+/// attribution, under its policy: a denied kind refuses here.
+pub fn record_exceptions(exceptions: &[crate::kernel::policy::Exception]) -> io::Result<()> {
+    for exception in exceptions {
+        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
+    Ok(())
 }
 
 /// A registry index URL over `ssh://` or `git://` (the scheme in any case,
@@ -378,39 +412,6 @@ fn git_index(url: &str) -> Option<crate::kernel::gitsrc::GitSource> {
         commit: "0".repeat(40),
         subdirectory: None,
     })
-}
-
-/// `host-git-transport` for a git source cargo's git reaches from this
-/// machine rather than through the proxy: `ssh://` and `file://`, as a git
-/// dependency records them
-/// ([`gitsrc::transport_exception`](crate::kernel::gitsrc::transport_exception)),
-/// and `git://`, which dials the host directly, unauthenticated and
-/// unencrypted, with no proxy check.
-fn cargo_transport(
-    source: &crate::kernel::gitsrc::GitSource,
-) -> Option<crate::kernel::policy::Exception> {
-    if let Some(exception) = crate::kernel::gitsrc::transport_exception(source) {
-        return Some(exception);
-    }
-    let git = source
-        .url
-        .get(..6)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("git://"));
-    git.then(|| crate::kernel::policy::Exception {
-        kind: crate::kernel::policy::HOST_GIT_TRANSPORT.into(),
-        subject: source.url.clone(),
-        detail: "fetched over the git protocol from this machine, unauthenticated and \
-                 unencrypted, outside the proxy"
-            .into(),
-    })
-}
-
-/// Record [`index_transports`] into the current attribution.
-pub fn record_index_transports(files: &[ConfigFile]) -> io::Result<()> {
-    for exception in index_transports(files) {
-        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
-    }
-    Ok(())
 }
 
 /// Every `[source.<name>]` the files define, so a `replace-with` chain can
@@ -534,12 +535,10 @@ pub fn network_lock_source(source: &str) -> bool {
 /// before the ledger is committed or anything is published
 /// ([`cargo_confined`](super::cargo_door::cargo_confined)).
 ///
-/// What it accepts, it returns the transports of
-/// ([`lock_transports`]): a git dependency read from a path on this machine
-/// or fetched over ssh, and an ssh registry index, each `host-git-transport`
-/// as a git dependency's transport is, for the door to record under the
-/// policy before anything is published.
-pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+/// What it accepts, it returns the `source` of each package, for
+/// [`transport_exceptions`], whose set the door records under the policy
+/// before anything is published.
+pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<String>> {
     let refuse = |why: String| {
         crate::kernel::error::refused(
             io::ErrorKind::PermissionDenied,
@@ -550,11 +549,7 @@ pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<crate::kernel::policy:
         .ok()
         .and_then(|text| toml::from_str::<toml::Table>(text).ok())
         .ok_or_else(|| refuse("the Cargo.lock cargo left does not parse".to_string()))?;
-    let bad: Vec<String> = table
-        .get("package")
-        .and_then(|packages| packages.as_array())
-        .into_iter()
-        .flatten()
+    let bad: Vec<String> = lock_packages(&table)
         .filter_map(|package| {
             let source = package.get("source")?.as_str()?;
             if network_lock_source(source) {
@@ -565,7 +560,7 @@ pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<crate::kernel::policy:
         })
         .collect();
     if bad.is_empty() {
-        return Ok(lock_transports(&table));
+        return Ok(sources_of(&table));
     }
     Err(refuse(format!(
         "cargo resolved {} from a source ward does not resolve from; a dependency is \
@@ -577,33 +572,30 @@ pub fn refuse_lock_sources(lock: &[u8]) -> io::Result<Vec<crate::kernel::policy:
     )))
 }
 
-/// `host-git-transport` for each source in a parsed `Cargo.lock` that cargo
-/// reached through this machine's git transport rather than the proxy: a
-/// git dependency over `file://`, `ssh://` or `git://` ([`cargo_transport`],
-/// the subject its vendoring records), and a registry index over `ssh://`
-/// or `git://` (as [`index_transports`] records one a config names; a
-/// manifest's `registry-index` needs no config). Each once.
-fn lock_transports(table: &toml::Table) -> Vec<crate::kernel::policy::Exception> {
-    let mut found: Vec<crate::kernel::policy::Exception> = Vec::new();
-    let sources = table
+/// The `[[package]]` rows of a parsed `Cargo.lock`.
+fn lock_packages(table: &toml::Table) -> impl Iterator<Item = &toml::Value> {
+    table
         .get("package")
         .and_then(|packages| packages.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|package| package.get("source")?.as_str());
-    for source in sources {
-        let git = if source.starts_with("git+") {
-            super::crates::parse_cargo_git_source(source).map(|git| git.inner)
-        } else {
-            source.strip_prefix("registry+").and_then(git_index)
-        };
-        if let Some(exception) = git.as_ref().and_then(cargo_transport) {
-            if !found.contains(&exception) {
-                found.push(exception);
-            }
-        }
-    }
-    found
+}
+
+/// Each package's `source` in a parsed `Cargo.lock`, in order.
+fn sources_of(table: &toml::Table) -> Vec<String> {
+    lock_packages(table)
+        .filter_map(|package| package.get("source")?.as_str())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Each package's `source` in a `Cargo.lock` the project or an sdist
+/// ships, for [`transport_exceptions`]; `None` when it does not parse (its
+/// own reader refuses it).
+pub fn lock_sources(lock: &str) -> Option<Vec<String>> {
+    toml::from_str::<toml::Table>(lock)
+        .ok()
+        .map(|table| sources_of(&table))
 }
 
 /// Every `Cargo.lock` (relative to the lock root) a cargo run with `args`

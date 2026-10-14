@@ -701,7 +701,7 @@ case "$1 $2" in
         for f in "$state/rel/$rel/assets"/*; do
             for p in "${patterns[@]}"; do
                 # shellcheck disable=SC2053 # the pattern is a glob on purpose
-                [[ "${f##*/}" == $p ]] && cp "$f" "$dir/"
+                if [[ "${f##*/}" == $p ]]; then cp "$f" "$dir/"; fi
             done
         done ;;
     "release upload")

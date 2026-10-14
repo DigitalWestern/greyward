@@ -50,6 +50,10 @@ pub fn init(quiet: bool, verbose: bool, no_color: bool) -> io::Result<()> {
         verbose: verbose && !quiet,
         color,
     });
+    if verbose && !quiet {
+        // The phase table's "total" row runs from here.
+        let _ = WALL_START.set(Instant::now());
+    }
     if quiet {
         silence_stderr()?;
     }
@@ -554,6 +558,263 @@ fn shell_word(word: &str) -> String {
     }
 }
 
+/// Phase timings for `--verbose`: where a sync's wall time went.
+///
+/// `let _t = ui::phase("artifact fetch");` times the rest of the scope and
+/// adds it to the row of that name. A phase opened while another is open
+/// on the same thread is nested under it, and the table shows it indented
+/// under its parent, already counted there. A thread of a pool starts its
+/// phases under the caller's with `current_phase`. Without `--verbose`
+/// the guard is inert: no clock is read and nothing is recorded.
+static PHASES: PhaseLog = PhaseLog::new();
+/// When `init` turned `--verbose` on: the table's "total" row runs from
+/// here.
+static WALL_START: OnceLock<Instant> = OnceLock::new();
+
+thread_local! {
+    /// The path of the phase open on this thread, outermost first.
+    static OPEN_PHASE: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One row of the table: a phase's path from the top level, the wall time
+/// it accumulated, and how many times it ran.
+#[derive(Debug, Clone, PartialEq)]
+struct PhaseRow {
+    path: Vec<String>,
+    total: Duration,
+    count: u32,
+}
+
+/// Every phase one process timed, in the order each was first opened.
+/// Shared by every thread, so a download pool adds to the same rows.
+struct PhaseLog {
+    rows: std::sync::Mutex<Vec<PhaseRow>>,
+}
+
+impl PhaseLog {
+    const fn new() -> Self {
+        Self {
+            rows: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<PhaseRow>> {
+        self.rows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Open `name` under `parent`, or under the phase open on this thread
+    /// when `parent` is `None`. The row, and every ancestor's, exists from
+    /// now on, so the table lists phases in the order they started.
+    fn start(&self, name: &str, parent: Option<&[String]>) -> Phase<'_> {
+        let previous = OPEN_PHASE.with(|open| open.borrow().clone());
+        let mut path = parent.map_or_else(|| previous.clone(), <[String]>::to_vec);
+        path.push(name.to_string());
+        {
+            let mut rows = self.lock();
+            for depth in 1..=path.len() {
+                if !rows.iter().any(|row| row.path == path[..depth]) {
+                    rows.push(PhaseRow {
+                        path: path[..depth].to_vec(),
+                        total: Duration::ZERO,
+                        count: 0,
+                    });
+                }
+            }
+        }
+        OPEN_PHASE.with(|open| *open.borrow_mut() = path.clone());
+        Phase {
+            open: Some(OpenPhase {
+                log: self,
+                path,
+                previous,
+                started: Instant::now(),
+            }),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    fn add(&self, path: &[String], elapsed: Duration) {
+        let mut rows = self.lock();
+        if let Some(row) = rows.iter_mut().find(|row| row.path == path) {
+            row.total += elapsed;
+            row.count += 1;
+        }
+    }
+
+    fn rows(&self) -> Vec<PhaseRow> {
+        self.lock().clone()
+    }
+}
+
+/// A phase being timed; dropping it adds the elapsed wall time to its row.
+/// Bound to the thread that opened it, because it restores that thread's
+/// open path when it drops.
+#[must_use = "a phase is timed until its guard drops: bind it with `let _t = ...`"]
+pub struct Phase<'a> {
+    open: Option<OpenPhase<'a>>,
+    _thread_bound: std::marker::PhantomData<*const ()>,
+}
+
+struct OpenPhase<'a> {
+    log: &'a PhaseLog,
+    path: Vec<String>,
+    previous: Vec<String>,
+    started: Instant,
+}
+
+impl Phase<'_> {
+    fn inert() -> Phase<'static> {
+        Phase {
+            open: None,
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for Phase<'_> {
+    fn drop(&mut self) {
+        if let Some(open) = self.open.take() {
+            open.log.add(&open.path, open.started.elapsed());
+            OPEN_PHASE.with(|current| *current.borrow_mut() = open.previous);
+        }
+    }
+}
+
+/// Time the rest of the caller's scope as `name`, under `--verbose` only.
+pub fn phase(name: &str) -> Phase<'static> {
+    if !verbose() {
+        return Phase::inert();
+    }
+    PHASES.start(name, None)
+}
+
+/// Run `job` as the phase `name`: [`phase`] for one expression.
+pub fn timed<T>(name: &str, job: impl FnOnce() -> T) -> T {
+    let _t = phase(name);
+    job()
+}
+
+/// The phase open on this thread, to open phases under from another
+/// thread: a pool worker's `parent.phase("artifact fetch")` is a child of
+/// the phase that started the pool, not a second top-level row. Test-only
+/// until the parallel download pool (#745) is its first caller.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub struct PhaseParent(Option<Vec<String>>);
+
+/// The phase open on this thread, for [`PhaseParent::phase`].
+#[cfg(test)]
+pub fn current_phase() -> PhaseParent {
+    if !verbose() {
+        return PhaseParent(None);
+    }
+    PhaseParent(Some(OPEN_PHASE.with(|open| open.borrow().clone())))
+}
+
+#[cfg(test)]
+impl PhaseParent {
+    /// Time the rest of the caller's scope as `name`, nested under the
+    /// phase this was taken from, on whatever thread calls it.
+    pub fn phase(&self, name: &str) -> Phase<'static> {
+        match &self.0 {
+            Some(path) => PHASES.start(name, Some(path)),
+            None => Phase::inert(),
+        }
+    }
+}
+
+/// Print the phase table on stderr, under `--verbose` only, when anything
+/// was timed. `main` calls it once a sync or a dependency edit finishes,
+/// before any error, so a failure is still the last line on screen.
+pub fn print_phase_table() {
+    if !verbose() {
+        return;
+    }
+    let rows = PHASES.rows();
+    if rows.is_empty() {
+        return;
+    }
+    let wall = WALL_START.get().map(Instant::elapsed);
+    write_phase_table(&rows, wall, &mut io::stderr().lock());
+}
+
+fn write_phase_table(rows: &[PhaseRow], wall: Option<Duration>, output: &mut impl Write) {
+    // A timing report must not turn a successful command into a failure
+    // when stderr is closed or full.
+    for line in render_phases(rows, wall).lines() {
+        let _ = writeln!(output, "ward: {} {line}", paint("[verbose]", DIM));
+    }
+}
+
+/// The table as text, one line per row. Top-level rows come first in the
+/// order they started, each followed by its nested rows, indented and
+/// marked with `-`: those are already counted in the row above them, so
+/// only the top-level rows sum to the total. A phase that ran more than
+/// once says how many times; a pool's phases can add up to more than the
+/// row they sit under, because they overlapped.
+fn render_phases(rows: &[PhaseRow], wall: Option<Duration>) -> String {
+    let mut ordered: Vec<(String, Duration)> = Vec::new();
+    fn walk(rows: &[PhaseRow], parent: &[String], ordered: &mut Vec<(String, Duration)>) {
+        for row in rows
+            .iter()
+            .filter(|row| row.path.len() == parent.len() + 1 && row.path.starts_with(parent))
+        {
+            let depth = parent.len();
+            let marker = if depth == 0 { "" } else { "- " };
+            let times = if row.count > 1 {
+                format!(" ({}x)", row.count)
+            } else {
+                String::new()
+            };
+            let name = row.path.last().map(String::as_str).unwrap_or_default();
+            let label = format!("{}{marker}{name}{times}", "  ".repeat(depth));
+            ordered.push((label, row.total));
+            walk(rows, &row.path, ordered);
+        }
+    }
+    walk(rows, &[], &mut ordered);
+    let timed: Duration = rows
+        .iter()
+        .filter(|row| row.path.len() == 1)
+        .map(|row| row.total)
+        .sum();
+    if let Some(wall) = wall {
+        ordered.push((
+            "(outside any phase)".to_string(),
+            wall.saturating_sub(timed),
+        ));
+        ordered.push(("total".to_string(), wall));
+    }
+    let width = ordered
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut text =
+        String::from("phase timings (wall clock; '-' rows are part of the row above them)\n");
+    for (label, elapsed) in ordered {
+        text.push_str(&format!(
+            "  {label:<width$}  {:>9}\n",
+            human_duration(elapsed)
+        ));
+    }
+    text
+}
+
+/// A duration as a human reads it in a table: milliseconds below a
+/// second, seconds above.
+fn human_duration(elapsed: Duration) -> String {
+    let millis = elapsed.as_secs_f64() * 1000.0;
+    if millis < 1000.0 {
+        format!("{millis:.1}ms")
+    } else {
+        format!("{:.2}s", millis / 1000.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +1057,198 @@ mod tests {
             next_line("ward audit"),
             format!("{NEXT_PREFIX}ward audit\n")
         );
+    }
+
+    fn row(path: &[&str], millis: u64, count: u32) -> PhaseRow {
+        PhaseRow {
+            path: path.iter().map(|part| part.to_string()).collect(),
+            total: Duration::from_millis(millis),
+            count,
+        }
+    }
+
+    fn paths(log: &PhaseLog) -> Vec<(Vec<String>, u32)> {
+        log.rows()
+            .into_iter()
+            .map(|row| (row.path, row.count))
+            .collect()
+    }
+
+    fn owned(path: &[&str]) -> Vec<String> {
+        path.iter().map(|part| part.to_string()).collect()
+    }
+
+    /// A phase that runs twice is one row with both runs' time in it.
+    #[test]
+    fn a_phase_accumulates_every_run_into_one_row() {
+        let log = PhaseLog::new();
+        for _ in 0..2 {
+            let _t = log.start("artifact fetch", None);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let rows = log.rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].count, 2);
+        assert!(rows[0].total >= Duration::from_millis(10), "{rows:?}");
+    }
+
+    /// A phase opened inside another on the same thread is its child; once
+    /// the child drops, the next phase is the parent's sibling again, and
+    /// the thread's open path is back to empty when the parent drops.
+    #[test]
+    fn a_phase_opened_inside_another_is_nested_under_it() {
+        let log = PhaseLog::new();
+        {
+            let _sync = log.start("sync python", None);
+            {
+                let _t = log.start("toolchain", None);
+            }
+            let _t = log.start("realize env", None);
+        }
+        {
+            let _t = log.start("notices", None);
+        }
+        assert_eq!(
+            paths(&log),
+            vec![
+                (owned(&["sync python"]), 1),
+                (owned(&["sync python", "toolchain"]), 1),
+                (owned(&["sync python", "realize env"]), 1),
+                (owned(&["notices"]), 1),
+            ]
+        );
+        assert!(OPEN_PHASE.with(|open| open.borrow().is_empty()));
+    }
+
+    /// Threads add to one shared table: a worker that opens its phase under
+    /// the caller's (`PhaseParent`) lands as a child with every run
+    /// counted, and phases opened on plain threads with no parent are
+    /// top-level rows, none lost to a race.
+    #[test]
+    fn phases_from_many_threads_land_in_one_table() {
+        static LOG: PhaseLog = PhaseLog::new();
+        let _sync = LOG.start("sync node", None);
+        let parent = OPEN_PHASE.with(|open| open.borrow().clone());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let parent = parent.clone();
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        let _t = LOG.start("artifact fetch", Some(&parent));
+                        // Nested on the worker's own thread, under its
+                        // pool phase.
+                        let _v = LOG.start("verify", None);
+                    }
+                    let _t = LOG.start("worker", None);
+                });
+            }
+        });
+        drop(_sync);
+        assert_eq!(
+            paths(&LOG),
+            vec![
+                (owned(&["sync node"]), 1),
+                (owned(&["sync node", "artifact fetch"]), 200),
+                (owned(&["sync node", "artifact fetch", "verify"]), 200),
+                (owned(&["worker"]), 8),
+            ]
+        );
+    }
+
+    /// The guard does nothing without `--verbose`, and a parent taken then
+    /// opens nothing either. The test process never calls `init`.
+    #[test]
+    fn phases_are_inert_without_verbose() {
+        assert!(!verbose(), "the test process never turns on --verbose");
+        let guard = phase("input scan");
+        assert!(guard.open.is_none());
+        assert!(current_phase().phase("artifact fetch").open.is_none());
+        drop(guard);
+        assert!(PHASES.rows().is_empty());
+    }
+
+    #[test]
+    fn phases_restore_the_parent_on_error_and_panic() {
+        let log = PhaseLog::new();
+        let _parent = log.start("sync", None);
+        let fail = || -> io::Result<()> {
+            let _child = log.start("error", None);
+            Err(io::Error::other("failed"))?;
+            Ok(())
+        };
+        assert!(fail().is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _child = log.start("panic", None);
+            panic!("failed");
+        })
+        .is_err());
+        assert_eq!(
+            OPEN_PHASE.with(|open| open.borrow().clone()),
+            owned(&["sync"])
+        );
+        assert_eq!(log.rows()[1].count, 1);
+        assert_eq!(log.rows()[2].count, 1);
+    }
+
+    #[test]
+    fn phases_recover_a_poisoned_table_lock() {
+        let log = PhaseLog::new();
+        assert!(std::panic::catch_unwind(|| {
+            let _lock = log.lock();
+            panic!("failed");
+        })
+        .is_err());
+        drop(log.start("sync", None));
+        assert_eq!(paths(&log), vec![(owned(&["sync"]), 1)]);
+    }
+
+    #[test]
+    fn a_closed_timing_output_does_not_panic() {
+        let rows = [row(&["preflight"], 12, 1)];
+        let mut closed = File::open("/dev/null").unwrap();
+        write_phase_table(&rows, None, &mut closed);
+        let mut output = Vec::new();
+        write_phase_table(&rows, None, &mut output);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.matches("phase timings").count(), 1);
+        assert!(text
+            .lines()
+            .all(|line| line.starts_with("ward: [verbose] ")));
+    }
+
+    /// Top-level rows in start order, each followed by its nested rows,
+    /// indented and marked; repeated phases say how often; the gap between
+    /// the top-level rows and the wall clock is its own row.
+    #[test]
+    fn the_table_nests_children_under_their_parent_and_sums_to_the_wall() {
+        let rows = vec![
+            row(&["preflight"], 12, 1),
+            row(&["sync python"], 11_800, 1),
+            row(&["sync python", "toolchain"], 8_100, 1),
+            row(&["sync python", "realize env"], 3_000, 1),
+            row(&["sync python", "realize env", "artifact fetch"], 2_400, 70),
+            row(&["notices"], 0, 1),
+        ];
+        let table = render_phases(&rows, Some(Duration::from_millis(11_900)));
+        assert_eq!(
+            table,
+            "phase timings (wall clock; '-' rows are part of the row above them)\n\
+             \x20 preflight                      12.0ms\n\
+             \x20 sync python                    11.80s\n\
+             \x20   - toolchain                   8.10s\n\
+             \x20   - realize env                 3.00s\n\
+             \x20     - artifact fetch (70x)      2.40s\n\
+             \x20 notices                         0.0ms\n\
+             \x20 (outside any phase)            88.0ms\n\
+             \x20 total                          11.90s\n"
+        );
+        // No wall clock (verbose was never set): no summary rows.
+        let table = render_phases(&rows[..1], None);
+        assert_eq!(
+            table.lines().nth(1),
+            Some("  preflight     12.0ms"),
+            "{table}"
+        );
+        assert_eq!(table.lines().count(), 2, "{table}");
     }
 }

@@ -165,8 +165,9 @@ pub(super) struct UvDependency {
 }
 
 /// `(name, version, file names, route)` of every uv.lock package locked
-/// from the public PyPI index (no `source`, or a registry source on PyPI's
-/// hosts) or from one of `indexes`, the listed registries' `(index URL,
+/// from the public PyPI index (a registry source on PyPI's hosts), from the
+/// default index (no `source`: the first of `indexes`, else PyPI) or from
+/// one of `indexes`, the listed registries' `(index URL,
 /// route)`: what the `young-package` check judges, each by the route of
 /// the index that served it. Local, git, URL and other-index packages are
 /// left out.
@@ -180,16 +181,21 @@ pub fn uv_pypi_packages(
             let Some(UvSource::Registry(url)) = uv_source(&package.source) else {
                 return None;
             };
-            let route =
-                if package.source == "registry" || (!url.is_empty() && is_public_pypi_url(&url)) {
-                    crate::tailors::python::registry::ROUTE_ID.to_string()
-                } else {
-                    indexes
-                        .iter()
-                        .find(|(index, _)| crate::kernel::registries::lock::same_url(index, &url))?
-                        .1
-                        .clone()
-                };
+            let route = if package.source == "registry" || url.is_empty() {
+                // No index named: uv's default, the first one it was given.
+                indexes.first().map_or_else(
+                    || crate::tailors::python::registry::ROUTE_ID.to_string(),
+                    |(_, route)| route.clone(),
+                )
+            } else if is_public_pypi_url(&url) {
+                crate::tailors::python::registry::ROUTE_ID.to_string()
+            } else {
+                indexes
+                    .iter()
+                    .find(|(index, _)| crate::kernel::registries::lock::same_url(index, &url))?
+                    .1
+                    .clone()
+            };
             let files = package
                 .files
                 .into_iter()

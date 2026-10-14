@@ -92,8 +92,12 @@ pub(crate) fn npm_registry_packages(
         {
             continue;
         }
-        let url = Url::parse(resolved)
-            .map_err(|_| unread(format!("{path} resolves to {resolved:?}, which is no URL")))?;
+        let url = Url::parse(resolved).map_err(|_| {
+            unread(format!(
+                "{path} resolves to {:?}, which is no URL",
+                crate::kernel::resolve::redact::text(resolved)
+            ))
+        })?;
         if url.host_str() != Some(REGISTRY_HOST) {
             // A configured registry lays its tarballs out its own way
             // (Nexus under its repository path, GitHub Packages under
@@ -111,7 +115,8 @@ pub(crate) fn npm_registry_packages(
         }
         let package = tarball_identity(&url).ok_or_else(|| {
             unread(format!(
-                "{path} resolves to {resolved}, which is not a registry tarball"
+                "{path} resolves to {}, which is not a registry tarball",
+                crate::kernel::resolve::redact::text(resolved)
             ))
         })?;
         let route = route_of(&package.name, Some(resolved)).unwrap_or_default();

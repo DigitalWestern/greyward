@@ -190,6 +190,19 @@ source = { git = "https://github.com/pytest-dev/iniconfig?rev=v2.0.0#93f5930e668
                 )
             ]
         );
+        // A package that names no index came from uv's default: the first
+        // listed index, else public PyPI.
+        let bare = "version = 1\n\n[[package]]\nname = \"plain\"\nversion = \"1.0.0\"\n";
+        let plain = |route: &str| {
+            vec![(
+                "plain".to_string(),
+                "1.0.0".to_string(),
+                Vec::new(),
+                route.to_string(),
+            )]
+        };
+        assert_eq!(uv_pypi_packages(bare, &listed).unwrap(), plain("pypi-corp"));
+        assert_eq!(uv_pypi_packages(bare, &[]).unwrap(), plain("pypi"));
     }
 
     #[test]

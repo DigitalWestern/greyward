@@ -223,7 +223,7 @@ impl ProjectRoot {
     }
 
     fn member_manifest_unobserved(&self, dir: &Path) -> io::Result<MemberManifest> {
-        let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+        let flags = PLACE_FLAG | libc::O_DIRECTORY | libc::O_CLOEXEC;
         let member = match open_beneath(self.dir.as_raw_fd(), dir, flags) {
             Ok(member) => member,
             Err(error) => match beneath_refusal(&error) {
@@ -326,6 +326,14 @@ impl ProjectRoot {
     }
 }
 
+/// The open mode of a descriptor held only as a place to look up from:
+/// `O_PATH` on Linux. Off Linux [`open_beneath`] refuses as unsupported
+/// before it reads its flags.
+#[cfg(target_os = "linux")]
+const PLACE_FLAG: libc::c_int = libc::O_PATH;
+#[cfg(not(target_os = "linux"))]
+const PLACE_FLAG: libc::c_int = libc::O_RDONLY;
+
 /// What a failed beneath-open means.
 enum Beneath {
     Missing,
@@ -361,7 +369,7 @@ fn read_manifest(file: fs::File) -> io::Result<MemberManifest> {
 /// and no magic link (`openat2` with `RESOLVE_BENEATH |
 /// RESOLVE_NO_MAGICLINKS`).
 fn open_beneath_following(dirfd: RawFd, target: &Path) -> io::Result<fs::File> {
-    open_beneath(dirfd, target, libc::O_PATH | libc::O_CLOEXEC)
+    open_beneath(dirfd, target, PLACE_FLAG | libc::O_CLOEXEC)
 }
 
 /// [`open_beneath_following`] with the open's own `flags`.

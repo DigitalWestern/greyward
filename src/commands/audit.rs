@@ -286,7 +286,7 @@ fn effective_policy_from(
 ) -> io::Result<(Policy, Vec<PolicySource>)> {
     let (mut policy, mut sources) = policy::load_with_sources_from(dir, project, false)?;
     if let Some((path, extra)) = extra {
-        policy::merge(&mut policy, extra, SourceOrigin::Flag);
+        policy::merge_file(&mut policy, extra, SourceOrigin::Flag, path)?;
         sources.push(PolicySource::from_file(SourceOrigin::Flag, path, extra));
     }
     Ok((policy, sources))

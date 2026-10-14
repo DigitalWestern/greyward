@@ -1156,6 +1156,86 @@ dependencies = [{ name = "six" }]
         );
     }
 
+    /// A uv.lock package from a registry the machine policy lists is
+    /// approved with no exception. Under an enforced list a package from
+    /// an unlisted index, or whose file is outside its registry, refuses
+    /// the sync, and so does PyPI when `public` is not listed.
+    #[test]
+    fn uv_lock_packages_must_come_from_a_listed_registry() {
+        use crate::kernel::policy::{self, Policy, PolicyScope, SourceOrigin};
+        let _attribution_lock = crate::kernel::policy::exception_guard();
+        let _attribution = crate::kernel::policy::Attribution::open("python").unwrap();
+        let text = r#"
+[[registry]]
+name = "corp"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi/simple/"
+root = "https://nexus.corp.example/repository/pypi/"
+
+[sources]
+python = ["corp"]
+"#;
+        let path = std::path::Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, text).unwrap();
+        let mut merged = Policy::default();
+        policy::merge_file(&mut merged, &parsed, SourceOrigin::Machine, path).unwrap();
+        let _scope = PolicyScope::install(merged);
+        let package = |source: &str, url: &str| UvPackage {
+            name: "internal".into(),
+            version: "1.0.0".into(),
+            source: source.into(),
+            files: vec![UvFile {
+                url: url.into(),
+                hash: "a".repeat(64),
+                filename: url.rsplit('/').next().unwrap().into(),
+                kind: ArtifactKind::Sdist,
+            }],
+            dependencies: Vec::new(),
+            resolution_markers: Vec::new(),
+            dependency_edges: Vec::new(),
+            optional_dependencies: BTreeMap::new(),
+        };
+        let manifest = |source: &str, url: &str| {
+            uv_lock_manifest(
+                &[package(source, url)],
+                &[],
+                Platform::X86_64UnknownLinuxGnu,
+                "3.12.14",
+                pypi::Glibc(2, 43),
+            )
+        };
+        let corp = "{ registry = \"https://NEXUS.corp.example/repository/pypi/simple\" }";
+        let selected = manifest(
+            corp,
+            "https://nexus.corp.example/repository/pypi/packages/internal-1.0.0.tar.gz",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(drained_records().is_empty());
+        for (source, url, why) in [
+            (
+                "{ registry = \"https://other.example/simple\" }",
+                "https://nexus.corp.example/repository/pypi/packages/internal-1.0.0.tar.gz",
+                "not a listed registry",
+            ),
+            (
+                corp,
+                "https://nexus.corp.example/repository/other/internal-1.0.0.tar.gz",
+                "not under any listed registry",
+            ),
+            (
+                "{ registry = \"https://pypi.org/simple\" }",
+                "https://files.pythonhosted.org/packages/internal-1.0.0.tar.gz",
+                "not under any listed registry",
+            ),
+        ] {
+            let error = manifest(source, url).unwrap_err().to_string();
+            assert!(error.contains(why), "{error}");
+            assert!(error.contains("fix:"), "{error}");
+        }
+    }
+
     /// #688: a private registry's package carries its index into the lock
     /// (the SBOM's `repository_url`), and a public-index package whose file
     /// is served from another host is recorded as unattested. A file URL

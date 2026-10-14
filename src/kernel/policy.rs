@@ -3,6 +3,8 @@
 //! the collision checks the store consults at commit time.
 
 use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::registries::config::{CredentialSpec, RegistrySpec};
+use crate::kernel::registries::effective::Sources;
 use crate::kernel::signing::{self, KeySet};
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -253,6 +255,21 @@ pub struct Policy {
     /// mistake for `ward audit`), empty means "trust nobody".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<Signing>,
+    /// `[credentials.<name>]`: where each registry secret lives, never the
+    /// secret. Machine scope only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, CredentialSpec>,
+    /// `[[registry]]`: the private registries this machine may use. Machine
+    /// scope only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registry: Vec<RegistrySpec>,
+    /// `[sources]`: per ecosystem, the ordered registry names in use.
+    /// Declared by the machine scope, narrowed by any other.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, Vec<String>>,
+    /// The registry configuration of the merged chain. Not file grammar.
+    #[serde(skip)]
+    pub registries: Sources,
     /// The `[packages]` table: limits on the registry packages a resolution
     /// may lock (`min_age_days`). In a merged chain it holds the effective
     /// values; see [`packages`].
@@ -477,7 +494,7 @@ fn merge_text(
             .or_insert_with(|| path.to_path_buf());
     }
     let before = policy.min_age_days();
-    merge(policy, &other, origin);
+    merge_file(policy, &other, origin, path)?;
     if packages::sets_min_age(&other)
         && (origin == SourceOrigin::Machine || policy.min_age_days() != before)
     {
@@ -526,10 +543,10 @@ pub fn union(policy: &mut Policy, other: &Policy) {
 /// with it, so a working tree can drop keys but never vouch for its own.
 /// A scope with no `[signing]` table leaves the set unchanged, and a
 /// project or flag list seen before any machine declaration cannot
-/// initialize it: trust stays unconfigured. Used by `ward audit
-/// --policy` too, so the file handed to the gate can never loosen the
-/// machine or project policy.
-pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
+/// initialize it: trust stays unconfigured. It does not merge the
+/// registry tables: [`merge_file`], which every policy load goes through,
+/// merges them and then calls this.
+pub(crate) fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
     union(policy, other);
     packages::merge(policy, other, origin);
     match origin {
@@ -781,6 +798,9 @@ pub(crate) fn machine_policy_path() -> io::Result<PathBuf> {
 
 mod packages;
 pub use packages::{Packages, DEFAULT_MIN_AGE_DAYS, MAX_MIN_AGE_DAYS};
+
+mod sources;
+pub use sources::merge_file;
 
 mod strict;
 #[cfg(test)]
@@ -2260,6 +2280,78 @@ deny = ["git-dependency"]"#,
             load_with_sources_from(root.path(), Some(&root), false).is_err(),
             "the replacement path must not suppress held policy"
         );
+    }
+
+    #[test]
+    fn registries_load_from_machine_scope_and_projects_only_narrow() {
+        use crate::kernel::registries::config::Ecosystem;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = temp.0.join("project");
+        let machine = temp.0.join("machine.toml");
+        fs::create_dir_all(project.join(".greyward")).unwrap();
+        fs::write(
+            &machine,
+            r#"
+[credentials.corp]
+env = "CORP_REGISTRY_TOKEN"
+
+[[registry]]
+name = "corp-pypi"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi-proxy/simple/"
+credential = "corp"
+root = "https://nexus.corp.example/repository/pypi-proxy/"
+
+[sources]
+python = ["corp-pypi", "public"]
+"#,
+        )
+        .unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
+        let _policy = EnvVarGuard::set("GREYWARD_POLICY", machine.as_os_str());
+        let (policy, _) = load_with_sources(&project, false).unwrap();
+        let python = policy.registries.ecosystem(Ecosystem::Python);
+        assert!(python.enforced);
+        assert_eq!(python.names(), "corp-pypi, public");
+        assert!(!policy.registries.ecosystem(Ecosystem::Node).enforced);
+
+        fs::write(
+            project.join(".greyward/policy.toml"),
+            "[sources]\npython = [\"corp-pypi\"]\n",
+        )
+        .unwrap();
+        let (policy, _) = load_with_sources(&project, false).unwrap();
+        assert_eq!(
+            policy.registries.ecosystem(Ecosystem::Python).names(),
+            "corp-pypi"
+        );
+
+        fs::write(
+            project.join(".greyward/policy.toml"),
+            "[sources]\npython = [\"other\"]\n",
+        )
+        .unwrap();
+        let error = load_with_sources(&project, false).unwrap_err().to_string();
+        assert!(error.contains("does not list"), "{error}");
+
+        fs::write(
+            project.join(".greyward/policy.toml"),
+            "[[registry]]\nname = \"x\"\necosystem = \"python\"\nurl = \"https://x.example/simple/\"\n",
+        )
+        .unwrap();
+        let error = load_with_sources(&project, false).unwrap_err().to_string();
+        assert!(error.contains("declared only in machine policy"), "{error}");
+        assert!(error.contains("fix:"), "{error}");
+    }
+
+    #[test]
+    fn the_company_template_parses() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/human/policy-company.toml"
+        ));
+        parse_file(path, &fs::read_to_string(path).unwrap()).unwrap();
     }
 
     #[test]

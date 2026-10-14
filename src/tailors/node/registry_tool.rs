@@ -196,6 +196,7 @@ impl RegistryTool for NodeTool {
         let report = door::run_node_checked(
             door,
             NodeRun {
+                policy: None,
                 tool: door::NodeTool::Npm {
                     node_obj: &node_obj,
                 },

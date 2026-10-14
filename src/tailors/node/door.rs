@@ -13,7 +13,9 @@
 //!
 //! - npm: `--proxy` and `--https-proxy` with the session token as
 //!   credentials, `--noproxy=` so no host bypasses it, `--registry` the
-//!   public registry, `--strict-ssl=true` with `--cafile` the session CA
+//!   default registry of the effective `[sources]` list (npmjs unless the
+//!   machine policy names one) and `--@scope:registry` for each listed
+//!   scoped registry ([`node_sources`]), `--strict-ssl=true` with `--cafile` the session CA
 //!   (which replaces npm's roots, PR 0), `--update-notifier=false`,
 //!   `--audit=false` and `--fund=false` (each otherwise a request that is
 //!   not resolution), and `--cache` in the run's scratch.
@@ -34,15 +36,19 @@
 //! system roots carry: ward provisions no git or shell of its own.
 
 use super::registry;
+use crate::kernel::policy::{self, Policy};
+use crate::kernel::registries::{self, config::Ecosystem, effective::Source};
 use crate::kernel::resolve::confine;
 use crate::kernel::resolve::door::{self, ConfinedSpec, Publish, Wire, Wiring};
 use crate::kernel::resolve::record;
+use crate::kernel::resolve::routes::{Permitted, Route};
 use crate::kernel::resolve::session::Intercept;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 /// Why npm runs isolated, for the missing-capability message.
 pub(crate) const WHY_NPM: &str = "runs the git and script-shell programs a project's .npmrc \
@@ -222,6 +228,84 @@ fn node_spec(run: &NodeRun<'_>) -> DelegateSpec {
     spec
 }
 
+/// The effective `[sources]` list for node (docs/agent/DESIGNS.md §4 "npm
+/// and pnpm"): the registry the tools are pointed at, one per listed
+/// scope, a route for every listed registry, and the origins they add to
+/// the permitted set. An empty list, or one with only scoped registries,
+/// is an error, never a fallback to npmjs.
+pub(crate) struct NodeSources {
+    pub registry: RegistryFlags,
+    pub routes: Vec<Route>,
+    pub permitted: Permitted,
+}
+
+/// The registry settings the tools get on the command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegistryFlags {
+    /// The default registry's URL.
+    pub default: String,
+    /// `(@scope, url)` for every listed registry with `scopes`.
+    pub scoped: Vec<(String, String)>,
+}
+
+impl RegistryFlags {
+    /// `registry=<url>` and `@scope:registry=<url>`, each after `prefix`.
+    fn settings(&self, prefix: &str) -> Vec<String> {
+        std::iter::once(format!("{prefix}registry={}", self.default))
+            .chain(
+                self.scoped
+                    .iter()
+                    .map(|(scope, url)| format!("{prefix}{scope}:registry={url}")),
+            )
+            .collect()
+    }
+}
+
+pub(crate) fn node_sources(policy: &Policy) -> io::Result<NodeSources> {
+    let refused =
+        |error: String| crate::kernel::error::refused(io::ErrorKind::PermissionDenied, error);
+    let sources = policy.registries.ecosystem(Ecosystem::Node);
+    sources.require_nonempty().map_err(refused)?;
+    let default = match sources.default_source() {
+        Some(Source::Public) => registry::REGISTRY_URL.to_string(),
+        Some(Source::Registry(configured)) => configured.url.clone(),
+        None => {
+            return Err(refused(format!(
+                "no registry serves node packages outside a scope: every registry in [{}] has scopes ({})\nfix: list public or a node registry without scopes in the machine policy's [sources].node",
+                sources.names(),
+                sources.provenance()
+            )))
+        }
+    };
+    let mut out = NodeSources {
+        registry: RegistryFlags {
+            default,
+            scoped: Vec::new(),
+        },
+        routes: Vec::new(),
+        permitted: Permitted::compiled(),
+    };
+    for source in &sources.list {
+        match source {
+            Source::Public => out.routes.push(registry::route()?),
+            Source::Registry(configured) => {
+                for scope in &configured.scopes {
+                    out.registry
+                        .scoped
+                        .push((scope.clone(), configured.url.clone()));
+                }
+                out.routes.push(registries::route::route(
+                    Arc::new(registry::ConfiguredNpm::new(configured)),
+                    configured,
+                    &policy.registries,
+                )?);
+                out.permitted = registries::route::permit(out.permitted.clone(), configured);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The `ConfinedSpec` of `run`, through the process proxy with TLS
 /// interception on the npm route. Tests replace the proxy and the
 /// permitted set.
@@ -247,7 +331,9 @@ pub(crate) fn node_confined<'a>(
     // install ignores it, and pnpm's modules state is pointed into the
     // scratch. Greyward's projection is a symlink into the store anyway.
     confined.exclude = vec![PathGlob::new("**/node_modules")?];
-    confined.routes = vec![registry::route()?];
+    let sources = node_sources(&policy::effective())?;
+    confined.routes = sources.routes;
+    confined.permitted = sources.permitted;
     confined.intercept = Intercept::Tls;
     confined.cwd = run.cwd.clone();
     let kind = match &run.tool {
@@ -259,8 +345,9 @@ pub(crate) fn node_confined<'a>(
         None => run.lock_root.to_path_buf(),
     };
     let lock_root = run.lock_root.to_path_buf();
+    let flags = sources.registry;
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
-        wiring(kind, wire, &lock_root, &project)
+        wiring(kind, wire, &flags, &lock_root, &project)
     }));
     confined.publish(publish);
     Ok(confined)
@@ -274,7 +361,13 @@ enum Kind {
 
 /// The session settings before the verb, the forced ones among them, and
 /// the environment any other Node code reads.
-fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::Result<Wiring> {
+fn wiring(
+    kind: Kind,
+    wire: &Wire<'_>,
+    flags: &RegistryFlags,
+    lock_root: &Path,
+    project: &Path,
+) -> io::Result<Wiring> {
     let ca_file = wire.ca_file.ok_or_else(|| {
         io::Error::other("npm and pnpm resolve only through TLS interception, which this run lacks")
     })?;
@@ -294,15 +387,17 @@ fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::
                     format!("--proxy={proxy}"),
                     format!("--https-proxy={proxy}"),
                     "--noproxy=".to_string(),
-                    format!("--registry={}", registry::REGISTRY_URL),
+                ]
+                .into_iter()
+                .chain(flags.settings("--"))
+                .chain([
                     "--strict-ssl=true".to_string(),
                     format!("--cafile={ca}"),
                     "--update-notifier=false".to_string(),
                     "--audit=false".to_string(),
                     "--fund=false".to_string(),
                     format!("--cache={}", wire.scratch.join("npm-cache").display()),
-                ]
-                .into_iter()
+                ])
                 .map(OsString::from),
             );
         }
@@ -313,7 +408,10 @@ fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::
                     format!("--config.proxy={proxy}"),
                     format!("--config.https-proxy={proxy}"),
                     "--config.noproxy=".to_string(),
-                    format!("--config.registry={}", registry::REGISTRY_URL),
+                ]
+                .into_iter()
+                .chain(flags.settings("--config."))
+                .chain([
                     "--config.strict-ssl=true".to_string(),
                     format!("--config.cafile={ca}"),
                     "--config.update-notifier=false".to_string(),
@@ -323,8 +421,7 @@ fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::
                     format!("--config.virtual-store-dir={}", scratch.virtual_store_dir),
                     format!("--config.store-dir={}", scratch.store_dir),
                     format!("--config.cache-dir={}", scratch.cache_dir),
-                ]
-                .into_iter()
+                ])
                 .map(OsString::from),
             );
         }
@@ -1857,5 +1954,75 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             lock_before
         );
         done();
+    }
+
+    fn with_sources(sources: &str) -> Policy {
+        let text = format!(
+            r#"
+[[registry]]
+name = "corp-npm"
+ecosystem = "node"
+url = "https://nexus.corp.example/repository/npm/"
+
+[[registry]]
+name = "corp-scoped"
+ecosystem = "node"
+url = "https://npm.pkg.github.com/"
+scopes = ["@corp"]
+
+[sources]
+node = {sources}
+"#
+        );
+        let path = Path::new("/machine/policy.toml");
+        let other = policy::parse_file(path, &text).unwrap();
+        let mut merged = Policy::default();
+        policy::merge_file(&mut merged, &other, policy::SourceOrigin::Machine, path).unwrap();
+        merged
+    }
+
+    /// The default registry is the first unscoped entry, each scope gets
+    /// its own setting, npmjs is reached only when `public` is listed, and
+    /// a list with no unscoped registry is refused.
+    #[test]
+    fn node_sources_follow_the_effective_list() {
+        let default = node_sources(&Policy::default()).unwrap();
+        assert_eq!(
+            default.registry.settings("--"),
+            ["--registry=https://registry.npmjs.org/"]
+        );
+        assert_eq!(default.routes.len(), 1);
+
+        let corp = node_sources(&with_sources(r#"["corp-scoped", "corp-npm"]"#)).unwrap();
+        assert_eq!(
+            corp.registry.settings("--config."),
+            [
+                "--config.registry=https://nexus.corp.example/repository/npm/",
+                "--config.@corp:registry=https://npm.pkg.github.com/",
+            ]
+        );
+        assert_eq!(corp.routes.len(), 2);
+        for origin in [
+            "https://nexus.corp.example/x",
+            "https://npm.pkg.github.com/x",
+        ] {
+            assert!(corp.permitted.allows(&url::Url::parse(origin).unwrap()));
+        }
+
+        let mixed = node_sources(&with_sources(r#"["corp-scoped", "public"]"#)).unwrap();
+        assert_eq!(
+            mixed.registry.settings("--"),
+            [
+                "--registry=https://registry.npmjs.org/",
+                "--@corp:registry=https://npm.pkg.github.com/",
+            ]
+        );
+
+        for list in [r#"["corp-scoped"]"#, "[]"] {
+            let Err(error) = node_sources(&with_sources(list)) else {
+                panic!("{list} was accepted");
+            };
+            assert!(error.to_string().contains("fix:"), "{error}");
+        }
     }
 }

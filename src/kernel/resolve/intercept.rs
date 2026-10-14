@@ -35,8 +35,8 @@ use super::mirror::{self, Exchange, Record};
 use super::proxy::{next_request, Context, Stream, Timed, Transport, Tunnel};
 use super::redact;
 use super::routes::{
-    check_route_path_with, Claim, Endpoint, Permitted, RegistryProtocol, RequestClass, Route,
-    Upstream,
+    check_route_path_with, route_for, Claim, Endpoint, Permitted, RegistryProtocol, RequestClass,
+    Route, Upstream,
 };
 use crate::kernel::policy;
 use rustls::{ServerConnection, StreamOwned};
@@ -215,11 +215,29 @@ fn serve(
         );
         return refuse(out, shown, 421, &why, false);
     }
+    // A configured registry's route owns the URL by `covers` on its raw
+    // spelling, the one test every registry check shares: its metadata by
+    // its protocol's grammar, anything else only by a claim its own
+    // metadata made (see `mirror`).
+    let raw = format!("{}{}", target.origin, request.target);
+    if let Some(route) = route_for(&state.config.routes, &raw).filter(|r| r.scope().is_some()) {
+        if !READ_METHODS.contains(&request.method.as_str()) {
+            let why = format!("{} is not served by registry routes", request.method);
+            return refuse(out, shown, 405, &why, keep_alive);
+        }
+        let Ok(url) = Url::parse(&raw) else {
+            return refuse(out, shown, 400, "not a URL", false);
+        };
+        let check = |next: &Url, method: &str| hop_allowed(state, &Class::Route, next, method);
+        exchange(context, route, &state.config.permitted, request, &check).serve(&url, out)?;
+        return Ok(!request.http10);
+    }
     // A route that serves this host may take an encoded slash in a
     // segment (npm's scoped packuments); its own grammar is still applied
     // by `Route::resolve` below. Every other host gets the strict grammar.
     let encoded_slash = state.config.routes.iter().any(|route| {
-        route.protocol.encoded_slash()
+        route.scope().is_none()
+            && route.protocol.encoded_slash()
             && route
                 .endpoints
                 .iter()
@@ -231,12 +249,9 @@ fn serve(
     let Ok(url) = Url::parse(&format!("{}{}", target.origin, request.target)) else {
         return refuse(out, shown, 400, "not a URL", false);
     };
-    if let Some(route) = state
-        .config
-        .routes
-        .iter()
-        .find(|route| route.endpoints.iter().any(|endpoint| endpoint.serves(&url)))
-    {
+    if let Some(route) = state.config.routes.iter().find(|route| {
+        route.scope().is_none() && route.endpoints.iter().any(|endpoint| endpoint.serves(&url))
+    }) {
         if !READ_METHODS.contains(&request.method.as_str()) {
             let why = format!("{} is not served by registry routes", request.method);
             return refuse(out, shown, 405, &why, keep_alive);
@@ -296,6 +311,16 @@ fn serve(
                 );
                 return refuse(out, shown, 405, &why, keep_alive);
             }
+            // An ecosystem with a configured registry list uses nothing
+            // else: no policy can let another host through.
+            if let Some(list) = state.enforced_sources() {
+                let why = format!(
+                    "{shown} is not served by any registry this machine's policy allows for {}: {list}",
+                    state.config.ecosystem
+                );
+                state.hard_failure(why.clone());
+                return refuse(out, shown, 403, &why, keep_alive);
+            }
             let detail = format!(
                 "{} is not one of this door's registries; the request was forwarded through \
                  interception and recorded",
@@ -334,9 +359,7 @@ fn classify(routes: &[Route], url: &Url, method: &str) -> Result<Class, String> 
         return Err(why);
     }
     let read = READ_METHODS.contains(&method);
-    let routed = routes
-        .iter()
-        .any(|route| route.endpoints.iter().any(|endpoint| endpoint.serves(url)));
+    let routed = route_for(routes, url.as_str()).is_some();
     match fetch {
         _ if routed && read => Ok(Class::Route),
         _ if routed => Err(format!("{method} is not served by registry routes")),

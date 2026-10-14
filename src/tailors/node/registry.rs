@@ -26,6 +26,8 @@
 
 use crate::kernel::digest::{sri_candidates, strongest_sri};
 use crate::kernel::fetch::Digest;
+use crate::kernel::registries::config::Registry;
+use crate::kernel::registries::covers;
 use crate::kernel::resolve::routes::{
     Claim, Endpoint, RegistryProtocol, RequestClass, Route, Upstream,
 };
@@ -86,23 +88,9 @@ impl RegistryProtocol for NpmRegistry {
         if url.host_str() != Some(REGISTRY_HOST) || is_tarball_path(url.path()) {
             return Vec::new();
         }
-        let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
-            return Vec::new();
-        };
-        let Some(versions) = packument.get("versions").and_then(|v| v.as_object()) else {
-            return Vec::new();
-        };
-        versions
-            .values()
-            .filter_map(|version| {
-                let dist = version.get("dist")?;
-                let tarball = Url::parse(dist.get("tarball")?.as_str()?).ok()?;
-                if tarball.host_str() != Some(REGISTRY_HOST) || !is_tarball_path(tarball.path()) {
-                    return None;
-                }
-                Some((tarball, dist_claim(dist)?))
-            })
-            .collect()
+        packument_claims(body, |tarball| {
+            tarball.host_str() == Some(REGISTRY_HOST) && is_tarball_path(tarball.path())
+        })
     }
 
     /// The registry publishes a digest for every tarball.
@@ -238,6 +226,97 @@ fn check_version(version: &str) -> Result<(), String> {
     } else {
         Err(format!("{version:?} is not a package version"))
     }
+}
+
+/// A configured npm registry, as a route of its own (docs/agent/DESIGNS.md
+/// §4 "The proxy"). Its grammar decides metadata only: a packument under
+/// its `url` (`<name>`, `@scope%2fname` in either case, `@scope/name`).
+/// Every other URL the route owns is a tarball wherever the registry put
+/// it (GitHub Packages serves `/download/...` and redirects to a blob
+/// host), fetched only when this registry's own packuments claimed it.
+pub struct ConfiguredNpm {
+    id: String,
+    base: String,
+}
+
+impl ConfiguredNpm {
+    pub fn new(registry: &Registry) -> ConfiguredNpm {
+        ConfiguredNpm {
+            id: format!("{ROUTE_ID}-{}", registry.name),
+            base: registry.url.clone(),
+        }
+    }
+
+    fn is_packument(&self, url: &Url) -> bool {
+        if url.query().is_some() || !covers::covers(&self.base, url.as_str()) {
+            return false;
+        }
+        let Ok(base) = Url::parse(&self.base) else {
+            return false;
+        };
+        let Some(rest) = url.path().strip_prefix(base.path()) else {
+            return false;
+        };
+        check_packument_path(&format!("/{rest}")).is_ok()
+    }
+}
+
+impl RegistryProtocol for ConfiguredNpm {
+    fn route_id(&self) -> &str {
+        &self.id
+    }
+
+    /// Reached only through interception, never as a mirror path.
+    fn upstream(&self, _endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+        Err(refused(
+            path,
+            "a configured registry is not served as a mirror",
+        ))
+    }
+
+    fn classify(&self, url: &Url) -> RequestClass {
+        if self.is_packument(url) {
+            RequestClass::Metadata
+        } else {
+            RequestClass::Artifact
+        }
+    }
+
+    fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)> {
+        if !self.is_packument(url) {
+            return Vec::new();
+        }
+        packument_claims(body, |_| true)
+    }
+
+    fn expects_claim(&self, _url: &Url) -> bool {
+        true
+    }
+
+    fn encoded_slash(&self) -> bool {
+        true
+    }
+}
+
+/// Each version's `dist.tarball` that `keep` accepts, with its claim.
+fn packument_claims(body: &[u8], keep: impl Fn(&Url) -> bool) -> Vec<(Url, Claim)> {
+    let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(versions) = packument.get("versions").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    versions
+        .values()
+        .filter_map(|version| {
+            let dist = version.get("dist")?;
+            let tarball = Url::parse(dist.get("tarball")?.as_str()?).ok()?;
+            if !keep(&tarball) {
+                return None;
+            }
+            Some((tarball, dist_claim(dist)?))
+        })
+        .collect()
 }
 
 /// The npm route: the public registry.

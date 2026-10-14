@@ -987,6 +987,7 @@ fn node_closure_body(
         .filter(|p| mutable.contains(&p.name))
         .map(|p| p.path.as_str())
         .collect();
+    let sources = crate::kernel::policy::effective().registries;
     serde_json::json!({
         "env_object": env_obj,
         crate::comforter::join::BASIS_FIELD: crate::comforter::join::basis_value(basis),
@@ -1030,6 +1031,17 @@ fn node_closure_body(
             // can pack it again and compare.
             if let Some(dir) = super::local_package::source_dir(p) {
                 row["local"] = dir.into();
+            }
+            // The configured registry that served the tarball, for the
+            // receipt and `ward audit`.
+            if p.git.is_none() {
+                if let Some(registry) = crate::kernel::registries::lock::served_by(
+                    &sources,
+                    crate::kernel::registries::config::Ecosystem::Node,
+                    &p.url,
+                ) {
+                    row["registry"] = registry;
+                }
             }
             row
         }).collect::<Vec<_>>(),

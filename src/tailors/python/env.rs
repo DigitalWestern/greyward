@@ -598,6 +598,22 @@ fn python_closure_body(
         "python": python,
         "inputs": inputs,
     });
+    // The configured registry that served each file, for the receipt and
+    // `ward audit`.
+    let sources = crate::kernel::policy::effective().registries;
+    if let Some(packages) = body["plan"]["packages"].as_array_mut() {
+        for package in packages {
+            if !package["git"].is_null() {
+                continue;
+            }
+            let url = package["url"].as_str().unwrap_or_default();
+            if let Some(registry) =
+                crate::kernel::registries::lock::served_by(&sources, Ecosystem::Python, url)
+            {
+                package["registry"] = registry;
+            }
+        }
+    }
     if let Some(record) = runtime_record {
         crate::comforter::merge_record(&mut body, record);
     }

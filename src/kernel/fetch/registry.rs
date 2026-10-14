@@ -93,7 +93,7 @@ fn open_through<'c>(
 
 /// The public registry's hosts for `ecosystem`, as the proxy's public
 /// routes name them.
-fn is_public(ecosystem: Ecosystem, url: &str) -> bool {
+pub fn is_public(ecosystem: Ecosystem, url: &str) -> bool {
     let hosts: &[&str] = match ecosystem {
         Ecosystem::Python => &["pypi.org", "files.pythonhosted.org"],
         Ecosystem::Node => &["registry.npmjs.org"],

@@ -590,6 +590,14 @@ fn evaluate_in(
                  the resolution join); run 'ward' once{key}, then commit"
             ));
         }
+        let registries = registry_findings(policy, closure);
+        denied.extend(registries.unapproved);
+        if registries.unattributed && !matches!(freshness, Freshness::Stale(_)) {
+            freshness = Freshness::Outdated(format!(
+                "a registry package records no registry (the closure predates private \
+                 registries); run 'ward' once{key}, then commit"
+            ));
+        }
         // A retired kind is not judged against the policy: the record is
         // older than what retired it, and a fresh sync replaces it.
         if let Some((why, kind)) = retired {
@@ -611,6 +619,72 @@ fn evaluate_in(
         });
     }
     Ok(verdicts)
+}
+
+/// The verdict reason of a package served by a registry the effective
+/// list does not allow.
+pub const UNAPPROVED_REGISTRY: &str = "unapproved-registry";
+
+/// What the registry check found in one closure.
+#[derive(Default)]
+struct RegistryFindings {
+    /// One per package whose `registry` the effective list does not allow.
+    unapproved: Vec<Exception>,
+    /// A registry package with no `registry` field: a closure written
+    /// before the field existed.
+    unattributed: bool,
+}
+
+/// Check every registry package of a closure of an enforced ecosystem: its
+/// `registry.name` must be in the effective list and its `registry.url`
+/// that source's URL. A default ecosystem is not checked. Packages from no
+/// registry (git, a local directory) are judged by their own kinds.
+fn registry_findings(policy: &Policy, closure: &ClosureFile) -> RegistryFindings {
+    use crate::kernel::registries::config::Ecosystem;
+    let mut findings = RegistryFindings::default();
+    let Some(ecosystem) = Ecosystem::parse(&closure.ecosystem) else {
+        return findings;
+    };
+    let list = policy.registries.ecosystem(ecosystem);
+    if !list.enforced {
+        return findings;
+    }
+    let packages = match ecosystem {
+        Ecosystem::Python => &closure.body["plan"]["packages"],
+        Ecosystem::Node => &closure.body["packages"],
+        _ => return findings,
+    };
+    for package in packages.as_array().map(Vec::as_slice).unwrap_or_default() {
+        if !package["git"].is_null() || package.get("local").is_some() {
+            continue;
+        }
+        let subject = package["name"]
+            .as_str()
+            .or_else(|| package["path"].as_str())
+            .unwrap_or_default();
+        let Some(registry) = package.get("registry") else {
+            findings.unattributed = true;
+            continue;
+        };
+        let name = registry["name"].as_str().unwrap_or_default();
+        let url = registry["url"].as_str().unwrap_or_default();
+        if crate::kernel::registries::lock::approved(&policy.registries, ecosystem, name, url) {
+            continue;
+        }
+        findings.unapproved.push(Exception {
+            kind: UNAPPROVED_REGISTRY.to_string(),
+            subject: subject.to_string(),
+            detail: format!(
+                "served by registry {} ({}); {} allows [{}] ({})",
+                printable(name),
+                printable(url),
+                ecosystem.as_str(),
+                list.names(),
+                list.provenance()
+            ),
+        });
+    }
+    findings
 }
 
 /// The detected ecosystems with no closure file: each is a record the gate
@@ -1326,6 +1400,102 @@ mod tests {
             signing: trusting(&[test_key()]),
             ..Policy::default()
         }
+    }
+
+    /// `permissive()` with a machine policy that lists `corp` for python,
+    /// narrowed by a project layer to `narrowed` when one is given.
+    fn with_registries(narrowed: Option<&str>) -> Policy {
+        let mut merged = permissive();
+        let machine = r#"
+[[registry]]
+name = "corp"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi/simple/"
+root = "https://nexus.corp.example/repository/pypi/"
+
+[sources]
+python = ["corp", "public"]
+"#;
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, machine).unwrap();
+        policy::merge_file(&mut merged, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+        if let Some(list) = narrowed {
+            let path = Path::new("/project/.greyward/policy.toml");
+            let parsed =
+                policy::parse_file(path, &format!("[sources]\npython = {list}\n")).unwrap();
+            policy::merge_file(&mut merged, &parsed, policy::SourceOrigin::Project, path).unwrap();
+        }
+        merged
+    }
+
+    fn registry_closure(dir: &Path, registry: Option<Value>) -> ClosureFile {
+        let mut body = python_body(dir);
+        let mut package = json!({
+            "name": "internal",
+            "version": "1.0.0",
+            "url": "https://nexus.corp.example/repository/pypi/packages/internal-1.0.0.tar.gz",
+        });
+        if let Some(registry) = registry {
+            package["registry"] = registry;
+        }
+        body["plan"]["packages"] = json!([package]);
+        body["exceptions"] = json!([]);
+        write_closure(dir, "python", "python", Some(host().triple()), body)
+    }
+
+    /// An enforced ecosystem's closure passes when each registry package
+    /// names a listed registry at its configured URL; a narrower list, a
+    /// same-host repository or a reused name fails it as
+    /// `unapproved-registry`, and a package with no `registry` makes it
+    /// `outdated`. A default ecosystem is not checked.
+    #[test]
+    fn registry_packages_must_name_a_listed_registry() {
+        let temp = python_project("audit-registry");
+        let dir = &temp.0;
+        let corp = json!({
+            "name": "corp",
+            "url": "https://NEXUS.corp.example:443/repository/pypi/simple",
+        });
+        let closure = registry_closure(dir, Some(corp.clone()));
+        let verdicts = judge(dir, &with_registries(None), std::slice::from_ref(&closure));
+        assert_eq!(verdicts[0].word(), "clean", "{verdicts:?}");
+        // Not enforced: nothing to check.
+        let verdicts = judge(dir, &permissive(), std::slice::from_ref(&closure));
+        assert_eq!(verdicts[0].word(), "clean", "{verdicts:?}");
+
+        let verdicts = judge(dir, &with_registries(Some(r#"["public"]"#)), &[closure]);
+        assert_eq!(verdicts[0].word(), "denied");
+        let denied = verdicts[0].denied.as_ref().unwrap();
+        assert_eq!(denied[0].kind, UNAPPROVED_REGISTRY);
+        assert_eq!(denied[0].subject, "internal");
+        assert!(
+            denied[0].detail.contains("python allows [public]"),
+            "{denied:?}"
+        );
+
+        for registry in [
+            json!({"name": "corp", "url": "https://nexus.corp.example/repository/other/simple/"}),
+            json!({"name": "elsewhere", "url": "https://nexus.corp.example/repository/pypi/simple/"}),
+            json!({"name": "public", "url": "https://mirror.example/simple/"}),
+        ] {
+            let closure = registry_closure(dir, Some(registry.clone()));
+            let verdicts = judge(dir, &with_registries(None), &[closure]);
+            assert_eq!(verdicts[0].word(), "denied", "{registry}");
+        }
+        let public = registry_closure(
+            dir,
+            Some(json!({"name": "public", "url": "https://pypi.org/simple/"})),
+        );
+        let verdicts = judge(dir, &with_registries(None), &[public]);
+        assert_eq!(verdicts[0].word(), "clean", "{verdicts:?}");
+
+        let missing = registry_closure(dir, None);
+        let verdicts = judge(dir, &with_registries(None), &[missing]);
+        assert_eq!(verdicts[0].word(), "outdated");
+        assert!(
+            matches!(&verdicts[0].freshness, Freshness::Outdated(why) if why.contains("records no registry")),
+            "{verdicts:?}"
+        );
     }
 
     fn judge(dir: &Path, policy: &Policy, closures: &[ClosureFile]) -> Vec<Verdict> {

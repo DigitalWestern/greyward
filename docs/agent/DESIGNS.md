@@ -2214,16 +2214,21 @@ how many records it held. The log was chosen. Every signed head ward
 serves (go's own `latest` and lookup answers, and ward's lookups through
 the same route) is verified against sum.golang.org's Ed25519 key (Go's
 note format, `ring`'s Ed25519, no new crate) and appended to
-`<store>/resolve/tlog/sum.golang.org` as a checkpoint: the tree size and
-the local time. The history is thinned (all of the last two days, one a
-day back to the longest minimum age, and the newest older one). The
+`<store>/resolve/tlog/sum.golang.org` as a checkpoint: the tree size, its
+root hash and the local time, at most one per ten minutes, under a lock.
+A head of a size already kept with another root is a fork and a hard
+failure; no consistency proof between sizes is checked. The history is thinned (all of the last two days, one a
+day back to the longest minimum age, and the largest older one). The
 binary carries a seed checkpoint (`src/tailors/go/sumdb-seed.txt`,
 written by `tools/sumdb_seed.py`, which keeps it only when the Rust test
-verifies its signature). Each Go version, tagged or pseudo, is judged by
-its record number: below the size of the newest checkpoint observed at
+verifies its signature; the release workflow runs `tools/sumdb_seed.py
+--check`, which refuses a seed taken more than 60 days before the release
+commit). Each Go version, tagged or pseudo, is judged by
+its record number: below the size of the largest checkpoint observed at
 least `min_age_days` before the resolution, it passes; otherwise its age
-is unknown ("logged after the newest checkpoint older than N days").
-The `.info` time is never read. A head that does not verify is a hard
+is unknown ("logged after the largest checkpoint older than N days").
+The `.info` time is never read. A head that does not verify, or a lookup
+answer that is not exactly the asked version's two go.sum lines, is a hard
 failure (502, the door fails), never an unknown age. The record number
 is authenticated by TLS and checked to lie inside the signed tree the
 answer carries, without an inclusion proof. LIMITATIONS.md states the

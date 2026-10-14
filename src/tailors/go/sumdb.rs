@@ -24,7 +24,7 @@
 //! same answer carries, but does not fetch the tiles that would prove the
 //! record sits there.
 
-use crate::kernel::resolve::tlog::{Checkpoint, Log};
+use crate::kernel::resolve::tlog::{Checkpoint, Head, Log};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use sha2::{Digest, Sha256};
 
@@ -78,13 +78,13 @@ fn key_hash(name: &str, key: &[u8]) -> [u8; 4] {
     [digest[0], digest[1], digest[2], digest[3]]
 }
 
-/// The tree size a signed tree head carries, once sum.golang.org's
+/// The tree a signed tree head names (its size and root hash), once sum.golang.org's
 /// signature over it verifies. Read as Go's `note.Open` reads a note: any
 /// other signer's line is skipped, only the first of sum.golang.org's lines
 /// is checked (Go drops repeats by one verifier), and signatures are padded
 /// standard base64. A note with none of sum.golang.org's, a bad one, or a
 /// malformed line is refused.
-pub fn verify_tree(note: &[u8]) -> Result<u64, String> {
+pub fn verify_tree(note: &[u8]) -> Result<Head, String> {
     let note = std::str::from_utf8(note).map_err(|_| "the tree head is not UTF-8".to_string())?;
     let split = note
         .rfind("\n\n")
@@ -123,22 +123,22 @@ pub fn verify_tree(note: &[u8]) -> Result<u64, String> {
     tree_size(text)
 }
 
-/// The size in a verified tree head's text, read as Go's `tlog.ParseTree`
+/// The size and root hash in a verified tree head's text, read as Go's `tlog.ParseTree`
 /// reads it: the header line, the size, the root hash (32 bytes of padded
 /// standard base64), each ending in a newline. Lines after the hash are
 /// ignored, as Go ignores them for forward compatibility.
-fn tree_size(text: &str) -> Result<u64, String> {
+fn tree_size(text: &str) -> Result<Head, String> {
     let malformed = || "the signed text is not a go.sum database tree".to_string();
     let rest = text.strip_prefix(TREE_TEXT).ok_or_else(malformed)?;
     let lines: Vec<&str> = rest.splitn(3, '\n').collect();
     let [size, hash, _later] = lines.as_slice() else {
         return Err(malformed());
     };
-    let hash_ok = crate::kernel::base64::decode_padded(hash).is_some_and(|hash| hash.len() == 32);
-    if !hash_ok {
-        return Err(malformed());
-    }
-    go_count(size).ok_or_else(malformed)
+    let root: [u8; 32] = crate::kernel::base64::decode_padded(hash)
+        .and_then(|hash| hash.try_into().ok())
+        .ok_or_else(malformed)?;
+    let size = go_count(size).ok_or_else(malformed)?;
+    Ok(Head { size, root })
 }
 
 /// A count as Go's `strconv.ParseInt(text, 10, 64)` reads one, not
@@ -184,16 +184,17 @@ pub fn split_lookup(body: &[u8]) -> Result<Answer<'_>, String> {
 /// The answer to a lookup of `module@version` (both in the escaped
 /// spelling the lookup URL carries), once the tree head it carries
 /// verifies, the record sits below that tree's size, and the record is
-/// exactly that version's two go.sum lines; and the tree's size. Anything
+/// exactly that version's two go.sum lines; and the tree. Anything
 /// else in a validly signed answer is refused like a bad signature: the
 /// record number would otherwise date a version it was never given for.
 pub fn verify_lookup<'a>(
     body: &'a [u8],
     module: &str,
     version: &str,
-) -> Result<(Answer<'a>, u64), String> {
+) -> Result<(Answer<'a>, Head), String> {
     let answer = split_lookup(body)?;
-    let size = verify_tree(answer.tree)?;
+    let head = verify_tree(answer.tree)?;
+    let size = head.size;
     if answer.record >= size {
         return Err(format!(
             "the lookup answer's record {} is not in the tree of {size} it carries",
@@ -201,7 +202,7 @@ pub fn verify_lookup<'a>(
         ));
     }
     check_record(answer.text, module, version)?;
-    Ok((answer, size))
+    Ok((answer, head))
 }
 
 /// A lookup record for `module@version`: exactly the lines
@@ -254,8 +255,8 @@ pub fn log() -> Log {
 fn seed(text: &str) -> Option<Checkpoint> {
     let (first, note) = text.split_once('\n')?;
     let observed = first.strip_prefix("observed ")?.parse().ok()?;
-    let size = verify_tree(note.as_bytes()).ok()?;
-    Some(Checkpoint { size, observed })
+    let head = verify_tree(note.as_bytes()).ok()?;
+    Some(Checkpoint::new(head, observed))
 }
 
 #[cfg(test)]
@@ -288,7 +289,12 @@ mod tests {
 
     #[test]
     fn a_recorded_lookup_verifies_and_names_its_record() {
-        let (answer, size) = verify_lookup(UUID, MODULE, VERSION).unwrap();
+        let (answer, head) = verify_lookup(UUID, MODULE, VERSION).unwrap();
+        let size = head.size;
+        assert_eq!(
+            crate::kernel::base64::encode(&head.root),
+            "mjjTG8zqUwpbOnYRsjT2HvgQnf1VWnISago9r8LcR1k="
+        );
         assert_eq!(answer.record, 22_152_757);
         assert_eq!(size, 64_828_441);
         assert!(answer.text.starts_with("github.com/google/uuid v1.6.0 h1:"));
@@ -386,7 +392,10 @@ mod tests {
         bytes[10] ^= 1;
         let bad = crate::kernel::base64::encode(&bytes);
         let repeated = format!("{note}\u{2014} sum.golang.org {bad}\n");
-        assert_eq!(verify_tree(repeated.as_bytes()), Ok(64_828_441));
+        assert_eq!(
+            verify_tree(repeated.as_bytes()).map(|head| head.size),
+            Ok(64_828_441)
+        );
         // A bad first line is not rescued by a good repeat.
         let first_bad = note.replace(encoded, &bad) + line + "\n";
         assert!(verify_tree(first_bad.as_bytes()).is_err());
@@ -396,7 +405,7 @@ mod tests {
         // ParseTree ignores lines after the hash, and reads the size as
         // ParseInt does.
         let hash = "mjjTG8zqUwpbOnYRsjT2HvgQnf1VWnISago9r8LcR1k=";
-        let tree = |rest: &str| tree_size(&format!("{TREE_TEXT}{rest}"));
+        let tree = |rest: &str| tree_size(&format!("{TREE_TEXT}{rest}")).map(|head| head.size);
         assert_eq!(tree(&format!("5\n{hash}\n")), Ok(5));
         assert_eq!(tree(&format!("5\n{hash}\nlater\nlines\n")), Ok(5));
         assert_eq!(tree(&format!("007\n{hash}\n")), Ok(7));

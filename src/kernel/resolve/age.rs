@@ -291,7 +291,7 @@ impl Judging<'_> {
         Ok(match tlog::eligible(checkpoints, before) {
             Some(checkpoint) if record < checkpoint.size => None,
             Some(checkpoint) => Some(format!(
-                "{} logged it as record {record}, after the newest checkpoint older than \
+                "{} logged it as record {record}, after the largest checkpoint older than \
                  {days} days (a tree of {} records, observed {})",
                 log.name,
                 checkpoint.size,
@@ -1070,7 +1070,7 @@ mod tests {
         use super::*;
         use crate::kernel::resolve::routes::{Endpoint, Permitted, RegistryProtocol, Route};
         use crate::kernel::resolve::testing::Reach;
-        use crate::tailors::go::registry::{GO_PROXY, PROXY_HOST, SUMDB_HOST, SUMDB_NAME};
+        use crate::tailors::go::registry::{GO_PROXY, PROXY_HOST, SUMDB_HOST};
 
         const LOOKUP: &str = "/lookup/github.com/google/uuid@v1.6.0";
         /// The recorded answer's record number, and its tree's size.
@@ -1098,7 +1098,12 @@ mod tests {
         }
 
         fn checkpoint(harness: &Harness, size: u64, observed: i64) {
-            tlog::record(&harness.store, SUMDB_NAME, Checkpoint { size, observed }).unwrap();
+            let mut root = [0xee; 32];
+            root[..8].copy_from_slice(&size.to_be_bytes());
+            let head = tlog::Head { size, root };
+            assert!(
+                tlog::record(&harness.store, &GO_PROXY.log().unwrap(), head, observed).unwrap()
+            );
         }
 
         fn judge_uuid(harness: &Harness, now: i64) -> Judged {
@@ -1134,7 +1139,7 @@ mod tests {
         }
 
         /// A tag whose commit time says 2024 but which the log took in
-        /// only after the newest checkpoint older than the minimum: its age
+        /// only after the largest checkpoint older than the minimum: its age
         /// is unknown, and a policy that denies the kind refuses it.
         #[test]
         fn a_version_logged_recently_is_refused_whatever_its_commit_time() {
@@ -1149,7 +1154,7 @@ mod tests {
                 young.fact.detail,
                 format!(
                     "its publish time is unknown at this resolution at 2026-10-12T00:00:00Z: \
-                     sum.golang.org logged it as record {RECORD}, after the newest checkpoint \
+                     sum.golang.org logged it as record {RECORD}, after the largest checkpoint \
                      older than 7 days (a tree of {} records, observed \
                      2026-10-02T00:00:00Z); the minimum age is 7 days (the default)",
                     RECORD - 1
@@ -1216,6 +1221,23 @@ mod tests {
             assert!(report.published.is_empty());
             let kept = tlog::load(&harness.store, &GO_PROXY.log().unwrap()).unwrap();
             assert!(kept.iter().all(|kept| kept.size != 64_828_441), "{kept:?}");
+        }
+
+        /// A head of a size ward kept with another root forks the log: the
+        /// answer that carried it is refused.
+        #[test]
+        fn a_head_that_forks_a_kept_checkpoint_is_a_hard_failure() {
+            let harness = harness("age-go-fork");
+            checkpoint(&harness, 64_828_441, NOW - 10 * SECONDS_PER_DAY);
+            let judged = judge_uuid(&harness, NOW);
+            let report = judged.lookups.unwrap();
+            let failure = report.facts.hard_failures.join("; ");
+            assert!(
+                failure.contains(LOOKUP)
+                    && failure.contains("signed two different trees of 64828441 records"),
+                "{failure}"
+            );
+            assert!(report.published.is_empty());
         }
 
         /// A fresh store holds only the seed the binary carries: a version

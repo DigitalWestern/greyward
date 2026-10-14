@@ -1,6 +1,5 @@
 //! The policy-file grammar of private registries: `[credentials.<name>]`,
-//! `[[registry]]` and `[sources]` (docs/agent/DESIGNS.md §4 "Private
-//! registries"). Parsing and validation here are pure: no file, variable or
+//! `[[registry]]` and `[sources]`. Parsing and validation here are pure: no file, variable or
 //! network is touched. Secrets are read later, lazily, by
 //! [`super::credential`]; a [`CredentialSpec`] only says where one lives.
 

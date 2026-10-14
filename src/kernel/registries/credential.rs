@@ -1,5 +1,4 @@
-//! Registry credentials, read lazily (docs/agent/DESIGNS.md §4
-//! "Credentials"). A [`Credential`] is a reference: which registry, which
+//! Registry credentials, read lazily. A [`Credential`] is a reference: which registry, which
 //! `[credentials]` entry, which host. Its secret is read the first time a
 //! request inside the registry's root is sent upstream, once per process;
 //! the result, a failure included, is kept for every later request. The

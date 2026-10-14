@@ -326,9 +326,8 @@ fn record_for(spec: &RecordSpec, args: &[OsString]) -> RecordSpec {
     }
 }
 
-/// The effective `[sources]` list for python (docs/agent/DESIGNS.md §4
-/// "Python"): the default registry's index, the one uv searches, and a
-/// route for every listed registry, so a lock naming another listed one
+/// The effective `[sources]` list for python: the default registry's
+/// index, the one uv searches, and a route for every listed registry, so a lock naming another listed one
 /// still syncs. An empty list is an error, never a fallback to PyPI.
 pub(crate) struct Indexes {
     /// The default registry's index URL.

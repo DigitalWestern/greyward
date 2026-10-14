@@ -126,6 +126,8 @@ pub(crate) struct NodeRun<'a> {
     /// Capture the tool's output into the report instead of letting the
     /// user watch it.
     pub capture: bool,
+    /// `None` is the policy in force (tests set one).
+    pub policy: Option<Policy>,
 }
 
 /// The pinned pnpm as `ward x` realized it: the store environment object
@@ -228,9 +230,8 @@ fn node_spec(run: &NodeRun<'_>) -> DelegateSpec {
     spec
 }
 
-/// The effective `[sources]` list for node (docs/agent/DESIGNS.md §4 "npm
-/// and pnpm"): the registry the tools are pointed at, one per listed
-/// scope, a route for every listed registry, and the origins they add to
+/// The effective `[sources]` list for node: the registry the tools are
+/// pointed at, one per listed scope, a route for every listed registry, and the origins they add to
 /// the permitted set. An empty list, or one with only scoped registries,
 /// is an error, never a fallback to npmjs.
 pub(crate) struct NodeSources {
@@ -331,7 +332,8 @@ pub(crate) fn node_confined<'a>(
     // install ignores it, and pnpm's modules state is pointed into the
     // scratch. Greyward's projection is a symlink into the store anyway.
     confined.exclude = vec![PathGlob::new("**/node_modules")?];
-    let sources = node_sources(&policy::effective())?;
+    let policy = run.policy.clone().unwrap_or_else(policy::effective);
+    let sources = node_sources(&policy)?;
     confined.routes = sources.routes;
     confined.permitted = sources.permitted;
     confined.intercept = Intercept::Tls;
@@ -349,6 +351,7 @@ pub(crate) fn node_confined<'a>(
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         wiring(kind, wire, &flags, &lock_root, &project)
     }));
+    confined.policy = Some(policy);
     confined.publish(publish);
     Ok(confined)
 }
@@ -805,6 +808,7 @@ mod tests {
         )
         .unwrap();
         let mut run = run;
+        run.policy = Some(policy);
         let publish = std::mem::replace(
             &mut run.publish,
             Publish::Detached {
@@ -813,7 +817,6 @@ mod tests {
         );
         let mut confined = node_confined(&run, publish).unwrap();
         confined.proxy = Some(&harness.proxy);
-        confined.policy = Some(policy);
         adjust(&mut confined);
         let spec = node_spec(&run);
         let report = door.run_confined(spec, confined);
@@ -825,6 +828,7 @@ mod tests {
 
     fn lock_only_run<'a>(node_obj: &'a Path, project: &'a Path) -> NodeRun<'a> {
         NodeRun {
+            policy: None,
             tool: NodeTool::Npm { node_obj },
             lock_root: project,
             cwd: None,
@@ -1728,6 +1732,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             DoorKind::Edit,
             Policy::default(),
             NodeRun {
+                policy: None,
                 tool: NodeTool::Pnpm {
                     node_obj: &node_obj,
                     program: &pinned.program,
@@ -1907,6 +1912,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             DoorKind::MissingLock,
             Policy::default(),
             NodeRun {
+                policy: None,
                 tool: NodeTool::Pnpm {
                     node_obj: &node_obj,
                     program: &pinned.program,

@@ -1792,6 +1792,8 @@ fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bo
         "download_verified_digest_held",
         "download_toolchain_artifact_held",
         "download_verified_any_held",
+        "download_registry_held",
+        "download_registry_any_held",
         // The cache-only reads and the proxy's streaming insert: a hit is
         // admitted by digest the same way.
         "cache_verified_held",

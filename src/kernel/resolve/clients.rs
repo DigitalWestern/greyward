@@ -1,6 +1,6 @@
 //! The upstream clients of one process: the public one, and one per (extra
 //! trust roots, network mode) a configured registry asks for
-//! (docs/agent/DESIGNS.md §4 "One transport for both paths").
+//!.
 //!
 //! Each client is immutable once built, and the key fully determines it, so
 //! sessions under different machine policies share entries safely and no

@@ -24,6 +24,7 @@
 
 pub mod ca;
 pub mod cache;
+pub mod clients;
 pub mod confine;
 pub mod container;
 pub mod door;

@@ -9,11 +9,15 @@
 //! permitted set, and the request path must parse in the route grammar
 //! before the protocol ever sees it.
 
+use super::clients::ClientSpec;
 use crate::kernel::fetch::Digest;
+use crate::kernel::registries::covers;
+use crate::kernel::registries::credential::{Credential, Secret};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use url::Url;
 
 /// The upstream hosts the proxy may reach: the public registries ward
@@ -175,7 +179,23 @@ impl Permitted {
 pub struct Endpoint {
     host: String,
     port: u16,
-    authorization: Option<String>,
+    authorization: Option<Authorization>,
+    /// A configured registry's endpoint: its client settings.
+    client: Option<ClientSpec>,
+}
+
+/// The credential an endpoint attaches.
+#[derive(Clone, PartialEq, Eq)]
+enum Authorization {
+    /// Tests only: a fixed value for the whole origin.
+    #[cfg(test)]
+    Fixed(String),
+    /// A configured registry's credential, read on first use and sent only
+    /// to URLs under `root` (`covers`).
+    Registry {
+        root: String,
+        credential: Arc<Credential>,
+    },
 }
 
 impl fmt::Debug for Endpoint {
@@ -184,6 +204,7 @@ impl fmt::Debug for Endpoint {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("authorization", &self.authorization.as_ref().map(|_| "…"))
+            .field("client", &self.client)
             .finish()
     }
 }
@@ -202,6 +223,40 @@ impl Endpoint {
             host,
             port: 443,
             authorization: None,
+            client: None,
+        })
+    }
+
+    /// A configured registry's origin (its `url` origin, or one of its
+    /// `files` origins), outside the compiled set: the permitted set of a
+    /// session that routes it must name it. `root` and `credential`, when
+    /// given, attach the credential to URLs under the root only.
+    pub fn configured(
+        origin: &str,
+        credential: Option<(String, Arc<Credential>)>,
+        client: ClientSpec,
+    ) -> io::Result<Endpoint> {
+        let url = Url::parse(origin).map_err(|error| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("{origin}: {error}"))
+        })?;
+        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{origin} has no host"),
+            ));
+        };
+        if url.scheme() != "https" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{origin} is not https"),
+            ));
+        }
+        Ok(Endpoint {
+            host: host.to_ascii_lowercase(),
+            port,
+            authorization: credential
+                .map(|(root, credential)| Authorization::Registry { root, credential }),
+            client: Some(client),
         })
     }
 
@@ -214,6 +269,7 @@ impl Endpoint {
             host: host.to_ascii_lowercase(),
             port,
             authorization: None,
+            client: None,
         }
     }
 
@@ -225,6 +281,7 @@ impl Endpoint {
             host: host.to_string(),
             port,
             authorization: None,
+            client: None,
         }
     }
 
@@ -243,7 +300,7 @@ impl Endpoint {
                 ),
             ));
         }
-        self.authorization = Some(value.to_string());
+        self.authorization = Some(Authorization::Fixed(value.to_string()));
         Ok(self)
     }
 
@@ -284,8 +341,39 @@ impl Endpoint {
             && url.port_or_known_default() == Some(self.port)
     }
 
-    pub(crate) fn authorization(&self) -> Option<&str> {
-        self.authorization.as_deref()
+    /// The `Authorization` value for a request to `raw` (the URL as it
+    /// will be sent), read on first use: `None` when this endpoint sends no
+    /// credential there, an error when the credential cannot be read.
+    pub(crate) fn authorization(&self, raw: &str) -> Result<Option<Secret>, String> {
+        match &self.authorization {
+            None => Ok(None),
+            #[cfg(test)]
+            Some(Authorization::Fixed(value)) => Ok(Some(Secret::fixed(value))),
+            Some(Authorization::Registry { root, credential }) => {
+                if !covers::covers(root, raw) {
+                    return Ok(None);
+                }
+                credential.authorization().map(Some)
+            }
+        }
+    }
+
+    /// The identity of this endpoint's credential for cache keys: never the
+    /// value, and never a read of it.
+    fn credential_reference(&self) -> Option<String> {
+        match self.authorization.as_ref()? {
+            #[cfg(test)]
+            Authorization::Fixed(value) => Some(format!("fixed|{value}")),
+            Authorization::Registry { root, credential } => {
+                Some(format!("{root}|{}", credential.reference()))
+            }
+        }
+    }
+
+    /// The client settings of a configured registry's endpoint; `None`
+    /// takes the public client.
+    pub(crate) fn client(&self) -> Option<&ClientSpec> {
+        self.client.as_ref()
     }
 
     pub(crate) fn permitted_by(&self, permitted: &Permitted) -> bool {
@@ -350,10 +438,10 @@ pub struct LocalAnswer {
 
 /// One registry's protocol, implemented in its tailor folder. Every method
 /// is pure: no I/O, no network.
-pub trait RegistryProtocol: Sync {
+pub trait RegistryProtocol: Send + Sync {
     /// The route segment in mirror URLs (`/<token>/<route_id>/...`):
     /// lowercase letters, digits, and `-`.
-    fn route_id(&self) -> &'static str;
+    fn route_id(&self) -> &str;
 
     /// Map a mirror path (starting with `/`, query included) to where it
     /// is served from. `endpoints` are the route's; the answer's origin must
@@ -410,8 +498,41 @@ pub trait RegistryProtocol: Sync {
 /// A mirror route: a protocol and the endpoints it may reach.
 #[derive(Clone)]
 pub struct Route {
-    pub protocol: &'static dyn RegistryProtocol,
+    pub protocol: Arc<dyn RegistryProtocol>,
     pub endpoints: Vec<Endpoint>,
+}
+
+/// A compiled-in protocol, shared as an instance.
+struct Fixed(&'static dyn RegistryProtocol);
+
+impl RegistryProtocol for Fixed {
+    fn route_id(&self) -> &str {
+        self.0.route_id()
+    }
+    fn upstream(&self, endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+        self.0.upstream(endpoints, path)
+    }
+    fn classify(&self, url: &Url) -> RequestClass {
+        self.0.classify(url)
+    }
+    fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)> {
+        self.0.claims(url, body)
+    }
+    fn expects_claim(&self, url: &Url) -> bool {
+        self.0.expects_claim(url)
+    }
+    fn request_body_cap(&self) -> u64 {
+        self.0.request_body_cap()
+    }
+    fn content_query_keys(&self) -> &'static [&'static str] {
+        self.0.content_query_keys()
+    }
+    fn rewrite(&self, url: &Url, body: Vec<u8>, base: &ProxyAddress) -> io::Result<Vec<u8>> {
+        self.0.rewrite(url, body, base)
+    }
+    fn encoded_slash(&self) -> bool {
+        self.0.encoded_slash()
+    }
 }
 
 impl fmt::Debug for Route {
@@ -424,8 +545,17 @@ impl fmt::Debug for Route {
 }
 
 impl Route {
+    /// A route of a compiled-in protocol.
     pub fn new(
         protocol: &'static dyn RegistryProtocol,
+        endpoints: Vec<Endpoint>,
+    ) -> io::Result<Route> {
+        Route::instance(Arc::new(Fixed(protocol)), endpoints)
+    }
+
+    /// A route of a protocol instance (a configured registry's).
+    pub fn instance(
+        protocol: Arc<dyn RegistryProtocol>,
         endpoints: Vec<Endpoint>,
     ) -> io::Result<Route> {
         let id = protocol.route_id();
@@ -458,7 +588,7 @@ impl Route {
         let upstream = self
             .protocol
             .upstream(&self.endpoints, path)
-            .map_err(|error| scrub_echo(&error.to_string(), path, self.protocol))?;
+            .map_err(|error| scrub_echo(&error.to_string(), path, &*self.protocol))?;
         let url = match &upstream {
             Upstream::Fetch(url) => url,
             Upstream::Local(answer) => &answer.url,
@@ -486,10 +616,32 @@ impl Route {
     /// credentials. The value itself never leaves this hash.
     pub(crate) fn credential_identity(&self) -> String {
         use sha2::{Digest as _, Sha256};
-        let mut pairs: Vec<(String, &str)> = self
+        let mut pairs: Vec<(String, String)> = self
             .endpoints
             .iter()
-            .filter_map(|endpoint| Some((endpoint.origin(), endpoint.authorization()?)))
+            .filter_map(|endpoint| {
+                let credential = endpoint.credential_reference();
+                let client = endpoint.client().map(|client| {
+                    // The trust roots by content, so a replaced file is a
+                    // different configuration; an unreadable one fails the
+                    // request itself, so its path stands in here.
+                    let ca = client.ca.as_ref().map(|path| {
+                        super::clients::ca_file(path)
+                            .map(|ca| hex::encode(ca.digest))
+                            .unwrap_or_else(|_| path.display().to_string())
+                    });
+                    format!("{}|{}", client.network.as_str(), ca.unwrap_or_default())
+                });
+                if credential.is_none() && client.is_none() {
+                    return None;
+                }
+                let identity = format!(
+                    "{}|{}",
+                    credential.unwrap_or_default(),
+                    client.unwrap_or_default()
+                );
+                Some((endpoint.origin(), identity))
+            })
             .collect();
         if pairs.is_empty() {
             return String::new();

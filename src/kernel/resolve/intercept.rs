@@ -394,7 +394,7 @@ fn exchange<'a>(
 ) -> Exchange<'a> {
     Exchange {
         state: &context.state,
-        client: &context.shared.client,
+        clients: &context.shared.clients,
         budget: &context.shared.budget,
         route,
         address: &context.address,

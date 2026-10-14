@@ -368,7 +368,7 @@ pub fn read_record_value(id: &str, value: serde_json::Value) -> io::Result<Recor
 pub const META_SCHEMA: &str = "object-meta/3";
 
 pub(crate) fn parse_digest(algo: &str, hex: &str) -> Result<Digest, String> {
-    if !matches!(algo, "sha1" | "sha256" | "sha512") {
+    if !matches!(algo, "sha1" | "sha256" | "sha384" | "sha512") {
         return Err(format!("unsupported cache algorithm {algo}"));
     }
     Digest::from_parts(algo, hex).map_err(|error| error.to_string())
@@ -837,12 +837,12 @@ mod tests {
             "BEAM relocation relation",
         );
 
-        let node_empty = case_with_input(&linux, "node-env", Some("node-env/6"), "layout");
+        let node_empty = case_with_input(&linux, "node-env", Some("node-env/7"), "layout");
         assert_relation_breaks(&node_empty, &["layout"], "Node layout/package relation");
         let node_packages = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/6"),
+            Some("node-env/7"),
             "pkg:node_modules/example",
         );
         assert_relation_breaks(
@@ -850,7 +850,7 @@ mod tests {
             &["pkg:node_modules/example"],
             "Node layout/package relation",
         );
-        let node_native = case_with_input(&linux, "node-env", Some("node-env/6"), "native_libs");
+        let node_native = case_with_input(&linux, "node-env", Some("node-env/7"), "native_libs");
         assert_relation_breaks(
             &node_native,
             &["pkg:node_modules/example"],
@@ -859,7 +859,7 @@ mod tests {
         let node_provisioned = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/6"),
+            Some("node-env/7"),
             "provisioned:node_modules/electron",
         );
         assert_relation_breaks(
@@ -877,7 +877,7 @@ mod tests {
         let mut node_darwin_native = case_with_input(
             &darwin,
             "node-env",
-            Some("node-env/6"),
+            Some("node-env/7"),
             "pkg:node_modules/example",
         );
         node_darwin_native
@@ -1046,7 +1046,7 @@ mod tests {
             .iter()
             .find(|identity| {
                 identity.kind == "node-env"
-                    && schema_input_of(identity) == Some("node-env/6")
+                    && schema_input_of(identity) == Some("node-env/7")
                     && identity
                         .inputs
                         .keys()
@@ -1078,7 +1078,7 @@ mod tests {
         let declared = case_with_input(
             &linux,
             "node-env",
-            Some("node-env/6"),
+            Some("node-env/7"),
             "artifact:.npm/tool.tar.gz",
         );
         let mut dropped = declared.clone();
@@ -1096,7 +1096,7 @@ mod tests {
             let provisioned = case_with_input(
                 &cases,
                 "node-env",
-                Some("node-env/6"),
+                Some("node-env/7"),
                 "provisioned:node_modules/electron",
             );
             let mut dropped = provisioned.clone();
@@ -1119,7 +1119,7 @@ mod tests {
     #[test]
     fn node_env_native_libs_dropped_is_detected() {
         let linux = live_identity_cases(Platform::X86_64UnknownLinuxGnu);
-        let native = case_with_input(&linux, "node-env", Some("node-env/6"), "native_libs");
+        let native = case_with_input(&linux, "node-env", Some("node-env/7"), "native_libs");
         let mut dropped = native.clone();
         dropped.inputs.remove("native_libs");
 

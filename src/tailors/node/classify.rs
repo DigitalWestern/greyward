@@ -188,7 +188,11 @@ pub(super) fn persisted_archive_classification(
             if !object.is_dir() {
                 return Ok(None);
             }
-            has_native |= object.join("binding.gyp").is_file();
+            // The package is the subdirectory the source names, when it
+            // names one, as `place_git_packages` places it.
+            has_native |= git_package_root(&object, source)?
+                .join("binding.gyp")
+                .is_file();
             continue;
         }
         // The archive matched one of the integrity's candidates, and its
@@ -488,5 +492,38 @@ mod tests {
         let mut unclassified = package.clone();
         unclassified.path = "node_modules/other".into();
         confirm_classified_sources(&from, &[(unclassified, PathBuf::from("/x"))]).unwrap();
+    }
+
+    /// A git dependency whose package is a subdirectory of the repository
+    /// is native when that subdirectory has the `binding.gyp`, not the
+    /// repository root (#695).
+    #[test]
+    fn a_git_package_in_a_subdirectory_is_classified_from_that_subdirectory() {
+        let scratch = TempDir::named("npm-classify-git-subdir");
+        let root = scratch.0.join("store");
+        for subdir in ["objects", "meta", "cache", "tmp"] {
+            fs::create_dir_all(root.join(subdir)).unwrap();
+        }
+        let store = Store::for_test(root.canonicalize().unwrap());
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let source = crate::kernel::gitsrc::GitSource {
+            url: "https://example.invalid/repo.git".into(),
+            commit: "a".repeat(40),
+            subdirectory: Some("packages/addon".into()),
+        };
+        let object = store.object_path(&crate::kernel::gitsrc::object_id(&source));
+        fs::create_dir_all(object.join("packages/addon")).unwrap();
+        fs::write(object.join("packages/addon/binding.gyp"), "{}").unwrap();
+        let mut package = registry_package("");
+        package.git = Some(source);
+        let decision = persisted_archive_classification(&store, activity, &[package])
+            .unwrap()
+            .expect("a realized git object classifies");
+        assert!(
+            decision.has_native,
+            "binding.gyp is in the package directory"
+        );
     }
 }

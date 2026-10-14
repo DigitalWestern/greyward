@@ -2,13 +2,14 @@
 //! artifact verification, cache addressing, and object metadata share.
 
 use sha1::Sha1;
-use sha2::{Digest as _, Sha256, Sha512};
+use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::io::{self, Read};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Algo {
     Sha1,
     Sha256,
+    Sha384,
     Sha512,
 }
 
@@ -27,6 +28,7 @@ impl Digest {
         let want = match algo {
             Algo::Sha1 => 40,
             Algo::Sha256 => 64,
+            Algo::Sha384 => 96,
             Algo::Sha512 => 128,
         };
         let hex = hex.to_ascii_lowercase();
@@ -53,8 +55,9 @@ impl Digest {
     pub fn hex(&self) -> &str {
         &self.hex
     }
-    /// Parse an npm SRI string like "sha512-<base64>", "sha256-<base64>", or
-    /// the legacy "sha1-<base64>" form.
+    /// Parse an npm SRI string like "sha512-<base64>", "sha384-<base64>",
+    /// "sha256-<base64>", or the legacy "sha1-<base64>" form. All four are
+    /// what npm's `ssri` accepts by default.
     pub fn from_sri(sri: &str) -> io::Result<Digest> {
         let (algo, b64) = sri.split_once('-').ok_or_else(|| {
             io::Error::new(
@@ -98,6 +101,7 @@ impl Digest {
 pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<String> {
     let mut buf = vec![0u8; 65536];
     let mut h256 = Sha256::new();
+    let mut h384 = Sha384::new();
     let mut h512 = Sha512::new();
     let mut h1 = Sha1::new();
     loop {
@@ -111,12 +115,14 @@ pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<Stri
         match algo {
             Algo::Sha1 => h1.update(&buf[..n]),
             Algo::Sha256 => h256.update(&buf[..n]),
+            Algo::Sha384 => h384.update(&buf[..n]),
             Algo::Sha512 => h512.update(&buf[..n]),
         }
     }
     Ok(match algo {
         Algo::Sha1 => hex::encode(h1.finalize()),
         Algo::Sha256 => hex::encode(h256.finalize()),
+        Algo::Sha384 => hex::encode(h384.finalize()),
         Algo::Sha512 => hex::encode(h512.finalize()),
     })
 }
@@ -127,7 +133,7 @@ pub(crate) fn hash_reader(reader: &mut impl Read, algo: Algo) -> io::Result<Stri
 /// carry several hashes of that algorithm, and the bytes are allowed when
 /// they match any one of them (the W3C SRI rule, and npm's ssri), so the
 /// order a lock wrote them in means nothing and two orders give the same
-/// list. `None` when no entry names sha512, sha256 or sha1.
+/// list. `None` when no entry names sha512, sha384, sha256 or sha1.
 pub fn strongest_sri(list: &str) -> Option<String> {
     let entries: Vec<(Algo, &str)> = list
         .split_whitespace()
@@ -179,6 +185,7 @@ fn algo_named(name: &str) -> Option<Algo> {
     match name {
         "sha1" => Some(Algo::Sha1),
         "sha256" => Some(Algo::Sha256),
+        "sha384" => Some(Algo::Sha384),
         "sha512" => Some(Algo::Sha512),
         _ => None,
     }
@@ -188,6 +195,7 @@ pub(super) fn algo_name(a: Algo) -> &'static str {
     match a {
         Algo::Sha1 => "sha1",
         Algo::Sha256 => "sha256",
+        Algo::Sha384 => "sha384",
         Algo::Sha512 => "sha512",
     }
 }
@@ -245,7 +253,16 @@ mod tests {
             strongest_sri("  sha256-c\tsha1-a ").as_deref(),
             Some("sha256-c")
         );
-        assert_eq!(strongest_sri("sha384-x sha1-a").as_deref(), Some("sha1-a"));
+        // sha384 is one of npm's (ssri's) default algorithms (#692): it
+        // outranks sha256 and sha1, and sha512 outranks it.
+        assert_eq!(
+            strongest_sri("sha384-x sha1-a sha256-c").as_deref(),
+            Some("sha384-x")
+        );
+        assert_eq!(
+            strongest_sri("sha384-x sha512-b").as_deref(),
+            Some("sha512-b")
+        );
         // Every strongest entry is kept, in one order whatever the lock's.
         assert_eq!(
             strongest_sri("sha512-y sha1-a sha512-x sha512-y").as_deref(),
@@ -255,7 +272,7 @@ mod tests {
             strongest_sri("sha512-x sha512-y"),
             strongest_sri("sha512-y sha512-x")
         );
-        assert_eq!(strongest_sri("sha384-x md5-y"), None);
+        assert_eq!(strongest_sri("sha224-x md5-y"), None);
         assert_eq!(strongest_sri(""), None);
     }
 
@@ -284,8 +301,31 @@ mod tests {
         // A malformed strongest entry fails the list; a weaker entry is
         // never what is left to verify against.
         assert!(sri_candidates(&format!("{a} sha512-!!!")).is_err());
-        assert!(sri_candidates("sha384-x md5-y").is_err());
+        assert!(
+            sri_candidates("sha384-x md5-y").is_err(),
+            "a malformed sha384"
+        );
+        assert!(sri_candidates("sha224-x md5-y").is_err());
         assert_eq!(sri_candidates(weak).unwrap()[0].algo(), "sha1");
+    }
+
+    /// A sha384 SRI parses to its digest and `hash_reader` computes it: the
+    /// FIPS 180-2 vector for "abc".
+    #[test]
+    fn sha384_integrity_parses_and_hashes() {
+        const ABC: &str = "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded163\
+                           1a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7";
+        let sri = format!(
+            "sha384-{}",
+            crate::kernel::base64::encode(&hex::decode(ABC).unwrap())
+        );
+        let digest = Digest::from_sri(&sri).unwrap();
+        assert_eq!(digest.algo(), "sha384");
+        assert_eq!(digest.hex(), ABC);
+        assert_eq!(Digest::from_parts("sha384", ABC).unwrap(), digest);
+        assert_eq!(hash_reader(&mut &b"abc"[..], Algo::Sha384).unwrap(), ABC);
+        assert_eq!(sri_candidates(&format!("sha1-a {sri}")).unwrap(), [digest]);
+        assert!(Digest::from_parts("sha384", &ABC[..94]).is_err());
     }
 
     /// A read a signal interrupts is retried, not the end of the hash.

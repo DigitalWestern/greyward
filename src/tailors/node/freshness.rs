@@ -6,13 +6,22 @@
 //! each lock records what every manifest asked for.
 
 use crate::kernel::fsroot::ProjectRoot;
-use crate::tailors::node::{inputs, lock_import, NpmPlan};
+use crate::tailors::node::{self, inputs, lock_import, NpmPlan};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
-const FIELDS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
+/// The dependency maps npm copies verbatim from each package.json into its
+/// lock entry (arborist's `pkgMetaKeys`). `overrides` is not among them:
+/// npm keeps no copy of it in the lock, so there is nothing to compare it
+/// with.
+const FIELDS: [&str; 4] = [
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+];
 
 /// A lock format: its file name and the command that regenerates it.
 pub(crate) struct LockFormat {
@@ -22,6 +31,12 @@ pub(crate) struct LockFormat {
 
 const NPM: LockFormat = LockFormat {
     lock: "package-lock.json",
+    regenerate: "npm install --package-lock-only",
+};
+/// The same format under the name npm publishes with a package; npm reads
+/// it before `package-lock.json` and rewrites it in place.
+const SHRINKWRAP: LockFormat = LockFormat {
+    lock: "npm-shrinkwrap.json",
     regenerate: "npm install --package-lock-only",
 };
 const PNPM: LockFormat = LockFormat {
@@ -61,10 +76,19 @@ pub(crate) fn manifest_path(dir: &str) -> String {
 /// is fatal, since skipping the manifest would skip the check.
 pub fn check_lock_freshness(project: &ProjectRoot, plan: &NpmPlan) -> io::Result<()> {
     match plan.lock_source.as_str() {
-        "package-lock.json" => npm(
-            &inputs::read_input(project, NPM.lock)?,
-            &read_manifests(project, &plan.workspaces)?,
-        ),
+        source @ ("package-lock.json" | "npm-shrinkwrap.json") => {
+            let format = if source == SHRINKWRAP.lock {
+                &SHRINKWRAP
+            } else {
+                &NPM
+            };
+            let named = node::resolve::npm_manifest_named(project)?;
+            let members: Vec<String> = named.iter().map(|(_, dir)| dir.clone()).collect();
+            npm_members(&members, &plan.workspaces, format)?;
+            let lock = inputs::read_input(project, format.lock)?;
+            npm_member_links(&named, &lock, format)?;
+            npm_lock(format, &lock, &read_manifests(project, &plan.workspaces)?)
+        }
         "pnpm-lock.yaml" => {
             let lock = inputs::read_input(project, PNPM.lock)?;
             match lock_import::pnpm_workspace_members(project)? {
@@ -94,7 +118,7 @@ fn read_manifests(project: &ProjectRoot, workspaces: &[String]) -> io::Result<Ve
         .map(|dir| {
             Ok(Manifest {
                 dir: dir.to_string(),
-                text: project.read_input_string(Path::new(&manifest_path(dir)))?,
+                text: inputs::read_manifest(project, Path::new(dir))?,
             })
         })
         .collect()
@@ -134,18 +158,21 @@ fn parse_manifest(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{path}: {error}")))
 }
 
-/// package-lock.json records each manifest's dependency maps verbatim: the
-/// root's under `packages[""]`, a workspace member's under its directory.
-pub fn npm(lock: &str, manifests: &[Manifest]) -> io::Result<()> {
+/// An npm lock (`package-lock.json`, or `npm-shrinkwrap.json`: `format`)
+/// records each manifest's dependency maps verbatim: the root's under
+/// `packages[""]`, a workspace member's under its directory. The root
+/// entry also keeps the root's `workspaces` as written, so a pattern added,
+/// changed or removed since the lock was written shows there.
+pub(crate) fn npm_lock(format: &LockFormat, lock: &str, manifests: &[Manifest]) -> io::Result<()> {
     let lock: Value = serde_json::from_str(lock).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("package-lock.json: {error}"),
+            format!("{}: {error}", format.lock),
         )
     })?;
     for manifest in manifests {
         let path = manifest_path(&manifest.dir);
-        let package = parse_manifest(&path, Some(manifest), &NPM)?;
+        let package = parse_manifest(&path, Some(manifest), format)?;
         let key = if manifest.dir == "." {
             ""
         } else {
@@ -156,8 +183,81 @@ pub fn npm(lock: &str, manifests: &[Manifest]) -> io::Result<()> {
             let declared = package[field].as_object().cloned().unwrap_or_default();
             let locked = entry[field].as_object().cloned().unwrap_or_default();
             if declared != locked {
-                return Err(stale(&path, field, &NPM));
+                return Err(stale(&path, field, format));
             }
+        }
+        if key.is_empty() && recorded(&package["workspaces"]) != recorded(&entry["workspaces"]) {
+            return Err(stale(&path, "workspaces", format));
+        }
+    }
+    Ok(())
+}
+
+/// A package.json field as npm copies it into the lock: an empty list or
+/// object, `false` and `null` are left out (arborist's `metaFieldFromPkg`).
+fn recorded(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Null | Value::Bool(false) => None,
+        Value::Array(list) if list.is_empty() => None,
+        Value::Object(map) if map.is_empty() => None,
+        other => Some(other),
+    }
+}
+
+/// npm's member set (`members`, from the root `package.json`) against the
+/// workspaces the lock lists (`listed`): a member the lock does not list
+/// was added after it was written, so the lock has no entry for its
+/// dependencies and `npm ci` refuses it. A member the lock lists that npm
+/// no longer names is pruned by npm, not refused, and is left alone here.
+pub(crate) fn npm_members(
+    members: &[String],
+    listed: &[String],
+    format: &LockFormat,
+) -> io::Result<()> {
+    match members.iter().find(|member| !listed.contains(member)) {
+        Some(member) => Err(crate::kernel::error::stale(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is an npm workspace member but {} does not list it; regenerate the lock ({})",
+                manifest_path(member),
+                format.lock,
+                format.regenerate
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Each npm member's link in the lock: npm installs a member as the symlink
+/// `node_modules/<name>` to its directory and records it as
+/// `{"resolved": "<dir>", "link": true}` under that key, `<name>` being the
+/// member's package.json `name` (its directory's last component when it has
+/// none). A member renamed since the lock was written has no link under its
+/// name, so the lock still links the old one and `npm ci` would not match.
+pub(crate) fn npm_member_links(
+    named: &[(String, String)],
+    lock: &str,
+    format: &LockFormat,
+) -> io::Result<()> {
+    let lock: Value = serde_json::from_str(lock).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: {error}", format.lock),
+        )
+    })?;
+    for (name, dir) in named {
+        let entry = &lock["packages"][format!("node_modules/{name}").as_str()];
+        if entry["link"] != Value::Bool(true) || entry["resolved"].as_str() != Some(dir) {
+            return Err(crate::kernel::error::stale(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} names the npm workspace member {name:?} but {} does not link \
+                     node_modules/{name} to {dir}; regenerate the lock ({})",
+                    manifest_path(dir),
+                    format.lock,
+                    format.regenerate
+                ),
+            ));
         }
     }
     Ok(())
@@ -286,6 +386,10 @@ mod tests {
 
     fn message(result: io::Result<()>) -> String {
         result.unwrap_err().to_string()
+    }
+
+    fn npm(lock: &str, manifests: &[Manifest]) -> io::Result<()> {
+        npm_lock(&NPM, lock, manifests)
     }
 
     const NPM_STALE: &str = "package.json dependencies disagree with package-lock.json; \
@@ -665,5 +769,211 @@ dependencies:
         )
         .unwrap();
         check().unwrap();
+    }
+
+    /// A project for the npm member checks: the root package.json with
+    /// `workspaces`, a package.json in each of `members`, and `lock` as the
+    /// lock `lock_name`.
+    fn npm_workspace(
+        dir: &std::path::Path,
+        workspaces: &str,
+        members: &[&str],
+        lock_name: &str,
+        lock: &str,
+    ) -> ProjectRoot {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"p","workspaces":{workspaces}}}"#),
+        )
+        .unwrap();
+        for member in members {
+            std::fs::create_dir_all(dir.join(member)).unwrap();
+            std::fs::write(dir.join(member).join("package.json"), "{}").unwrap();
+        }
+        std::fs::write(dir.join(lock_name), lock).unwrap();
+        ProjectRoot::open(dir).unwrap()
+    }
+
+    fn npm_plan(lock_source: &str, workspaces: &[&str]) -> NpmPlan {
+        NpmPlan {
+            node_version: "22.0.0".into(),
+            packages: Vec::new(),
+            links: Vec::new(),
+            workspaces: workspaces.iter().map(|w| w.to_string()).collect(),
+            lock_source: lock_source.into(),
+        }
+    }
+
+    /// The audit's probe (#694): `workspaces: ["packages/*"]` and a new
+    /// `packages/b` the lock does not list. The lock was fresh to ward and
+    /// `b` got no node_modules; `npm ci` refuses it, and so does ward now.
+    /// The member set is npm's own (faked here; the ignored test in
+    /// `npm_members` runs npm).
+    #[test]
+    fn an_npm_lock_missing_a_new_workspace_member_is_stale() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-members");
+        let workspaces = r#"["packages/*","!packages/skip"]"#;
+        let lock = format!(
+            r#"{{"lockfileVersion":3,"packages":{{"":{{"name":"p","workspaces":{workspaces}}},"node_modules/a":{{"resolved":"packages/a","link":true}},"node_modules/b":{{"resolved":"packages/b","link":true}},"packages/a":{{}}}}}}"#
+        );
+        let project = npm_workspace(
+            &scratch.0,
+            workspaces,
+            &["packages/a", "packages/b", "packages/skip"],
+            "package-lock.json",
+            &lock,
+        );
+        let _npm = node::npm_members::tests::fake_npm(&scratch.0, |_| {
+            vec!["packages/a".to_string(), "packages/b".to_string()]
+        });
+        assert_eq!(
+            node::resolve::npm_manifest_members(&project).unwrap(),
+            ["packages/a", "packages/b"]
+        );
+        let stale_plan = npm_plan("package-lock.json", &["packages/a"]);
+        assert_eq!(
+            message(check_lock_freshness(&project, &stale_plan)),
+            "packages/b/package.json is an npm workspace member but package-lock.json does not list it; regenerate the lock (npm install --package-lock-only)"
+        );
+        let regenerated = lock.replace(r#""packages/a":{}"#, r#""packages/a":{},"packages/b":{}"#);
+        std::fs::write(scratch.0.join("package-lock.json"), regenerated).unwrap();
+        check_lock_freshness(
+            &project,
+            &npm_plan("package-lock.json", &["packages/a", "packages/b"]),
+        )
+        .unwrap();
+    }
+
+    /// A member manifest npm's members check read as a regular file, then
+    /// swapped for a symlink to a host file before freshness reads it, is
+    /// never read: the outcome is the one fixed refusal whatever the host
+    /// file holds (dependency maps matching the lock, different ones, or
+    /// not JSON), never a stale-lock or parse message (#694, Sol round 7).
+    #[test]
+    fn a_member_manifest_swapped_for_a_host_file_is_the_fixed_refusal() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-swapped");
+        let root = scratch.0.join("project");
+        let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]},"node_modules/lib":{"resolved":"packages/lib","link":true},"packages/lib":{"name":"lib"}}}"#;
+        let project = npm_workspace(
+            &root,
+            r#"["packages/*"]"#,
+            &["packages/lib"],
+            "package-lock.json",
+            lock,
+        );
+        let plan = npm_plan("package-lock.json", &["packages/lib"]);
+        let _npm = node::npm_members::tests::fake_npm(&root, |_| vec!["packages/lib".to_string()]);
+        node::resolve::npm_manifest_named(&project).unwrap();
+        let manifest = root.join("packages/lib/package.json");
+        std::fs::remove_file(&manifest).unwrap();
+        std::os::unix::fs::symlink(scratch.0.join("host.json"), &manifest).unwrap();
+        let expected = format!(
+            "workspace members of {}/package.json could not be determined inside the project \
+             (workspaces [\"packages/*\"]); set {}=1 to see why, which can print host files",
+            root.display(),
+            node::npm_members::DEBUG_ENV
+        );
+        for host in [
+            r#"{"name":"lib"}"#,
+            r#"{"name":"lib","dependencies":{"secret":"1"}}"#,
+            "SECRET not json",
+        ] {
+            std::fs::write(scratch.0.join("host.json"), host).unwrap();
+            let held = ProjectRoot::open(&root).unwrap();
+            let read = read_manifests(&held, &plan.workspaces).map(|_| ());
+            assert_eq!(message(read), expected, "{host}");
+            assert_eq!(
+                message(check_lock_freshness(&held, &plan)),
+                expected,
+                "{host}"
+            );
+        }
+    }
+
+    /// A member renamed since the lock was written (its directory the same,
+    /// its package.json `name` changed) is a stale lock: the lock links the
+    /// old name, and `npm ci` would link the new one (#694).
+    #[test]
+    fn an_npm_lock_linking_a_member_by_its_old_name_is_stale() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-renamed");
+        let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]},"node_modules/a":{"resolved":"packages/lib","link":true},"packages/lib":{"name":"a"}}}"#;
+        let project = npm_workspace(
+            &scratch.0,
+            r#"["packages/*"]"#,
+            &["packages/lib"],
+            "package-lock.json",
+            lock,
+        );
+        let plan = npm_plan("package-lock.json", &["packages/lib"]);
+        let named = |name: &'static str| {
+            node::npm_members::tests::fake_npm_named(&scratch.0, move |_| {
+                vec![(name.to_string(), "packages/lib".to_string())]
+            })
+        };
+        let manifest = scratch.0.join("packages/lib/package.json");
+        std::fs::write(&manifest, r#"{"name":"a"}"#).unwrap();
+        let npm = named("a");
+        check_lock_freshness(&project, &plan).unwrap();
+        drop(npm);
+        std::fs::write(&manifest, r#"{"name":"b"}"#).unwrap();
+        let _npm = named("b");
+        assert_eq!(
+            message(check_lock_freshness(&project, &plan)),
+            "packages/lib/package.json names the npm workspace member \"b\" but package-lock.json does not link node_modules/b to packages/lib; regenerate the lock (npm install --package-lock-only)"
+        );
+    }
+
+    /// npm copies the root `workspaces` into `packages[""]`, so a pattern
+    /// changed since the lock was written is a stale lock even before a
+    /// member it names exists; an empty list is not recorded at all.
+    #[test]
+    fn npm_compares_the_root_workspaces_and_peer_dependencies() {
+        let lock = r#"{"packages":{"":{"workspaces":["packages/*"]}}}"#;
+        npm(lock, &[root(r#"{"workspaces":["packages/*"]}"#)]).unwrap();
+        assert_eq!(
+            message(npm(lock, &[root(r#"{"workspaces":["apps/*"]}"#)])),
+            "package.json workspaces disagree with package-lock.json; regenerate the lock (npm install --package-lock-only)"
+        );
+        assert!(message(npm(lock, &[root("{}")])).contains("workspaces disagree"));
+        npm(r#"{"packages":{"":{}}}"#, &[root(r#"{"workspaces":[]}"#)]).unwrap();
+        let peers = r#"{"packages":{"":{"peerDependencies":{"react":"^18"}}}}"#;
+        npm(peers, &[root(r#"{"peerDependencies":{"react":"^18"}}"#)]).unwrap();
+        assert_eq!(
+            message(npm(peers, &[root(r#"{"peerDependencies":{"react":"^19"}}"#)])),
+            "package.json peerDependencies disagree with package-lock.json; regenerate the lock (npm install --package-lock-only)"
+        );
+    }
+
+    /// An npm-shrinkwrap.json is checked as the npm lock it is, and the
+    /// refusal names it.
+    #[test]
+    fn a_stale_shrinkwrap_is_refused_by_its_own_name() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-shrinkwrap");
+        let project = npm_workspace(
+            &scratch.0,
+            r#"["packages/*"]"#,
+            &["packages/a"],
+            "npm-shrinkwrap.json",
+            r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]},"node_modules/a":{"resolved":"packages/a","link":true}}}"#,
+        );
+        let _npm =
+            node::npm_members::tests::fake_npm(&scratch.0, |_| vec!["packages/a".to_string()]);
+        assert_eq!(
+            message(check_lock_freshness(&project, &npm_plan("npm-shrinkwrap.json", &[]))),
+            "packages/a/package.json is an npm workspace member but npm-shrinkwrap.json does not list it; regenerate the lock (npm install --package-lock-only)"
+        );
+        std::fs::write(
+            scratch.0.join("package.json"),
+            r#"{"name":"p","workspaces":["packages/*"],"dependencies":{"x":"1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            message(check_lock_freshness(
+                &project,
+                &npm_plan("npm-shrinkwrap.json", &["packages/a"])
+            )),
+            "package.json dependencies disagree with npm-shrinkwrap.json; regenerate the lock (npm install --package-lock-only)"
+        );
     }
 }

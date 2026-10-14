@@ -200,13 +200,39 @@ Rust `/4` records remain readable). Environments are immutable: no activate scri
 cannot mutate them.
 
 **npm** (`tailors/node/`: `plan.rs`, `realize.rs`, `project.rs`, `lock_import/`). `package-lock.json` is parsed
-locally; a pnpm v9/v6 or Yarn classic lockfile is imported by
+locally (an `npm-shrinkwrap.json`, the same format, is read first when both exist, as npm reads
+it); a pnpm v9/v6 or Yarn classic lockfile is imported by
 `lock_import/` (dependency-free strict YAML for pnpm, `lock_source`
 recorded); with none of these, the store node's bundled npm runs
-`npm install --package-lock-only`. Before planning, `plan` and `sync`
+`npm install --package-lock-only`. npm's workspace members are read by
+npm itself: the `@npmcli/map-workspaces` bundled with the store node's npm
+runs in the sandbox's whole-host view (`HostView::WholeHost`: the host
+read-only, no network, only scratch writable, the held project bound from
+its descriptor) on the root's `workspaces` list, and its answer is the
+member set every npm check uses (lock freshness, the resolution record's
+inputs, which root a member's edit writes to). Its answer is `[name,
+directory]` pairs written to a file, or a fixed error code; npm's own
+output is discarded. The answer is untrusted: ward reads each member's
+`package.json` itself beneath the held project and the member's own
+directory (`ProjectRoot::read_member_manifest`), names the member from those
+bytes, and refuses if npm's name differs. Every failure is one fixed message
+holding only the project and its declared patterns; the reason is shown only
+with `GREYWARD_DEBUG_NPM_MEMBERS`, since it can quote a host file. It runs
+again for each of them, and an answer that changes within one command
+(names, directories or order) refuses it. A lock is fresh only if it links
+each member as `node_modules/<name>` to its directory. A planted workspace
+link registers a check with `comforter::publication`, which the closure
+writer runs as the last step before the store registers the root and signs
+the closure, after the resolution join: the link is read in its directory,
+held open since planting (`fsroot::LinkSite`), which must still be at its
+path with no symlink below the directory it shares with the project's path,
+and one `openat2` beneath the held project must still reach the directory
+recorded when the link was planted. Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
-dependency maps (the root's and each workspace member's), pnpm's importer
+dependency maps (the root's and each workspace member's, `peerDependencies` included), the
+root's `workspaces` as npm copies it into the lock, and every member npm's own `workspaces`
+expansion finds, pnpm's importer
 specifiers, and Yarn classic's `name@spec` selectors (with no entry left
 that nothing depends on; a `link:` dependency, which Yarn classic never
 locks, is linked to its directory inside the project). A pnpm `file:`
@@ -596,7 +622,7 @@ existed counts as `null`, which is what it was built on.
 Cached `ward x` environments key on `x/5`: store root, ecosystem, package
 request, platform, the primary runtime version, the selected `bundle_id`,
 the realized runtime object, the environment's identity schema
-(`node-env/6`, `python-env/4`) and the object record schema
+(`node-env/7`, `python-env/4`) and the object record schema
 (`object-meta/3`), so a changed bundle component or a schema bump gives a
 fresh environment. A registry tool
 that builds with helpers (npm's node-gyp Python, a `py:` tool's Rust for
@@ -749,8 +775,8 @@ time in a network-denied sandbox: writes confined to the package directory
 plus a scratch HOME, node-gyp shimmed from the store node, gyp's Python a
 store CPython: the one the project's `greyward-toolchain.toml` names when the
 project also locks Python, the shipped 3.12 otherwise. Its object id is the
-`gyp_python` input of `node-env/5`, so a different interpreter is a different
-environment. Likewise a Python sdist with a Rust extension compiles with the
+`gyp_python` input of `node-env` (since `/5`), so a different interpreter is a
+different environment. Likewise a Python sdist with a Rust extension compiles with the
 project's locked Rust when the lock has a `rust` section, and with the shipped
 Rust its toolchain file resolves to otherwise (the Python section's pinned Rust
 when the file names no channel); `sdist-build/5` commits
@@ -1014,6 +1040,7 @@ extraction). It becomes a recorded dependency only when an install script
 ran with it: the interpreter is realized only then, and a script handed
 `$PYTHON` can leave a symlink or wrapper to it, so the environment it built
 must keep it alive. A pure-JavaScript environment does not retain a CPython.
+
 Every other `/4` input is
 unchanged, and the test goldens check that dropping `gyp_python` gives back the
 `/4` ids byte for byte. `sdist-build` needed no successor for its Rust: the
@@ -1033,6 +1060,16 @@ closure rows and the SBOM name that digest. The environment's cache set
 cannot say it, since it also holds the declared artifacts lifecycle scripts
 were given, and one of those can be another candidate of a package's
 integrity.
+
+`node-env/7` has the `/6` inputs and contract. It renames the environments
+built since #695 changed what realization puts in them: every package's bins
+linked in the `node_modules/.bin` that holds it (not only the root's), each
+ancestor `.bin` on a lifecycle script's `PATH`, an empty script skipped, and
+the default node-gyp build run only for a `binding.gyp` file that
+`gypfile: false` does not turn off. A `/6` environment was built by the old
+rules under the same inputs, so its id must not be reused: the bump gives
+every Node environment a new id and the next sync rebuilds it. The goldens
+check that spelling the schema `/6` gives back the `/6` ids byte for byte.
 
 A new schema reissues every object id of its kind. Nothing caches the old id:
 a re-sync computes the successor identity, misses the store, and realizes

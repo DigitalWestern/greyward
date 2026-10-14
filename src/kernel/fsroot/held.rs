@@ -34,6 +34,19 @@ impl HeldEntry {
     }
 }
 
+impl super::ProjectRoot {
+    /// This root, registered as held like one [`ProjectRoot::open`] returns
+    /// (a [`ProjectRoot::parent`] is not), so a sandbox or a child started
+    /// at its path gets the directory this descriptor holds, never what
+    /// the path names by then.
+    pub(crate) fn registered(mut self) -> Self {
+        if self._held.is_none() {
+            self._held = Some(HeldEntry::register(&self.path, &self.dir));
+        }
+        self
+    }
+}
+
 impl Drop for HeldEntry {
     fn drop(&mut self) {
         held_table().retain(|(id, _, _)| *id != self.0);

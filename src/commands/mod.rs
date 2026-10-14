@@ -253,6 +253,18 @@ fn install_tailor_tables(command: &cli::Command) {
         cli::Command::X { .. } | cli::Command::XClean { .. }
     ) {
         crate::tailors::install_resolution_files();
+        // A tailor that reads a project with its own tool (npm its
+        // workspace members) runs the toolchain the project selects, in a
+        // store this hook opens.
+        crate::tailors::install_toolchain_provider(std::sync::Arc::new(
+            |ecosystem: &str, dir: &Path| {
+                let platform = Platform::host()?;
+                Ok((
+                    crate::kernel::context::Context::open(platform)?,
+                    crate::commands::shared::selected_toolchain(platform, dir, ecosystem)?,
+                ))
+            },
+        ));
     }
 }
 

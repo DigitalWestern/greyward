@@ -81,7 +81,12 @@ pub(crate) fn provisioned_version<'a>(name: &str, version: &'a str) -> Option<&'
 /// extraction checks each tarball against the name and version its lock
 /// entry gives (`check_tarball_identity`), so one built before that check
 /// is never reused.
-pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/6";
+/// `node-env/7` has the `/6` inputs and is built by the #695 rules: every
+/// package's bins linked in its own `node_modules/.bin`, each ancestor
+/// `.bin` on a lifecycle script's `PATH`, and only non-empty scripts (and
+/// a `binding.gyp` file not turned off by `gypfile: false`) run. An
+/// environment `/6` built without them gets a new id, so it is rebuilt.
+pub(crate) const NODE_ENV_SCHEMA: &str = "node-env/7";
 
 /// The two spellings of the `node-env/5` native decision. The producer
 /// writes one of them on every commit, so a dropped `native_libs` key is a
@@ -726,13 +731,9 @@ fn place_git_packages(
 ) -> io::Result<()> {
     for (p, object) in git_objects {
         let dest = env_package_path(staged, &p.path);
-        let source_root = match &p.git.as_ref().and_then(|g| g.subdirectory.clone()) {
-            Some(subdir) => {
-                crate::tailors::node::validate_lock_path(subdir).map_err(|e| {
-                    io::Error::new(e.kind(), format!("{}: subdirectory {subdir}: {e}", p.path))
-                })?;
-                object.join(subdir)
-            }
+        let source_root = match &p.git {
+            Some(source) => git_package_root(object, source)
+                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.path)))?,
             None => object.clone(),
         };
         if !source_root.is_dir() {
@@ -1033,21 +1034,27 @@ pub(super) fn run_install_scripts(
 ///
 /// `None` means the package has no lifecycle work at all: no readable
 /// manifest, or no preinstall/install/postinstall and no binding.gyp. A
-/// package with a binding.gyp and neither an install nor a preinstall script
-/// gets npm's default `node-gyp rebuild`.
+/// package with a binding.gyp file, neither an install nor a preinstall
+/// script, and no `"gypfile": false` gets npm's default `node-gyp rebuild`.
+/// An empty script is no script, as npm reads it (`""` is falsy there):
+/// it is not run, and an empty `install` leaves the default gyp build.
 fn package_lifecycle_phases(pkg_dir: &Path) -> Option<Vec<(&'static str, String)>> {
     let manifest = fs::read_to_string(pkg_dir.join("package.json")).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
     let scripts = &manifest["scripts"];
-    let has = |k: &str| scripts[k].as_str().is_some();
-    let default_gyp = !has("install") && !has("preinstall") && pkg_dir.join("binding.gyp").exists();
+    let script = |k: &str| scripts[k].as_str().filter(|s| !s.is_empty());
+    let has = |k: &str| script(k).is_some();
+    let default_gyp = !has("install")
+        && !has("preinstall")
+        && manifest["gypfile"] != serde_json::Value::Bool(false)
+        && pkg_dir.join("binding.gyp").is_file();
     if !has("preinstall") && !has("install") && !has("postinstall") && !default_gyp {
         return None;
     }
     Some(
         ["preinstall", "install", "postinstall"]
             .iter()
-            .filter_map(|ph| match scripts[*ph].as_str() {
+            .filter_map(|ph| match script(ph) {
                 Some(s) => Some((*ph, s.to_string())),
                 None if *ph == "install" && default_gyp => {
                     Some((*ph, "node-gyp rebuild".to_string()))
@@ -1139,23 +1146,23 @@ fn ensure_gyp_python(
 }
 
 /// PATH for one package's lifecycle scripts: the tool shims first, then the
-/// node selected, then the nearest and root .bin dirs, then the system.
+/// node selected, then every `.bin` from the package's own outwards
+/// ([`lifecycle_bin_dirs`]), then the system.
 fn lifecycle_path_env(
     tools_dir: &Path,
     node_obj: &Path,
     staged: &Path,
     package_path: &str,
 ) -> String {
-    let nearest_bin = env_node_modules_path(staged, package_path).join(".bin");
-    let root_bin = staged.join("node_modules/.bin");
     let mut path_entries = vec![
         tools_dir.join("bin").display().to_string(),
         node_obj.join("bin").display().to_string(),
-        nearest_bin.display().to_string(),
     ];
-    if nearest_bin != root_bin {
-        path_entries.push(root_bin.display().to_string());
-    }
+    path_entries.extend(
+        lifecycle_bin_dirs(package_path)
+            .iter()
+            .map(|dir| env_package_path(staged, dir).display().to_string()),
+    );
     path_entries.extend([
         "/usr/bin".into(),
         "/bin".into(),
@@ -1163,6 +1170,33 @@ fn lifecycle_path_env(
         "/sbin".into(),
     ]);
     path_entries.join(":")
+}
+
+/// The `.bin` directories, nearest first, that npm puts on a lifecycle
+/// script's PATH for the package placed at `package_path`
+/// (`@npmcli/run-script`'s `set-path`: `<dir>/node_modules/.bin` for the
+/// package directory and each directory above it). Only the directories
+/// that can hold a `node_modules` of the plan are named: the package's
+/// own, each package or workspace it is nested in, and the project root.
+/// `node_modules/a/node_modules/b` gets `node_modules/a/node_modules/b/
+/// node_modules/.bin`, `node_modules/a/node_modules/.bin` and
+/// `node_modules/.bin`.
+fn lifecycle_bin_dirs(package_path: &str) -> Vec<String> {
+    let mut holders = vec![package_path];
+    let mut rest = package_path;
+    while let Some(index) = rest.rfind("/node_modules/") {
+        rest = &rest[..index];
+        holders.push(rest);
+    }
+    let mut dirs: Vec<String> = holders
+        .into_iter()
+        .map(|holder| format!("{holder}/node_modules/.bin"))
+        .collect();
+    let root = "node_modules/.bin".to_string();
+    if !dirs.contains(&root) {
+        dirs.push(root);
+    }
+    dirs
 }
 
 /// The environment every lifecycle phase of this package starts from, before
@@ -1391,14 +1425,26 @@ pub(super) fn run_install_scripts_staged(
     Ok(fallback)
 }
 
+/// Remove the `.bin` links whose target is gone (a bin a package declares
+/// but does not ship, or one a script deleted): the root's, each
+/// workspace's, and the nested `node_modules/.bin` of every package a
+/// nested package was placed in.
 pub(super) fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Result<()> {
-    let mut bin_dirs = vec![staged.join("node_modules/.bin")];
+    let mut bin_dirs = std::collections::BTreeSet::new();
+    bin_dirs.insert(staged.join("node_modules/.bin"));
     bin_dirs.extend(workspace_set(plan).into_iter().map(|workspace| {
         staged
             .join("workspaces")
             .join(encode_workspace_path(&workspace))
             .join("node_modules/.bin")
     }));
+    for package in &plan.packages {
+        bin_dirs.extend(
+            lifecycle_bin_dirs(&package.path)
+                .iter()
+                .map(|dir| env_package_path(staged, dir)),
+        );
+    }
     for bin_dir in bin_dirs {
         let entries = match fs::read_dir(&bin_dir) {
             Ok(entries) => entries,
@@ -1669,6 +1715,131 @@ mod tests {
             .map(|package| package.path.as_str())
             .collect();
         assert_eq!(paths, ["node_modules/a/node_modules/b", "node_modules/a"]);
+    }
+
+    /// npm's default gyp build and empty scripts (#695): `"gypfile": false`
+    /// turns the default `node-gyp rebuild` off, an empty script is no
+    /// script (an empty `install` leaves the default build in place), and a
+    /// `binding.gyp` directory is not a gyp file.
+    #[test]
+    fn gypfile_false_and_empty_scripts_are_read_as_npm_reads_them() {
+        let scratch = crate::kernel::testutil::TempDir::named("node-phases");
+        let package = |name: &str, manifest: &str, gyp: Option<bool>| {
+            let dir = scratch.0.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("package.json"), manifest).unwrap();
+            match gyp {
+                Some(true) => fs::write(dir.join("binding.gyp"), "{}").unwrap(),
+                Some(false) => fs::create_dir_all(dir.join("binding.gyp")).unwrap(),
+                None => {}
+            }
+            dir
+        };
+        let gyp_off = package("off", r#"{"gypfile":false}"#, Some(true));
+        assert_eq!(package_lifecycle_phases(&gyp_off), None);
+        let gyp_off_post = package(
+            "off-post",
+            r#"{"gypfile":false,"scripts":{"postinstall":"node p.js"}}"#,
+            Some(true),
+        );
+        assert_eq!(
+            package_lifecycle_phases(&gyp_off_post),
+            Some(vec![("postinstall", "node p.js".to_string())])
+        );
+        let empty_install = package("empty", r#"{"scripts":{"install":""}}"#, Some(true));
+        assert_eq!(
+            package_lifecycle_phases(&empty_install),
+            Some(vec![("install", "node-gyp rebuild".to_string())])
+        );
+        let empty_only = package("empty-only", r#"{"scripts":{"postinstall":""}}"#, None);
+        assert_eq!(package_lifecycle_phases(&empty_only), None);
+        let gyp_dir = package("gyp-dir", "{}", Some(false));
+        assert_eq!(package_lifecycle_phases(&gyp_dir), None);
+        let default = package("default", "{}", Some(true));
+        assert_eq!(
+            package_lifecycle_phases(&default),
+            Some(vec![("install", "node-gyp rebuild".to_string())])
+        );
+    }
+
+    /// A nested package's scripts see every `.bin` from its own outwards,
+    /// as npm's `set-path` builds PATH, so `a`'s own `tool@7` comes before
+    /// the hoisted `tool@5` (#695).
+    #[test]
+    fn a_lifecycle_path_walks_every_enclosing_bin_directory() {
+        assert_eq!(
+            lifecycle_bin_dirs("node_modules/a"),
+            ["node_modules/a/node_modules/.bin", "node_modules/.bin"]
+        );
+        assert_eq!(
+            lifecycle_bin_dirs("node_modules/a/node_modules/@s/b"),
+            [
+                "node_modules/a/node_modules/@s/b/node_modules/.bin",
+                "node_modules/a/node_modules/.bin",
+                "node_modules/.bin",
+            ]
+        );
+        assert_eq!(
+            lifecycle_bin_dirs("packages/web/node_modules/a/node_modules/b"),
+            [
+                "packages/web/node_modules/a/node_modules/b/node_modules/.bin",
+                "packages/web/node_modules/a/node_modules/.bin",
+                "packages/web/node_modules/.bin",
+                "node_modules/.bin",
+            ]
+        );
+        let staged = Path::new("/staged");
+        let path = lifecycle_path_env(
+            Path::new("/tools"),
+            Path::new("/node"),
+            staged,
+            "packages/web/node_modules/a",
+        );
+        assert_eq!(
+            path,
+            "/tools/bin:/node/bin:\
+             /staged/workspaces/packages%2Fweb/node_modules/a/node_modules/.bin:\
+             /staged/workspaces/packages%2Fweb/node_modules/.bin:\
+             /staged/node_modules/.bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+    }
+
+    /// A nested `.bin` is swept for dangling links like the root's.
+    #[test]
+    fn dangling_links_in_a_nested_bin_directory_are_removed() {
+        let scratch = crate::kernel::testutil::TempDir::named("node-dangling-nested");
+        let staged = &scratch.0;
+        let nested = staged.join("node_modules/a/node_modules/.bin");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(staged.join("node_modules/a/node_modules/tool")).unwrap();
+        fs::write(staged.join("node_modules/a/node_modules/tool/cli.js"), "").unwrap();
+        std::os::unix::fs::symlink("../tool/cli.js", nested.join("tool")).unwrap();
+        std::os::unix::fs::symlink("../tool/gone.js", nested.join("gone")).unwrap();
+        let package = |path: &str| NpmPackage {
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            version: "1.0.0".into(),
+            url: String::new(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            foreign_platform: false,
+            needs_workspace: false,
+        };
+        let plan = NpmPlan {
+            node_version: "22.0.0".into(),
+            packages: vec![
+                package("node_modules/a"),
+                package("node_modules/a/node_modules/tool"),
+            ],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        remove_dangling_bin_links(staged, &plan).unwrap();
+        assert!(nested.join("tool").symlink_metadata().is_ok());
+        assert!(nested.join("gone").symlink_metadata().is_err());
     }
 
     /// The tarball's package.json must name the package its lock entry

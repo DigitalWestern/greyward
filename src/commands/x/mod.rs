@@ -181,7 +181,7 @@ pub fn environment_name(
 /// projection actually points at. The name's first word is the registry
 /// tool's `cache_prefix`.
 ///
-/// `x/5` adds the environment's identity schema (`node-env/6`) and the
+/// `x/5` adds the environment's identity schema (`node-env/7` today) and the
 /// object record schema (`object-meta/3`) to the `x/3` fields, so a bump of
 /// either gives every cached tool a new directory and a rebuild: `x/4` and
 /// `x/3` keyed on neither, and an npm tool kept its `node-env/5`
@@ -1107,7 +1107,7 @@ mod tests {
                 &[],
             )
             .unwrap(),
-            "npm-_angular_cli-db52f1a80a94001f"
+            "npm-_angular_cli-060bfc5572ad6893"
         );
         assert_eq!(registry_tool("node").unwrap().helpers(), ["python"]);
         let npm = |gyp_python: &str| {
@@ -1123,7 +1123,7 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(npm("cpython-object"), "npm-_angular_cli-3196ad549d21dd6c");
+        assert_eq!(npm("cpython-object"), "npm-_angular_cli-bf213a0eddbdbe93");
         assert_ne!(npm("other-cpython-object"), npm("cpython-object"));
     }
 
@@ -1803,7 +1803,7 @@ mod tests {
     /// version `env` (`node-env`), with the identity schema its ecosystem
     /// builds, hashes to, which [`test_record`] checks.
     const TEST_ENV: &str = "98ad2f451df11ea8e093d9d859d9a431d459b61f-test-env";
-    const TEST_NODE_ENV: &str = "e95ca6ca684ba8a705bcec1b46ee66feda834b2d-test-node-env";
+    const TEST_NODE_ENV: &str = "b89d5780495c953341c1778be9d93959af74c524-test-node-env";
 
     /// The whole metadata record of the placeholder object `id`, carrying
     /// `exceptions`. Its identity names the schema the ecosystem's tool

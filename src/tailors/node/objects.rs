@@ -15,7 +15,7 @@ pub static KINDS: &[ObjectKind] = &[
     },
     ObjectKind {
         kind: "node-env",
-        schema: Some("node-env/6"),
+        schema: Some("node-env/7"),
         live_required: &[
             "schema",
             "store_root",
@@ -146,8 +146,8 @@ fn node_env_v4_contract(identity: &Identity) -> Result<(), String> {
 /// which no producer writes any more, named that interpreter nowhere: it was
 /// the shipped pin, so a pin change could rebuild a native addon under an
 /// unchanged id. Under `/5` it is the project's locked Python (or the
-/// shipped default) and the id commits to it. `node-env/6` has the same
-/// inputs and contract (see `realize::NODE_ENV_SCHEMA`).
+/// shipped default) and the id commits to it. `node-env/6` and `/7` have
+/// the same inputs and contract (see `realize::NODE_ENV_SCHEMA`).
 fn node_env_v5_contract(identity: &Identity) -> Result<(), String> {
     node_env_v4_contract(identity)?;
     // A host-fallback environment names the packages whose install scripts

@@ -173,8 +173,10 @@ fn node_package_manager(root: &Path, lock_text: &str) -> io::Result<NodePackageM
     parse_package_manager_value(value, &package_json)
 }
 
+/// The lock in `directory`, in the order sync picks one
+/// ([`super::inputs::LOCKS`]: npm's shrinkwrap before its package-lock).
 fn node_lock_at(directory: &Path) -> Option<&'static str> {
-    ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
+    super::inputs::LOCKS
         .into_iter()
         .find(|name| directory.join(name).is_file())
 }
@@ -314,7 +316,7 @@ pub(crate) fn node_lock_for(project: &Path) -> io::Result<NodeLock> {
         let relative = project
             .strip_prefix(ancestor)
             .expect("an ancestor is a prefix of the project");
-        if super::resolve::npm_workspace_names(ancestor, relative) {
+        if super::resolve::npm_workspace_names(ancestor, relative)? {
             return Ok(NodeLock::NpmWorkspaceMember {
                 root: ancestor.to_path_buf(),
             });
@@ -470,8 +472,8 @@ pub(crate) fn edit_manifest(
             (name, root.to_path_buf())
         }
     };
-    if lock_name == "package-lock.json" {
-        return npm_edit(edit, door, lock_root);
+    if matches!(lock_name, "package-lock.json" | "npm-shrinkwrap.json") {
+        return npm_edit(edit, door, lock_name, lock_root);
     }
     // A pnpm workspace root that has no lock yet gets its first one from
     // this edit; the text only serves the refusals' words.
@@ -491,7 +493,8 @@ pub(crate) fn edit_manifest(
     pnpm_edit(edit, door, lock_name, lock_root, &lock_text)
 }
 
-/// A project with its own package-lock.json (or no lock yet), or a member
+/// A project with its own npm lock `lock_name` (package-lock.json or
+/// npm-shrinkwrap.json, or no lock yet: package-lock.json), or a member
 /// of an npm workspace whose root `lock_root` has one or none: the store
 /// node's npm edits it, confined through the edit door at the lock root
 /// (running in the member, where npm's own workspace detection finds the
@@ -500,6 +503,7 @@ pub(crate) fn edit_manifest(
 fn npm_edit(
     edit: &ManifestEdit<'_>,
     door: &mut ResolutionDoor<'_>,
+    lock_name: &str,
     lock_root: PathBuf,
 ) -> io::Result<EditOutcome> {
     let (project, verb, dev, texts) = (edit.project, edit.verb, edit.dev, &edit.texts());
@@ -550,7 +554,7 @@ fn npm_edit(
         },
     )?;
     Ok(EditOutcome {
-        files: vec![package_label, "package-lock.json".into()],
+        files: vec![package_label, lock_name.into()],
         sync_root: lock_root,
     })
 }
@@ -717,6 +721,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(member.join("package.json"), r#"{"name":"member"}"#).unwrap();
+        let _npm = super::super::npm_members::tests::fake_npm(&root, |_| {
+            vec!["packages/member".to_string()]
+        });
         let _search_only = match crate::kernel::testutil::SearchOnly::new(&root) {
             Ok(held) => held,
             Err(skip) => return eprintln!("{skip}"),
@@ -1164,6 +1171,21 @@ mod tests {
             r#"{"workspaces":["packages/*","!packages/skipped","apps/**","./tools/cli/"]}"#,
         )
         .unwrap();
+        // npm's answer for that list, faked: the ignored test in
+        // `npm_members` runs npm on lists like it.
+        let _npm = super::super::npm_members::tests::fake_npm(&root, |workspaces| {
+            if workspaces == &serde_json::json!(["apps/*"]) {
+                return Vec::new();
+            }
+            [
+                "packages/app",
+                "packages/util",
+                "apps/nested/deep",
+                "tools/cli",
+            ]
+            .map(String::from)
+            .to_vec()
+        });
 
         let member = |project: &Path| match node_lock_for(project).unwrap() {
             NodeLock::NpmWorkspaceMember { root } => Some(root),
@@ -1312,6 +1334,39 @@ mod tests {
                 "convert with 'npm install --package-lock-only' or 'pnpm install --lockfile-only'"
             ),
             "{error}"
+        );
+    }
+
+    /// An edit writes the lock npm itself would: a shrinkwrap before a
+    /// package-lock in the same directory, a member's root shrinkwrap too.
+    #[test]
+    fn an_npm_shrinkwrap_is_the_lock_an_edit_selects() {
+        let scratch = TempDir::named("node-lock-shrinkwrap");
+        let root = scratch.0.clone();
+        fs::write(root.join("package-lock.json"), "{}\n").unwrap();
+        assert_eq!(
+            selected(&root),
+            ("package-lock.json".to_string(), root.clone())
+        );
+        fs::write(root.join("npm-shrinkwrap.json"), "{}\n").unwrap();
+        assert_eq!(
+            selected(&root),
+            ("npm-shrinkwrap.json".to_string(), root.clone())
+        );
+        fs::write(
+            root.join("package.json"),
+            r#"{"workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        let member = root.join("packages/a");
+        fs::create_dir_all(&member).unwrap();
+        fs::write(member.join("package.json"), "{}").unwrap();
+        let _npm =
+            super::super::npm_members::tests::fake_npm(&root, |_| vec!["packages/a".to_string()]);
+        let lock = node_lock_for(&member).unwrap();
+        assert_eq!(
+            lock.workspace().map(|(at, name)| (at.to_path_buf(), name)),
+            Some((root.clone(), "npm-shrinkwrap.json"))
         );
     }
 }

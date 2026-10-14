@@ -27,8 +27,8 @@
 //! mode. Temporary cleanup after a failure is best-effort.
 
 use crate::kernel::store::{
-    fd_stat, fsync_directory, mkdir_at, open_file_at, read_dir_names_at, remove_tree_entry_at,
-    rename_at, same_inode, stat_at, stat_at_following, unlink_if_same,
+    fd_identity, fd_stat, fsync_directory, mkdir_at, open_file_at, read_dir_names_at,
+    remove_tree_entry_at, rename_at, same_inode, stat_at, stat_at_following, unlink_if_same,
 };
 use std::ffi::{CString, OsStr};
 use std::fs;
@@ -55,6 +55,10 @@ const ANCESTOR_FLAGS: libc::c_int =
 #[cfg(not(target_os = "linux"))]
 const ANCESTOR_FLAGS: libc::c_int = DIRECTORY_FLAGS;
 const TEMP_ATTEMPTS: usize = 8;
+
+mod containment;
+pub(crate) mod linksite;
+pub(crate) use containment::{Containment, LinkEnd, MemberManifest};
 
 /// What a project-relative name resolves to, without following symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -737,8 +741,9 @@ impl ProjectRoot {
     /// symlink the project itself contains is followed, as a pathname read
     /// inside the project would follow it: that is the user's own layout,
     /// not a race. The strict no-follow walk (`read_file`) stays for ward's
-    /// own state under `.greyward` and for toolchain inputs. `relative` may climb
-    /// with `..` (a requirements include beside the project); it may not be
+    /// own state under `.greyward` and for toolchain inputs. `relative` may
+    /// not climb above the project with `..` (a file beside the project, a
+    /// requirements include, is `read_external`'s), and it may not be
     /// absolute, since an absolute path would ignore the descriptor.
     pub fn read_input(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
         let Some(mut file) = self.open_input(relative)? else {
@@ -1187,9 +1192,11 @@ fn split_relative(relative: &Path) -> io::Result<(Vec<&OsStr>, &OsStr)> {
 }
 
 /// A project-input name for `openat` from the held descriptor: not empty,
-/// not absolute, no NUL. Unlike `split_relative` it may climb or repeat a
-/// separator, since it is resolved by the kernel the way a pathname
-/// relative to the project would be.
+/// not absolute, no NUL. Unlike `split_relative` it may repeat a separator
+/// or step back down with `..` (`.cargo/../shared.toml`), as the kernel
+/// resolves it. It may not climb above the project (`read_external` reads
+/// a file beside it), so a lockfile name like `../outside` cannot leave the
+/// held directory by spelling alone; a symlink inside is still followed.
 fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
     let bytes = relative.as_os_str().as_bytes();
     let invalid = |reason: &str| {
@@ -1206,6 +1213,18 @@ fn input_name(relative: &Path) -> io::Result<Vec<u8>> {
     }
     if bytes[0] == b'/' {
         return Err(invalid("is absolute"));
+    }
+    let mut depth = 0usize;
+    for segment in bytes.split(|byte| *byte == b'/') {
+        match segment {
+            b"" | b"." => {}
+            b".." => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| invalid("climbs out of the project with `..`"))?;
+            }
+            _ => depth += 1,
+        }
     }
     Ok(bytes.to_vec())
 }
@@ -2826,10 +2845,66 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let error = root.read_input(Path::new("/etc/hostname")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        // A project input never climbs out of the held directory, however
+        // the climb is spelled.
+        fs::write(temp.0.join("outside.json"), b"outside").unwrap();
+        for climbing in [
+            "../outside.json",
+            "dir/../../outside.json",
+            "./../outside.json",
+        ] {
+            let error = root.read_input(Path::new(climbing)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{climbing}");
+            assert!(error.to_string().contains("climbs out"), "{error}");
+        }
+        // Stepping back down inside it is a name in the project.
+        assert_eq!(
+            root.read_input(Path::new("dir/../package-lock.json"))
+                .unwrap()
+                .unwrap(),
+            b"shared"
+        );
         fs::write(dir.join("bad.txt"), [0xff, 0xfe]).unwrap();
         let error = root.read_input_string(Path::new("bad.txt")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
+    /// A name inside the project stays inside; one a symlink carries out
+    /// does not, wherever the symlink sits on the way; one that does not
+    /// exist yet is judged by its deepest existing ancestor; and one that
+    /// passes through a dangling symlink is refused.
+    #[test]
+    fn input_containment_follows_symlinks_from_the_held_directory() {
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(outside.join("lib")).unwrap();
+        fs::create_dir_all(dir.join("packages/a")).unwrap();
+        symlink(&outside, dir.join("vendor")).unwrap();
+        symlink("packages", dir.join("alias")).unwrap();
+        symlink(temp.0.join("missing"), dir.join("dangling")).unwrap();
+        let root = ProjectRoot::open(&dir).unwrap();
+        let at = |name: &str| root.input_containment(Path::new(name)).unwrap();
+        for inside in [
+            ".",
+            "packages",
+            "packages/a",
+            "alias/a",
+            "packages/new/deeper",
+        ] {
+            assert_eq!(at(inside), Containment::Inside, "{inside}");
+        }
+        for out in ["vendor", "vendor/lib", "vendor/not-yet"] {
+            assert_eq!(at(out), Containment::Outside, "{out}");
+        }
+        for dangling in ["dangling", "dangling/x"] {
+            assert_eq!(at(dangling), Containment::Dangling, "{dangling}");
+        }
+        for bad in ["../outside", "packages/../..", "/etc", ""] {
+            let error = root.input_containment(Path::new(bad)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
+    }
+
     #[test]
     fn projection_writes_go_through_the_held_directory() {
         use std::os::unix::fs::PermissionsExt as _;

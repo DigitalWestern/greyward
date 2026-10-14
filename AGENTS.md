@@ -33,14 +33,32 @@
   options, and the one you would pick. Add a short pointer to each in
   FOLLOW-UPS.md so the repo's to-do list and the tracker agree.
 
+- Cross-review. Before you push, have the other agent family review the
+  change through T3 Code's `delegate_task` tool (the `t3-code` MCP
+  server), with `role: "review"` and `mode: "async"`.
+  - If you are Claude, the reviewer is Muse: target
+    `{"providerInstanceId": "muse", "model": "muse-wonder-full-1.0",
+    "options": {"reasoningEffort": "xhigh"}}`.
+  - If you are Muse, the reviewer is Claude: target
+    `{"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5",
+    "options": {"effort": "high"}}`.
+  - The reviewer has no memory of your session. Put the diff, the file
+    paths, and what to check in `task`.
+  - After you delegate, end your turn. T3 wakes you when the review
+    finishes. Do not poll.
+  - A second round is a new `delegate_task` call that includes the first
+    findings and what you changed.
+  - Treat the review as advisory. Fix what is real, and say what you
+    declined and why.
+
 - Keep CI runs few. The repository is public (since 2026-10-06), so
   Actions minutes are free on the standard runners, but the heavy suite
   is slow: one e2e run took 47 minutes, every push to a pull request
   re-runs the whole suite, and every merge runs it again on main, so an
   extra push that wakes the heavy suite is a 47-minute wait and a queue
   behind it. Before the first push:
-  - Run clippy (`-D warnings`) and the tests locally, so the branch goes
-    up once, finished.
+  - Run clippy (`-D warnings`), the tests and the cross-review locally,
+    so the branch goes up once, finished.
   - If main has moved, merge it into the branch locally, then push. A
     merge from main after the PR is open costs a second full run.
   - Batch related work into one pull request, one commit per piece,

@@ -52,7 +52,7 @@ fn verifier() -> Result<Verifier, String> {
         .ok()
         .and_then(|hash| hash.try_into().ok())
         .ok_or_else(bad)?;
-    let key = crate::kernel::base64::decode(key).ok_or_else(bad)?;
+    let key = crate::kernel::base64::decode_padded(key).ok_or_else(bad)?;
     let [1, public @ ..] = key.as_slice() else {
         return Err(bad());
     };
@@ -79,9 +79,11 @@ fn key_hash(name: &str, key: &[u8]) -> [u8; 4] {
 }
 
 /// The tree size a signed tree head carries, once sum.golang.org's
-/// signature over it verifies. Any other signer's line is skipped, as Go
-/// skips it; a note with none of sum.golang.org's, or a bad one, is
-/// refused.
+/// signature over it verifies. Read as Go's `note.Open` reads a note: any
+/// other signer's line is skipped, only the first of sum.golang.org's lines
+/// is checked (Go drops repeats by one verifier), and signatures are padded
+/// standard base64. A note with none of sum.golang.org's, a bad one, or a
+/// malformed line is refused.
 pub fn verify_tree(note: &[u8]) -> Result<u64, String> {
     let note = std::str::from_utf8(note).map_err(|_| "the tree head is not UTF-8".to_string())?;
     let split = note
@@ -101,11 +103,13 @@ pub fn verify_tree(note: &[u8]) -> Result<u64, String> {
         let (name, signature) = line
             .strip_prefix("\u{2014} ")
             .and_then(|line| line.split_once(' '))
+            .filter(|(name, _)| !name.is_empty() && !name.contains(char::is_whitespace))
+            .filter(|(name, _)| !name.contains('+'))
             .ok_or_else(malformed)?;
-        let signature = crate::kernel::base64::decode(signature)
+        let signature = crate::kernel::base64::decode_padded(signature)
             .filter(|signature| signature.len() > 4)
             .ok_or_else(malformed)?;
-        if name != verifier.name || signature[..4] != verifier.hash {
+        if name != verifier.name || signature[..4] != verifier.hash || verified {
             continue;
         }
         UnparsedPublicKey::new(&ED25519, verifier.key)
@@ -119,27 +123,29 @@ pub fn verify_tree(note: &[u8]) -> Result<u64, String> {
     tree_size(text)
 }
 
-/// The size in a verified tree head's text.
+/// The size in a verified tree head's text, read as Go's `tlog.ParseTree`
+/// reads it: the header line, the size, the root hash (32 bytes of padded
+/// standard base64), each ending in a newline. Lines after the hash are
+/// ignored, as Go ignores them for forward compatibility.
 fn tree_size(text: &str) -> Result<u64, String> {
     let malformed = || "the signed text is not a go.sum database tree".to_string();
     let rest = text.strip_prefix(TREE_TEXT).ok_or_else(malformed)?;
-    let lines: Vec<&str> = rest.split('\n').collect();
-    let [size, hash, ""] = lines.as_slice() else {
+    let lines: Vec<&str> = rest.splitn(3, '\n').collect();
+    let [size, hash, _later] = lines.as_slice() else {
         return Err(malformed());
     };
-    let hash_ok = crate::kernel::base64::decode(hash).is_some_and(|hash| hash.len() == 32);
+    let hash_ok = crate::kernel::base64::decode_padded(hash).is_some_and(|hash| hash.len() == 32);
     if !hash_ok {
         return Err(malformed());
     }
-    decimal(size).ok_or_else(malformed)
+    go_count(size).ok_or_else(malformed)
 }
 
-/// A decimal count as Go writes one: digits, no sign, no leading zero.
-fn decimal(text: &str) -> Option<u64> {
-    let canonical = !text.is_empty()
-        && text.bytes().all(|b| b.is_ascii_digit())
-        && (text == "0" || !text.starts_with('0'));
-    canonical.then(|| text.parse().ok()).flatten()
+/// A count as Go's `strconv.ParseInt(text, 10, 64)` reads one, not
+/// negative: an optional sign, then decimal digits.
+fn go_count(text: &str) -> Option<u64> {
+    let count: i64 = text.parse().ok()?;
+    u64::try_from(count).ok()
 }
 
 /// A lookup answer: its record number, the record's text, and the signed
@@ -160,7 +166,7 @@ pub fn split_lookup(body: &[u8]) -> Result<Answer<'_>, String> {
         .ok_or_else(malformed)?;
     let record = std::str::from_utf8(&body[..newline])
         .ok()
-        .and_then(decimal)
+        .and_then(go_count)
         .ok_or_else(malformed)?;
     let rest = &body[newline + 1..];
     let blank = rest
@@ -270,5 +276,43 @@ mod tests {
             assert!(verify_lookup(broken.as_bytes()).is_err(), "{broken:?}");
         }
         assert!(verify_tree(b"go.sum database tree\n1\nAA==\n\n").is_err());
+    }
+
+    #[test]
+    fn notes_and_trees_read_as_go_reads_them() {
+        let text = std::str::from_utf8(UUID).unwrap();
+        let (_, note) = text.split_once("\n\n").unwrap();
+        let line = note.lines().last().unwrap();
+        let encoded = line.rsplit_once(' ').unwrap().1;
+        // A repeat of sum.golang.org's line is dropped unchecked, as Go
+        // drops it, even when its signature is bad.
+        let mut bytes = crate::kernel::base64::decode(encoded).unwrap();
+        bytes[10] ^= 1;
+        let bad = crate::kernel::base64::encode(&bytes);
+        let repeated = format!("{note}\u{2014} sum.golang.org {bad}\n");
+        assert_eq!(verify_tree(repeated.as_bytes()), Ok(64_828_441));
+        // A bad first line is not rescued by a good repeat.
+        let first_bad = note.replace(encoded, &bad) + line + "\n";
+        assert!(verify_tree(first_bad.as_bytes()).is_err());
+        // Signatures are padded base64.
+        let unpadded = note.replace(encoded, encoded.trim_end_matches('='));
+        assert!(verify_tree(unpadded.as_bytes()).is_err());
+        // ParseTree ignores lines after the hash, and reads the size as
+        // ParseInt does.
+        let hash = "mjjTG8zqUwpbOnYRsjT2HvgQnf1VWnISago9r8LcR1k=";
+        let tree = |rest: &str| tree_size(&format!("{TREE_TEXT}{rest}"));
+        assert_eq!(tree(&format!("5\n{hash}\n")), Ok(5));
+        assert_eq!(tree(&format!("5\n{hash}\nlater\nlines\n")), Ok(5));
+        assert_eq!(tree(&format!("007\n{hash}\n")), Ok(7));
+        assert_eq!(tree(&format!("+7\n{hash}\n")), Ok(7));
+        for broken in [
+            format!("-1\n{hash}\n"),
+            format!("x\n{hash}\n"),
+            format!("5\n{}\n", hash.trim_end_matches('=')),
+            "5\nAA==\n".to_string(),
+            format!("5\n{hash}"),
+        ] {
+            assert!(tree(&broken).is_err(), "{broken:?}");
+        }
     }
 }

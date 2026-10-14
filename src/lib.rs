@@ -40,7 +40,7 @@ pub mod boundary {
     pub use crate::kernel::error::class_of;
     pub use crate::kernel::resolve::transaction::record_startup_umask;
     pub use crate::kernel::supervise::stop_signal;
-    pub use crate::kernel::ui::{error_with_fix, failure_json, init};
+    pub use crate::kernel::ui::{error_with_fix, failure_json, init, print_phase_table};
     // tests/npm_scripts.rs
     pub use crate::kernel::fetch::download_verified_digest;
     pub use crate::tailors::node::{ensure_node_for, project_node_env, realize_node_env};

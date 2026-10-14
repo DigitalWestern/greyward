@@ -21,9 +21,11 @@
 //! dependency are not this route's: they reach the proxy as unattested
 //! hosts or git fetches (see `kernel::resolve::intercept`).
 
+use super::pypi::normalize_name;
 use crate::kernel::fetch::Digest;
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, RegistryProtocol, RequestClass, Route, Upstream,
+    Claim, Endpoint, Lookup, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -120,6 +122,74 @@ impl RegistryProtocol for PypiRegistry {
     fn expects_claim(&self, url: &Url) -> bool {
         url.host_str() == Some(FILES_HOST)
     }
+
+    /// A JSON project page's `upload-time` per file, each file's version
+    /// read from its name; a version's earliest file is when it was
+    /// published. An HTML page carries no upload times.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        if url.host_str() != Some(INDEX_HOST) || !url.path().starts_with("/simple/") {
+            return Vec::new();
+        }
+        let Ok(page) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Vec::new();
+        };
+        let Some(name) = page.get("name").and_then(|name| name.as_str()) else {
+            return Vec::new();
+        };
+        page.get("files")
+            .and_then(|files| files.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|file| {
+                let filename = file.get("filename")?.as_str()?;
+                let at = parse_rfc3339(file.get("upload-time")?.as_str()?)?;
+                Some((name.to_string(), file_version(name, filename)?, at))
+            })
+            .collect()
+    }
+
+    /// The project's JSON page (PEP 691), which lists each file's upload
+    /// time.
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        let name = normalize_name(name);
+        check_name(&name).ok()?;
+        let url = endpoint(endpoints, INDEX_HOST)
+            .ok()?
+            .url(&format!("/simple/{name}/"))
+            .ok()?;
+        Some(Lookup {
+            url,
+            accept: "application/vnd.pypi.simple.v1+json",
+        })
+    }
+
+    /// PEP 503 names; versions compared without letter case.
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        (normalize_name(name), version.to_ascii_lowercase())
+    }
+}
+
+/// The version in a distribution's file name for project `project`: a
+/// wheel's second field, or what follows the project's name in an sdist
+/// (whose name part may itself hold `-`). `None` for an egg or a name that
+/// does not belong to `project`.
+fn file_version(project: &str, filename: &str) -> Option<String> {
+    if let Some(stem) = filename.strip_suffix(".whl") {
+        let mut fields = stem.split('-');
+        let (dist, version) = (fields.next()?, fields.next()?);
+        return (normalize_name(dist) == normalize_name(project) && !version.is_empty())
+            .then(|| version.to_string());
+    }
+    let stem = [".tar.gz", ".zip", ".tar.bz2", ".tgz"]
+        .iter()
+        .find_map(|suffix| filename.strip_suffix(suffix))?;
+    let project = normalize_name(project);
+    stem.match_indices('-').find_map(|(at, _)| {
+        let version = &stem[at + 1..];
+        (normalize_name(&stem[..at]) == project
+            && version.starts_with(|c: char| c.is_ascii_digit()))
+        .then(|| version.to_string())
+    })
 }
 
 /// One file a project page lists: its link as written, and the hashes the
@@ -366,6 +436,53 @@ mod tests {
     }
 
     const WHEEL: &str = "/packages/d9/5a/e7c31adbe875f2abbb91bd84cf2dc52d792b5a01506781dbcf25c91daf11/six-1.16.0-py2.py3-none-any.whl";
+
+    /// A JSON page's files carry `upload-time`; each version is read from
+    /// its file name, a wheel's or an sdist's whose name holds `-`.
+    #[test]
+    fn publish_times_come_from_json_pages_and_file_names() {
+        let body = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/proxy/registry/python/pypi.org/simple/six/_index.body"),
+        )
+        .unwrap();
+        let url = Url::parse("https://pypi.org/simple/six/").unwrap();
+        let times = PYPI_REGISTRY.published(&url, &body);
+        assert!(times.contains(&("six".into(), "1.16.0".into(), 1_620_224_297)));
+        assert!(times.contains(&("six".into(), "1.16.0".into(), 1_620_224_298)));
+        assert!(times.contains(&("six".into(), "1.17.0".into(), 1_733_333_726)));
+        let file =
+            Url::parse("https://files.pythonhosted.org/packages/x/six-1.17.0.tar.gz").unwrap();
+        assert!(PYPI_REGISTRY.published(&file, &body).is_empty());
+        let html = b"<a href=\"https://files.pythonhosted.org/packages/a/six-1.0.tar.gz\">x</a>";
+        assert!(PYPI_REGISTRY.published(&url, html).is_empty());
+        assert_eq!(
+            file_version("python-dateutil", "python-dateutil-2.8.2.tar.gz").as_deref(),
+            Some("2.8.2")
+        );
+        assert_eq!(
+            file_version(
+                "Python_Dateutil",
+                "python_dateutil-2.9.0.post0-py2.py3-none-any.whl"
+            )
+            .as_deref(),
+            Some("2.9.0.post0")
+        );
+        assert_eq!(file_version("six", "other-1.0.tar.gz"), None);
+        assert_eq!(file_version("six", "six-1.0-py2.7.egg"), None);
+        let lookup = PYPI_REGISTRY
+            .lookup(&endpoints(), "Python_Dateutil", "2.9.0")
+            .unwrap();
+        assert_eq!(
+            lookup.url.as_str(),
+            "https://pypi.org/simple/python-dateutil/"
+        );
+        assert_eq!(lookup.accept, "application/vnd.pypi.simple.v1+json");
+        assert_eq!(
+            PYPI_REGISTRY.package_key("Python_Dateutil", "2.9.0.POST0"),
+            ("python-dateutil".to_string(), "2.9.0.post0".to_string())
+        );
+    }
 
     #[test]
     fn pages_and_files_map_onto_their_hosts() {

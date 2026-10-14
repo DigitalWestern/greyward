@@ -25,8 +25,9 @@
 //! `contentHash` is a semantic hash NuGet itself verifies, so the route
 //! claims nothing.
 
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, ProxyAddress, RegistryProtocol, RequestClass, Route, Upstream,
+    Claim, Endpoint, Lookup, ProxyAddress, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -83,6 +84,45 @@ impl RegistryProtocol for NuGet {
         Vec::new()
     }
 
+    /// A registration leaf (`/v3/registration5-gz-semver2/<id>/<version>.json`,
+    /// gzip on the wire): its `published`. NuGet writes 1900-01-01 for an
+    /// unlisted version, which says nothing about when it was published.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        let Some((id, version)) = leaf_path(url) else {
+            return Vec::new();
+        };
+        let Some(json) = inflated(body) else {
+            return Vec::new();
+        };
+        serde_json::from_slice::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|leaf| leaf.get("published")?.as_str().map(str::to_string))
+            .filter(|at| !at.starts_with("1900-"))
+            .and_then(|at| parse_rfc3339(&at))
+            .map(|at| (id.to_string(), version.to_string(), at))
+            .into_iter()
+            .collect()
+    }
+
+    /// The registration leaf of the lower-cased id and version. Restore
+    /// itself reads no registration page, so only a lookup reaches one.
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, version: &str) -> Option<Lookup> {
+        let (id, version) = self.package_key(name, version);
+        check_word(&id).ok()?;
+        check_word(&version).ok()?;
+        let endpoint = endpoints.iter().find(|endpoint| endpoint.host() == HOST)?;
+        Some(Lookup {
+            url: endpoint
+                .url(&format!("{REGISTRATION}{id}/{version}.json"))
+                .ok()?,
+            accept: "application/json",
+        })
+    }
+
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        (name.to_ascii_lowercase(), version.to_ascii_lowercase())
+    }
+
     fn rewrite(&self, url: &Url, body: Vec<u8>, base: &ProxyAddress) -> io::Result<Vec<u8>> {
         let route_base = base.route_base(ROUTE_ID);
         match url.path() {
@@ -91,6 +131,32 @@ impl RegistryProtocol for NuGet {
             _ => Ok(body),
         }
     }
+}
+
+/// The registration hive whose leaves carry `published`.
+const REGISTRATION: &str = "/v3/registration5-gz-semver2/";
+/// The most a registration leaf may inflate to.
+const MAX_LEAF: u64 = 1 << 20;
+
+/// The id and version of a registration leaf URL on api.nuget.org.
+fn leaf_path(url: &Url) -> Option<(&str, &str)> {
+    if url.host_str() != Some(HOST) {
+        return None;
+    }
+    let rest = url.path().strip_prefix(REGISTRATION)?;
+    let (id, file) = rest.split_once('/')?;
+    let version = file.strip_suffix(".json")?;
+    (check_word(id).is_ok() && check_word(version).is_ok() && version != "index")
+        .then_some((id, version))
+}
+
+/// `body`, inflated when it is gzip (the hive is stored compressed), at
+/// most [`MAX_LEAF`] bytes.
+fn inflated(body: &[u8]) -> Option<Vec<u8>> {
+    if !body.starts_with(&[0x1f, 0x8b]) {
+        return Some(body.to_vec());
+    }
+    super::unpack::gunzip_capped(body, MAX_LEAF)
 }
 
 /// Whether `path` is one the route serves.

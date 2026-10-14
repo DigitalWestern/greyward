@@ -1,0 +1,169 @@
+//! The registry packages a Node lock names, for the door's `young-package`
+//! check (`kernel::resolve::age`): every package `package-lock.json` or
+//! `pnpm-lock.yaml` resolves from the npm registry, at its locked version.
+//! Git, tarball-URL, `file:` and workspace packages are not the registry's
+//! and are left out.
+
+use super::lock_import::pnpm_registry_packages;
+use super::registry::REGISTRY_HOST;
+use crate::kernel::resolve::age::LockedPackage;
+use crate::kernel::resolve::door::{LockedList, Staged};
+use std::io;
+use std::path::Path;
+use url::Url;
+
+/// Which lock the run leaves.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NodeLock {
+    Npm,
+    Pnpm,
+}
+
+/// The [`LockedList`] of a run whose lock is `lock`, at the lock root.
+pub(crate) fn locked_list<'a>(lock: NodeLock) -> LockedList<'a> {
+    Box::new(move |staged: &Staged<'_>| {
+        let (file, parse): (&str, fn(&str) -> io::Result<Vec<LockedPackage>>) = match lock {
+            NodeLock::Npm => ("package-lock.json", npm_registry_packages),
+            NodeLock::Pnpm => ("pnpm-lock.yaml", |text| {
+                Ok(pnpm_registry_packages(text)?
+                    .into_iter()
+                    .map(|(name, version)| LockedPackage::new(name, version))
+                    .collect())
+            }),
+        };
+        match staged.read(Path::new(file))? {
+            Some(bytes) => parse(&String::from_utf8_lossy(&bytes)),
+            None => Ok(Vec::new()),
+        }
+    })
+}
+
+/// Every `packages` entry of a `package-lock.json` (v2 and v3) whose
+/// `resolved` is a tarball on the public registry, named and versioned by
+/// that tarball, so an alias (`"x": "npm:y@1"`) reads as the package it
+/// really is.
+pub(crate) fn npm_registry_packages(text: &str) -> io::Result<Vec<LockedPackage>> {
+    let lock: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("package-lock.json does not parse: {error}"),
+        )
+    })?;
+    let Some(packages) = lock.get("packages").and_then(|p| p.as_object()) else {
+        return Ok(Vec::new());
+    };
+    Ok(packages
+        .values()
+        .filter_map(|entry| tarball_identity(entry.get("resolved")?.as_str()?))
+        .collect())
+}
+
+/// `(name, version)` of a registry tarball URL:
+/// `/<name>/-/<name>-<version>.tgz` or `/@<scope>/<name>/-/<name>-<version>.tgz`.
+fn tarball_identity(resolved: &str) -> Option<LockedPackage> {
+    let url = Url::parse(resolved).ok()?;
+    if url.host_str() != Some(REGISTRY_HOST) {
+        return None;
+    }
+    let parts: Vec<&str> = url.path().trim_start_matches('/').split('/').collect();
+    let (name, base, file) = match parts.as_slice() {
+        [name, "-", file] => (name.to_string(), *name, *file),
+        [scope, name, "-", file] if scope.starts_with('@') => {
+            (format!("{scope}/{name}"), *name, *file)
+        }
+        _ => return None,
+    };
+    let version = file
+        .strip_prefix(base)?
+        .strip_prefix('-')?
+        .strip_suffix(".tgz")?;
+    if version.is_empty() {
+        return None;
+    }
+    Some(LockedPackage::new(name, version))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn npm_locks_list_registry_tarballs_by_their_real_names() {
+        let lock = r#"{
+          "lockfileVersion": 3,
+          "packages": {
+            "": {"name": "demo", "dependencies": {"is-odd": "^3.0.1"}},
+            "node_modules/is-odd": {"version": "3.0.1",
+              "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"},
+            "node_modules/is-odd/node_modules/is-number": {"version": "6.0.0",
+              "resolved": "https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz"},
+            "node_modules/alias": {"name": "@types/node", "version": "20.1.0",
+              "resolved": "https://registry.npmjs.org/@types/node/-/node-20.1.0.tgz"},
+            "node_modules/from-git": {"version": "1.0.0",
+              "resolved": "git+ssh://git@github.com/a/b.git#abc"},
+            "node_modules/elsewhere": {"version": "1.0.0",
+              "resolved": "https://example.com/elsewhere-1.0.0.tgz"},
+            "packages/member": {"version": "0.1.0"},
+            "node_modules/member": {"resolved": "packages/member", "link": true}
+          }
+        }"#;
+        let mut found = npm_registry_packages(lock).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                LockedPackage::new("@types/node", "20.1.0"),
+                LockedPackage::new("is-number", "6.0.0"),
+                LockedPackage::new("is-odd", "3.0.1"),
+            ]
+        );
+        assert!(npm_registry_packages("{}").unwrap().is_empty());
+        assert!(npm_registry_packages("not json").is_err());
+    }
+
+    #[test]
+    fn pnpm_locks_list_registry_resolutions_without_peer_context() {
+        let lock = "lockfileVersion: '9.0'\n\
+            \n\
+            importers:\n\
+            \n\
+            \x20 .:\n\
+            \x20   dependencies:\n\
+            \x20     is-odd:\n\
+            \x20       specifier: ^3.0.1\n\
+            \x20       version: 3.0.1\n\
+            \n\
+            packages:\n\
+            \n\
+            \x20 '@scope/peer@2.0.0':\n\
+            \x20   resolution: {integrity: sha512-AAAA}\n\
+            \n\
+            \x20 is-number@6.0.0:\n\
+            \x20   resolution: {integrity: sha512-BBBB}\n\
+            \x20   engines: {node: '>=0.10.0'}\n\
+            \n\
+            \x20 is-odd@3.0.1:\n\
+            \x20   resolution: {integrity: sha512-CCCC}\n\
+            \n\
+            \x20 from-url@1.0.0:\n\
+            \x20   resolution: {integrity: sha512-DDDD, tarball: https://example.com/x.tgz}\n\
+            \n\
+            \x20 from-git@https://codeload.github.com/a/b/tar.gz/abc:\n\
+            \x20   resolution: {tarball: https://codeload.github.com/a/b/tar.gz/abc}\n\
+            \n\
+            snapshots:\n\
+            \n\
+            \x20 is-odd@3.0.1:\n\
+            \x20   dependencies:\n\
+            \x20     is-number: 6.0.0\n";
+        let found = pnpm_registry_packages(lock).unwrap();
+        assert_eq!(
+            found,
+            [
+                ("@scope/peer".to_string(), "2.0.0".to_string()),
+                ("is-number".to_string(), "6.0.0".to_string()),
+                ("is-odd".to_string(), "3.0.1".to_string()),
+            ]
+        );
+    }
+}

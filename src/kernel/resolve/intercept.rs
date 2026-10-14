@@ -406,6 +406,7 @@ fn exchange<'a>(
         // A streamed body is delimited by the close for HTTP/1.0.
         keep_alive: request.keep_alive && !request.http10,
         http10: request.http10,
+        supplemental: false,
     }
 }
 

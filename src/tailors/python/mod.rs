@@ -10,6 +10,7 @@ pub(crate) mod door;
 pub mod edit;
 pub mod env;
 pub mod inputs;
+pub(crate) mod locked;
 pub mod manifest;
 pub mod objects;
 pub mod pypi;

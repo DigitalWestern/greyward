@@ -1,12 +1,44 @@
 //! What `pnpm-lock.yaml` records about the manifests it was generated
 //! from (node tailor): each importer's dependencies, the settings and
 //! overrides pnpm applies before comparing, and the workspace members
-//! `pnpm-workspace.yaml` names. The freshness check reads these.
+//! `pnpm-workspace.yaml` names. The freshness check reads these. Also the
+//! registry packages it resolved, which the `young-package` check reads.
 
 use super::*;
 
 mod workspace;
 pub(crate) use workspace::*;
+
+/// `(name, version)` of every `packages` entry `pnpm-lock.yaml` resolves
+/// from a registry: a resolution with an `integrity` and no `tarball`,
+/// `type` (git, directory) or `repo`, at a version that starts with a
+/// digit (not `file:` or `link:`).
+pub(crate) fn pnpm_registry_packages(lock_yaml: &str) -> io::Result<Vec<(String, String)>> {
+    let parsed = parse_yaml(lock_yaml)?;
+    let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
+    let Some(YamlValue::Map(packages)) = root.get("packages") else {
+        return Ok(Vec::new());
+    };
+    Ok(packages
+        .iter()
+        .filter_map(|(key, value)| {
+            let YamlValue::Map(entry) = value else {
+                return None;
+            };
+            let Some(YamlValue::Map(resolution)) = entry.get("resolution") else {
+                return None;
+            };
+            let registry = yaml_str(resolution.get("integrity")).is_some()
+                && ["tarball", "type", "repo"]
+                    .iter()
+                    .all(|field| resolution.get(*field).is_none());
+            let (name, version) = normalize_pnpm_identity(key)?;
+            let version = trim_peer_suffix(&version).to_string();
+            (registry && version.starts_with(|c: char| c.is_ascii_digit()))
+                .then_some((name, version))
+        })
+        .collect())
+}
 
 /// A dependency as an importer of `pnpm-lock.yaml` records it: the
 /// specifier its package.json wrote, verbatim, and the version pnpm resolved

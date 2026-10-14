@@ -24,6 +24,7 @@ pub mod freshness;
 pub mod inputs;
 pub(crate) mod local_package;
 pub mod lock_import;
+pub(crate) mod locked;
 pub mod objects;
 pub mod registry;
 pub mod registry_tool;

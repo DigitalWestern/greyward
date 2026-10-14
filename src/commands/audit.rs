@@ -1680,6 +1680,44 @@ mod tests {
         );
     }
 
+    /// A recorded `young-package` carries the times it was judged by, so
+    /// audit shows them when a later policy denies the kind.
+    #[test]
+    fn a_recorded_young_package_is_denied_with_the_times_it_was_judged_by() {
+        let temp = python_project("young");
+        let young = Exception {
+            kind: policy::YOUNG_PACKAGE.into(),
+            subject: "six@1.17.0".into(),
+            detail: "published 2026-10-11T00:00:00Z, 24 hours before this resolution at \
+                     2026-10-12T00:00:00Z; the minimum age is 7 days (the default)"
+                .into(),
+        };
+        let closures = [with_exceptions(&temp.0, std::slice::from_ref(&young))];
+        let allowed = judge(&temp.0, &Policy::default(), &closures);
+        assert!(allowed[0].passes());
+        let policy = deny(&[policy::YOUNG_PACKAGE]);
+        let verdicts = judge(&temp.0, &policy, &closures);
+        assert_eq!(
+            verdicts[0].denied.as_deref().unwrap(),
+            std::slice::from_ref(&young)
+        );
+        let report = Report {
+            policy,
+            sources: Vec::new(),
+            verdicts,
+            missing: Vec::new(),
+            signatures_checked: true,
+        };
+        let text = render(&temp.0, &report, false).unwrap();
+        assert!(
+            text.contains(&format!(
+                "    denied   young-package  six@1.17.0  {}\n",
+                young.detail
+            )),
+            "{text}"
+        );
+    }
+
     #[test]
     fn strict_policy_denies_every_kind() {
         let temp = python_project("strict");

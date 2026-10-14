@@ -303,7 +303,20 @@ pub(crate) struct Exchange<'a> {
     /// The tool spoke HTTP/1.0: a body of unknown length ends with the
     /// connection, and the connection closes after every response.
     pub http10: bool,
+    /// Ward's own publish-time lookup (`young-package`), not the tool's
+    /// request. Its entries are class `publish-time`, its body is never
+    /// rewritten, and what it cannot fetch is not the run's failure: an
+    /// offline miss or an unreachable registry leaves the time unknown,
+    /// which the door judges. A last-good copy is served whatever
+    /// `stale-resolution` says, and counts as no stale resolution: a
+    /// version's publish time does not change, so an old copy of it is as
+    /// good as a fresh one, and nothing the tool resolved came from it. An
+    /// address the SSRF rule refuses still fails the door.
+    pub supplemental: bool,
 }
+
+/// The ledger class of a publish-time lookup ([`Exchange::supplemental`]).
+pub const PUBLISH_TIME_CLASS: &str = "publish-time";
 
 /// [`Exchange::hop`]: `Err(why)` refuses the redirect.
 pub(crate) type HopCheck<'a> = dyn Fn(&Url, &str) -> Result<(), String> + 'a;
@@ -560,8 +573,19 @@ impl Exchange<'_> {
         }
     }
 
+    /// Serve a publish-time lookup ([`Exchange::supplemental`]) of `url`,
+    /// which the protocol built on one of the route's endpoints.
+    pub(crate) fn lookup(&self, url: &Url, out: &mut dyn Write) -> io::Result<()> {
+        self.metadata(url, RequestClass::Metadata, out)
+    }
+
     fn metadata(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
-        let mut record = Record::new(class.as_str(), self.method, self.redacted(url))
+        let class = if self.supplemental {
+            PUBLISH_TIME_CLASS
+        } else {
+            class.as_str()
+        };
+        let mut record = Record::new(class, self.method, self.redacted(url))
             .keeping(self.keys())
             .resolved();
         let forwarded: Vec<(&str, &str)> = self
@@ -710,11 +734,13 @@ impl Exchange<'_> {
         let endpoint = url.origin().ascii_serialization();
         match cached {
             Some(cached) => {
-                if let Err(refusal) = self.state.stale_allowed(&endpoint, &record.url, &why) {
-                    record.served = Some(504);
-                    return self.refuse(out, record, 504, &refusal);
+                if !self.supplemental {
+                    if let Err(refusal) = self.state.stale_allowed(&endpoint, &record.url, &why) {
+                        record.served = Some(504);
+                        return self.refuse(out, record, 504, &refusal);
+                    }
+                    self.state.stale_served(&endpoint);
                 }
-                self.state.stale_served(&endpoint);
                 record.detail = Some(why);
                 self.serve_metadata(
                     out,
@@ -739,9 +765,13 @@ impl Exchange<'_> {
     }
 
     fn offline_miss(&self, out: &mut dyn Write, mut record: Record) -> io::Result<()> {
-        self.state.offline_miss(&record.url);
+        if !self.supplemental {
+            self.state.offline_miss(&record.url);
+        }
         let reason = format!("offline, and {} is not cached", record.url);
-        record.class = "offline-miss".into();
+        if !self.supplemental {
+            record.class = "offline-miss".into();
+        }
         record.status = 504;
         record.disposition = "offline-miss";
         record.detail = Some(reason.clone());
@@ -777,7 +807,11 @@ impl Exchange<'_> {
             body: upstream,
             ..
         } = cached;
-        let body = if success && !self.head_only() {
+        if success && !self.head_only() {
+            self.state
+                .add_published(self.route, protocol.published(url, &upstream));
+        }
+        let body = if success && !self.head_only() && !self.supplemental {
             self.state.add_claims(protocol.claims(url, &upstream));
             let before = upstream.len();
             match protocol.rewrite(url, upstream, self.address) {

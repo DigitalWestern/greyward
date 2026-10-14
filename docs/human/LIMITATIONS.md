@@ -186,7 +186,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   no network of its own, through Greyward's resolution proxy: Go, Cargo, Node (npm and the pinned
   pnpm), Python (uv), Ruby (Bundler) and Elixir `update` (Mix). There is no unsandboxed fallback: a host where
   neither bubblewrap nor rootless podman can isolate the tool refuses the edit and names
-  what is missing (`ward doctor --isolation`).
+  what is missing (`ward doctor --isolation`). macOS has no such engine yet, so these
+  commands, missing-lock generation and `attest` are refused there: run them on Linux.
   Refusal rows: Poetry/PDM, setup.py, `requirements/` dirs, Elixir add/remove, Yarn, .NET.
 - **A Node `file:` or `link:` dependency outside the project is refused** by every door
   (edits, a missing lock, `attest`), naming the manifest and the path: the confined npm or

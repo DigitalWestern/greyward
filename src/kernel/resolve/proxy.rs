@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The git protocol's port: a `CONNECT` there is a `git://` fetch.
 const GIT_PORT: u16 = 9418;
@@ -92,7 +92,7 @@ impl Capture {
         let retry_after = lines
             .filter_map(|line| line.split_once(':'))
             .find(|(name, _)| name.trim().eq_ignore_ascii_case("retry-after"))
-            .and_then(|(_, value)| value.trim().parse().ok());
+            .and_then(|(_, value)| retry_after_seconds(value.trim(), SystemTime::now()));
         let reason = body
             .strip_prefix("ward: ")
             .and_then(|reason| reason.lines().next())
@@ -104,6 +104,25 @@ impl Capture {
             retry_after,
         }
     }
+}
+
+/// A `Retry-After` value as seconds to wait from `now`: delay-seconds, or
+/// an HTTP-date (RFC 9110's IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`),
+/// a date already past being no wait. Anything else is `None`.
+fn retry_after_seconds(value: &str, now: SystemTime) -> Option<u64> {
+    if let Ok(seconds) = value.parse() {
+        return Some(seconds);
+    }
+    let words: Vec<&str> = value.split(' ').collect();
+    let [_weekday, day, month, year, time, "GMT"] = words.as_slice() else {
+        return None;
+    };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS.iter().position(|name| name == month)? + 1;
+    let at = super::age::parse_rfc3339(&format!("{year}-{month:02}-{day}T{time}Z"))?;
+    Some(at.saturating_sub(super::age::unix_seconds(now)).max(0) as u64)
 }
 
 impl Write for Capture {
@@ -1315,6 +1334,30 @@ mod tests {
         get, mirror, proxy_authorization, send, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
     use crate::kernel::testutil::SocketDir;
+
+    #[test]
+    fn retry_after_reads_seconds_and_http_dates() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(784_111_777);
+        assert_eq!(retry_after_seconds("120", now), Some(120));
+        // 1994-11-06T08:49:37Z is 784111777: a minute later is 60 seconds.
+        assert_eq!(
+            retry_after_seconds("Sun, 06 Nov 1994 08:50:37 GMT", now),
+            Some(60)
+        );
+        assert_eq!(
+            retry_after_seconds("Sun, 06 Nov 1994 08:48:37 GMT", now),
+            Some(0)
+        );
+        for unread in [
+            "",
+            "soon",
+            "-5",
+            "Sun, 06 Nov 1994 08:49:37 PST",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+        ] {
+            assert_eq!(retry_after_seconds(unread, now), None, "{unread}");
+        }
+    }
 
     fn deny(kinds: &[&str]) -> Policy {
         Policy {

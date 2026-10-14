@@ -439,7 +439,17 @@ fn write_closure_inner(
         projections,
         project_lock,
     )?;
-    if let Some(bytes) = envelope_bytes(ecosystem, platform, body, existing.as_deref())? {
+    if let Some(bytes) = envelope_bytes(ecosystem, platform, &body, existing.as_deref())? {
+        project.write_file(&closure_path, &bytes)?;
+    } else if !project.sync_file_if_matches(
+        &closure_path,
+        existing.as_deref().expect("an unchanged envelope exists"),
+    )? {
+        // The snapshot matched, but its destination changed before the
+        // final publication. Replace the current file with a fresh envelope
+        // instead of treating the earlier read as a successful publication.
+        let bytes = envelope_bytes(ecosystem, platform, &body, None)?
+            .expect("without an existing envelope a write is required");
         project.write_file(&closure_path, &bytes)?;
     }
     // The root was registered under the path while the closure was being
@@ -455,16 +465,17 @@ fn write_closure_inner(
 ///
 /// A closure that already says exactly this, down to its signature, is
 /// left in place with its own `projected_at`: a sync that changed nothing
-/// makes no temporary, fsync or rename (#746). The candidate is rendered
+/// makes no temporary or rename (#746). The candidate is rendered
 /// with the existing file's timestamp and compared byte for byte; Ed25519
 /// signing is deterministic, so a signed closure compares the same way.
-/// The file on disk was fsynced by the sync that wrote it. Anything else
-/// is stamped with the current time, so a timestamp read from the file is
-/// only ever kept, never carried into a new write.
+/// The caller must recheck and sync the retained file and its parent:
+/// visibility does not prove an earlier writer finished its fsyncs.
+/// Anything else is stamped with the current time, so a timestamp read
+/// from the file is only ever kept, never carried into a new write.
 fn envelope_bytes(
     ecosystem: &str,
     platform: &str,
-    body: serde_json::Value,
+    body: &serde_json::Value,
     existing: Option<&[u8]>,
 ) -> io::Result<Option<Vec<u8>>> {
     let now = std::time::SystemTime::now()
@@ -1760,6 +1771,74 @@ mod tests {
         assert!(now["projected_at"].as_u64().unwrap() > 1);
     }
 
+    #[test]
+    fn an_unchanged_closure_is_repaired_if_changed_after_comparison() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        for change in ["overwrite", "remove", "replace-parent"] {
+            let temp = TempDir::named("closure-comparison-race");
+            let project = &temp.0;
+            let (_store_dir, store) = test_store("closure-comparison-race");
+            let id = complete_object(&store, "closure-comparison-race");
+            let body = serde_json::json!({"store_object": store.object_path(&id)});
+            let path = project.join(".greyward/closures/python.json");
+            publish_body(project, &store, &id, body.clone()).unwrap();
+            let expected: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+
+            let destination = path.clone();
+            publication::register_publication_check(
+                project,
+                "closure-comparison-race",
+                std::sync::Arc::new(move || match change {
+                    "overwrite" => fs::write(&destination, b"{}"),
+                    "remove" => fs::remove_file(&destination),
+                    _ => {
+                        let parent = destination.parent().unwrap();
+                        fs::rename(parent, parent.with_file_name("old-closures"))?;
+                        fs::create_dir(parent)
+                    }
+                }),
+            );
+            let result = publish_body(project, &store, &id, body);
+            publication::withdraw_publication_check(project, "closure-comparison-race");
+            result.unwrap();
+            let actual: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(actual["body"], expected["body"], "{change}");
+        }
+    }
+
+    #[test]
+    fn an_unchanged_closure_refuses_a_symlink_swapped_in_after_comparison() {
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        for swap_parent in [false, true] {
+            let temp = TempDir::named("closure-comparison-symlink");
+            let project = &temp.0;
+            let (_store_dir, store) = test_store("closure-comparison-symlink");
+            let id = complete_object(&store, "closure-comparison-symlink");
+            let body = serde_json::json!({"store_object": store.object_path(&id)});
+            let path = project.join(".greyward/closures/python.json");
+            publish_body(project, &store, &id, body.clone()).unwrap();
+            let destination = if swap_parent {
+                path.parent().unwrap().to_path_buf()
+            } else {
+                path.clone()
+            };
+            let moved = destination.with_file_name("moved");
+            publication::register_publication_check(
+                project,
+                "closure-comparison-symlink",
+                std::sync::Arc::new(move || {
+                    fs::rename(&destination, &moved)?;
+                    symlink(&moved, &destination)
+                }),
+            );
+            let result = publish_body(project, &store, &id, body);
+            publication::withdraw_publication_check(project, "closure-comparison-symlink");
+            assert!(result.is_err(), "swap_parent={swap_parent}");
+        }
+    }
+
     /// The comparison holds for a signed closure too, since Ed25519
     /// signatures are deterministic, and a different key is a change.
     #[test]
@@ -1784,8 +1863,26 @@ mod tests {
         let (first, _) = key("first.key");
         let (second, second_public) = key("second.key");
 
-        let signing = signing_key_for_test(Some(first));
+        // Enabling signing must replace an otherwise unchanged unsigned file.
         publish_body(project, &store, &id, body.clone()).unwrap();
+        let unsigned_inode = fs::metadata(&path).unwrap().ino();
+        let signing = signing_key_for_test(Some(first.clone()));
+        publish_body(project, &store, &id, body.clone()).unwrap();
+        assert_ne!(fs::metadata(&path).unwrap().ino(), unsigned_inode);
+
+        // Use an older signed stamp so this proves timestamp reuse even
+        // when the repeat publication is in a different second.
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        written["projected_at"] = 1.into();
+        first.sign(&mut written).unwrap();
+        ProjectRoot::open(project)
+            .unwrap()
+            .write_file(
+                Path::new(".greyward/closures/python.json"),
+                &serde_json::to_vec_pretty(&written).unwrap(),
+            )
+            .unwrap();
         let bytes = fs::read(&path).unwrap();
         let inode = fs::metadata(&path).unwrap().ino();
         publish_body(project, &store, &id, body.clone()).unwrap();

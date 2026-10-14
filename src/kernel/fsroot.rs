@@ -2898,6 +2898,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn matching_files_are_synced_without_replacement() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = TempDir::new();
+        let dir = project(&temp);
+        let root = ProjectRoot::open(&dir).unwrap();
+        let relative = Path::new(".greyward/closures/python.json");
+        root.write_file(relative, b"closure").unwrap();
+        let path = dir.join(relative);
+        let inode = fs::metadata(&path).unwrap().ino();
+        assert!(root.sync_file_if_matches(relative, b"closure").unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        let error = crate::kernel::store::with_directory_sync_failure(|| {
+            root.sync_file_if_matches(relative, b"closure")
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert!(!root.sync_file_if_matches(relative, b"changed").unwrap());
+        fs::remove_file(&path).unwrap();
+        assert!(!root.sync_file_if_matches(relative, b"closure").unwrap());
+        let outside = temp.0.join("outside");
+        fs::write(&outside, b"closure").unwrap();
+        symlink(&outside, &path).unwrap();
+        assert!(root.sync_file_if_matches(relative, b"closure").is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"closure");
+    }
+
     /// A link that already names its target is left as it is (#746): same
     /// inode, no temporary. A different target still replaces it.
     #[test]

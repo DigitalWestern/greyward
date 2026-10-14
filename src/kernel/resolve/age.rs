@@ -1190,6 +1190,34 @@ mod tests {
             assert!(kept.iter().all(|kept| kept.size != 94_828_441), "{kept:?}");
         }
 
+        /// A validly signed answer whose record is another version's is
+        /// refused like a forged one, and its head is not kept.
+        #[test]
+        fn a_lookup_answer_for_another_version_is_a_hard_failure() {
+            let harness = harness("age-go-other");
+            checkpoint(&harness, RECORD + 1, NOW - 10 * SECONDS_PER_DAY);
+            let recorded =
+                std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "tests/fixtures/proxy/registry/go/sum.golang.org/lookup/github.com/google/\
+                     uuid@v1.6.0.body",
+                ))
+                .unwrap();
+            let other = recorded.replace(" v1.6.0", " v1.5.0");
+            harness
+                .upstream
+                .set(LOOKUP, Behavior::Reply(Reply::new(200, other.as_bytes())));
+            let judged = judge_uuid(&harness, NOW);
+            let report = judged.lookups.unwrap();
+            let failure = report.facts.hard_failures.join("; ");
+            assert!(
+                failure.contains(LOOKUP) && failure.contains("names another version"),
+                "{failure}"
+            );
+            assert!(report.published.is_empty());
+            let kept = tlog::load(&harness.store, &GO_PROXY.log().unwrap()).unwrap();
+            assert!(kept.iter().all(|kept| kept.size != 64_828_441), "{kept:?}");
+        }
+
         /// A fresh store holds only the seed the binary carries: a version
         /// logged before it passes once the seed is old enough, and until
         /// then every version's age is unknown.

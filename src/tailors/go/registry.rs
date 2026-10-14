@@ -103,24 +103,18 @@ impl RegistryProtocol for GoProxy {
     /// the log, keyed by the escaped module path and version the lookup
     /// URL names (as [`Self::package_key`] spells a go.sum entry). Only an
     /// answer whose tree head verifies, whose record is in that tree, and
-    /// whose go.sum line names the same module and version gives one. The
-    /// module proxy's `.info` time is never read: it is the commit's time,
-    /// which the module's author sets.
+    /// whose record is exactly that version's go.sum lines gives one
+    /// ([`super::sumdb::verify_lookup`]); any other answer is refused
+    /// before it gets here, by [`Self::tree_size`]. The module proxy's
+    /// `.info` time is never read: it is the commit's time, which the
+    /// module's author sets.
     fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
         let Some((module, version)) = lookup_target(url) else {
             return Vec::new();
         };
-        let Ok((answer, _)) = super::sumdb::verify_lookup(body) else {
+        let Ok((answer, _)) = super::sumdb::verify_lookup(body, &module, &version) else {
             return Vec::new();
         };
-        let mut words = answer.text.lines().next().unwrap_or("").split(' ');
-        let named = (words.next(), words.next());
-        let (Some(named_module), Some(named_version)) = named else {
-            return Vec::new();
-        };
-        if self.package_key(named_module, named_version) != (module.clone(), version.clone()) {
-            return Vec::new();
-        }
         match i64::try_from(answer.record) {
             Ok(record) => vec![(module, version, record)],
             Err(_) => Vec::new(),
@@ -156,7 +150,8 @@ impl RegistryProtocol for GoProxy {
     }
 
     /// A `latest` answer is a signed tree head; a lookup answer ends with
-    /// one. Tiles carry none.
+    /// one, and must also be the record of the version the URL asks for.
+    /// Tiles carry none.
     fn tree_size(&self, url: &Url, body: &[u8]) -> Option<Result<u64, String>> {
         if url.host_str() != Some(SUMDB_HOST) {
             return None;
@@ -164,8 +159,8 @@ impl RegistryProtocol for GoProxy {
         if url.path() == "/latest" {
             return Some(super::sumdb::verify_tree(body));
         }
-        lookup_target(url)?;
-        Some(super::sumdb::verify_lookup(body).map(|(_, size)| size))
+        let (module, version) = lookup_target(url)?;
+        Some(super::sumdb::verify_lookup(body, &module, &version).map(|(_, size)| size))
     }
 }
 
@@ -393,9 +388,11 @@ mod tests {
             )]
         );
         assert_eq!(GO_PROXY.tree_size(&lookup, body), Some(Ok(64_828_441)));
-        // The answer must name the version the URL asked for.
+        // The answer must name the version the URL asked for, and is
+        // refused outright when it does not.
         let other = url(SUMDB_HOST, "/lookup/github.com/google/uuid@v1.5.0");
         assert!(GO_PROXY.published(&other, body).is_empty());
+        assert!(matches!(GO_PROXY.tree_size(&other, body), Some(Err(_))));
         // A forged head gives no record, and its tree size is refused.
         let forged = String::from_utf8_lossy(body).replace("64828441", "94828441");
         assert!(GO_PROXY.published(&lookup, forged.as_bytes()).is_empty());

@@ -38,6 +38,7 @@ pub mod commands;
 pub mod boundary {
     // src/main.rs
     pub use crate::kernel::error::class_of;
+    pub use crate::kernel::resolve::transaction::record_startup_umask;
     pub use crate::kernel::supervise::stop_signal;
     pub use crate::kernel::ui::{error_with_fix, failure_json, init};
     // tests/npm_scripts.rs

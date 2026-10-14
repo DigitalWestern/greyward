@@ -318,6 +318,36 @@ fn a_bare_ward_whose_sync_fails_prints_no_footer() {
 }
 
 #[test]
+fn phase_timings_are_verbose_stderr_only_and_precede_the_error() {
+    let home = TempDir::boundary("cli-timings-home");
+    let project = TempDir::boundary("cli-timings-project");
+    std::fs::write(project.0.join("requirements.txt"), "six==1.17.0\n").unwrap();
+    let run = |args: &[&str]| {
+        ward_env(
+            &project.0,
+            &home.0,
+            args,
+            &[("GREYWARD_SIGNING_KEY", "/nonexistent/signing.key")],
+        )
+    };
+    let plain = run(&["sync"]);
+    let failure = text(&plain.stderr);
+    assert!(!failure.contains("phase timings"), "{failure}");
+    for args in [&["sync", "--verbose"][..], &["--verbose"]] {
+        let verbose = run(args);
+        let stderr = text(&verbose.stderr);
+        assert_eq!(verbose.status.code(), plain.status.code(), "{stderr}");
+        assert_eq!(verbose.stdout, plain.stdout);
+        assert_eq!(stderr.matches("phase timings").count(), 1, "{stderr}");
+        assert!(stderr.ends_with(&failure), "{stderr}");
+    }
+    let quiet = run(&["sync", "--quiet", "--verbose"]);
+    assert_eq!(quiet.status.code(), plain.status.code());
+    assert_eq!(quiet.stdout, plain.stdout);
+    assert_eq!(quiet.stderr, plain.stderr);
+}
+
+#[test]
 fn help_goes_to_stdout_and_exits_0() {
     let home = TempDir::boundary("cli-help");
     for args in [&["--help"][..], &["-h"], &["help"]] {

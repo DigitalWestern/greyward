@@ -309,6 +309,7 @@ impl Tailor for Node {
         // The plan and the closure's resolution basis come from one read of
         // the lock: a lock swapped in while this sync realizes is not what
         // the closure was planned from, and the join refuses it.
+        let plan_phase = ui::phase("plan");
         let Some(inputs::Planned { plan, basis }) =
             inputs::load_npm_plan_with_basis(platform, project, selected)?
         else {
@@ -324,6 +325,7 @@ impl Tailor for Node {
             None => node::GreywardConfig::default(),
         };
         record_skipped_project_scripts(project, &plan, package_json.as_deref(), attribution)?;
+        drop(plan_phase);
         let runtime = node::realize_runtime(store, activity, platform, selected)?;
         // node-gyp runs on the helper Python selection when the project has
         // one; a Node-only project gets the shipped default.
@@ -334,6 +336,7 @@ impl Tailor for Node {
         };
         // A `file:` directory package is packed from the project into the
         // cache, where the environment extracts it like a registry tarball.
+        let realize_phase = ui::phase("realize env");
         node::local_package::stage(store, activity, project, &plan.packages)?;
         let env = node::realize_node_env_for(
             store,
@@ -344,6 +347,8 @@ impl Tailor for Node {
             selected,
             &gyp_python,
         )?;
+        drop(realize_phase);
+        let _t = ui::phase("project + closure");
         let inputs = inputs::input_records(project, &["package.json", &plan.lock_source])?;
         node::project_node_env_recorded(
             activity,

@@ -421,6 +421,7 @@ pub fn edit(
                 text: spec.text,
             })
             .collect();
+        let _t = ui::phase(&format!("edit {}", eco.name()));
         let outcome = eco.tailor.edit_manifest(
             ctx,
             &ManifestEdit {
@@ -522,7 +523,10 @@ pub fn run(ctx: &Context, request: Request, no_sync: bool) -> io::Result<()> {
         crate::kernel::resolve::transaction::recover_project(&ctx.store, &ctx.activity, &cwd)?;
     }
     let mut edit_attribution = edit_attribution()?;
-    let outcome = edit(ctx, &cwd, request, &mut edit_attribution)?;
+    let outcome = {
+        let _t = ui::phase("dependency edit");
+        edit(ctx, &cwd, request, &mut edit_attribution)?
+    };
     for line in &outcome.lines {
         ui::note(line);
     }

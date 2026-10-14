@@ -109,7 +109,20 @@ fn main() {
             exit(failure_code(&error));
         }
     };
-    let code = match commands::dispatch(command, options.sync) {
+    // A sync and a dependency edit end with where their time went, under
+    // `--verbose` only, and before any error, so the error stays last.
+    let timed = matches!(
+        command,
+        cli::Command::Sync { .. }
+            | cli::Command::Add { .. }
+            | cli::Command::Remove { .. }
+            | cli::Command::Update { .. }
+    );
+    let result = commands::dispatch(command, options.sync);
+    if timed {
+        ui::print_phase_table();
+    }
+    let code = match result {
         Ok(code) => code,
         Err(error) => {
             report_failure(&error);

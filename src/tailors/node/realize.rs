@@ -862,6 +862,7 @@ pub(super) fn realize_node_env_with_node_object(
     let mut classification_tarballs: Vec<FetchedTarball<'_>> = Vec::new();
     // One lease for the whole realization: the archive children and the
     // staged environment borrow it.
+    let classify = crate::kernel::ui::phase("classify native");
     let (native_libs_id, classified_from) = resolve_native_libs_id(
         store,
         activity,
@@ -869,6 +870,7 @@ pub(super) fn realize_node_env_with_node_object(
         plan,
         &mut classification_tarballs,
     )?;
+    drop(classify);
     let identity = node_env_identity(
         store,
         platform,
@@ -893,7 +895,9 @@ pub(super) fn realize_node_env_with_node_object(
     // function for exactly that reason.
     drop(classification_tarballs);
     let (leases, mut tarballs, mut git_objects, matched) =
-        fetch_plan_sources(store, activity, plan)?;
+        crate::kernel::ui::timed("artifact fetch", || {
+            fetch_plan_sources(store, activity, plan)
+        })?;
     confirm_classified_sources(&classified_from, &tarballs)?;
 
     let native_libs = if native_libs_id.is_some() {
@@ -904,6 +908,7 @@ pub(super) fn realize_node_env_with_node_object(
         None
     };
 
+    let extract = crate::kernel::ui::phase("extract");
     let staged = stage_env_skeleton(store, activity, &workspaces)?;
     extract_tarball_packages(store, activity, platform, &staged, &mut tarballs)?;
     place_git_packages(activity, platform, &staged, &mut git_objects)?;
@@ -922,6 +927,8 @@ pub(super) fn realize_node_env_with_node_object(
     // Lifecycle setup may fetch declared artifacts and a pinned Python for
     // node-gyp; the package tarballs have already been fully extracted.
     drop(tarballs);
+    drop(extract);
+    let scripts = crate::kernel::ui::phase("install scripts");
     let fallback = run_install_scripts(
         store,
         activity,
@@ -938,7 +945,8 @@ pub(super) fn realize_node_env_with_node_object(
     // Written after the scripts ran, which cannot write outside their own
     // package directory in any case.
     super::archives::write_matched_archives(&staged, &matched)?;
-
+    drop(scripts);
+    let _t = crate::kernel::ui::phase("commit object");
     let object = commit_env_object(
         store,
         activity,

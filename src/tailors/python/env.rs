@@ -387,17 +387,7 @@ pub(crate) fn realize_env_at_depth(
         host_inputs,
     } = realize_artifacts(door, &packages, selected, rust, plan, sdist_depth)?;
     // Keep verified cache leases alive until every wheel has been extracted.
-    let mut _cache_leases = Vec::new();
-    // Sdist realization may recursively fetch toolchains. Re-verify all
-    // wheel inputs only after that work, then hold their leases through wheel
-    // extraction and publication.
-    for (p, path) in &mut artifacts {
-        if p.kind == ArtifactKind::Wheel {
-            let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
-            *path = lease.to_path_buf();
-            _cache_leases.push(lease);
-        }
-    }
+    let _cache_leases = hold_wheels(store, activity, &mut artifacts)?;
 
     let minor = plan
         .python_version
@@ -436,19 +426,7 @@ pub(crate) fn realize_env_at_depth(
     let final_python = store
         .object_path(&commit_identity.object_id())
         .join("bin/python");
-    let mut installed = BTreeMap::new();
-    for (package, wheel_file) in &artifacts {
-        // The wheel's own metadata must name the locked package (#688).
-        wheel::check_wheel_package(wheel_file, package)?;
-        wheel::install_wheel(
-            wheel_file,
-            &site,
-            &bin,
-            &minor,
-            &final_python,
-            &mut installed,
-        )?;
-    }
+    install_wheels(&artifacts, &site, &bin, &minor, &final_python)?;
 
     let candidate = crate::kernel::policy::object_exceptions();
     let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -475,6 +453,7 @@ pub(crate) fn realize_env_at_depth(
             }
         }
     }
+    let _t = crate::kernel::ui::phase("commit object");
     let (object, applied) = store.commit_with_activity_and_deps(
         activity,
         &commit_identity,
@@ -491,6 +470,45 @@ pub(crate) fn realize_env_at_depth(
         }
     }
     Ok(object)
+}
+
+/// Sdist realization may recursively fetch toolchains. Re-verify all wheel
+/// inputs only after that work, pointing each at its verified cache file,
+/// and return their leases for the caller to hold through wheel extraction
+/// and publication.
+fn hold_wheels(
+    store: &crate::kernel::store::Store,
+    activity: &StoreActivity,
+    artifacts: &mut [(&crate::kernel::types::LockedPackage, PathBuf)],
+) -> io::Result<Vec<crate::kernel::fetch::CacheLease>> {
+    let _t = crate::kernel::ui::phase("wheel re-verify");
+    let mut leases = Vec::new();
+    for (p, path) in artifacts {
+        if p.kind == ArtifactKind::Wheel {
+            let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+            *path = lease.to_path_buf();
+            leases.push(lease);
+        }
+    }
+    Ok(leases)
+}
+
+/// Install every wheel into the staged environment, in `artifacts` order.
+fn install_wheels(
+    artifacts: &[(&crate::kernel::types::LockedPackage, PathBuf)],
+    site: &Path,
+    bin: &Path,
+    minor: &str,
+    final_python: &Path,
+) -> io::Result<()> {
+    let _t = crate::kernel::ui::phase("install wheels");
+    let mut installed = BTreeMap::new();
+    for (package, wheel_file) in artifacts {
+        // The wheel's own metadata must name the locked package (#688).
+        wheel::check_wheel_package(wheel_file, package)?;
+        wheel::install_wheel(wheel_file, site, bin, minor, final_python, &mut installed)?;
+    }
+    Ok(())
 }
 
 /// Every package of an environment as a wheel file, in `packages` order:
@@ -512,6 +530,7 @@ fn realize_artifacts<'p>(
     plan: &Plan,
     sdist_depth: usize,
 ) -> io::Result<Artifacts<'p>> {
+    let _t = crate::kernel::ui::phase("artifact fetch");
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
     let mut fell_back = Vec::new();

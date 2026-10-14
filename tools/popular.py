@@ -205,7 +205,7 @@ SOURCES = {
     ),
     "dotnet": (
         "dotnet",
-        "NuGet search API, packages sorted by total downloads",
+        "NuGet search API, the first 3,000 relevance results re-sorted by total downloads",
         dotnet_names,
         normalize_lower,
     ),

@@ -118,7 +118,7 @@ pub fn macos_gap() -> Missing {
     Missing {
         capability: "macOS isolation",
         reason: "ward has no isolation engine for macOS yet".to_string(),
-        fix: "run the command on a Linux machine or in Linux CI and commit the lock it writes"
+        fix: "run commands that need a resolution tool on a Linux machine or in Linux CI"
             .to_string(),
     }
 }
@@ -242,9 +242,10 @@ fn choose_tier_on(
     })
 }
 
-/// How a macOS refusal ends: what cannot run there, said plainly.
-const MACOS_UNSUPPORTED: &str = ". Commands that change a lock (add, remove, update, a missing \
-     lock, attest) are not supported on macOS yet";
+/// How a macOS refusal ends: what cannot run there, said plainly. Not a
+/// list of commands: a sync that has to plan reaches the door too.
+const MACOS_UNSUPPORTED: &str = ". ward cannot run resolution tools on macOS yet, so any command \
+     that needs one is refused here";
 
 // ---------------------------------------------------------------------------
 // Forced program settings
@@ -631,13 +632,6 @@ pub fn signing_key_paths() -> Vec<PathBuf> {
 pub use super::keyscrub::{scrub_signing_key, signing_key_secrets, Scrubber};
 
 pub type FileId = (u64, u64);
-
-/// The [`FileId`] of a `stat`. `st_dev` is an `i32` on macOS and a `u64` on
-/// Linux; the cast lives here so no call site has to remember it.
-#[allow(clippy::unnecessary_cast)]
-pub fn file_id(stat: &libc::stat) -> FileId {
-    (stat.st_dev as u64, stat.st_ino as u64)
-}
 
 /// The identities of the signing-key files that exist ([`signing_key_paths`],
 /// symlinks followed): what "is the signing key" is decided by, so a hard
@@ -1723,7 +1717,7 @@ mod tests {
         for needle in [
             "npm runs scripts",
             "macOS isolation: ward has no isolation engine for macOS yet",
-            "not supported on macOS yet",
+            "cannot run resolution tools on macOS yet",
         ] {
             assert!(message.contains(needle), "{needle}: {message}");
         }

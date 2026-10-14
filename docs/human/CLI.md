@@ -991,7 +991,7 @@ can run one here. The podman row needs the store, so it is `warn` and
 `not checked` when the store is busy or cannot be opened.
 On macOS it prints the Seatbelt build sandbox as its own row and an
 `isolation` row that fails: no engine there can isolate a resolution tool
-yet, so commands that change a lock are not supported on macOS.
+yet, so any command that needs one is refused on macOS.
 
 The fallback requires local rootless Podman with `--rootfs <dir>:O`,
 `--preserve-fds`, cgroup v2, subordinate user/group IDs, and a runtime

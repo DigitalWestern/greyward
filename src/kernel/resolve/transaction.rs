@@ -963,7 +963,8 @@ static STARTUP_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 /// Read the umask by setting it and setting it back, for
 /// [`new_file_mode`] on a host with no `/proc`. Setting it races any other
 /// thread that creates a file, so `main` calls this first, while the
-/// process has one thread.
+/// process has one thread. Any other embedder must do the same, once, or
+/// get 0644 where there is no `/proc`.
 pub fn record_startup_umask() {
     // SAFETY: umask has no preconditions. Restored on the next line.
     let umask = unsafe { libc::umask(0o022) };

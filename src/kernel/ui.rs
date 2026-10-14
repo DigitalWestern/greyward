@@ -734,8 +734,14 @@ pub fn print_phase_table() {
         return;
     }
     let wall = WALL_START.get().map(Instant::elapsed);
-    for line in render_phases(&rows, wall).lines() {
-        trace(line);
+    write_phase_table(&rows, wall, &mut io::stderr().lock());
+}
+
+fn write_phase_table(rows: &[PhaseRow], wall: Option<Duration>, output: &mut impl Write) {
+    // A timing report must not turn a successful command into a failure
+    // when stderr is closed or full.
+    for line in render_phases(rows, wall).lines() {
+        let _ = writeln!(output, "ward: {} {line}", paint("[verbose]", DIM));
     }
 }
 
@@ -1155,6 +1161,55 @@ mod tests {
         assert!(current_phase().phase("artifact fetch").open.is_none());
         drop(guard);
         assert!(PHASES.rows().is_empty());
+    }
+
+    #[test]
+    fn phases_restore_the_parent_on_error_and_panic() {
+        let log = PhaseLog::new();
+        let _parent = log.start("sync", None);
+        let fail = || -> io::Result<()> {
+            let _child = log.start("error", None);
+            Err(io::Error::other("failed"))?;
+            Ok(())
+        };
+        assert!(fail().is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _child = log.start("panic", None);
+            panic!("failed");
+        })
+        .is_err());
+        assert_eq!(
+            OPEN_PHASE.with(|open| open.borrow().clone()),
+            owned(&["sync"])
+        );
+        assert_eq!(log.rows()[1].count, 1);
+        assert_eq!(log.rows()[2].count, 1);
+    }
+
+    #[test]
+    fn phases_recover_a_poisoned_table_lock() {
+        let log = PhaseLog::new();
+        assert!(std::panic::catch_unwind(|| {
+            let _lock = log.lock();
+            panic!("failed");
+        })
+        .is_err());
+        drop(log.start("sync", None));
+        assert_eq!(paths(&log), vec![(owned(&["sync"]), 1)]);
+    }
+
+    #[test]
+    fn a_closed_timing_output_does_not_panic() {
+        let rows = [row(&["preflight"], 12, 1)];
+        let mut closed = File::open("/dev/null").unwrap();
+        write_phase_table(&rows, None, &mut closed);
+        let mut output = Vec::new();
+        write_phase_table(&rows, None, &mut output);
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.matches("phase timings").count(), 1);
+        assert!(text
+            .lines()
+            .all(|line| line.starts_with("ward: [verbose] ")));
     }
 
     /// Top-level rows in start order, each followed by its nested rows,

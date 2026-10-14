@@ -996,10 +996,84 @@ pub fn select_file<'a>(
 }
 
 fn fetch_candidates(name: &str, version: &str) -> io::Result<Vec<FileCandidate>> {
+    let policy = crate::kernel::policy::effective();
+    if let Some(registry) = default_registry(&policy)? {
+        return simple_candidates(&policy.registries, registry, name);
+    }
     let url = format!("https://pypi.org/pypi/{name}/{version}/json");
     let body = crate::kernel::fetch::fetch_text(&url)
         .map_err(|e| err(format!("PyPI lookup failed for {name}=={version}: {e}")))?;
     candidates_from_json(name, &body)
+}
+
+/// The `Accept` of a simple API read: PEP 691 JSON, else the PEP 503 HTML
+/// page.
+pub(crate) const SIMPLE_ACCEPT: &str = "application/vnd.pypi.simple.v1+json, text/html;q=0.1";
+
+/// The configured registry python packages are looked up on: the default
+/// registry of the effective `[sources]` list, `None` when that is PyPI.
+/// An empty list is an error, never a fallback to PyPI.
+pub(crate) fn default_registry(
+    policy: &crate::kernel::policy::Policy,
+) -> io::Result<Option<&crate::kernel::registries::config::Registry>> {
+    let list = policy
+        .registries
+        .ecosystem(crate::kernel::registries::config::Ecosystem::Python);
+    list.require_nonempty()
+        .map_err(|error| crate::kernel::error::refused(io::ErrorKind::PermissionDenied, error))?;
+    Ok(list.default_registry())
+}
+
+/// A project's simple API page on `registry`, read whole, or `None` when
+/// the registry does not have the project.
+pub(crate) fn simple_page(
+    sources: &crate::kernel::registries::effective::Sources,
+    registry: &crate::kernel::registries::config::Registry,
+    name: &str,
+) -> io::Result<Option<Vec<(String, String, String)>>> {
+    let url = format!("{}{}/", registry.url, normalize_name(name));
+    let Some((body, served)) = crate::kernel::fetch::registry::fetch_page(
+        sources,
+        registry,
+        &url,
+        SIMPLE_ACCEPT,
+        64 << 20,
+    )?
+    else {
+        return Ok(None);
+    };
+    let page = url::Url::parse(&served).map_err(|e| err(format!("{served}: {e}")))?;
+    Ok(Some(super::registry::simple_page_files(&page, &body)))
+}
+
+/// The files a configured registry's simple API lists for `name`: every
+/// release's, since the pins decide which one is meant.
+fn simple_candidates(
+    sources: &crate::kernel::registries::effective::Sources,
+    registry: &crate::kernel::registries::config::Registry,
+    name: &str,
+) -> io::Result<Vec<FileCandidate>> {
+    let files = simple_page(sources, registry, name)
+        .map_err(|e| {
+            err(format!(
+                "registry {} lookup failed for {name}: {e}",
+                registry.name
+            ))
+        })?
+        .ok_or_else(|| {
+            err(format!(
+                "registry {} has no project {name} ({})",
+                registry.name, registry.url
+            ))
+        })?;
+    Ok(files
+        .into_iter()
+        .map(|(filename, url, sha256)| FileCandidate {
+            filename,
+            url,
+            sha256,
+        })
+        .collect())
 }
 
 /// The files PyPI's JSON API lists for one release. An entry without a

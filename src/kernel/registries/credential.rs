@@ -20,6 +20,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct Secret(String);
 
 impl Secret {
+    /// Tests only: a value given directly.
+    #[cfg(test)]
+    pub(crate) fn fixed(value: &str) -> Secret {
+        Secret(value.to_string())
+    }
+
     pub fn expose(&self) -> &str {
         &self.0
     }

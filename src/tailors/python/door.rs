@@ -413,7 +413,19 @@ fn confined<'r>(
         .iter()
         .map(|glob| PathGlob::new(glob))
         .collect::<io::Result<_>>()?;
-    let urls = indexes.urls;
+    // Each listed index with its route, in list order: `urls` and `routes`
+    // are pushed together, one per source.
+    let urls: Vec<(String, String)> = indexes
+        .urls
+        .iter()
+        .cloned()
+        .zip(
+            indexes
+                .routes
+                .iter()
+                .map(|route| route.protocol.route_id().to_string()),
+        )
+        .collect();
     confined.routes = indexes.routes;
     confined.permitted = indexes.permitted;
     confined.intercept = Intercept::Tls;

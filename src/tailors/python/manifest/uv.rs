@@ -164,34 +164,38 @@ pub(super) struct UvDependency {
     pub(super) extras: BTreeSet<String>,
 }
 
-/// `(name, version, file names)` of every uv.lock package locked from the
-/// public PyPI index (no `source`, or a registry source on PyPI's hosts)
-/// or from one of `indexes`, the listed registries' index URLs: what the
-/// `young-package` check judges. Local, git, URL and other-index packages
-/// are left out.
+/// `(name, version, file names, route)` of every uv.lock package locked
+/// from the public PyPI index (no `source`, or a registry source on PyPI's
+/// hosts) or from one of `indexes`, the listed registries' `(index URL,
+/// route)`: what the `young-package` check judges, each by the route of
+/// the index that served it. Local, git, URL and other-index packages are
+/// left out.
 pub fn uv_pypi_packages(
     text: &str,
-    indexes: &[String],
-) -> io::Result<Vec<(String, String, Vec<String>)>> {
+    indexes: &[(String, String)],
+) -> io::Result<Vec<(String, String, Vec<String>, String)>> {
     Ok(parse_uv_lock(text)?
         .into_iter()
-        .filter(|package| match uv_source(&package.source) {
-            Some(UvSource::Registry(url)) => {
-                package.source == "registry"
-                    || (!url.is_empty() && is_public_pypi_url(&url))
-                    || indexes
+        .filter_map(|package| {
+            let Some(UvSource::Registry(url)) = uv_source(&package.source) else {
+                return None;
+            };
+            let route =
+                if package.source == "registry" || (!url.is_empty() && is_public_pypi_url(&url)) {
+                    crate::tailors::python::registry::ROUTE_ID.to_string()
+                } else {
+                    indexes
                         .iter()
-                        .any(|index| crate::kernel::registries::lock::same_url(index, &url))
-            }
-            _ => false,
-        })
-        .map(|package| {
+                        .find(|(index, _)| crate::kernel::registries::lock::same_url(index, &url))?
+                        .1
+                        .clone()
+                };
             let files = package
                 .files
                 .into_iter()
                 .map(|file| file.filename)
                 .collect();
-            (package.name, package.version, files)
+            Some((package.name, package.version, files, route))
         })
         .collect())
 }

@@ -1093,6 +1093,25 @@ mod tests {
     use super::testing::TEST_PROTOCOL;
     use super::*;
 
+    /// The wrapper of compiled-in protocols names every method the trait
+    /// has: a method added to the trait with a default body, and not
+    /// forwarded, would leave every compiled-in route on the default.
+    #[test]
+    fn the_compiled_in_wrapper_names_every_trait_method() {
+        let source = include_str!("routes.rs");
+        let methods = |header: &str| -> BTreeSet<String> {
+            let start = source.find(header).expect(header) + header.len();
+            let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+            body.lines()
+                .filter_map(|line| line.strip_prefix("    fn "))
+                .map(|rest| rest.split(['(', '<']).next().unwrap().to_string())
+                .collect()
+        };
+        let trait_methods = methods("pub trait RegistryProtocol: Send + Sync {");
+        assert!(trait_methods.contains("tree_size"), "{trait_methods:?}");
+        assert_eq!(methods("impl RegistryProtocol for Fixed {"), trait_methods);
+    }
+
     /// A compiled-in protocol answers through its route exactly as it
     /// answers itself: every method the trait has is passed through, so a
     /// method added later and not forwarded fails here, not silently.

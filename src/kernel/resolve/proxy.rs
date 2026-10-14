@@ -107,22 +107,54 @@ impl Capture {
 }
 
 /// A `Retry-After` value as seconds to wait from `now`: delay-seconds, or
-/// an HTTP-date (RFC 9110's IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`),
-/// a date already past being no wait. Anything else is `None`.
+/// an HTTP-date in any of the three forms RFC 9110 has recipients accept
+/// (IMF-fixdate `Sun, 06 Nov 1994 08:49:37 GMT`, RFC 850
+/// `Sunday, 06-Nov-94 08:49:37 GMT`, asctime `Sun Nov  6 08:49:37 1994`), a
+/// date already past being no wait. Anything else is `None`.
 fn retry_after_seconds(value: &str, now: SystemTime) -> Option<u64> {
     if let Ok(seconds) = value.parse() {
         return Some(seconds);
     }
-    let words: Vec<&str> = value.split(' ').collect();
-    let [_weekday, day, month, year, time, "GMT"] = words.as_slice() else {
-        return None;
-    };
+    let now = super::age::unix_seconds(now);
+    let at = http_date(value, now)?;
+    Some(at.saturating_sub(now).max(0) as u64)
+}
+
+/// An HTTP-date (RFC 9110 section 5.6.7) as unix seconds.
+fn http_date(value: &str, now: i64) -> Option<i64> {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    let month = MONTHS.iter().position(|name| name == month)? + 1;
-    let at = super::age::parse_rfc3339(&format!("{year}-{month:02}-{day}T{time}Z"))?;
-    Some(at.saturating_sub(super::age::unix_seconds(now)).max(0) as u64)
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let (day, month, year, time) = match words.as_slice() {
+        [weekday, day, month, year, time, "GMT"] if weekday.ends_with(',') => {
+            (*day, *month, year.parse::<i64>().ok()?, *time)
+        }
+        [weekday, date, time, "GMT"] if weekday.ends_with(',') => {
+            let parts: Vec<&str> = date.split('-').collect();
+            let [day, month, year] = parts.as_slice() else {
+                return None;
+            };
+            if year.len() != 2 {
+                return None;
+            }
+            // A two-digit year is the latest one with those digits that is
+            // not more than 50 years ahead.
+            let this_year = 1970 + now.div_euclid(31_556_952);
+            let mut full = this_year - this_year.rem_euclid(100) + year.parse::<i64>().ok()?;
+            if full > this_year + 50 {
+                full -= 100;
+            }
+            (*day, *month, full, *time)
+        }
+        [_weekday, month, day, time, year] => (*day, *month, year.parse::<i64>().ok()?, *time),
+        _ => return None,
+    };
+    let month = MONTHS.iter().position(|name| *name == month)? + 1;
+    if day.is_empty() || day.len() > 2 || !(0..=9999).contains(&year) {
+        return None;
+    }
+    super::age::parse_rfc3339(&format!("{year:04}-{month:02}-{day:0>2}T{time}Z"))
 }
 
 impl Write for Capture {
@@ -1347,6 +1379,29 @@ mod tests {
         assert_eq!(
             retry_after_seconds("Sun, 06 Nov 1994 08:48:37 GMT", now),
             Some(0)
+        );
+        // The same instant in the two obsolete forms.
+        assert_eq!(
+            retry_after_seconds("Sunday, 06-Nov-94 08:50:37 GMT", now),
+            Some(60)
+        );
+        assert_eq!(
+            retry_after_seconds("Sun Nov  6 08:50:37 1994", now),
+            Some(60)
+        );
+        // 2026: "26" is this century, "90" the last one.
+        let later = SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_969_946);
+        assert_eq!(
+            http_date("Sunday, 06-Nov-26 08:49:37 GMT", 1_791_969_946),
+            Some(1_793_954_977)
+        );
+        assert_eq!(
+            retry_after_seconds("Tuesday, 06-Nov-90 08:49:37 GMT", later),
+            Some(0)
+        );
+        assert_eq!(
+            http_date("Tuesday, 06-Nov-90 08:49:37 GMT", 1_791_969_946),
+            Some(657_881_377)
         );
         for unread in [
             "",

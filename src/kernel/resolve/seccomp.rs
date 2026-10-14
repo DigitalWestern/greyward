@@ -42,6 +42,7 @@
 //! The program is plain classic BPF built here, so its logic is data a unit
 //! test can run for both supported architectures on any host.
 
+#[cfg(target_os = "linux")]
 use std::io;
 
 /// `AUDIT_ARCH_X86_64` from `linux/audit.h`: `EM_X86_64 | 64BIT | LE`.

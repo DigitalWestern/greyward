@@ -1067,13 +1067,8 @@ fn platform_checks(platform: Platform, project: Option<&ProjectRoot>, checks: &m
 pub fn isolation_doctor(store: DoctorStore) -> io::Result<Vec<Check>> {
     let mut checks = Vec::new();
     if Platform::host().ok() != Some(Platform::X86_64UnknownLinuxGnu) {
-        // macOS has one engine, Seatbelt: the ordinary sandbox row.
         let platform = Platform::host()?;
-        checks.push(match sandbox::probe(platform) {
-            Ok(detail) => check("sandbox", Level::Ok, detail),
-            Err(error) => check("sandbox", Level::Fail, error.to_string()),
-        });
-        return Ok(checks);
+        return Ok(macos_isolation_checks(sandbox::probe(platform)));
     }
     let interrupted = |error: &io::Error| crate::kernel::supervise::stop_signal(error).is_some();
     let activity = match store {
@@ -1138,6 +1133,33 @@ pub fn isolation_doctor(store: DoctorStore) -> io::Result<Vec<Check>> {
         "greyward-isolate is not part of this build of ward; bubblewrap or podman isolates instead",
     ));
     Ok(checks)
+}
+
+/// `ward doctor --isolation` on macOS: the Seatbelt build sandbox is its
+/// own row, and the isolation verdict fails, since no engine there can
+/// isolate a resolution tool yet. A green row must mean the named thing
+/// works (#730).
+fn macos_isolation_checks(sandbox: io::Result<String>) -> Vec<Check> {
+    let gap = crate::kernel::resolve::confine::macos_gap();
+    vec![
+        match sandbox {
+            Ok(detail) => check(
+                "sandbox",
+                Level::Ok,
+                format!("{detail}; the build sandbox, which isolates no resolution tool"),
+            ),
+            Err(error) => check("sandbox", Level::Fail, error.to_string()),
+        },
+        check(
+            "isolation",
+            Level::Fail,
+            format!(
+                "{}, so any command that needs a resolution tool (npm, cargo, uv, Bundler and \
+                 the rest, to change or write a lock) is refused here; fix: {}",
+                gap.reason, gap.fix
+            ),
+        ),
+    ]
 }
 
 /// Which policy sources are in force, in the order they are consulted.
@@ -1355,6 +1377,31 @@ pub(crate) fn with_toolchain_lock(dir: &Path, ecosystem: &str, mut body: Value) 
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    /// On macOS `doctor --isolation` reports the build sandbox as its own
+    /// row and fails the isolation verdict, in text and JSON, rather than
+    /// a green row while every resolver refuses (#730).
+    #[test]
+    fn macos_isolation_doctor_fails_the_isolation_verdict() {
+        let checks = macos_isolation_checks(Ok(
+            "sandbox-exec (Seatbelt) at /usr/bin/sandbox-exec".to_string()
+        ));
+        assert_eq!(checks[0].name, "sandbox");
+        assert_eq!(checks[0].level, Level::Ok);
+        assert_eq!(checks[1].name, "isolation");
+        assert_eq!(checks[1].level, Level::Fail);
+        let text = render_doctor(&checks, false).unwrap();
+        assert!(text.contains("no isolation engine for macOS yet"), "{text}");
+        assert!(text.contains("is refused here"), "{text}");
+        for needle in ["bubblewrap", "podman", "subuid", "cgroup"] {
+            assert!(!text.contains(needle), "{needle}: {text}");
+        }
+        let json: Value = serde_json::from_str(&render_doctor(&checks, true).unwrap()).unwrap();
+        assert_eq!(json["ok"], false, "{json}");
+        let missing = macos_isolation_checks(Err(io::Error::other("no sandbox-exec")));
+        assert_eq!(missing[0].level, Level::Fail);
+        assert_eq!(missing[1].level, Level::Fail);
+    }
 
     /// Doctor's realized-toolchain row reads `Tailor::toolchain_kinds`; each
     /// is a kind its own tailor or a kernel provider registers (#191), and

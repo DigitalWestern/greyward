@@ -213,8 +213,8 @@ provider.
 (`src/policy.rs`), which tightens through ancestors and never loosens silently:
 
 - The trusted-publisher set is **configuration**, expressed through shared
-  project/home/protected-machine policy loading. **WP3 PR 1 owns the protected
-  loading prerequisite**; WP5 later extends it. It is not a constant in
+  project/home/protected-machine policy loading. **The foundation PR owns the
+  protected loading prerequisite** (see "Order" below); WP5 later extends it. It is not a constant in
   `src/*.rs`. The shipped upstream publishers are the *default
   contents* of that list, not a privileged category.
 - **Adding a publisher is an explicit, recorded configuration change at an
@@ -226,8 +226,8 @@ provider.
   verification exceptions.
 - **A project can never widen the set beyond what home or machine policy
   allows.** A company can pin the set to its own internal publisher and a
-  checked-out repo cannot add to it. WP3 PR 1 owns unconditional protected
-  machine-policy loading; environment overrides cannot suppress it.
+  checked-out repo cannot add to it. The foundation PR owns unconditional
+  protected machine-policy loading; environment overrides cannot suppress it.
 - **An invalid signature is a hard failure under every configuration.** Making
   the publisher list configurable must not create a spelling of "trust
   anything"; an empty or unparseable list fails closed.
@@ -268,10 +268,11 @@ TOFU by construction with a `LIMITATIONS.md` row. **No provider is described
 as "signed" anywhere in the repo until this PR lands its evidence.** Done
 2026-10-14: "PR 0 evidence" below.
 
-**PR 1 — shared trust foundation and one authenticated provider.** Start with
-unconditional protected policy loading, typed endpoint/trust/credential
-configuration, effective-set intersection, and a fixture internal publisher.
-Then implement catalog rows, signed-payload verification, refresh, snapshot
+**PR 1 — shared trust foundation and one authenticated provider.** Build on
+the foundation PR (see "Order" below): unconditional protected policy
+loading, typed endpoint/trust/credential configuration, effective-set
+intersection, and a fixture internal publisher. Add what it left out, then
+implement catalog rows, signed-payload verification, refresh, snapshot
 storage, valid last-good fallback, and the two offline modes. Choose a provider
 with evidence-backed authentication from PR 0; checksum-only/TOFU support does
 not satisfy this milestone. If no production provider qualifies yet, finish
@@ -290,7 +291,12 @@ succeeds with the network denied; tampered/invalidly signed catalogs fail
 without fallback. Also test: internal publisher, project attempts to widen
 machine policy, environment attempts to suppress machine policy, revoked key
 on a cache hit and locked replay, missing offline proof, unauthorized redirect,
-credential non-forwarding, expired snapshot, and rollback rejection. Record
+credential non-forwarding, expired snapshot, and rollback rejection. And for
+the 2026-10-14 recovery design: a damaged mark file, a damaged log entry, an
+unreadable log (seed floor), a revoked key that does not lower the mark,
+the explicit reset with and without authority and when machine policy
+forbids it, a damaged clock file, an interrupted refresh that changes
+nothing, and locked replay that runs under a wrong clock. Record
 TOFU evidence honestly; it cannot satisfy authenticated-provider acceptance.
 
 **Mac before merge.** Every catalog provider must produce darwin-arm64 rows,
@@ -418,11 +424,16 @@ signatures.
   the mechanism accommodates a company's own internal publisher, "one
   enterprise key alongside or instead of the upstream ones", from the
   start.
-- **WP3 owns shared policy/trust infrastructure; WP5 owns the remaining
-  ecosystem credential adapters and enforcement coverage.** Keep one source
-  configuration model, with distinct authentication and authorization checks.
-  Move the mandatory-loading prerequisite here rather than creating a cycle
-  in which WP3 waits for WP5 and WP5 waits for WP3.
+- **Order (owner, 2026-10-14): private registries first.** The first
+  #405 (WP5) PR is the *foundation PR*. It builds the shared policy and
+  trust infrastructure: unconditional protected machine-policy loading
+  and one typed configuration for endpoints, publisher trust and
+  credentials, with distinct authentication and authorization checks.
+  WP3 PR 1 starts after it merges and builds on it, so neither waits for
+  the other. Where §4 or §6 says "WP3 PR 1" delivers protected loading,
+  the shared configuration or the permitted-endpoint set, read "the
+  foundation PR". WP5 still owns the ecosystem credential adapters and
+  enforcement coverage.
 
 #### Key and credential policy (owner decision, 2026-10-03, #72)
 
@@ -451,71 +462,99 @@ signatures.
   read it with the workflow's own `GITHUB_TOKEN`, so no personal
   credential is needed. The local authenticated fixture still covers
   everything that does not need a real registry.
-- **Still open, before activation.** The approval does not settle
-  snapshot expiry, rollback rejection, or how fresh the local policy must
-  be offline; the trust configuration rules above require them before
-  authenticated policy is activated, so WP3 PR 1 (#404) proposes them for
-  the owner. The proposal follows.
+- **Settled 2026-10-14.** This approval left snapshot expiry, rollback
+  rejection and offline policy freshness open. PR 0 proposed them and the
+  owner approved them (below).
 
 **Decided (owner, 2026-10-14).** The three proposals below, written in
-PR 0, are approved as recommended, with the owner's clarifications and
-the recovery rule that follows them. PR 1 builds to them.
+PR 0, are approved as recommended, with the owner's clarifications below.
+This change narrows one bullet of proposal 3 to fit them ("Clock
+rollback"). The recovery design after them is the author's, written to
+meet the owner's recovery requirement, and PR 1 builds to all of it.
 
 - **The rule over all three: metadata freshness is separate from package
-  usability.** Stale metadata must never influence a *new* choice (picking
-  a version, moving a default, answering "what is newest"). It must never
-  stop an *existing* project working: a committed lock, an installed
-  environment, a realized store object or a cached artifact keeps working
-  however old the metadata is. The only things that may refuse an existing
-  lock are a trust change the owner of the policy made on purpose (a
-  revoked key, a removed endpoint) and an explicit policy `not_after`
-  (proposal 3).
+  usability.** Expired metadata never drives a *new* choice (picking a
+  version, moving a default, answering "what is newest"). The two
+  approved ways older metadata still serves discovery are the last-good
+  snapshot within `max_age` and the explicit "shipped catalog only"
+  override (proposal 1). Age never stops an *existing* project: a
+  committed lock, an installed environment, a realized store object or a
+  cached artifact keeps working however old the metadata is. Proof and
+  trust checks still apply to them (missing proof, an invalid signature,
+  a revoked key, a removed endpoint), and so does an explicit policy
+  `not_after` (proposal 3), which is a clock the policy owner chose.
 - **1, expiry:** limits discovery only, as written.
-- **2, rollback:** the high-water mark is persisted in the store and
-  survives restarts, so older metadata cannot be replayed. Recovery from
-  corrupted state is part of the design (below).
+- **2, rollback:** the newest accepted position is persisted in the store
+  and survives restarts, so older metadata cannot be replayed. Damaged
+  state must be recoverable (below).
 - **3, local policy freshness:** none by default. An explicit `not_after`
-  is supported, as written.
+  is supported, as written. The clock-rollback guard is narrowed so it
+  never stops locked replay or a cache hit unless a `not_after` is set.
 
-**Recovery from corrupted rollback state (owner requirement, 2026-10-14).**
-Anti-replay protection must not make a damaged store hard to recover.
+**Recovery from damaged rollback state.** The owner's requirement:
+anti-replay protection must not make a damaged store hard to recover.
+The design that meets it, for PR 1:
 
-- **The mark is derived data.** Each provider's mark is the newest signed
-  position among the snapshots and retained rows the store holds, and each
-  of those carries its own proof. The mark file is a cache of that value,
-  written atomically (temporary file, fsync, rename) with a checksum.
-- **The mark only gates refresh and discovery.** Locked replay, cache hits
-  and installed environments never read it, so a damaged mark cannot stop
-  an existing project (the rule above).
-- **A damaged mark rebuilds itself.** A mark file that is missing,
-  unreadable or fails its checksum is rebuilt from the retained snapshots
-  whose signatures still verify under current policy, never lower than the
-  shipped seed, with a `ward: warning:` line saying it was rebuilt and from
-  what. This gives an attacker nothing new: the threat model already says
-  whoever can write the store can reset the mark, and a network attacker
-  cannot damage a local file. A damaged *snapshot* is dropped from that
-  calculation and reported. It is not trusted.
-- **A damaged mark is a different error from a rollback.** A rollback
-  error says the metadata is older than what this machine has accepted. A
-  damaged-state message says what was rebuilt. Neither tells the user to
-  delete files by hand.
-- **A wrong but valid mark has an explicit reset.** If the mark is
-  readable but wrong (an upstream re-signed older metadata by mistake, or
-  a bad clock accepted a date within the one-day allowance), one explicit
-  command resets a provider's mark to the shipped seed, or to the newest
-  verifying snapshot older than the bad one. It needs machine or home
-  authority (a project cannot do it), machine policy can forbid it, and it
-  is recorded like any trust change. PR 1 names the command. `ward gc
-  --reset` already empties the store, marks included, which returns every
-  provider to its shipped seed.
-- **The same applies to the local high-water clock** (proposal 3, "Clock
-  rollback"). A damaged clock file is rebuilt from the newest signed time
-  the store has accepted, with a warning. A clock that was set far ahead
-  and then corrected is cleared by the same explicit reset. Neither case
-  touches locked replay unless a policy `not_after` is set.
+- **Scope.** This applies to providers with an authenticated signed
+  position (proposal 2, "The signed position per provider"): Rust in PR 1,
+  each later provider in its own PR. A provider with no signed position
+  (Hex, any TOFU source) has no mark, so there is nothing to recover. An
+  internal publisher has no shipped seed: its floor is the first position
+  accepted after machine or home policy authorized it.
+- **The position log is the record; the mark is derived from it.** Each
+  provider has an append-only log in the store. Every accepted refresh
+  appends one entry: the full signed position (for Rust the pair `date`,
+  rustc version), the digest of the signed bytes, the signing key's
+  fingerprint and the local time. An entry records what was accepted *at
+  the time*. It is never re-judged against current policy, so rotating
+  or revoking a key makes that key's rows unusable (#72) but never lowers
+  the mark. The mark is the highest position in the log, or the shipped
+  seed, whichever is higher. PR 1 seeds the full position per provider,
+  not a time alone. The mark file is a cache of that value.
+- **A refresh is all or nothing.** It verifies everything before it
+  writes anything, appends the log entry, then replaces the current
+  snapshot and the mark file, each atomically (temporary file, fsync,
+  rename), and keeps the last-good snapshot intact until the new one is
+  durable. A failed or interrupted refresh changes nothing that was
+  there before. Network bytes enter the store only after they verify.
+- **A damaged mark file rebuilds itself and the command continues.** On a
+  fresh store the mark is seeded with no message. In an initialized store, a mark
+  file that is missing, unreadable or fails its checksum is rebuilt from
+  the log. The command continues against the rebuilt mark, with one
+  `ward: warning:` line that names the provider and the rebuilt position.
+  A damaged log entry is skipped and reported in the same warning. If the
+  whole log is unreadable, the mark falls back to the seed and the warning
+  says rollback detection now starts from the seed. The checksum catches
+  accidental damage only. It does not authenticate: a store writer can
+  write a low mark with a valid checksum.
+- **Different messages for different causes.** A rollback is an error: the
+  metadata is older than this machine accepted. Damaged state is a
+  warning that says what was rebuilt. Neither tells the user to delete
+  files by hand.
+- **A wrong but valid mark has an explicit reset.** If the log holds a
+  position that is valid but wrong (an upstream re-signed older metadata
+  by mistake, or a bad clock let a date within the one-day allowance
+  through), one supported command lowers a provider's mark to the seed or
+  to an earlier logged position, by appending a reset entry to the log,
+  never by deleting entries. It needs machine or home authority (a project
+  cannot run it), machine policy can forbid it, and it is recorded like
+  any trust change. PR 1 names the command. Machine policy controls this
+  command only. Anyone who can write the store can reset rollback state
+  outside it, by editing files or with `ward gc --reset` (which empties the
+  store, log included, and returns every provider to its seed). That is
+  the existing trust model ("whoever can write the store can reset it").
+- **The local high-water clock** (proposal 3, "Clock rollback") gets the
+  same treatment. A damaged clock file is rebuilt to the newest local time
+  in the position log, or the newest signed time, whichever is later, with
+  a warning. That is a floor: it can be behind the newest time the store
+  had seen, and rollback detection is weaker back to it until the clock
+  moves past. With no log entry, the clock starts fresh, like a new store.
+  A clock that was set far ahead and then corrected is cleared by the same
+  explicit reset. Locked replay and cache hits may move the high-water
+  clock forward but are never refused by it unless a `not_after` is set.
 
-The proposals as written in PR 0 follow. Each has one recommended option
-and the condition that would change it.
+The proposals as written in PR 0 follow, with the one narrowing above.
+Each has one recommended option and the condition that would change it.
 
 Two terms first. A **snapshot** is the signed metadata one refresh
 accepted from one provider, the documents and their signatures as served
@@ -638,7 +677,9 @@ changes or deletes one, which is what keeps an old lock realizable.
      freshness on first use (its signature is still checked). The mark is
      only as safe as the store, which is trusted from its file permissions
      (`LIMITATIONS.md`: "Store objects are trusted from permissions + metadata"): whoever can write the store can
-     reset it. PR 1 adds this as a `LIMITATIONS.md` row.
+     reset it. PR 1 adds this as a `LIMITATIONS.md` row, together with rows
+     for the seed floor after a lost log and for the checksum being no
+     authentication (the recovery design above).
    - An old release in a lock is never a rollback; only the snapshot
      moving backwards is.
    - Change it if a provider publishes versioned, signed metadata (a TUF
@@ -660,12 +701,15 @@ changes or deletes one, which is what keeps an old lock realizable.
    - **Clock rollback.** `not_after` and `max_age` both read the local
      clock, so setting it back defeats them. PR 1 narrows that: the store
      records the newest local time any command has seen in it (a
-     high-water clock that only moves forward) and refuses to run a
-     clock-dependent check (a discovery under `max_age`, or a `not_after`
-     check) when the clock reads earlier than that, or earlier than
+     high-water clock that only moves forward) and refuses to run any
+     check that reads the local clock (a discovery under `max_age`, a
+     `not_after` check, a signed expiration such as .NET's
+     `signature.expiration`, and the refusal of a signed date more than a
+     day ahead) when the clock reads earlier than that, or earlier than
      the newest signed time it has accepted. Locked replay and cache hits
-     under a policy with no `not_after` read no clock, so a bad clock
-     never stops them (the owner's rule above). That catches a clock set
+     judge keys and certificates at their signed time and never read wall
+     time, so under a policy with no `not_after` a bad clock never stops
+     them (the owner's rule above). That catches a clock set
      back on a store already in use, but not a clock that is held still
      or set back before the store's first use, and not a fresh store
      (a CI job's throwaway store included), which has no history to

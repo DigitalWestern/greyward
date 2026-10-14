@@ -275,8 +275,9 @@ pub(crate) fn write_closure_with_project_lock(
 
 /// Persist the producer's complete root union before a project projection or
 /// user backup is switched. This is the first half of closure publication;
-/// `write_closure` repeats the union after the visible closure is written so
-/// a crash can only leave extra protection.
+/// `write_closure` registers the union again before the visible closure is
+/// written, so a crash can only leave extra protection. A registration that
+/// adds nothing to the record on disk leaves it untouched (#746).
 pub(crate) fn persist_root_for_refs_with_project_lock(
     project: &ProjectRoot,
     store: &Store,
@@ -417,6 +418,11 @@ fn write_closure_inner(
     let project_lock = project_lock
         .as_ref()
         .expect("closure publication owns a project lock");
+    // The closure this sync would replace, read before the final sequence
+    // below so nothing is added between its recheck and the sign call. Only
+    // a comparison uses it: a file that cannot be read is replaced, and
+    // `write_file` applies its own refusals to the destination.
+    let existing = project.read_file(&closure_path).ok().flatten();
     // The final sequence, in this order: prove again what each producer
     // checked while it built (`publication`: a planted workspace link still
     // reaches, inside the project, the directory it reached when planted),
@@ -433,27 +439,67 @@ fn write_closure_inner(
         projections,
         project_lock,
     )?;
-    let mut envelope = serde_json::json!({
-        "schema": "closure/1",
-        "ecosystem": ecosystem,
-        "platform": platform,
-        "projected_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        "body": body,
-    });
-    // Sign the value that is about to be pretty-printed: the signature
-    // covers every envelope field and the whole body, exceptions included.
-    // `ward audit` rebuilds the same canonical bytes from the file.
-    if let Some(key) = signing_key() {
-        key.sign(&mut envelope)?;
+    if let Some(bytes) = envelope_bytes(ecosystem, platform, body, existing.as_deref())? {
+        project.write_file(&closure_path, &bytes)?;
     }
-    project.write_file(&closure_path, &serde_json::to_vec_pretty(&envelope)?)?;
     // The root was registered under the path while the closure was being
     // renamed into the held directory: prove the path still names it, so a
     // swap in that window fails the sync instead of passing silently.
     project.check_still_named()?;
     attribution.mark_published()?;
     Ok(())
+}
+
+/// The closure envelope to write, signed when a key is in force, or `None`
+/// when `existing` already holds exactly it.
+///
+/// A closure that already says exactly this, down to its signature, is
+/// left in place with its own `projected_at`: a sync that changed nothing
+/// makes no temporary, fsync or rename (#746). The candidate is rendered
+/// with the existing file's timestamp and compared byte for byte; Ed25519
+/// signing is deterministic, so a signed closure compares the same way.
+/// The file on disk was fsynced by the sync that wrote it. Anything else
+/// is stamped with the current time, so a timestamp read from the file is
+/// only ever kept, never carried into a new write.
+fn envelope_bytes(
+    ecosystem: &str,
+    platform: &str,
+    body: serde_json::Value,
+    existing: Option<&[u8]>,
+) -> io::Result<Option<Vec<u8>>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let previous_stamp = existing
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|value| value["projected_at"].as_u64());
+    let mut envelope = serde_json::json!({
+        "schema": "closure/1",
+        "ecosystem": ecosystem,
+        "platform": platform,
+        "projected_at": previous_stamp.unwrap_or(now),
+        "body": body,
+    });
+    // Sign the value that is about to be pretty-printed: the signature
+    // covers every envelope field and the whole body, exceptions included.
+    // `ward audit` rebuilds the same canonical bytes from the file.
+    let key = signing_key();
+    if let Some(key) = &key {
+        key.sign(&mut envelope)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&envelope)?;
+    if existing == Some(bytes.as_slice()) {
+        return Ok(None);
+    }
+    if previous_stamp.is_none_or(|stamp| stamp == now) {
+        return Ok(Some(bytes));
+    }
+    envelope["projected_at"] = now.into();
+    if let Some(key) = &key {
+        key.sign(&mut envelope)?;
+    }
+    Ok(Some(serde_json::to_vec_pretty(&envelope)?))
 }
 
 /// Refuse a tampered destination before the root record is written, so a
@@ -1651,6 +1697,111 @@ mod tests {
             Some(store.object_path(&id).to_str().unwrap())
         );
         assert!(project.join(".greyward/closures").is_dir());
+    }
+
+    /// Publish `body` for `project` under one complete object `id`.
+    fn publish_body(
+        project: &Path,
+        store: &Store,
+        id: &str,
+        body: serde_json::Value,
+    ) -> io::Result<()> {
+        let mut attribution = crate::kernel::policy::Attribution::open("python")?;
+        let activity = store.activity(crate::kernel::activity::ActivityMode::Shared)?;
+        let mut refs = ClosureRefs::new();
+        refs.object_id(store, &activity, id)?;
+        super::write_closure(
+            &crate::kernel::fsroot::ProjectRoot::open(project)?,
+            "python",
+            body,
+            store,
+            &activity,
+            refs,
+            &mut attribution,
+        )?;
+        attribution.finish(true)
+    }
+
+    /// A closure that already says what this sync would write is left as it
+    /// is (#746): same inode, same bytes, its own `projected_at`, and the
+    /// attribution still counts as published. A changed body is written
+    /// again with the current time.
+    #[test]
+    fn an_unchanged_closure_is_not_rewritten() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::named("closure-unchanged");
+        let project = &temp.0;
+        fs::create_dir_all(project).unwrap();
+        let (_store_dir, store) = test_store("closure-unchanged");
+        let id = complete_object(&store, "closure-unchanged");
+        let body = serde_json::json!({"store_object": store.object_path(&id)});
+        let path = project.join(".greyward/closures/python.json");
+        publish_body(project, &store, &id, body.clone()).unwrap();
+
+        // What a sync at time 1 wrote: the same envelope with that stamp.
+        let mut written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        written["projected_at"] = 1.into();
+        fs::write(&path, serde_json::to_vec_pretty(&written).unwrap()).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+
+        publish_body(project, &store, &id, body.clone()).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        let mut changed = body;
+        changed["extra"] = true.into();
+        publish_body(project, &store, &id, changed).unwrap();
+        assert_ne!(fs::metadata(&path).unwrap().ino(), inode);
+        let now: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(now["body"]["extra"], true);
+        assert!(now["projected_at"].as_u64().unwrap() > 1);
+    }
+
+    /// The comparison holds for a signed closure too, since Ed25519
+    /// signatures are deterministic, and a different key is a change.
+    #[test]
+    fn an_unchanged_signed_closure_is_not_rewritten() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _attribution_lock = crate::kernel::policy::attribution_test_lock();
+        let temp = TempDir::named("closure-unchanged-signed");
+        let project = &temp.0;
+        fs::create_dir_all(project).unwrap();
+        let (_store_dir, store) = test_store("closure-unchanged-signed");
+        let id = complete_object(&store, "closure-unchanged-signed");
+        let body = serde_json::json!({"store_object": store.object_path(&id)});
+        let path = project.join(".greyward/closures/python.json");
+        let key = |name: &str| {
+            let key_path = temp.0.join(name);
+            let public = crate::kernel::signing::generate(&key_path).unwrap();
+            (
+                std::sync::Arc::new(SigningKey::load(&key_path).unwrap()),
+                public,
+            )
+        };
+        let (first, _) = key("first.key");
+        let (second, second_public) = key("second.key");
+
+        let signing = signing_key_for_test(Some(first));
+        publish_body(project, &store, &id, body.clone()).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let inode = fs::metadata(&path).unwrap().ino();
+        publish_body(project, &store, &id, body.clone()).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        drop(signing);
+
+        let signing = signing_key_for_test(Some(second));
+        publish_body(project, &store, &id, body).unwrap();
+        drop(signing);
+        assert_ne!(fs::metadata(&path).unwrap().ino(), inode);
+        let closure: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            crate::kernel::signing::verify(&closure),
+            crate::kernel::signing::Verification::Valid(second_public)
+        );
     }
 
     #[test]

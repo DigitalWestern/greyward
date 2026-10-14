@@ -213,9 +213,9 @@ provider.
 (`src/policy.rs`), which tightens through ancestors and never loosens silently:
 
 - The trusted-publisher set is **configuration**, expressed through shared
-  project/home/protected-machine policy loading. **The foundation PR owns the
-  protected loading prerequisite** (see "Order" below); WP5 later extends it. It is not a constant in
-  `src/*.rs`. The shipped upstream publishers are the *default
+  project/home/protected-machine policy loading. **The foundation PR owns
+  the protected loading prerequisite** (see "Order" below); later WP5 PRs
+  extend it. It is not a constant in `src/*.rs`. The shipped upstream publishers are the *default
   contents* of that list, not a privileged category.
 - **Adding a publisher is an explicit, recorded configuration change at an
   authorized user/machine scope.** Lower-precedence/project layers may only
@@ -268,7 +268,8 @@ TOFU by construction with a `LIMITATIONS.md` row. **No provider is described
 as "signed" anywhere in the repo until this PR lands its evidence.** Done
 2026-10-14: "PR 0 evidence" below.
 
-**PR 1 — shared trust foundation and one authenticated provider.** Build on
+**PR 1 — catalog trust on the shared foundation, and one authenticated
+provider.** Build on
 the foundation PR (see "Order" below): unconditional protected policy
 loading, typed endpoint/trust/credential configuration, effective-set
 intersection, and a fixture internal publisher. Add what it left out, then
@@ -292,11 +293,15 @@ without fallback. Also test: internal publisher, project attempts to widen
 machine policy, environment attempts to suppress machine policy, revoked key
 on a cache hit and locked replay, missing offline proof, unauthorized redirect,
 credential non-forwarding, expired snapshot, and rollback rejection. And for
-the 2026-10-14 recovery design: a damaged mark file, a damaged log entry, an
+the 2026-10-14 recovery design: a damaged log entry, an
 unreadable log (seed floor), a revoked key that does not lower the mark,
-the explicit reset with and without authority and when machine policy
-forbids it, a damaged clock file, an interrupted refresh that changes
-nothing, and locked replay that runs under a wrong clock. Record
+a damaged newest entry (the warning says the mark may be lower), a missing
+log in an initialized store, a reset that survives a restart and a rebuild,
+the reset with and without authority and when machine policy forbids it, a
+damaged clock file, a far-ahead clock cleared by the reset, a crash between
+the log append and the snapshot write, `ward gc --reset` removing `trust/`
+while ordinary `ward gc` keeps it, and locked replay that runs under a
+wrong clock. Record
 TOFU evidence honestly; it cannot satisfy authenticated-provider acceptance.
 
 **Mac before merge.** Every catalog provider must produce darwin-arm64 rows,
@@ -431,9 +436,14 @@ signatures.
   credentials, with distinct authentication and authorization checks.
   WP3 PR 1 starts after it merges and builds on it, so neither waits for
   the other. Where §4 or §6 says "WP3 PR 1" delivers protected loading,
-  the shared configuration or the permitted-endpoint set, read "the
-  foundation PR". WP5 still owns the ecosystem credential adapters and
-  enforcement coverage.
+  the shared configuration, the permitted-endpoint set or company TLS
+  roots (§6, "company roots"), read "the foundation PR". Two §4 passages
+  are superseded the same way: its prerequisite "the authenticated WP3
+  foundation" is the foundation PR, and "WP3 owns the shared
+  implementation" now reads "the foundation PR builds the shared
+  implementation". WP5 still owns the ecosystem credential adapters and
+  enforcement coverage. §4 is left as written until the foundation PR
+  updates it.
 
 #### Key and credential policy (owner decision, 2026-10-03, #72)
 
@@ -498,62 +508,94 @@ The design that meets it, for PR 1:
 - **Scope.** This applies to providers with an authenticated signed
   position (proposal 2, "The signed position per provider"): Rust in PR 1,
   each later provider in its own PR. A provider with no signed position
-  (Hex, any TOFU source) has no mark, so there is nothing to recover. An
-  internal publisher has no shipped seed: its floor is the first position
-  accepted after machine or home policy authorized it.
-- **The position log is the record; the mark is derived from it.** Each
-  provider has an append-only log in the store. Every accepted refresh
-  appends one entry: the full signed position (for Rust the pair `date`,
-  rustc version), the digest of the signed bytes, the signing key's
-  fingerprint and the local time. An entry records what was accepted *at
-  the time*. It is never re-judged against current policy, so rotating
-  or revoking a key makes that key's rows unusable (#72) but never lowers
-  the mark. The mark is the highest position in the log, or the shipped
-  seed, whichever is higher. PR 1 seeds the full position per provider,
-  not a time alone. The mark file is a cache of that value.
-- **A refresh is all or nothing.** It verifies everything before it
-  writes anything, appends the log entry, then replaces the current
-  snapshot and the mark file, each atomically (temporary file, fsync,
-  rename), and keeps the last-good snapshot intact until the new one is
-  durable. A failed or interrupted refresh changes nothing that was
-  there before. Network bytes enter the store only after they verify.
-- **A damaged mark file rebuilds itself and the command continues.** On a
-  fresh store the mark is seeded with no message. In an initialized store, a mark
-  file that is missing, unreadable or fails its checksum is rebuilt from
-  the log. The command continues against the rebuilt mark, with one
-  `ward: warning:` line that names the provider and the rebuilt position.
-  A damaged log entry is skipped and reported in the same warning. If the
-  whole log is unreadable, the mark falls back to the seed and the warning
-  says rollback detection now starts from the seed. The checksum catches
-  accidental damage only. It does not authenticate: a store writer can
-  write a low mark with a valid checksum.
-- **Different messages for different causes.** A rollback is an error: the
-  metadata is older than this machine accepted. Damaged state is a
-  warning that says what was rebuilt. Neither tells the user to delete
-  files by hand.
+  (Hex, any TOFU source) has no mark, so there is nothing to recover.
+- **The floor.** Each provider has a floor the mark never goes below. For
+  a shipped provider it is the seed: the full signed position (for Rust
+  the pair `date`, rustc version) that `tools/catalog.py` writes into the
+  shipped data from the metadata it verified. For an internal publisher it
+  is the position recorded in the policy entry that authorizes it. With
+  none recorded, the internal publisher's first accepted position is
+  trusted on first use, and after a lost log it is again; PR 1 adds a
+  `LIMITATIONS.md` row for that.
+- **The position log is the only record.** Each provider has an
+  append-only log at `trust/<provider>.log` in the store. There is no
+  separate mark file, so no cached value can go stale. Each entry is
+  one framed record (its length and its own checksum), so a damaged entry
+  is detected and parsing continues at the next one. An *accept* entry
+  holds the full signed position, the digest of the signed bytes, the
+  signing key's fingerprint and the local time. A *reset* entry holds the
+  target position, the scope that authorized it, and the time. Entries
+  record what was accepted *at the time* and are never re-judged against
+  current policy, so rotating or revoking a key makes that key's rows
+  unusable (#72) but never lowers the mark. An append is one fsynced write
+  under an exclusive lock on the log, so concurrent refreshes cannot
+  interleave entries.
+- **The mark is computed by replaying the log on every read.** Start at
+  the floor. An accept entry raises the mark to its position if higher. A
+  reset entry sets the mark to its target, never below the floor. Entries
+  before the last reset count only through what the reset left. A refresh
+  that accepts the position already held appends nothing, so the log grows
+  by one small entry per new upstream release. That growth is accepted.
+  PR 1 may compact a log to its last reset entry plus the highest accept
+  entry after it, by an atomic rewrite.
+- **Refresh order.** A refresh verifies everything before it writes
+  anything. Then it appends the accept entry, then it replaces the current
+  snapshot atomically (temporary file, fsync, rename), keeping the
+  last-good snapshot until the new one is durable. A crash between the two
+  writes leaves the mark raised and the old snapshot in place. That is the
+  safe direction: the old snapshot is now below the mark, so discovery
+  refuses to fall back to it until the next refresh succeeds, and locked
+  replay is unaffected. Network bytes enter the store only after they
+  verify.
+- **A provider is initialized** once the store holds a snapshot, a
+  retained row or a log for it. An uninitialized provider starts at its
+  floor with no message.
+- **Damaged state is a warning and the command continues.** For an
+  initialized provider, a log that is missing or unreadable, or one with
+  damaged entries, is replayed from what can be read (from the floor if
+  nothing can). The command continues against that mark with
+  `ward: warning: <provider> rollback log damaged; mark rebuilt to
+  <position>`, saying when skipped or lost entries may have held a higher
+  position (rollback detection is then weaker back to the rebuilt mark),
+  followed by `ward:     fix: <refresh command>`, because a successful
+  refresh appends a new entry and restores the protection. A damaged
+  snapshot is dropped and reported the same way. It is never trusted.
+- **A rollback is an error.** The metadata is older than this machine
+  accepted. Neither message tells the user to delete files by hand.
 - **A wrong but valid mark has an explicit reset.** If the log holds a
-  position that is valid but wrong (an upstream re-signed older metadata
-  by mistake, or a bad clock let a date within the one-day allowance
-  through), one supported command lowers a provider's mark to the seed or
-  to an earlier logged position, by appending a reset entry to the log,
-  never by deleting entries. It needs machine or home authority (a project
-  cannot run it), machine policy can forbid it, and it is recorded like
-  any trust change. PR 1 names the command. Machine policy controls this
-  command only. Anyone who can write the store can reset rollback state
-  outside it, by editing files or with `ward gc --reset` (which empties the
-  store, log included, and returns every provider to its seed). That is
-  the existing trust model ("whoever can write the store can reset it").
-- **The local high-water clock** (proposal 3, "Clock rollback") gets the
-  same treatment. A damaged clock file is rebuilt to the newest local time
-  in the position log, or the newest signed time, whichever is later, with
-  a warning. That is a floor: it can be behind the newest time the store
-  had seen, and rollback detection is weaker back to it until the clock
-  moves past. With no log entry, the clock starts fresh, like a new store.
-  A clock that was set far ahead and then corrected is cleared by the same
-  explicit reset. Locked replay and cache hits may move the high-water
-  clock forward but are never refused by it unless a `not_after` is set.
+  position that is valid but wrong (an upstream that re-signed older
+  metadata by mistake, or a bad clock that let a date within the one-day
+  allowance through), one supported command appends a reset entry whose
+  target is the floor or an earlier logged position. The lowered mark
+  survives restarts and rebuilds because replay honors the reset. It needs
+  machine or home authority (a project cannot run it), machine policy can
+  forbid it, and it is recorded like any trust change. PR 1 names the
+  command. Machine policy controls this command only. Anyone who can write
+  the store can reset rollback state outside it, by editing files or with
+  `ward gc --reset`, which removes `trust/` with the rest of the store's
+  records and returns every provider to its floor. That is the existing
+  trust model ("whoever can write the store can reset it").
+- **GC.** PR 1 adds `trust/` to the store's namespaces and to what
+  `ward gc --reset` removes (`NAMESPACES` and `RESET_REMOVES` in
+  `src/kernel/store/format.rs`). Ordinary `ward gc` never sweeps the logs,
+  the clock, the snapshots or the retained rows' proof.
+- **The local high-water clock** (proposal 3, "Clock rollback") is one
+  store-wide file, `trust/clock`, framed the same way. In an initialized
+  store, a missing or damaged clock file is rebuilt to the newest local
+  time in any provider's log, or the newest signed time accepted, whichever
+  is later, with the same warning shape. That is a floor: it can be behind
+  the newest time the store had seen, and clock-rollback detection is
+  weaker back to it until the clock passes it. With no log entries it
+  starts fresh, like a new store. A clock that was set far ahead and then
+  corrected is cleared by the same reset command, with a store-wide clock
+  option: it sets the clock file to the current local time and is
+  recorded like any trust change. Locked replay and cache hits may move
+  the clock forward but are never refused by it unless a `not_after` is
+  set.
 
-The proposals as written in PR 0 follow, with the one narrowing above.
+The proposals as written in PR 0 follow, with two changes: the narrowed
+clock-rollback bullet, and the mark and seed are full signed positions,
+not times alone (proposal 2).
 Each has one recommended option and the condition that would change it.
 
 Two terms first. A **snapshot** is the signed metadata one refresh
@@ -592,7 +634,7 @@ changes or deletes one, which is what keeps an old lock realizable.
      setting in machine or home policy. A project cannot select it, and
      machine policy can forbid it. It reads only the binary's tables,
      does not move the high-water mark, and says which tables it used
-     (the Greyward version and each provider's seed time) and when the
+     (the Greyward version and each provider's seed position) and when the
      store has seen a newer snapshot than them.
    - **Locked replay and cache hits never expire.** They check their
      stored proof against current policy, so an old lock stays realizable
@@ -610,13 +652,14 @@ changes or deletes one, which is what keeps an old lock realizable.
    - Change it if more upstreams sign an expiry (TUF-style metadata); for
      them the signed expiry becomes the limit.
 2. **Rollback rejection.** Recommended: the store keeps, per provider, a
-   high-water mark: the newest signed time accepted so far. It is per
+   high-water mark: the newest signed position accepted so far (a time,
+   or for Rust the pair below). It is per
    provider, not per key, and carries across key rotation, so a new or
    replacement key cannot reset it. A fresh store seeds the mark from the
    shipped catalog, so it never accepts metadata older than the binary.
-   The shipped catalogs carry no such time today (the Rust catalog has
-   no date field), so PR 1 adds one seed signed time per provider to the
-   shipped data, written by `tools/catalog.py` from the signed metadata
+   The shipped catalogs carry no such position today (the Rust catalog
+   has no date field), so PR 1 adds one seed signed position per provider
+   to the shipped data, written by `tools/catalog.py` from the signed metadata
    it verified.
    - **What fails, hard (no fallback):** a refresh whose signed position
      (below) is older than the mark; a refresh at the same position but
@@ -678,8 +721,9 @@ changes or deletes one, which is what keeps an old lock realizable.
      only as safe as the store, which is trusted from its file permissions
      (`LIMITATIONS.md`: "Store objects are trusted from permissions + metadata"): whoever can write the store can
      reset it. PR 1 adds this as a `LIMITATIONS.md` row, together with rows
-     for the seed floor after a lost log and for the checksum being no
-     authentication (the recovery design above).
+     for the floor after a lost log, the internal publisher trusted on
+     first use, and the log checksums detecting accidental damage only
+     (the recovery design above).
    - An old release in a lock is never a rollback; only the snapshot
      moving backwards is.
    - Change it if a provider publishes versioned, signed metadata (a TUF
@@ -707,8 +751,8 @@ changes or deletes one, which is what keeps an old lock realizable.
      `signature.expiration`, and the refusal of a signed date more than a
      day ahead) when the clock reads earlier than that, or earlier than
      the newest signed time it has accepted. Locked replay and cache hits
-     judge keys and certificates at their signed time and never read wall
-     time, so under a policy with no `not_after` a bad clock never stops
+     judge keys and certificates at their signed time and are never
+     judged by wall time, so under a policy with no `not_after` a bad clock never stops
      them (the owner's rule above). That catches a clock set
      back on a store already in use, but not a clock that is held still
      or set back before the store's first use, and not a fresh store

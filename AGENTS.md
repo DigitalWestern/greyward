@@ -102,19 +102,24 @@
     `bash tests/install.sh`, `python3 tools/test_catalog.py`.
   - `e2e` (heavy.yml): `cargo test --locked --no-fail-fast -- --ignored
     --test-threads=2`, or only the failing suite with `--test <name>`,
-    then `bash tests/acceptance.sh`. Point `TMPDIR` at a directory under
-    `$HOME` first: these tests leave large stores behind and fill the
-    `/tmp` quota. Set `GREYWARD_STORE` to a throwaway store under the same
+    then `bash tests/acceptance.sh`. Point `TMPDIR` at a scratch directory
+    under `/home/ethan/repos/greyward-repo/tmp/` first (see below): these tests leave large
+    stores behind and fill the `/tmp` quota. Set `GREYWARD_STORE` to a throwaway store under the same
     directory, as heavy.yml does: with `GREYWARD_SANDBOX_TESTS=required`,
     suites that open the store in-process (`native_libs`) panic without it.
+  Never save temp files, scratch directories, or test stores in the home
+  directory (`/home/ethan/greyward-tmp`, `/home/ethan/tmp` and the like).
+  They go under `/home/ethan/repos/greyward-repo/tmp/`, inside the `greyward-repo` folder
+  one level up from the git checkout, so nothing lands in the repository
+  itself. Use that path even when you work from a worktree elsewhere.
   Clean up after yourself. Give each run its own fresh scratch directory,
-  for example `TMPDIR=/home/ethan/greyward-tmp/<branch-name>` (write the
-  path out, see the shell-command rule below). Once the checks pass,
-  delete that directory (`rm -rf /home/ethan/greyward-tmp/<branch-name>`), and
-  any `$HOME/greyward-tmp/run-*` directory you created. Do this before you
+  for example `TMPDIR=/home/ethan/repos/greyward-repo/tmp/<branch-name>` (write the path
+  out, see the shell-command rule below). Once the checks pass, delete that
+  directory (`rm -rf /home/ethan/repos/greyward-repo/tmp/<branch-name>`), and any
+  `/home/ethan/repos/greyward-repo/tmp/run-*` directory you created. Do this before you
   report the work as done, so nobody has to clear disk space later.
   Delete only directories you created in this task: never
-  `$HOME/greyward-tmp` itself, and never another agent's directory, which may
+  `/home/ethan/repos/greyward-repo/tmp` itself, and never another agent's directory, which may
   still be in use. Also delete the `/tmp/greyward-*` stores your own test
   runs left, and only those. Use `find /tmp -mindepth 1 -maxdepth 1
   -name 'greyward-*' -user "$USER" -mmin -<minutes since you started>`, and
@@ -135,9 +140,9 @@
   prove stays inside its worktree, and it refused 615 commands in 98
   sessions between 2026-09-01 and 2026-10-13. What it refuses:
   - A variable inside a path or an environment value:
-    `export TMPDIR=$HOME/greyward-tmp/x`, `GREYWARD_STORE=$T/store`,
+    `export TMPDIR=$HOME/repos/greyward-repo/tmp/x`, `GREYWARD_STORE=$T/store`,
     `sed -n "$a,${b}p" "$f"`. Write the absolute path instead:
-    `export TMPDIR=/home/ethan/greyward-tmp/x && cargo test --locked`
+    `export TMPDIR=/home/ethan/repos/greyward-repo/tmp/x && cargo test --locked`
     passes.
   - Setting `HOME` (81% refused), `bash -c '...'` (always refused),
     `for`/`while` loops, shell functions, and process substitution

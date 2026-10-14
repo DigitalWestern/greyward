@@ -46,10 +46,12 @@ impl Popular {
     }
 
     /// How many distinct names the list holds.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }

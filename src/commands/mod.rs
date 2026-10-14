@@ -242,8 +242,8 @@ pub fn relay(invocation: cli::RelayInvocation) -> i32 {
 }
 
 /// Hand the kernel and the closure writer what the tailors know, before any
-/// verb runs: every object-kind row, and each ecosystem's resolution files
-/// for the resolution join. `x` roots are no project and no door records
+/// verb runs: every object-kind row, each ecosystem's resolution files
+/// for the resolution join, and its popular names for `lookalike-name`. `x` roots are no project and no door records
 /// them, so `x` joins nothing.
 fn install_tailor_tables(command: &cli::Command) {
     crate::tailors::install_kinds();
@@ -253,6 +253,7 @@ fn install_tailor_tables(command: &cli::Command) {
         cli::Command::X { .. } | cli::Command::XClean { .. }
     ) {
         crate::tailors::install_resolution_files();
+        crate::tailors::install_lookalikes();
         // A tailor that reads a project with its own tool (npm its
         // workspace members) runs the toolchain the project selects, in a
         // store this hook opens.

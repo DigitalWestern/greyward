@@ -7,6 +7,7 @@
 //! so a crash can only over-retain. Realization itself lives in each tailor.
 
 pub mod join;
+pub mod lookalike;
 pub mod publication;
 pub mod records;
 pub mod status;
@@ -376,6 +377,7 @@ fn write_closure_inner(
         activity,
         Some(&mut refs),
     )?;
+    lookalike::record_for_closure(project, ecosystem, &body)?;
     #[cfg(test)]
     tests::after_join();
 

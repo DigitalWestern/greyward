@@ -1033,15 +1033,24 @@ fn node_closure_body(
                 row["local"] = dir.into();
             }
             // The configured registry that served the tarball, for the
-            // receipt and `ward audit`.
-            if p.git.is_none() {
-                if let Some(registry) = crate::kernel::registries::lock::served_by(
-                    &sources,
-                    crate::kernel::registries::config::Ecosystem::Node,
-                    &p.url,
-                ) {
-                    row["registry"] = registry;
-                }
+            // receipt and `ward audit`. A tarball fetched from a URL off
+            // every registry names it: the package is not the registry's
+            // package of that name.
+            let registry = p
+                .git
+                .is_none()
+                .then(|| {
+                    crate::kernel::registries::lock::served_by(
+                        &sources,
+                        crate::kernel::registries::config::Ecosystem::Node,
+                        &p.url,
+                    )
+                })
+                .flatten();
+            if let Some(registry) = registry {
+                row["registry"] = registry;
+            } else if let Some(url) = super::locked::off_registry_tarball(p) {
+                row["tarball"] = url.into();
             }
             row
         }).collect::<Vec<_>>(),

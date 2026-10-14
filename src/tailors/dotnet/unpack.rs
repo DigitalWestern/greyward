@@ -6,6 +6,18 @@
 use super::*;
 use crate::kernel::archive::{Compression, ExtractOptions};
 
+/// A gzip `body` inflated, or `None` when it is not gzip or inflates past
+/// `cap` bytes (a registration leaf's `published` lookup).
+pub(super) fn gunzip_capped(body: &[u8], cap: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(body)
+        .take(cap + 1)
+        .read_to_end(&mut out)
+        .ok()?;
+    (out.len() as u64 <= cap).then_some(out)
+}
+
 #[cfg(test)]
 pub(super) fn extract_sdk_archive(tarball: &Path, staged: &Path) -> io::Result<()> {
     // No activity lease: the extraction is test-only and writes scratch

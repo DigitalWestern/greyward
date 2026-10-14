@@ -189,7 +189,11 @@ program's status through.
 
 Policy is permissive by default; `.greyward/policy.toml` can tighten it
 (`deny = ["install-script-failed", "git-dependency"]`), or
-`ward --strict` denies every exception.
+`ward --strict` denies every exception. Two kinds watch for packages
+an attacker just published: `young-package` (a locked version published
+less than `[packages] min_age_days`, 7 by default, before the resolution
+that locked it) and `lookalike-name` (a name one edit from one of its
+registry's 2,000 most popular names).
 
 You never install Python or Node yourself: a bare `ward` materializes
 pinned, verified toolchains into the store and wires `.venv` /
@@ -469,8 +473,9 @@ under the trusted-key policy would refuse those closures. Signed resolution
 receipts do not sign closures. A signed-closure gate needs a separate trusted
 closure-producing setup.
 
-`--strict` rejects every exception, including `resolution-build` and
-`stale-resolution`, which the company template deliberately permits. A team
+`--strict` rejects every exception, including `resolution-build`,
+`stale-resolution` and `lookalike-name`, which the company template
+deliberately permits. A team
 that permits those kinds should use its operator-owned machine deny policy
 with the trusted keys instead of `--strict`. Project policy can narrow
 machine trust and denials. It cannot supply the gate's trust roots.

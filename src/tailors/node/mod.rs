@@ -24,6 +24,7 @@ pub mod freshness;
 pub mod inputs;
 pub(crate) mod local_package;
 pub mod lock_import;
+pub(crate) mod locked;
 pub mod objects;
 pub mod registry;
 pub mod registry_tool;
@@ -2417,7 +2418,7 @@ node = ["corp"]
             path: path.into(),
             name: "c".into(),
             version: version.into(),
-            url: "https://example.invalid/c.tgz".into(),
+            url: "https://registry.npmjs.org/c/-/c-1.0.0.tgz".into(),
             integrity: TEST_SRI.into(),
             bin: Vec::new(),
             patch: None,
@@ -2504,11 +2505,12 @@ node = ["corp"]
             closure["workspace_links"],
             serde_json::json!([{"path": "node_modules/lib", "target": "packages/lib"}])
         );
+        let public = serde_json::json!({"name": "public", "url": "https://registry.npmjs.org/"});
         assert_eq!(
             closure["packages"],
             serde_json::json!([
-                {"path": "node_modules/c", "name": "c", "version": "1.0.0", "integrity": TEST_SRI},
-                {"path": "packages/lib/node_modules/c", "name": "c", "version": "2.0.0", "integrity": TEST_SRI},
+                {"path": "node_modules/c", "name": "c", "version": "1.0.0", "integrity": TEST_SRI, "registry": public},
+                {"path": "packages/lib/node_modules/c", "name": "c", "version": "2.0.0", "integrity": TEST_SRI, "registry": public},
             ])
         );
         assert_eq!(

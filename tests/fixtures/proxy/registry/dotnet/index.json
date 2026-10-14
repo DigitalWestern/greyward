@@ -88,5 +88,18 @@
   "size": 2,
   "status": 200,
   "url": "https://api.nuget.org/v3-vulnerabilities/2026.09.23.05.36.38/2026.09.23.23.36.42/vulnerability.update.json"
+ },
+ {
+  "census_label": "nuget-publish-time",
+  "file": "api.nuget.org/v3/registration5-gz-semver2/humanizer.core/2.14.1.json.body",
+  "headers": {
+   "Content-Encoding": "gzip",
+   "Content-Type": "application/json"
+  },
+  "method": "GET",
+  "sha256": "0c4e0c214cc8d681a803aadd365a7ed5a01b6e01a872c2bb1ce0997b3f7daac5",
+  "size": 344,
+  "status": 200,
+  "url": "https://api.nuget.org/v3/registration5-gz-semver2/humanizer.core/2.14.1.json"
  }
 ]

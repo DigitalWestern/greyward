@@ -102,34 +102,65 @@ const SPARSE_SOURCE: &str = "sparse+https://index.crates.io/";
 /// The crates.io packages of the Cargo.locks among `locks` the run
 /// leaves, for the door's `young-package` check: every `[[package]]` whose
 /// source is crates.io (git, path and other-registry packages are left
-/// out).
+/// out). `locks` names every place a lock may be; a run that leaves none
+/// of them is `InvalidData`, never an empty lock.
 pub fn locked_list<'a>(locks: Vec<PathBuf>) -> LockedList<'a> {
     Box::new(move |staged: &Staged<'_>| {
         let mut locked = Vec::new();
+        let mut read = false;
         for lock in &locks {
             if let Some(bytes) = staged.read(lock)? {
+                read = true;
                 locked.extend(crates_io_packages(&String::from_utf8_lossy(&bytes))?);
             }
+        }
+        if !read {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the run left no Cargo.lock",
+            ));
         }
         Ok(locked)
     })
 }
 
-/// `name@version` of every crates.io package in a Cargo.lock.
+/// `name@version` of every crates.io package in a Cargo.lock. A package
+/// from a path (no source), git, or another registry is known and left
+/// out; a source of any other kind, or a crates.io package without its
+/// name or version, is `InvalidData`: a package this reader skipped would
+/// never be judged.
 pub fn crates_io_packages(lock_toml: &str) -> io::Result<Vec<LockedPackage>> {
     let lock = toml::from_str::<CargoLock>(lock_toml)
         .map_err(|e| super::cargo_door::toml_refusal("Cargo.lock", lock_toml, &e))?;
-    Ok(lock
-        .package
-        .into_iter()
-        .filter(|package| {
-            matches!(
-                package.source.as_deref(),
-                Some(REGISTRY_SOURCE) | Some(SPARSE_SOURCE)
-            )
-        })
-        .filter_map(|package| Some(LockedPackage::new(package.name?, package.version?)))
-        .collect())
+    let unread =
+        |why: String| io::Error::new(io::ErrorKind::InvalidData, format!("Cargo.lock: {why}"));
+    let mut found = Vec::new();
+    for package in lock.package {
+        match package.source.as_deref() {
+            Some(REGISTRY_SOURCE) | Some(SPARSE_SOURCE) => {}
+            None => continue,
+            Some(other)
+                if ["registry+", "sparse+", "git+"]
+                    .iter()
+                    .any(|kind| other.starts_with(kind)) =>
+            {
+                continue
+            }
+            Some(other) => {
+                return Err(unread(format!(
+                    "package {:?} has a source of no kind cargo writes: {other:?}",
+                    package.name.as_deref().unwrap_or("")
+                )))
+            }
+        }
+        let (Some(name), Some(version)) = (package.name, package.version) else {
+            return Err(unread(
+                "a crates.io package has no name or no version".to_string(),
+            ));
+        };
+        found.push(LockedPackage::new(name, version));
+    }
+    Ok(found)
 }
 
 /// Parse the complete Cargo.lock closure into a registry-only vendor plan.
@@ -905,6 +936,14 @@ mod tests {
             ]
         );
         assert!(crates_io_packages("[[package]\n").is_err());
+        for unread in [
+            "[[package]]\nname = \"x\"\nsource = \"sparse+https://index.crates.io/\"\n",
+            "[[package]]\nversion = \"1.0.0\"\nsource = \"sparse+https://index.crates.io/\"\n",
+            "[[package]]\nname = \"x\"\nversion = \"1.0.0\"\nsource = \"path+file:///x\"\n",
+        ] {
+            let error = crates_io_packages(unread).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unread}");
+        }
     }
 
     #[test]

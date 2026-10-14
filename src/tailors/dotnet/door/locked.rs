@@ -16,9 +16,8 @@ pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>) -> LockedList<'a> {
             path.file_name()
                 .is_some_and(|name| name == "packages.lock.json")
         }) {
-            if let Some(bytes) = staged.read(path)? {
-                found.extend(lock_packages(&String::from_utf8_lossy(&bytes))?);
-            }
+            let bytes = staged.read_lock(path)?;
+            found.extend(lock_packages(&String::from_utf8_lossy(&bytes))?);
         }
         Ok(found)
     })

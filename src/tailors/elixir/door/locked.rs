@@ -16,6 +16,10 @@ pub(crate) fn locked_list<'a>() -> LockedList<'a> {
     Box::new(
         |staged: &Staged<'_>| match staged.read(Path::new("mix.lock"))? {
             Some(bytes) => hexpm_packages(&String::from_utf8_lossy(&bytes)),
+            // mix writes no lock for a project with no dependencies, and
+            // mix.exs is code ward does not evaluate, so a missing lock is
+            // read as locking nothing: the run publishes no lock, so no
+            // package is locked for a later sync to install unjudged.
             None => Ok(Vec::new()),
         },
     )

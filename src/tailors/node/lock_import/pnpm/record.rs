@@ -10,34 +10,65 @@ mod workspace;
 pub(crate) use workspace::*;
 
 /// `(name, version)` of every `packages` entry `pnpm-lock.yaml` resolves
-/// from a registry: a resolution with an `integrity` and no `tarball`,
-/// `type` (git, directory) or `repo`, at a version that starts with a
-/// digit (not `file:` or `link:`).
+/// from the npm registry: a resolution with an `integrity` and no `type`
+/// (git, directory) or `repo`, whose `tarball`, when it names one, is on
+/// the registry, at a version that starts with a digit.
+///
+/// Every entry is accounted for: a git, directory, or off-registry
+/// tarball resolution is known and left out, and anything else (an entry
+/// without a resolution, a registry entry whose key names no version) is
+/// an `InvalidData` error, so no package is passed unjudged. A lock with
+/// no `packages` locks nothing.
 pub(crate) fn pnpm_registry_packages(lock_yaml: &str) -> io::Result<Vec<(String, String)>> {
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
     let Some(YamlValue::Map(packages)) = root.get("packages") else {
         return Ok(Vec::new());
     };
-    Ok(packages
-        .iter()
-        .filter_map(|(key, value)| {
-            let YamlValue::Map(entry) = value else {
-                return None;
-            };
-            let Some(YamlValue::Map(resolution)) = entry.get("resolution") else {
-                return None;
-            };
-            let registry = yaml_str(resolution.get("integrity")).is_some()
-                && ["tarball", "type", "repo"]
-                    .iter()
-                    .all(|field| resolution.get(*field).is_none());
-            let (name, version) = normalize_pnpm_identity(key)?;
-            let version = trim_peer_suffix(&version).to_string();
-            (registry && version.starts_with(|c: char| c.is_ascii_digit()))
-                .then_some((name, version))
-        })
-        .collect())
+    let unread = |key: &str, why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pnpm-lock.yaml: packages entry {key:?} {why}"),
+        )
+    };
+    let mut found = Vec::new();
+    for (key, value) in packages {
+        let YamlValue::Map(entry) = value else {
+            return Err(unread(key, "is not a map"));
+        };
+        let Some(YamlValue::Map(resolution)) = entry.get("resolution") else {
+            return Err(unread(key, "has no resolution"));
+        };
+        if ["type", "repo", "commit"]
+            .iter()
+            .any(|field| resolution.get(*field).is_some())
+        {
+            continue;
+        }
+        if let Some(tarball) = resolution.get("tarball") {
+            let host = yaml_str(Some(tarball))
+                .and_then(|tarball| url::Url::parse(tarball).ok())
+                .map(|url| url.host_str().map(str::to_string));
+            match host {
+                Some(Some(host)) if host == crate::tailors::node::registry::REGISTRY_HOST => {}
+                Some(_) => continue,
+                // `file:` tarballs are paths; anything else is unread.
+                None if yaml_str(Some(tarball)).is_some_and(|t| t.starts_with("file:")) => continue,
+                None => return Err(unread(key, "has a tarball that is not a URL")),
+            }
+        }
+        if yaml_str(resolution.get("integrity")).is_none() {
+            return Err(unread(key, "has a registry resolution with no integrity"));
+        }
+        let (name, version) =
+            normalize_pnpm_identity(key).ok_or_else(|| unread(key, "names no version"))?;
+        let version = trim_peer_suffix(&version).to_string();
+        if !version.starts_with(|c: char| c.is_ascii_digit()) {
+            return Err(unread(key, "names no registry version"));
+        }
+        found.push((name, version));
+    }
+    Ok(found)
 }
 
 /// A dependency as an importer of `pnpm-lock.yaml` records it: the

@@ -320,17 +320,18 @@ pub(super) fn fetch_tarball(
     // cache by its integrity: no registry serves it, so it is read from
     // the cache alone.
     if super::local_package::source_dir(package).is_some() {
+        let mut last = None;
         for digest in &candidates {
-            if let Ok(lease) =
-                crate::kernel::fetch::cache_verified_digest_held(store, activity, digest)
-            {
-                return Ok((lease, digest.clone()));
+            match crate::kernel::fetch::cache_verified_digest_held(store, activity, digest) {
+                Ok(lease) => return Ok((lease, digest.clone())),
+                Err(error) => last = Some(error),
             }
         }
+        let why = last.map_or_else(|| "no integrity".to_string(), |error| error.to_string());
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "{}: {} was not packed into the cache",
+                "{}: {} is not in the cache as packed from the project ({why})",
                 package.path, package.url
             ),
         ));

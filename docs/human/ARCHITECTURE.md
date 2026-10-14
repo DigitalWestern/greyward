@@ -269,7 +269,8 @@ ranged manifests, so a bare machine needs nothing installed besides Greyward.
 
 **cargo** (`tailors/cargo/`). Rust has no installed-environment analog, so the
 comforter is everything cargo needs to build fully offline: a pinned
-toolchain object (rustc + cargo + rust-std, TOFU-pinned sha256s) plus a
+toolchain object (rustc + cargo + rust-std, sha256s pinned from the
+signature-checked channel manifest) plus a
 `cargo-vendor` object of every registry crate, hash-verified, with Greyward
 generated `.cargo-checksum.json`. Vendor identity is the sorted crate
 checksums plus their count (`cargo-vendor/2`), so locks with the same crate

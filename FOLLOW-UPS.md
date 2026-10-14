@@ -86,8 +86,11 @@ None open.
   fails any record the removed key signed. The private-registry test
   account is a GitHub Packages registry under the DigitalWestern org. This
   unblocks the authenticated parts of `docs/agent/DESIGNS.md` §2 (WP3,
-  #404) and §4 (WP5, #405); §2 PR 0, the provider evidence spike, comes
-  first.
+  #404) and §4 (WP5, #405). §2 PR 0, the provider evidence spike, is done
+  (2026-10-14: §2 "PR 0 evidence", fixtures in `tests/fixtures/catalog/`).
+  Next is PR 1 with Rust as the first provider, once the owner approves
+  the trust root and the §2 proposal on snapshot expiry, rollback
+  rejection and offline policy freshness.
 - **macOS arm64 gate. Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list

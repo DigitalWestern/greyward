@@ -978,6 +978,37 @@ pub(crate) mod tests {
         assert_eq!(printed, "");
     }
 
+    /// A member whose `name` is an object nested so deep that writing npm's
+    /// answer throws gets the same fixed refusal as one nested a level
+    /// deep: an exception in the wrapper's success path is a fixed code
+    /// too, never Node exiting with an error of its own (#694, Sol round 7).
+    #[test]
+    #[ignore = "realizes the store Node and runs it in the Linux sandbox"]
+    fn a_member_name_too_deep_to_write_gets_the_fixed_refusal() {
+        if !crate::kernel::sandbox::linux_ready("npm_members_deep") {
+            return;
+        }
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        install_shipped_node();
+        let scratch = TempDir::named("npm-ws-deep");
+        let root = scratch.0.join("project");
+        std::fs::create_dir_all(root.join("packages/member")).unwrap();
+        let held = ProjectRoot::open(&root).unwrap();
+        let list = serde_json::json!(["packages/*"]);
+        let mut errors = Vec::new();
+        for depth in [1, 50_000] {
+            let name = format!("{}1{}", r#"{"a":"#.repeat(depth), "}".repeat(depth));
+            std::fs::write(
+                root.join("packages/member/package.json"),
+                format!(r#"{{"name":{name}}}"#),
+            )
+            .unwrap();
+            errors.push(npm_members(&held, &list).unwrap_err().to_string());
+        }
+        assert_eq!(errors[0], refusal(&root));
+        assert_eq!(errors[1], refusal(&root));
+    }
+
     /// The provider the ignored tests use: the shipped Node, in the store
     /// `GREYWARD_STORE` names.
     fn install_shipped_node() {

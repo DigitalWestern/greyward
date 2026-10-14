@@ -35,6 +35,9 @@ function fail (error) {
   fs.writeFileSync(out, JSON.stringify({ error: code }))
 }
 
+// Every exception, in the success path too (a `name` nested too deep for
+// JSON.stringify), ends as a fixed code: `.catch` comes after `.then`, so a
+// throw while writing the answer reaches `fail`, never Node's own exit.
 try {
   const mapWorkspaces = require(path.join(modules, '@npmcli', 'map-workspaces'))
   const workspaces = JSON.parse(fs.readFileSync(request, 'utf8'))
@@ -44,7 +47,7 @@ try {
       members.push([name, path.relative(root, dir).split(path.sep).join('/')])
     }
     fs.writeFileSync(out, JSON.stringify({ members }))
-  }, fail)
+  }).catch(fail)
 } catch (error) {
   fail(error)
 }

@@ -333,13 +333,14 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **No toolchain download is signature-checked when ward uses it.** ward compares each
   download with the digest in the catalog embedded in the binary, so that digest is as
   trustworthy as the Greyward release that ships it. When the catalogs are generated,
-  `tools/catalog.py` checks Rust's channel-manifest signature and Node's `SHASUMS256.txt`
-  signature; every other source is **TOFU** (trust on first use: a checksum taken when the
+  `tools/catalog.py` checks the signature of each Rust release's channel manifest (not yet of
+  `channel-rust-stable.toml`, which names the newest) and of Node's `SHASUMS256.txt`; every
+  other source is **TOFU** (trust on first use: a checksum taken when the
   row was pinned, with no signature behind it), one row each in the sections below. What each
   upstream publishes is in `docs/agent/DESIGNS.md` §2 "PR 0 evidence"; checking it is WP3.
 - **The conda-forge native libraries are TOFU.** `src/kernel/provider/nativelibs.rs` pins
-  their sha256 from conda-forge's repodata, taken once; nothing signed backs them, and PR 0
-  did not examine what conda-forge publishes.
+  their sha256 from conda-forge's repodata, taken once. ward checks nothing signed for them,
+  and PR 0 did not examine what conda-forge publishes.
 - **Delegated planning runs in the resolution sandbox.** A Gemfile, a mix.exs and a
   csproj are code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler), Elixir's
   (mix) and .NET's (restore) resolvers all run confined, reaching their registry only
@@ -825,9 +826,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   entity-encode element names) — the build sandbox, not preflight, is the security boundary.
 - **Output publication has a microsecond non-atomic window**: a reader during the rename sees
   no output; the last good build survives a failed publication. `/tmp/.dotnet` is a bounded,
-  local-only sandbox write allowance. **The .NET SDK is TOFU: releases.json is a checksum
-  channel, not signed metadata.** Detached signatures sit beside the metadata, but they predate
-  the current files and the key that made them is not published. **The lock does not cover asset selection**: project.assets.json is re-derived
+  local-only sandbox write allowance. **The .NET SDK is TOFU in ward today, though
+  Microsoft signs what would cover it.** The SDK's sha512 comes from `releases.json`, which
+  carries a CMS signature (a `.p7s` file chaining to DigiCert's code-signing root) and a signed
+  expiry date; ward does not check it yet (WP3). The `.sig` files beside the metadata are
+  stale and made by an unpublished key, so they prove nothing. **The lock does not cover asset selection**: project.assets.json is re-derived
   and attested but not diffed; a NuGet behavior change across SDK pins changes builds under
   the same lock, silently.
 

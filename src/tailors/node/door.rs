@@ -287,17 +287,38 @@ pub(crate) fn node_sources(policy: &Policy) -> io::Result<NodeSources> {
         routes: Vec::new(),
         permitted: Permitted::compiled(),
     };
+    let all_scopes: Vec<(&str, &String)> = sources
+        .list
+        .iter()
+        .filter_map(|source| match source {
+            Source::Registry(configured) => Some(configured),
+            Source::Public => None,
+        })
+        .flat_map(|configured| {
+            configured
+                .scopes
+                .iter()
+                .map(|scope| (configured.name.as_str(), scope))
+        })
+        .collect();
     for source in &sources.list {
         match source {
             Source::Public => out.routes.push(registry::route()?),
             Source::Registry(configured) => {
+                let elsewhere = all_scopes
+                    .iter()
+                    .filter(|(name, _)| *name != configured.name)
+                    .map(|(_, scope)| (*scope).clone())
+                    .collect();
                 for scope in &configured.scopes {
                     out.registry
                         .scoped
                         .push((scope.clone(), configured.url.clone()));
                 }
                 out.routes.push(registries::route::route(
-                    Arc::new(registry::ConfiguredNpm::new(configured)),
+                    Arc::new(
+                        registry::ConfiguredNpm::new(configured).with_scopes_elsewhere(elsewhere),
+                    ),
                     configured,
                     &policy.registries,
                 )?);
@@ -350,11 +371,7 @@ pub(crate) fn node_confined<'a>(
         NodeTool::Npm { .. } => (Kind::Npm, NodeLock::Npm),
         NodeTool::Pnpm { .. } => (Kind::Pnpm, NodeLock::Pnpm),
     };
-    confined.locked = Some(locked_list(lock));
-    let project = match &run.cwd {
-        Some(cwd) => run.lock_root.join(cwd),
-        None => run.lock_root.to_path_buf(),
-    };
+    confined.locked = Some(locked_list(lock, policy.registries.clone()));
     let lock_root = run.lock_root.to_path_buf();
     let flags = sources.registry;
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
@@ -1304,6 +1321,9 @@ mod tests {
             serde_json::json!({
                 "name": name,
                 "dist-tags": {"latest": version},
+                // The full packument's publish times, which the age check
+                // reads from each registry.
+                "time": {version: "2020-01-02T03:04:05.000Z"},
                 "versions": {version: {
                     "name": name,
                     "version": version,

@@ -341,23 +341,17 @@ pub(crate) fn planned_env_object_id(
     Ok(environment_identity(door, plan, &cpython_id, selected, rust)?.object_id())
 }
 
-/// Internal realization entry point used by sdist build environments. The
-/// depth is carried through nested build-requirement sdists so a malicious or
-/// pathological chain cannot recurse forever.
-pub(crate) fn realize_env_at_depth(
-    door: &mut ResolutionDoor<'_>,
+/// What [`realize_env_at_depth`] checks before any cache is consulted: the
+/// host, the plan against `selected`, and every registry package of `plan`
+/// against the effective python source list, so a warm environment built
+/// under another policy is not reused for a lock the list now refuses.
+fn preflight(
     plan: &Plan,
     selected: &Selected,
-    rust: Option<&Selected>,
-    sdist_depth: usize,
-) -> io::Result<PathBuf> {
-    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
-    crate::tailors::install_kinds();
+    platform: crate::kernel::platform::Platform,
+) -> io::Result<()> {
     crate::kernel::platform::require_host(platform, "Python environment")?;
     agreeing(plan, selected)?;
-    // Every registry package is checked against the effective python list
-    // before any cache is consulted: a warm environment built under another
-    // policy is not reused for a lock the list now refuses.
     let policy = crate::kernel::policy::effective();
     for package in plan.packages.iter().filter(|package| package.git.is_none()) {
         crate::kernel::registries::lock::check(
@@ -370,6 +364,22 @@ pub(crate) fn realize_env_at_depth(
             },
         )?;
     }
+    Ok(())
+}
+
+/// Internal realization entry point used by sdist build environments. The
+/// depth is carried through nested build-requirement sdists so a malicious or
+/// pathological chain cannot recurse forever.
+pub(crate) fn realize_env_at_depth(
+    door: &mut ResolutionDoor<'_>,
+    plan: &Plan,
+    selected: &Selected,
+    rust: Option<&Selected>,
+    sdist_depth: usize,
+) -> io::Result<PathBuf> {
+    let (store, activity, platform) = (door.store(), door.lease(), door.platform());
+    crate::tailors::install_kinds();
+    preflight(plan, selected, platform)?;
     let python_obj = python::realize_runtime(store, activity, platform, selected)?;
 
     // Identity planning and realization use exactly the same input builder.

@@ -165,15 +165,23 @@ pub(super) struct UvDependency {
 }
 
 /// `(name, version, file names)` of every uv.lock package locked from the
-/// public PyPI index (no `source`, or a registry source on PyPI's hosts):
-/// what the `young-package` check judges. Local, git, URL and other-index
-/// packages are left out.
-pub fn uv_pypi_packages(text: &str) -> io::Result<Vec<(String, String, Vec<String>)>> {
+/// public PyPI index (no `source`, or a registry source on PyPI's hosts)
+/// or from one of `indexes`, the listed registries' index URLs: what the
+/// `young-package` check judges. Local, git, URL and other-index packages
+/// are left out.
+pub fn uv_pypi_packages(
+    text: &str,
+    indexes: &[String],
+) -> io::Result<Vec<(String, String, Vec<String>)>> {
     Ok(parse_uv_lock(text)?
         .into_iter()
         .filter(|package| match uv_source(&package.source) {
             Some(UvSource::Registry(url)) => {
-                package.source == "registry" || (!url.is_empty() && is_public_pypi_url(&url))
+                package.source == "registry"
+                    || (!url.is_empty() && is_public_pypi_url(&url))
+                    || indexes
+                        .iter()
+                        .any(|index| crate::kernel::registries::lock::same_url(index, &url))
             }
             _ => false,
         })

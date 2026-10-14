@@ -20,7 +20,10 @@ pub(crate) use workspace::*;
 /// an `InvalidData` error, so no package is passed unjudged. A lock with
 /// no `packages` locks nothing; a `packages` that is not a map is
 /// `InvalidData` too.
-pub(crate) fn pnpm_registry_packages(lock_yaml: &str) -> io::Result<Vec<(String, String)>> {
+pub(crate) fn pnpm_registry_packages(
+    lock_yaml: &str,
+    configured: &dyn Fn(&str) -> bool,
+) -> io::Result<Vec<(String, String)>> {
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
     let packages = match root.get("packages") {
@@ -59,6 +62,7 @@ pub(crate) fn pnpm_registry_packages(lock_yaml: &str) -> io::Result<Vec<(String,
                 .map(|url| url.host_str().map(str::to_string));
             match host {
                 Some(Some(host)) if host == crate::tailors::node::registry::REGISTRY_HOST => {}
+                Some(_) if yaml_str(Some(tarball)).is_some_and(configured) => {}
                 Some(_) => continue,
                 // `file:` tarballs are paths; anything else is unread.
                 None if yaml_str(Some(tarball)).is_some_and(|t| t.starts_with("file:")) => continue,

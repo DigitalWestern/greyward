@@ -592,6 +592,11 @@ An ecosystem named in `[sources]` is enforced, end to end:
   `registry: {name, url}`. `ward audit` fails a package whose registry the
   effective list does not hold (`unapproved-registry`) and calls a closure
   with a registry package that records none `outdated`.
+- Package age. `young-package` judges a configured registry's packages
+  as it judges the public registry's: its route reads publish times from
+  the JSON project pages and full packuments it serves, and a lookup goes
+  to the registry that serves the name (a scoped registry for its scopes)
+  before the public one.
 
 Anything the list does not allow is an error with a `fix:` line, never a
 fallback to the public registry. Credentials are resolved when a request

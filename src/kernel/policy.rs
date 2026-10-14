@@ -4,7 +4,7 @@
 
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::registries::config::{CredentialSpec, RegistrySpec};
-use crate::kernel::registries::effective::{Sources, Tables};
+use crate::kernel::registries::effective::Sources;
 use crate::kernel::signing::{self, KeySet};
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -564,35 +564,6 @@ pub(crate) fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
     }
 }
 
-/// [`merge`] one file's policy, plus its registry tables: checked against
-/// the chain so far (a project or `--policy` file may only narrow the
-/// machine's `[sources]`), then merged. A refusal names `path`.
-pub fn merge_file(
-    policy: &mut Policy,
-    other: &Policy,
-    origin: SourceOrigin,
-    path: &Path,
-) -> io::Result<()> {
-    let tables = other.tables();
-    policy
-        .registries
-        .check(&tables, origin, path)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    merge(policy, other, origin);
-    policy.registries.merge(&tables, origin, path);
-    Ok(())
-}
-
-impl Policy {
-    fn tables(&self) -> Tables<'_> {
-        Tables {
-            credentials: &self.credentials,
-            registry: &self.registry,
-            sources: &self.sources,
-        }
-    }
-}
-
 /// Where one contributing policy came from. The serialized names
 /// (`machine`, `project`, `flag`, `env`) are the stable strings
 /// `ward audit --json` reports under `policy.sources`.
@@ -827,6 +798,9 @@ pub(crate) fn machine_policy_path() -> io::Result<PathBuf> {
 
 mod packages;
 pub use packages::{Packages, DEFAULT_MIN_AGE_DAYS, MAX_MIN_AGE_DAYS};
+
+mod sources;
+pub use sources::merge_file;
 
 mod strict;
 #[cfg(test)]

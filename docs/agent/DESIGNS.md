@@ -357,8 +357,9 @@ What the evidence does not show:
   `gh release verify-asset`; their bundles are not kept, except uv's.
 - The .NET CMS signatures were verified while the leaf certificate is
   valid. The embedded RFC 3161 timestamp was read, not verified:
-  `openssl cms` does not evaluate it, and PR 1's verifier needs to before
-  2027-02-15, when the leaf expires.
+  `openssl cms` does not evaluate it. The .NET provider PR (one of PRs
+  2-7, not PR 1, which is Rust) owns that check, and needs it once the
+  leaf expires on 2027-02-15.
 - Only the default release of each catalog was verified end to end.
   Coverage across all rows was checked by presence: Go `.asc` for all 11
   releases, the rustc archive `.asc` for all 43 Rust releases, PBS
@@ -477,8 +478,13 @@ changes or deletes one, which is what keeps an old lock realizable.
      time only moves when the upstream releases, so `max_age` is per
      provider and longer than its release cadence. Rust ships about every
      6 weeks, so a 7-day limit would expire in normal use; the Rust
-     default is 12 weeks. Machine or home policy sets `max_age`; a project
-     may only shorten it.
+     default is 12 weeks.
+   - **`max_age` layers like every other trust setting.** The effective
+     value is the smallest one set across machine, home, project and
+     `--policy`. Machine policy is the ceiling (the shipped default when
+     it sets none); no layer can lengthen it, and under authenticated
+     policy expiry cannot be turned off (no "never", no zero meaning
+     unlimited).
    - **Past `max_age`, discovery fails** with an error that names the
      snapshot's age and says to refresh. It does not fall back to anything
      older than the high-water mark (proposal 2), and the shipped catalog
@@ -486,9 +492,13 @@ changes or deletes one, which is what keeps an old lock realizable.
      back to the binary's tables would be the rollback proposal 2
      rejects. On a transport failure Greyward uses the last-good snapshot
      if it is within `max_age` and says so.
-   - **"Shipped catalog only"** stays an explicit mode the user picks, not
-     a fallback. It reports when the store has seen a newer snapshot than
-     the binary's tables.
+   - **"Shipped catalog only"** is the one exception, and it is an
+     explicit user override, never a fallback: a command-line flag, or a
+     setting in machine or home policy. A project cannot select it, and
+     machine policy can forbid it. It reads only the binary's tables,
+     does not move the high-water mark, and says which tables it used
+     (the Greyward version and each provider's seed time) and when the
+     store has seen a newer snapshot than them.
    - **Locked replay and cache hits never expire.** They check their
      stored proof against current policy, so an old lock stays realizable
      offline.
@@ -499,8 +509,9 @@ changes or deletes one, which is what keeps an old lock realizable.
      valid manifest hides a new release for up to `max_age`, because
      without a signed expiry "frozen" and "no release yet" look the same.
      Only an upstream-signed expiry closes that. .NET signs one
-     (`signature.expiration`, 2027-01-11 for the metadata captured here):
-     for .NET the limit is the earlier of that and `max_age`.
+     (`signature.expiration`, 2027-01-11 for the metadata captured here).
+     For .NET it is a hard deadline on top of `max_age`, never a mark:
+     past it the metadata is refused whatever `max_age` says.
    - Change it if more upstreams sign an expiry (TUF-style metadata); for
      them the signed expiry becomes the limit.
 2. **Rollback rejection.** Recommended: the store keeps, per provider, a
@@ -508,29 +519,57 @@ changes or deletes one, which is what keeps an old lock realizable.
    provider, not per key, and carries across key rotation, so a new or
    replacement key cannot reset it. A fresh store seeds the mark from the
    shipped catalog, so it never accepts metadata older than the binary.
-   - **What fails, hard (no fallback):** a refresh whose signed time is
-     older than the mark; a refresh with the same signed time but other
-     content (accepted only if the bytes are identical, or it names the
-     same release with the same digests, a re-sign); a listed release
-     whose digests changed (the generator's append-only rule); and a
-     refresh that drops the newest retained release of any maintained
-     line.
+   The shipped catalogs carry no such time today (the Rust catalog has
+   no date field), so PR 1 adds one seed signed time per provider to the
+   shipped data, written by `tools/catalog.py` from the signed metadata
+   it verified.
+   - **What fails, hard (no fallback):** a refresh whose signed position
+     (below) is older than the mark; a refresh at the same position but
+     with other content (accepted only if the bytes are identical, or it
+     names the same release with the same digests, a re-sign); a listed
+     release whose digests changed (the generator's append-only rule);
+     and a refresh that drops the newest retained release of a
+     maintained line without a signed statement or policy change that
+     retires it (below).
+   - **Lines.** A *line* is the series a security fix lands in, and a
+     line is *maintained* while its provider still ships fixes to it.
+     Each provider PR defines both from the provider's own data. Rust:
+     one line, stable, always maintained; its newest release is whatever
+     the newest accepted stable manifest names, so a drop shows up as an
+     older position and fails above. Go: a minor series (`1.27`),
+     maintained while the release listing shows it (the two newest).
+     Node: a major line, maintained per Node's published schedule. Where
+     that data is unsigned (Go's listing, Node's schedule), it can retire
+     a line only in the same refresh that brings the first signed release
+     of a line newer than any retained one; otherwise the shipped
+     catalog's list of maintained lines stands.
    - **Yanks and end of life.** An upstream dropping a release from its
-     listing does not delete the retained row. Below the newest release of
-     its line, the row is marked "no longer listed": discovery stops
-     offering it, locks still realize it. Where a provider publishes an
-     explicit yank, the row is marked yanked the same way. Dropping the
-     newest release of a line is the shape of hiding a security fix, so
-     it is a rollback. A whole line reaching end of life drops out of
-     discovery only when the provider's signed metadata says so (for
-     Rust, a newer stable manifest that names another release).
-   - **The signed time per provider.** Rust: the `date` field of
-     `channel-rust-stable.toml`, which is inside the signed bytes. The
-     versioned manifests carry their own, earlier dates (1.98.1's names
-     2026-09-03, the stable one 2026-10-01); they are verified by
-     signature and the append-only rule and are not compared with the
-     mark. The other providers fix theirs in their own PRs. Candidates:
-     .NET, the signed `signature.expiration` and the CMS signing time;
+     listing does not delete the retained row. In priority order:
+     1. a signed yank or a signed end-of-life statement, where the
+        provider publishes one, marks the row or the line and is
+        accepted;
+     2. with nothing signed, an authorized local policy change at
+        machine scope retires a line (recorded like any trust change),
+        so a refresh never blocks forever on a line upstream abandoned;
+     3. a disappearance alone marks a row "no longer listed" only below
+        the newest release of its line: discovery stops offering it,
+        locks still realize it. Dropping the newest release of a
+        maintained line is the shape of hiding a security fix, so on its
+        own it is always a rollback.
+   - **The signed position per provider.** Rust: the pair (`date`, rustc
+     version) from `channel-rust-stable.toml`, both inside the signed
+     bytes, compared in that order. `date` has day precision, so a second
+     stable release on the same day is ordered by its higher rustc
+     version instead of failing forever. For `max_age`, the date is the
+     instant 00:00 UTC that day; a date more than one day ahead of the
+     local clock is refused. The versioned manifests carry their own,
+     earlier dates (1.98.1's names 2026-09-03, the stable one 2026-10-01);
+     they are verified by signature and the append-only rule and are not
+     compared with the mark. The other providers fix theirs in their own
+     PRs. .NET: the verified signing time (the RFC 3161 timestamp, or the
+     CMS signing time until that is checked) is the mark, and
+     `signature.expiration` only a hard deadline (proposal 1). Candidates
+     for the rest:
      Node, the `SHASUMS256.txt` signature time; Go, the signature time,
      which binds bytes only and so is weaker; attestation providers, the
      Rekor `integratedTime`; Hex, none (its CSV carries no date), so only
@@ -563,10 +602,16 @@ changes or deletes one, which is what keeps an old lock realizable.
      expired policy is not a current one. Commands that need no
      authenticated trust keep working.
    - **Clock rollback.** `not_after` and `max_age` both read the local
-     clock, so setting it back defeats them. PR 1 narrows that: a clock
-     earlier than the newest signed time the store has accepted is an
-     error. Beyond that it is a `LIMITATIONS.md` row: whoever controls the
-     clock and the store controls freshness.
+     clock, so setting it back defeats them. PR 1 narrows that: the store
+     records the newest local time any command has seen in it (a
+     high-water clock that only moves forward) and refuses to run a
+     trust check when the clock reads earlier than that, or earlier than
+     the newest signed time it has accepted. That catches a clock set
+     back on a store already in use, but not a clock that is held still
+     or set back before the store's first use, and not a fresh store
+     (a CI job's throwaway store included), which has no history to
+     compare with. Those stay a `LIMITATIONS.md` row: whoever controls
+     the clock and the store controls freshness.
    - Change it if WP5 adds a policy fetched over the network; that
      fetched policy then needs a `max_age` like snapshots.
 

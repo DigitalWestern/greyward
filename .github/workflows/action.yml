@@ -66,6 +66,8 @@ jobs:
       # those 32 bytes.
       - name: A throwaway signing key, and a policy that trusts it and the records' key
         id: key
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           der="$RUNNER_TEMP/key.der"
@@ -75,15 +77,25 @@ jobs:
           rm -f "$der"
           # Not masked: GitHub drops a step output that holds a masked
           # value, and this key is made for this job and thrown away.
+          # The company policy as the installed release shipped it: a
+          # template on main may name a kind the release does not know yet,
+          # and a release refuses an unknown kind. The template in the
+          # checkout is checked against the code that reads it by the
+          # offline suite (commands/audit.rs).
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          git fetch --depth=1 origin "refs/tags/$tag:refs/tags/$tag"
           policy="$RUNNER_TEMP/greyward-policy.toml"
-          cp docs/human/policy-company.toml "$policy"
+          git show "$tag:docs/human/policy-company.toml" > "$policy"
           printf '\n[signing]\ntrusted = ["%s", "ed25519:%s"]\n' "$DEMO_RECORD_KEY" "$public" >> "$policy"
           echo "key=ed25519:$seed" >> "$GITHUB_OUTPUT"
           echo "policy=$policy" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: ./
         id: ward
         with:
           working-directory: .github/action-demo
+          # The release whose policy template the step above copied.
+          version: ${{ steps.key.outputs.tag }}
           sbom-artifact: sbom-${{ matrix.os }}${{ matrix.signed && '-signed' || '' }}
           cache: ${{ matrix.cache || 'false' }}
           policy: ${{ steps.key.outputs.policy }}

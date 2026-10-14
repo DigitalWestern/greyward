@@ -100,5 +100,29 @@
   "size": 64972,
   "status": 200,
   "url": "https://builds.hex.pm/installs/hex-1.x.csv"
+ },
+ {
+  "census_label": "hex-publish-time",
+  "file": "hex.pm/api/packages/jason/releases/1.4.5.body",
+  "headers": {
+   "Content-Type": "application/json; charset=utf-8"
+  },
+  "method": "GET",
+  "sha256": "2a746bdd5832ae7d4756f3bfb5ad45f8e70d07218f3ff9559085da3a18b5a201",
+  "size": 888,
+  "status": 200,
+  "url": "https://hex.pm/api/packages/jason/releases/1.4.5"
+ },
+ {
+  "census_label": "hex-publish-time",
+  "file": "hex.pm/api/packages/telemetry/releases/1.4.2.body",
+  "headers": {
+   "Content-Type": "application/json; charset=utf-8"
+  },
+  "method": "GET",
+  "sha256": "86f3539de868a27b19c839a0f90200be7462e7b8af9fe57874b55ddb14481447",
+  "size": 828,
+  "status": 200,
+  "url": "https://hex.pm/api/packages/telemetry/releases/1.4.2"
  }
 ]

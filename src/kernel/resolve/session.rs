@@ -114,12 +114,21 @@ impl Facts {
     }
 }
 
+/// When package versions were published, as served metadata said:
+/// `(route id, name, version)` in the route's [`package_key`] form, to unix
+/// seconds. Several documents naming one version keep the earliest time.
+///
+/// [`package_key`]: super::routes::RegistryProtocol::package_key
+pub type PublishTimes = BTreeMap<(String, String, String), i64>;
+
 /// A finished session.
 #[derive(Debug, Clone)]
 pub struct SessionReport {
     pub ledger: PortableLedger,
     pub diagnostics: Diagnostics,
     pub facts: Facts,
+    /// Publish times read from the metadata the session served.
+    pub published: PublishTimes,
 }
 
 /// A session's live state, shared by the connections serving it.
@@ -138,6 +147,8 @@ struct Inner {
     /// Artifact claims learned from served metadata, by URL without its
     /// fragment.
     claims: HashMap<String, UrlClaims>,
+    /// Publish times learned from served metadata.
+    published: PublishTimes,
     /// The last portable entry per (method, url), to count retries.
     last: HashMap<(String, String), Entry>,
     /// Last-good responses per endpoint origin.
@@ -645,6 +656,28 @@ impl State {
         }
     }
 
+    /// Keep the publish times `route`'s protocol read from a served body,
+    /// under its package keys; the earliest wins.
+    pub(crate) fn add_published(&self, route: &Route, times: Vec<(String, String, i64)>) {
+        if times.is_empty() {
+            return;
+        }
+        let protocol = &route.protocol;
+        let mut inner = self.inner();
+        if inner.closed {
+            return;
+        }
+        for (name, version, at) in times {
+            let (name, version) = protocol.package_key(&name, &version);
+            let key = (protocol.route_id().to_string(), name, version);
+            inner
+                .published
+                .entry(key)
+                .and_modify(|known| *known = (*known).min(at))
+                .or_insert(at);
+        }
+    }
+
     /// What the metadata served in `scope` claims for `url`.
     pub(crate) fn claimed(&self, scope: &str, url: &Url) -> Claimed {
         let inner = self.inner();
@@ -685,6 +718,7 @@ impl State {
             ledger,
             diagnostics: std::mem::take(&mut inner.diagnostics),
             facts,
+            published: std::mem::take(&mut inner.published),
         }
     }
 }

@@ -1346,6 +1346,7 @@ pub fn cargo_confined<'a>(
     // records them under the run's policy (a deny refuses the run) with the
     // session's, and carries them in the signed record.
     let locks = cargo_locks(run.args, &confined.outputs);
+    confined.locked = Some(super::crates::locked_list(locks.clone()));
     confined.check = Some(Box::new(move |staged: &Staged<'_>| {
         let mut sources: Vec<String> = Vec::new();
         for lock in &locks {

@@ -162,15 +162,19 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
         })
     }));
     let publish = std::mem::replace(&mut run.publish, RubyPublish::Detached);
-    confined.publish(match publish {
+    let publish = match publish {
         RubyPublish::Detached => Publish::Detached {
             outputs: Vec::new(),
         },
-        RubyPublish::Project { receipt } => Publish::Project {
-            outputs: OUTPUTS.iter().map(PathBuf::from).collect(),
-            receipt,
-        },
-    });
+        RubyPublish::Project { receipt } => {
+            confined.locked = Some(super::locked::locked_list());
+            Publish::Project {
+                outputs: OUTPUTS.iter().map(PathBuf::from).collect(),
+                receipt,
+            }
+        }
+    };
+    confined.publish(publish);
     Ok(confined)
 }
 

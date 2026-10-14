@@ -476,6 +476,13 @@ pub trait Tailor: Sync {
         out: &mut Vec<Value>,
     ) -> io::Result<()>;
 
+    /// `lookalike-name`: this registry's most popular package names and
+    /// the rule by which it treats two spellings as one name. `None`: no
+    /// list, and no package of this ecosystem is judged.
+    fn popular(&self) -> Option<&'static crate::kernel::lookalike::Popular> {
+        None
+    }
+
     /// The store object kinds this tailor produces: their live and
     /// legacy-migration identity grammars plus metadata adapters (`objmeta`).
     /// Every kind a tailor commits must have a row here or GC refuses to
@@ -694,6 +701,56 @@ pub fn install_resolution_files() {
             None => Ok(None),
         },
     ));
+}
+
+/// Hand the closure writer the `lookalike-name` judgment of every tailor
+/// with a popular list: the closure's registry packages, as its SBOM
+/// components name them, each judged against that list. A component whose
+/// purl names another source (`vcs_url`, `repository_url`,
+/// `download_url`) is not the registry's package, and a toolchain
+/// component has no purl. Idempotent.
+pub fn install_lookalikes() {
+    crate::comforter::lookalike::install(std::sync::Arc::new(|ecosystem: &str, body: &Value| {
+        match by_id(ecosystem) {
+            Some(tailor) => lookalikes(tailor, ecosystem, body),
+            None => Ok(BTreeMap::new()),
+        }
+    }));
+}
+
+fn lookalikes(
+    tailor: &dyn Tailor,
+    ecosystem: &str,
+    body: &Value,
+) -> io::Result<BTreeMap<String, String>> {
+    let mut found = BTreeMap::new();
+    let Some(popular) = tailor.popular() else {
+        return Ok(found);
+    };
+    let mut components = Vec::new();
+    tailor.sbom_components(ecosystem, body, &mut components)?;
+    for component in &components {
+        let (Some(purl), Some(name)) = (component["purl"].as_str(), component["name"].as_str())
+        else {
+            continue;
+        };
+        // A package from somewhere other than the registry is not the
+        // registry's package of its name: a git source (`vcs_url`: Cargo,
+        // npm, Python), another index (`repository_url`: Python), or a
+        // tarball URL (`download_url`: npm). A component without a purl (an
+        // npm `file:` package) is skipped above.
+        let elsewhere = purl.split_once('?').is_some_and(|(_, qualifiers)| {
+            qualifiers.split('&').any(|q| {
+                ["vcs_url=", "repository_url=", "download_url="]
+                    .iter()
+                    .any(|key| q.starts_with(key))
+            })
+        });
+        if let Some(like) = popular.lookalike(name).filter(|_| !elsewhere) {
+            found.insert(name.to_string(), like.to_string());
+        }
+    }
+    Ok(found)
 }
 
 /// `ward fmt`: an ecosystem's pinned formatter (`Tailor::formatter`),
@@ -955,6 +1012,7 @@ pub fn detected_in(project: &ProjectRoot) -> io::Result<Vec<&'static dyn Tailor>
 mod tests {
     use super::*;
     use crate::kernel::toolchain::{qualified, Request, SourcePolicy};
+    use serde_json::json;
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
@@ -1812,5 +1870,70 @@ mod tests {
         for extension in ["py", "js", "ts", "rb", "exs", "go", "rs", "cs"] {
             assert!(seen.contains(extension), "no tailor claims .{extension}");
         }
+    }
+
+    /// Every registry tailor embeds `tools/popular.py`'s list: 2000 names,
+    /// distinct once its own normalization has run (the script keeps the
+    /// first of two spellings of one name), and none a lookalike of itself.
+    #[test]
+    fn every_registry_tailor_embeds_two_thousand_distinct_popular_names() {
+        let samples = [
+            ("cargo", "serde_json", "serde-jsno"),
+            ("python", "Requests", "reqeusts"),
+            ("node", "express", "expres"),
+            ("ruby", "rails", "railss"),
+            ("go", "github.com/spf13/cobra/v2", "github.com/spf13/cobar"),
+            ("dotnet", "Newtonsoft.Json", "Newtonsoft.Jsno"),
+            ("elixir", "phoenix", "phoenx"),
+        ];
+        for (id, popular_name, lookalike) in samples {
+            let popular = by_id(id).unwrap().popular().unwrap();
+            assert_eq!(popular.len(), 2000, "{id}");
+            assert_eq!(popular.lookalike(popular_name), None, "{id}");
+            assert!(popular.lookalike(lookalike).is_some(), "{id}: {lookalike}");
+        }
+        assert_eq!(registry().len(), samples.len());
+    }
+
+    /// A closure's registry packages are judged by their SBOM components:
+    /// a git package's purl names its repository, so it is not judged,
+    /// and a popular name or a short one is no lookalike.
+    #[test]
+    fn a_closure_names_the_lookalikes_among_its_registry_packages() {
+        let row = |name: &str, git: bool| {
+            let mut row = json!({"path": format!("node_modules/{name}"), "name": name,
+                                 "version": "1.0.0", "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ=="});
+            if git {
+                row["integrity"] = json!("git:0123456789abcdef0123456789abcdef01234567");
+                row["git"] = json!({"url": "https://github.com/o/expres.git",
+                                    "commit": "0123456789abcdef0123456789abcdef01234567"});
+            }
+            row
+        };
+        let body = |rows: Vec<Value>| {
+            json!({"env_object": "/store/objects/abc123", "node_version": "22.0.0",
+                   "packages": rows})
+        };
+        let node = by_id("node").unwrap();
+        let found = lookalikes(
+            node,
+            "node",
+            &body(vec![
+                row("lodahs", false),
+                row("express", false),
+                row("exprss", true),
+                row("chak", false),
+                {
+                    let mut tarball = row("axois", false);
+                    tarball["tarball"] = json!("https://example.com/axois-1.0.0.tgz");
+                    tarball
+                },
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            BTreeMap::from([("lodahs".to_string(), "lodash".to_string())])
+        );
     }
 }

@@ -529,6 +529,17 @@ impl Tailor for Node {
         )
     }
 
+    /// npm names are lowercase; an old mixed-case one is the same name.
+    fn popular(&self) -> Option<&'static crate::kernel::lookalike::Popular> {
+        static POPULAR: std::sync::OnceLock<crate::kernel::lookalike::Popular> =
+            std::sync::OnceLock::new();
+        Some(POPULAR.get_or_init(|| {
+            crate::kernel::lookalike::Popular::parse(include_str!("popular.txt"), |name| {
+                name.to_lowercase()
+            })
+        }))
+    }
+
     fn sbom_components(&self, eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<()> {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "packages")? {
@@ -565,6 +576,10 @@ impl Tailor for Node {
                 if let Some(subdirectory) = &git.subdirectory {
                     purl.push_str(&format!("#{}", purl_encode_path(subdirectory)));
                 }
+            } else if let Some(url) = p["tarball"].as_str() {
+                // A tarball-URL package is not the registry's either: the
+                // purl names where its bytes came from (`download_url`).
+                purl.push_str(&format!("?download_url={}", purl_encode(url)));
             }
             let mut c = component(&name, &ver, purl, eco);
             if npm_name_from_path(&path) != name {
@@ -1567,6 +1582,22 @@ mod tests {
             .unwrap()
             .starts_with("unrecorded: this closure predates the matched digest"));
         assert!(property(old, "greyward:hash-match").is_some());
+
+        // A tarball-URL package names the URL its bytes came from, so no
+        // reader takes it for the registry's package of that name.
+        let mut out = Vec::new();
+        let tarball = json!({
+            "env_object": "/store/objects/abc123",
+            "node_version": "22.0.0",
+            "packages": [{"path": "node_modules/expres", "name": "expres", "version": "1.0.0",
+                          "integrity": "sha512-H0D8ktokFpR1CXnubPWC8tXX0o4YM13gWrxU0FYOD1MChgxlK/CNVgJSql50IQVG82n7u86MEs/HlXsmUv6adQ==",
+                          "tarball": "https://example.com/expres-1.0.0.tgz"}],
+        });
+        Node.sbom_components("node", &tarball, &mut out).unwrap();
+        assert_eq!(
+            out[0]["purl"],
+            "pkg:npm/expres@1.0.0?download_url=https%3A%2F%2Fexample.com%2Fexpres-1.0.0.tgz"
+        );
 
         // A matched digest that is none of the row's candidates is a
         // damaged closure.

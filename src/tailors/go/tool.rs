@@ -5,7 +5,10 @@
 use super::go_env;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
+use crate::kernel::resolve::age::LockedPackage;
+use crate::kernel::resolve::door::{
+    ConfinedSpec, LockedList, ReceiptProducer, Staged, Target, Wire, Wiring,
+};
 use crate::kernel::resolve::ledger;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
@@ -95,11 +98,61 @@ pub(crate) fn go_confined<'a>(
                 .collect::<io::Result<_>>()?;
         }
         GoPublish::Project { receipt } => {
+            confined.locked = Some(locked_list());
             confined.outputs = OUTPUTS.iter().map(PathBuf::from).collect();
             confined.target = Target::Project { receipt };
         }
     }
     Ok(confined)
+}
+
+/// The modules a published go.sum names with a content hash (its
+/// `/go.mod`-only lines are not modules the build uses), for the door's
+/// `young-package` check. Every one came through proxy.golang.org. go
+/// writes no go.sum for a module that requires nothing; a run that leaves
+/// none while its go.mod has a `require` is `InvalidData`.
+fn locked_list<'a>() -> LockedList<'a> {
+    Box::new(|staged: &Staged<'_>| {
+        if let Some(bytes) = staged.read(Path::new("go.sum"))? {
+            return go_sum_modules(&String::from_utf8_lossy(&bytes));
+        }
+        let go_mod = staged.read_lock(Path::new("go.mod"))?;
+        let requires = String::from_utf8_lossy(&go_mod)
+            .lines()
+            .any(|line| line.trim_start().starts_with("require"));
+        if requires {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the run left no go.sum, but go.mod requires modules",
+            ));
+        }
+        Ok(Vec::new())
+    })
+}
+
+/// `module version h1:...` lines of `go.sum`, without the `/go.mod` ones.
+/// A line that is not three words is `InvalidData`: a module this reader
+/// skipped would never be judged.
+pub(crate) fn go_sum_modules(text: &str) -> io::Result<Vec<LockedPackage>> {
+    let mut modules = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words[..] {
+            [] => {}
+            [module, version, _hash] => {
+                if !version.ends_with("/go.mod") {
+                    modules.push(LockedPackage::new(module, version));
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("go.sum line {} is not `module version hash`", number + 1),
+                ))
+            }
+        }
+    }
+    Ok(modules)
 }
 
 /// Run the store go confined through `door`. A Detached run's ledger is

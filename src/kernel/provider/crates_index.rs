@@ -24,8 +24,9 @@
 //! unattested hosts (see `kernel::resolve::intercept`).
 
 use crate::kernel::fetch::Digest;
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, RegistryProtocol, RequestClass, Route, Upstream,
+    Claim, Endpoint, Lookup, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -102,6 +103,58 @@ impl RegistryProtocol for CratesSparse {
     fn expects_claim(&self, url: &Url) -> bool {
         url.host_str() == Some(DOWNLOAD_HOST)
     }
+
+    /// Each index line's `pubtime` (crates.io writes it on every line,
+    /// backfilled for versions published before it existed).
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        if url.host_str() != Some(INDEX_HOST) || url.path() == "/config.json" {
+            return Vec::new();
+        }
+        let Ok(text) = std::str::from_utf8(body) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+                let at = parse_rfc3339(entry.get("pubtime")?.as_str()?)?;
+                Some((
+                    entry.get("name")?.as_str()?.to_string(),
+                    entry.get("vers")?.as_str()?.to_string(),
+                    at,
+                ))
+            })
+            .collect()
+    }
+
+    /// The crate's index file, which cargo skips for a crate its lock
+    /// already pins.
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        let path = index_path(name)?;
+        Some(Lookup {
+            url: endpoint(endpoints, INDEX_HOST).ok()?.url(&path).ok()?,
+            accept: "*/*",
+        })
+    }
+
+    /// crates.io names are unique without letter case.
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        (name.to_ascii_lowercase(), version.to_string())
+    }
+}
+
+/// The sparse index path of `name`: lowercased, under the prefix
+/// directories its length decides.
+fn index_path(name: &str) -> Option<String> {
+    check_name(name).ok()?;
+    let name = name.to_ascii_lowercase();
+    let path = match name.len() {
+        1 => format!("/1/{name}"),
+        2 => format!("/2/{name}"),
+        3 => format!("/3/{}/{name}", &name[..1]),
+        _ => format!("/{}/{}/{name}", &name[..2], &name[2..4]),
+    };
+    check_index_path(&path).ok()?;
+    Some(path)
 }
 
 /// Where cargo downloads `name` at `version` from (`config.json`'s `dl`,
@@ -235,6 +288,42 @@ mod tests {
             Upstream::Fetch(url) => url.to_string(),
             other => panic!("{path}: {other:?}"),
         }
+    }
+
+    /// Every index line carries `pubtime`; the lookup is the crate's own
+    /// index file, under the prefix its length decides.
+    #[test]
+    fn publish_times_come_from_index_lines() {
+        let body = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/proxy/registry/cargo/index.crates.io/it/oa/itoa.body"),
+        )
+        .unwrap();
+        let url = Url::parse("https://index.crates.io/it/oa/itoa").unwrap();
+        let times = CRATES_SPARSE.published(&url, &body);
+        assert_eq!(times.len(), 37);
+        assert!(times.contains(&("itoa".into(), "1.0.18".into(), 1_773_965_557)));
+        let config = Url::parse("https://index.crates.io/config.json").unwrap();
+        assert!(CRATES_SPARSE.published(&config, &body).is_empty());
+        let lookup = |name: &str| {
+            CRATES_SPARSE
+                .lookup(&endpoints(), name, "1.0.0")
+                .map(|lookup| lookup.url.to_string())
+        };
+        assert_eq!(
+            lookup("itoa").as_deref(),
+            Some("https://index.crates.io/it/oa/itoa")
+        );
+        assert_eq!(
+            lookup("Ryu").as_deref(),
+            Some("https://index.crates.io/3/r/ryu")
+        );
+        assert_eq!(
+            lookup("cc").as_deref(),
+            Some("https://index.crates.io/2/cc")
+        );
+        assert_eq!(lookup("a").as_deref(), Some("https://index.crates.io/1/a"));
+        assert_eq!(lookup("../x"), None);
     }
 
     #[test]

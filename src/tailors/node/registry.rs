@@ -29,8 +29,9 @@ use crate::kernel::digest::{sri_candidates, strongest_sri};
 use crate::kernel::fetch::Digest;
 use crate::kernel::registries::config::Registry;
 use crate::kernel::registries::covers;
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, RegistryProtocol, RequestClass, Route, Upstream,
+    Claim, Endpoint, Lookup, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -103,6 +104,51 @@ impl RegistryProtocol for NpmRegistry {
     fn encoded_slash(&self) -> bool {
         true
     }
+
+    /// A full packument's `time` map: each version's publish time. The
+    /// abbreviated packument pnpm asks for has none.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        if url.host_str() != Some(REGISTRY_HOST) || is_tarball_path(url.path()) {
+            return Vec::new();
+        }
+        packument_times(body)
+    }
+
+    /// The full packument (`Accept: application/json`), which carries
+    /// `time`.
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.host() == REGISTRY_HOST)?;
+        let path = format!("/{}", name.replacen('/', "%2f", 1));
+        check_packument_path(&path).ok()?;
+        Some(Lookup {
+            url: endpoint.url(&path).ok()?,
+            accept: "application/json",
+        })
+    }
+}
+
+/// `(name, version, published)` for each version a packument's `time` map
+/// names (`created` and `modified` are not versions).
+fn packument_times(body: &[u8]) -> Vec<(String, String, i64)> {
+    let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let (Some(name), Some(times)) = (
+        packument.get("name").and_then(|n| n.as_str()),
+        packument.get("time").and_then(|t| t.as_object()),
+    ) else {
+        return Vec::new();
+    };
+    times
+        .iter()
+        .filter(|(version, _)| !matches!(version.as_str(), "created" | "modified"))
+        .filter_map(|(version, at)| {
+            let at = parse_rfc3339(at.as_str()?)?;
+            Some((name.to_string(), version.clone(), at))
+        })
+        .collect()
 }
 
 /// What a `dist` object claims for its tarball: every `integrity` entry of
@@ -337,6 +383,34 @@ mod tests {
             Upstream::Fetch(url) => url.to_string(),
             other => panic!("{path}: {other:?}"),
         }
+    }
+
+    /// The full packument's `time` map gives each version's publish time;
+    /// the abbreviated one pnpm reads gives none, so the lookup asks for
+    /// the full one, scoped names spelled as npm spells them.
+    #[test]
+    fn publish_times_come_from_the_full_packuments_time_map() {
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proxy/registry");
+        let url = Url::parse("https://registry.npmjs.org/is-odd").unwrap();
+        let full = std::fs::read(fixtures.join("npm/registry.npmjs.org/is-odd.body")).unwrap();
+        let times = NPM_REGISTRY.published(&url, &full);
+        assert_eq!(times.len(), 7, "{times:?}");
+        assert!(times.contains(&("is-odd".into(), "3.0.1".into(), 1_527_797_093)));
+        let abbreviated =
+            std::fs::read(fixtures.join("pnpm/registry.npmjs.org/is-odd.body")).unwrap();
+        assert!(NPM_REGISTRY.published(&url, &abbreviated).is_empty());
+        let tarball = Url::parse("https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz").unwrap();
+        assert!(NPM_REGISTRY.published(&tarball, &full).is_empty());
+        let lookup = NPM_REGISTRY
+            .lookup(&endpoints(), "@types/node", "20.1.0")
+            .unwrap();
+        assert_eq!(
+            lookup.url.as_str(),
+            "https://registry.npmjs.org/@types%2fnode"
+        );
+        assert_eq!(lookup.accept, "application/json");
+        assert!(NPM_REGISTRY.lookup(&endpoints(), "../x", "1.0.0").is_none());
     }
 
     #[test]

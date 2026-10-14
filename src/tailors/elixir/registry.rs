@@ -19,8 +19,9 @@
 //! makes no claim; ward verifies each tarball's checksums from mix.lock when
 //! it realizes the dependencies.
 
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, ProxyAddress, RegistryProtocol, RequestClass, Route, Upstream,
+    Claim, Endpoint, Lookup, ProxyAddress, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -163,6 +164,82 @@ pub fn route() -> io::Result<Route> {
     Route::new(&HEX_REPO, vec![Endpoint::https(REPO_HOST)?])
 }
 
+/// The route id of [`HexApi`].
+pub const API_ROUTE_ID: &str = "hex-api";
+/// The Hex API host, where a release's publish time lives.
+pub const API_HOST: &str = "hex.pm";
+
+/// hex.pm's API, for ward's own `young-package` lookups only: the signed
+/// registry on repo.hex.pm carries no publish time, the API's release
+/// object does (`inserted_at`). The door adds this route to the lookup
+/// session alone, and it serves no path to a tool.
+pub struct HexApi;
+
+pub static HEX_API: HexApi = HexApi;
+
+impl RegistryProtocol for HexApi {
+    fn route_id(&self) -> &'static str {
+        API_ROUTE_ID
+    }
+
+    fn upstream(&self, _endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+        Err(refused(
+            path,
+            "hex.pm is reached only by ward's publish-time lookups",
+        ))
+    }
+
+    fn classify(&self, _url: &Url) -> RequestClass {
+        RequestClass::Metadata
+    }
+
+    fn claims(&self, _url: &Url, _body: &[u8]) -> Vec<(Url, Claim)> {
+        Vec::new()
+    }
+
+    /// `/api/packages/<name>/releases/<version>`: its `inserted_at`.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        let Some((name, version)) = release_path(url) else {
+            return Vec::new();
+        };
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|release| parse_rfc3339(release.get("inserted_at")?.as_str()?))
+            .map(|at| (name.to_string(), version.to_string(), at))
+            .into_iter()
+            .collect()
+    }
+
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, version: &str) -> Option<Lookup> {
+        check_tarball(&format!("{name}-{version}")).ok()?;
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.host() == API_HOST)?;
+        Some(Lookup {
+            url: endpoint
+                .url(&format!("/api/packages/{name}/releases/{version}"))
+                .ok()?,
+            accept: "application/json",
+        })
+    }
+}
+
+/// The name and version of a release URL on hex.pm.
+fn release_path(url: &Url) -> Option<(&str, &str)> {
+    if url.host_str() != Some(API_HOST) {
+        return None;
+    }
+    let rest = url.path().strip_prefix("/api/packages/")?;
+    let (name, version) = rest.split_once("/releases/")?;
+    check_tarball(&format!("{name}-{version}")).ok()?;
+    Some((name, version))
+}
+
+/// The lookup route: hex.pm alone.
+pub fn api_route() -> io::Result<Route> {
+    Route::new(&HEX_API, vec![Endpoint::https(API_HOST)?])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +291,33 @@ mod tests {
         ] {
             assert!(upstream(path).is_err(), "{path} was served");
         }
+    }
+
+    #[test]
+    fn publish_times_come_from_hex_pm_release_objects_only() {
+        let endpoints = vec![Endpoint::https(API_HOST).unwrap()];
+        let lookup = HEX_API.lookup(&endpoints, "jason", "1.4.4").unwrap();
+        assert_eq!(
+            lookup.url.as_str(),
+            "https://hex.pm/api/packages/jason/releases/1.4.4"
+        );
+        assert!(HEX_API.lookup(&endpoints, "Jason", "1.4.4").is_none());
+        assert!(HEX_API.lookup(&endpoints, "jason", "../x").is_none());
+        let body = br#"{"version":"1.4.4","inserted_at":"2024-07-26T18:41:59.418447Z"}"#;
+        assert_eq!(
+            HEX_API.published(&lookup.url, body),
+            [("jason".to_string(), "1.4.4".to_string(), 1_722_019_319)]
+        );
+        let repo = Url::parse("https://repo.hex.pm/api/packages/jason/releases/1.4.4").unwrap();
+        assert!(HEX_API.published(&repo, body).is_empty());
+        let refused = HEX_API
+            .upstream(&endpoints, "/api/packages/jason/releases/1.4.4")
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("publish-time lookups"),
+            "{refused}"
+        );
+        assert_eq!(api_route().unwrap().endpoints.len(), 1);
     }
 
     #[test]

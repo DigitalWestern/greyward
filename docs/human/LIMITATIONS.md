@@ -329,9 +329,19 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   sockets before invoking bubblewrap. The build sandbox trusts `/usr` unscanned; the
   resolution sandbox scans `/usr` and the other system roots once per process. A socket created
   after the scan is not caught (the fmt host-socket scan is Linux-only too); build daemons can
-  outlive a run. **Store objects are trusted from permissions + metadata, and all
-  toolchain pins are TOFU** (pin-time hashes, not signed manifests): same-user content
-  replacement after commit is undetected.
+  outlive a run. **Store objects are trusted from permissions + metadata**: same-user
+  content replacement after commit is undetected.
+- **No toolchain download is signature-checked when ward uses it.** ward compares each
+  download with the digest in the catalog embedded in the binary, so that digest is as
+  trustworthy as the Greyward release that ships it. When the catalogs are generated,
+  `tools/catalog.py` checks the signature of each Rust release's channel manifest (not yet of
+  `channel-rust-stable.toml`, which names the newest) and of Node's `SHASUMS256.txt`; every
+  other source is **TOFU** (trust on first use: a checksum taken when the
+  row was pinned, with no signature behind it), one row each in the sections below. What each
+  upstream publishes is in `docs/agent/DESIGNS.md` §2 "PR 0 evidence"; checking it is WP3.
+- **The conda-forge native libraries are TOFU.** `src/kernel/provider/nativelibs.rs` pins
+  their sha256 from conda-forge's repodata, taken once. ward checks nothing signed for them,
+  and PR 0 did not examine what conda-forge publishes.
 - **Delegated planning runs in the resolution sandbox.** A Gemfile, a mix.exs and a
   csproj are code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler), Elixir's
   (mix) and .NET's (restore) resolvers all run confined, reaching their registry only
@@ -385,6 +395,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
   3.10.1, 3.10.10, 3.11.0, 3.11.2; `tools/catalog.py python` reports them) and are refused. A
   two-part `.python-version` picks the default (3.12.14) on its minor, else the newest pinned
   patch; a three-part request must match a pin exactly.
+- **python-build-standalone builds are TOFU.** Their digests come from the release's
+  `SHA256SUMS` and GitHub's asset digest, neither signed. The project publishes GitHub
+  artifact attestations (Sigstore) from release 20250317 on, which ward does not check yet; 33
+  of the 73 shipped CPython releases come from older releases that have none.
+- **uv is TOFU.** Its digest comes from the `.sha256` beside the archive and GitHub's asset
+  digest. uv publishes artifact attestations, which ward does not check yet.
 - **RECORD files are left as shipped**: not verified on install; importlib listings can lie;
   project-local/editable and direct requirements are skipped (`requirement-skipped`). **Sdists
   with dynamic build requirements** (PEP 517 `get_requires_for_build_wheel`) are unsupported —
@@ -726,6 +742,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## Go
 
+- **Go archives are TOFU.** The digest comes from go.dev's release JSON, cross-checked with
+  the `.sha256` on dl.google.com, neither signed. A `.asc` signature by Google's Linux
+  packaging key sits beside every archive, which ward does not check yet; go.dev does not
+  document it, and the JSON that lists releases is unsigned.
 - **Only the Go lines go.dev lists as supported are realizable** (every release of each). An
   unmatched `go.mod` selection fails before store or network access. A non-default
   `toolchain` directive is exact; `go` alone is a minimum that takes the default (1.27.0) when
@@ -742,6 +762,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## Ruby
 
+- **portable-ruby, and the Bundler inside it, are TOFU.** Homebrew publishes no checksum file,
+  signature or attestation for the bottles; the digest is the bottle hashed at pin time,
+  compared with GitHub's own asset digest. Nothing can be checked later. The default
+  (3.4.6) is a release Homebrew marked prerelease and reverted in brew.
 - **git and path gems fail closed; non-rubygems.org sources fail closed.** So do gems whose
   installers need network or absent host libraries (mysql2/rmagick-class) — no
   declared-artifacts mechanism for gems yet. **Default/bundled-gem preactivation edge**: a
@@ -760,6 +784,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## Elixir
 
+- **Every BEAM toolchain row is TOFU.** The Darwin OTP build (erlef/otp_builds) has a
+  Sigstore provenance bundle beside it, which ward does not check yet. The Linux OTP build
+  (greyward-toolchains) has only an unsigned `.sha256`. The Elixir zip has a `.sha256sum`;
+  the `.sigstore` file beside it attests the release's SBOM files, not the zip. Hex and
+  rebar3 digests come from builds.hex.pm's install CSVs, whose `.signed` RSA signatures ward
+  does not check yet (Mix stopped checking them in 2025).
 - **Two OTP steps run outside the sandbox on Linux**: the `Install -cross -minimal` relocation
   and the OTP runtime probe (`src/tailors/elixir/mod.rs`). They touch only the staged object — the one
   non-sandboxed build step in the kernel. **OTP cache hits skip the runtime probe**: the OTP
@@ -797,8 +827,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   entity-encode element names) — the build sandbox, not preflight, is the security boundary.
 - **Output publication has a microsecond non-atomic window**: a reader during the rename sees
   no output; the last good build survives a failed publication. `/tmp/.dotnet` is a bounded,
-  local-only sandbox write allowance. **releases.json is a checksum channel, not signed
-  metadata.** **The lock does not cover asset selection**: project.assets.json is re-derived
+  local-only sandbox write allowance. **The .NET SDK is TOFU in ward today, though
+  Microsoft signs what would cover it.** The SDK's sha512 comes from `releases.json`, which
+  carries a CMS signature (a `.p7s` file chaining to DigiCert's code-signing root) and a signed
+  expiry date; ward does not check it yet (WP3). The `.sig` files beside the metadata are
+  stale and made by an unpublished key, so they prove nothing. **The lock does not cover asset selection**: project.assets.json is re-derived
   and attested but not diffed; a NuGet behavior change across SDK pins changes builds under
   the same lock, silently.
 

@@ -79,12 +79,19 @@ def median_ms(ward, args, cwd, store, reps):
 def make_writable_and_remove(path):
     if not path.exists():
         return
-    subprocess.run(["chmod", "-R", "u+w", str(path)], check=False)
-    shutil.rmtree(path, ignore_errors=True)
+    subprocess.run(["chmod", "-R", "u+w", str(path)], check=True)
+    shutil.rmtree(path)
 
 
 def copy_fixture(source, into):
     shutil.copytree(source, into, symlinks=True)
+    if source == FIXTURES["P1 proj-poly"][0]:
+        # The acceptance fixture is version-pinned but invokes uv to lock.
+        # Hash-pin its benchmark copy so cold sync excludes resolution.
+        shutil.copyfile(
+            REPO / "tools/perf-bench/fixtures/proj-poly/requirements.txt",
+            into / "requirements.txt",
+        )
     return into
 
 
@@ -177,17 +184,27 @@ def main():
     parser.add_argument("--add-reps", type=int, default=3, help="`ward add` runs per fixture (0 skips)")
     parser.add_argument("--keep", action="store_true", help="leave the scratch directory in place")
     options = parser.parse_args()
+    if options.reps < 1:
+        parser.error("--reps must be at least 1")
+    if options.add_reps < 0:
+        parser.error("--add-reps must be at least 0")
+    tmpdir = os.environ.get("TMPDIR")
+    if not tmpdir:
+        parser.error("TMPDIR must name a writable scratch directory")
+    tmpdir = Path(tmpdir).resolve()
     ward = Path(options.ward).resolve()
     if not os.access(ward, os.X_OK):
         sys.exit(f"perf-bench: no ward binary at {ward}; run `cargo build --release --locked`")
-    scratch = Path(tempfile.mkdtemp(prefix="perf-bench-", dir=os.environ.get("TMPDIR")))
+    scratch = Path(tempfile.mkdtemp(prefix="perf-bench-", dir=tmpdir))
 
     def log(line):
         print(f"perf-bench: {line}", file=sys.stderr, flush=True)
 
     log(f"scratch: {scratch}")
-    version = subprocess.run([str(ward), "--version"], capture_output=True, text=True).stdout.strip()
     try:
+        version = subprocess.run(
+            [str(ward), "--version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
         rows = bench(ward, scratch, options.reps, options.add_reps, log)
     except Failed as error:
         sys.exit(f"perf-bench: {error}")

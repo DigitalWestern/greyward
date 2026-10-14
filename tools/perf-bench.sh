@@ -10,6 +10,7 @@
 #
 # Fixtures (locks committed, so a sync time excludes resolution):
 #   P1  tests/fixtures/proj-poly                 Python six + npm is-odd/wrappy
+#       tools/perf-bench/fixtures/proj-poly      hash-pinned requirements overlay
 #   P2  tools/perf-bench/fixtures/npm-express    express + lodash, package-lock.json
 #   P3  tools/perf-bench/fixtures/py-fastapi     FastAPI stack, pyproject + uv.lock
 #

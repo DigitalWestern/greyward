@@ -87,8 +87,59 @@ fn open_through<'c>(
 ) -> io::Result<(Box<dyn Read>, Option<u64>)> {
     match source_for(sources, ecosystem, url)? {
         Served::Public => open_url(url, "download", None),
-        Served::Registry(registry) => open_configured(clients()?, sources, registry, url),
+        Served::Registry(registry) => open_configured(clients()?, sources, registry, url, None)
+            .map(|opened| (opened.reader, opened.declared)),
     }
+}
+
+/// A page a configured registry serves (a simple API project page): its
+/// body, at most `max` bytes, and the URL it was finally served from,
+/// which relative links resolve against. `None` when the registry answers
+/// 404.
+pub(crate) fn fetch_page(
+    sources: &Sources,
+    registry: &Registry,
+    url: &str,
+    accept: &str,
+    max: u64,
+) -> io::Result<Option<(Vec<u8>, String)>> {
+    fetch_page_through(clients::process()?, sources, registry, url, accept, max)
+}
+
+fn fetch_page_through(
+    clients: &Clients,
+    sources: &Sources,
+    registry: &Registry,
+    url: &str,
+    accept: &str,
+    max: u64,
+) -> io::Result<Option<(Vec<u8>, String)>> {
+    let opened = match open_configured(clients, sources, registry, url, Some(accept)) {
+        Ok(opened) => opened,
+        Err(error) if super::http_status(&error) == Some(404) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut body = Vec::new();
+    opened
+        .reader
+        .take(max + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| super::read_failure(&opened.url, error))?;
+    if body.len() as u64 > max {
+        return Err(io::Error::other(format!(
+            "{}: larger than {max} bytes; refusing",
+            shown_url(&opened.url)
+        )));
+    }
+    Ok(Some((body, opened.url)))
+}
+
+/// One configured registry's answer: the body, its declared length, and
+/// the URL that served it after redirects.
+struct Opened {
+    reader: Box<dyn Read>,
+    declared: Option<u64>,
+    url: String,
 }
 
 /// The public registry's hosts for `ecosystem`, as the proxy's public
@@ -123,7 +174,8 @@ fn open_configured(
     sources: &Sources,
     registry: &Registry,
     url: &str,
-) -> io::Result<(Box<dyn Read>, Option<u64>)> {
+    accept: Option<&str>,
+) -> io::Result<Opened> {
     let credential = match &registry.credential {
         None => None,
         Some(name) => {
@@ -161,6 +213,9 @@ fn open_configured(
     };
     follow_redirects(url, authorize, |hop| {
         let mut headers = vec![("User-Agent".to_string(), super::USER_AGENT.to_string())];
+        if let Some(accept) = accept {
+            headers.push(("Accept".to_string(), accept.to_string()));
+        }
         if let Some(credential) = &credential {
             if covers(&registry.root, hop) {
                 let secret = credential.authorization().map_err(io::Error::other)?;
@@ -198,7 +253,11 @@ fn open_configured(
         let declared = response
             .header("Content-Length")
             .and_then(|value| value.trim().parse::<u64>().ok());
-        Ok(Hop::Body((response.body as Box<dyn Read>, declared)))
+        Ok(Hop::Body(Opened {
+            reader: response.body,
+            declared,
+            url: hop.to_string(),
+        }))
     })
 }
 
@@ -476,6 +535,62 @@ python = ["corp"]
                 .unwrap_err();
             assert_eq!(super::super::super::http_status(&error), Some(404));
             assert!(!error.to_string().contains(TOKEN));
+        }
+
+        /// A simple page is read with the credential and the Accept asked
+        /// for, and comes back with the URL that served it; a 404 is no
+        /// page.
+        #[test]
+        fn a_page_comes_back_with_the_url_that_served_it() {
+            let fx = fixture();
+            let registry = fx.policy.registries.registry("corp").unwrap();
+            fx.upstream.set(
+                "/repo/pypi/simple/demo/",
+                Behavior::Authorized {
+                    value: format!("Bearer {TOKEN}"),
+                    reply: Reply::new(
+                        200,
+                        b"<a href=\"../../packages/demo-1.0.tar.gz#sha256=00\">x</a>",
+                    ),
+                },
+            );
+            let url = fx.url("registry.test", "/repo/pypi/simple/demo/");
+            let (body, served) = fetch_page_through(
+                &fx.clients,
+                &fx.policy.registries,
+                registry,
+                &url,
+                "application/vnd.pypi.simple.v1+json",
+                1 << 20,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(body.starts_with(b"<a href"));
+            assert_eq!(served, url);
+            let seen = fx.upstream.seen();
+            let request = seen
+                .iter()
+                .find(|seen| seen.target == "/repo/pypi/simple/demo/")
+                .unwrap();
+            assert_eq!(
+                request.headers.get("accept"),
+                Some("application/vnd.pypi.simple.v1+json")
+            );
+            let missing = fx.url("registry.test", "/repo/pypi/simple/nope/");
+            fx.upstream.set(
+                "/repo/pypi/simple/nope/",
+                Behavior::Reply(Reply::new(404, b"")),
+            );
+            assert!(fetch_page_through(
+                &fx.clients,
+                &fx.policy.registries,
+                registry,
+                &missing,
+                "text/html",
+                1 << 20
+            )
+            .unwrap()
+            .is_none());
         }
     }
 }

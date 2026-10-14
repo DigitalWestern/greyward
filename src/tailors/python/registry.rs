@@ -419,6 +419,30 @@ fn page_claims(url: &Url, body: &[u8], keep: impl Fn(&Url) -> bool) -> Vec<(Url,
     claims
 }
 
+/// The files a simple API project page lists, as `(filename, url,
+/// sha256)`, each link resolved against `page` (the URL that served it).
+/// PEP 691 JSON or the PEP 503 HTML page, as the proxy reads them. A file
+/// with no sha256 can never match a pin and is dropped.
+pub(crate) fn simple_page_files(page: &Url, body: &[u8]) -> Vec<(String, String, String)> {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return Vec::new();
+    };
+    let files = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(json) => json_files(&json),
+        Err(_) => html_files(text),
+    };
+    files
+        .into_iter()
+        .filter_map(|file| {
+            let mut target = page.join(&file.href).ok()?;
+            target.set_fragment(None);
+            let filename = target.path_segments()?.next_back()?.to_string();
+            let (_, sha256) = file.hashes.iter().find(|(algo, _)| algo == "sha256")?;
+            Some((filename, target.to_string(), sha256.to_ascii_lowercase()))
+        })
+        .collect()
+}
+
 /// The PyPI route: the index and the file host.
 pub fn route() -> io::Result<Route> {
     Route::new(
@@ -430,6 +454,34 @@ pub fn route() -> io::Result<Route> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A simple page's files resolve against the page that served them,
+    /// in either format; a file with no sha256 is dropped.
+    #[test]
+    fn simple_page_files_resolve_links_in_both_formats() {
+        let page = Url::parse("https://nexus.example/repo/pypi/simple/demo/").unwrap();
+        let html = b"<a href=\"../../packages/demo-1.0.tar.gz#sha256=AB\">demo-1.0.tar.gz</a>\n\
+                     <a href=\"https://cdn.example/demo-1.0-py3-none-any.whl#md5=00\">w</a>";
+        assert_eq!(
+            simple_page_files(&page, html),
+            [(
+                "demo-1.0.tar.gz".to_string(),
+                "https://nexus.example/repo/pypi/packages/demo-1.0.tar.gz".to_string(),
+                "ab".to_string()
+            )]
+        );
+        let json = br#"{"files": [{"filename": "demo-1.0-py3-none-any.whl",
+            "url": "/repo/pypi/packages/demo-1.0-py3-none-any.whl",
+            "hashes": {"sha256": "cd"}}]}"#;
+        assert_eq!(
+            simple_page_files(&page, json),
+            [(
+                "demo-1.0-py3-none-any.whl".to_string(),
+                "https://nexus.example/repo/pypi/packages/demo-1.0-py3-none-any.whl".to_string(),
+                "cd".to_string()
+            )]
+        );
+    }
 
     fn endpoints() -> Vec<Endpoint> {
         vec![

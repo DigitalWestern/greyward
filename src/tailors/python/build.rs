@@ -217,24 +217,64 @@ fn wrap_sandbox_build_error_with_tail(
     crate::kernel::error::describe(error, message)
 }
 
-fn build_toolchain_plan(python_version: &str) -> Plan {
-    Plan {
+/// The pinned build tools as a plan. Their files are on PyPI's file host;
+/// when the effective python `[sources]` list does not hold `public`, each
+/// is found by file name on the default registry's simple page instead,
+/// with the same pinned sha256, so every build's identity is unchanged.
+fn build_toolchain_plan(python_version: &str) -> io::Result<Plan> {
+    let policy = crate::kernel::policy::effective();
+    let mirror = match policy.registries.ecosystem(Ecosystem::Python) {
+        list if list.includes_public() => None,
+        _ => super::pypi::default_registry(&policy)?,
+    };
+    let mut packages = Vec::new();
+    for (name, version, filename, url, sha) in BUILD_TOOLCHAIN {
+        let url = match mirror {
+            None => url.to_string(),
+            Some(registry) => {
+                bootstrap_url(&policy.registries, registry, name, filename, sha)?
+            }
+        };
+        packages.push(LockedPackage {
+            index: None,
+            name: (*name).into(),
+            version: (*version).into(),
+            filename: (*filename).into(),
+            url,
+            sha256: (*sha).into(),
+            kind: ArtifactKind::Wheel,
+            git: None,
+        });
+    }
+    Ok(Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
-        packages: BUILD_TOOLCHAIN
-            .iter()
-            .map(|(name, version, filename, url, sha)| LockedPackage {
-                index: None,
-                name: (*name).into(),
-                version: (*version).into(),
-                filename: (*filename).into(),
-                url: (*url).into(),
-                sha256: (*sha).into(),
-                kind: ArtifactKind::Wheel,
-                git: None,
-            })
-            .collect(),
-    }
+        packages,
+    })
+}
+
+/// Where `registry` serves the pinned build tool `filename` with `sha`.
+fn bootstrap_url(
+    sources: &crate::kernel::registries::effective::Sources,
+    registry: &crate::kernel::registries::config::Registry,
+    name: &str,
+    filename: &str,
+    sha: &str,
+) -> io::Result<String> {
+    let files = super::pypi::simple_page(sources, registry, name)?.unwrap_or_default();
+    files
+        .into_iter()
+        .find(|(listed, _, sha256)| listed == filename && sha256 == sha)
+        .map(|(_, url, _)| url)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "registry {} does not serve {filename} with sha256 {sha}, which building a source distribution needs\nfix: have registry {} proxy PyPI's {name}, or list public in the machine policy's [sources].python",
+                    registry.name, registry.name
+                ),
+            )
+        })
 }
 
 fn has_package(plan: &Plan, wanted: &str) -> bool {
@@ -454,7 +494,7 @@ pub(crate) fn plan_sdist_identity_input(
     }
 
     let build_plan = if fast_requirements {
-        build_toolchain_plan(selected.version("cpython")?)
+        build_toolchain_plan(selected.version("cpython")?)?
     } else {
         build_requires::resolve_build_plan(door, selected, &info.build_requires, runtime_plan)?
     };
@@ -1048,7 +1088,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         }
     }
     let build_plan = if fast_requirements {
-        build_toolchain_plan(selected.version("cpython")?)
+        build_toolchain_plan(selected.version("cpython")?)?
     } else {
         build_requires::resolve_build_plan(door, selected, &info.build_requires, runtime_plan)?
     };
@@ -1414,7 +1454,7 @@ pub fn ensure_build_environment(
     crate::tailors::install_kinds();
     super::env::realize_env_for(
         door,
-        &build_toolchain_plan(selected.version("cpython")?),
+        &build_toolchain_plan(selected.version("cpython")?)?,
         selected,
     )
 }

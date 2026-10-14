@@ -45,7 +45,7 @@ pub(super) fn poetry_manifest(
                 .get("url")
                 .and_then(toml::Value::as_str)
                 .unwrap_or_default();
-            if !is_public_pypi_url(url) {
+            if !is_public_pypi_url(url) && !listed_python_index(url) {
                 let name = source
                     .get("name")
                     .and_then(toml::Value::as_str)
@@ -654,6 +654,7 @@ fn record_poetry_source_exceptions(
         .unwrap_or_default();
     if !is_public_pypi_url(url)
         && source.get("reference").and_then(toml::Value::as_str) != Some("pypi")
+        && !listed_python_index(url)
     {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_INDEX,
@@ -662,6 +663,16 @@ fn record_poetry_source_exceptions(
         )?;
     }
     Ok(false)
+}
+
+/// Whether `url` names a registry the effective python `[sources]` list
+/// holds: approved, no exception.
+fn listed_python_index(url: &str) -> bool {
+    crate::kernel::registries::lock::listed_index(
+        &crate::kernel::policy::effective().registries,
+        crate::kernel::registries::config::Ecosystem::Python,
+        url,
+    )
 }
 
 /// The pinned requirement line for one locked package, hashes and all.

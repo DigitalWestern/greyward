@@ -289,12 +289,24 @@ pub(super) fn confirm_classified_sources(
 pub(super) type FetchedTarball<'a> = (&'a NpmPackage, crate::kernel::fetch::CacheLease, Digest);
 
 /// Download `package`'s tarball, admitting bytes that match any hash of its
-/// integrity's strongest algorithm.
+/// integrity's strongest algorithm, from the registry that serves it.
 pub(super) fn fetch_tarball(
     store: &Store,
     activity: &StoreActivity,
     package: &NpmPackage,
 ) -> io::Result<(crate::kernel::fetch::CacheLease, Digest)> {
+    // The lock's URL must be the registry the effective node list assigns
+    // the package (its scope's, when one is listed), checked before the
+    // cache so a refused URL is refused offline too.
+    crate::kernel::registries::lock::check(
+        &crate::kernel::policy::effective().registries,
+        Ecosystem::Node,
+        &crate::kernel::registries::lock::Entry {
+            name: &package.name,
+            index: None,
+            file: &package.url,
+        },
+    )?;
     let candidates = sri_candidates(&package.integrity)?;
     download_registry_any_held(store, activity, Ecosystem::Node, &package.url, &candidates).map_err(
         |e| {

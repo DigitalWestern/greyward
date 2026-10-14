@@ -113,6 +113,7 @@ impl RegistryProtocol for GoProxy {
             None => return Vec::new(),
         };
         info_time(body)
+            .filter(|(version, _)| !is_pseudo_version(version))
             .and_then(|(version, at)| {
                 let version = crate::tailors::go::escape_go_path(&version).ok()?;
                 Some((module.trim_start_matches('/').to_string(), version, at))
@@ -122,6 +123,9 @@ impl RegistryProtocol for GoProxy {
     }
 
     fn lookup(&self, endpoints: &[Endpoint], name: &str, version: &str) -> Option<Lookup> {
+        if is_pseudo_version(version) {
+            return None;
+        }
         let (module, version) = self.package_key(name, version);
         let path = format!("/{module}/@v/{version}.info");
         check_module_path(&path).ok()?;
@@ -138,6 +142,47 @@ impl RegistryProtocol for GoProxy {
         };
         (escape(name), escape(version))
     }
+
+    /// A pseudo-version (`v0.0.0-20240123185404-0123456789ab`) names a
+    /// commit, not a release, and the only time the proxy records for it is
+    /// the commit's own, which whoever made the commit wrote.
+    fn untimed(&self, _name: &str, version: &str) -> Option<String> {
+        is_pseudo_version(version).then(|| {
+            "it is a pseudo-version, and Go's module proxy records no upload time: the only \
+             time it gives is the commit's own, which whoever made the commit sets"
+                .to_string()
+        })
+    }
+
+    /// A tagged version's `.info` Time is its commit's time as well.
+    fn time_note(&self) -> Option<&'static str> {
+        Some(
+            "the commit time the module's author sets; Go's module proxy records no upload \
+             time",
+        )
+    }
+}
+
+/// Whether `version` is a Go pseudo-version: a version whose last part is
+/// a 14-digit commit time and a 12-hex commit prefix
+/// (`vX.0.0-yyyymmddhhmmss-abcdef012345`, `vX.Y.Z-pre.0.yyyymmddhhmmss-..`,
+/// `vX.Y.Z-0.yyyymmddhhmmss-..`), with or without `+incompatible`.
+fn is_pseudo_version(version: &str) -> bool {
+    let version = version.strip_suffix("+incompatible").unwrap_or(version);
+    let Some((before, hash)) = version.rsplit_once('-') else {
+        return false;
+    };
+    let hex = hash.len() == 12
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let Some(split) = before.len().checked_sub(14) else {
+        return false;
+    };
+    let (head, stamp) = before.split_at(split);
+    hex && stamp.bytes().all(|b| b.is_ascii_digit())
+        && (head.ends_with('-') || head.ends_with('.'))
+        && head.starts_with('v')
 }
 
 /// The version and publish time of a module proxy `.info` body.
@@ -344,6 +389,41 @@ mod tests {
             .upstream(&endpoints(), path)
             .unwrap_err()
             .to_string()
+    }
+
+    #[test]
+    fn pseudo_versions_have_no_publish_time_and_tagged_ones_carry_a_note() {
+        for pseudo in [
+            "v0.0.0-20240123185404-0123456789ab",
+            "v1.2.4-0.20240123185404-0123456789ab",
+            "v1.2.3-pre.0.20240123185404-0123456789ab",
+            "v2.0.0-20240123185404-0123456789ab+incompatible",
+        ] {
+            assert!(is_pseudo_version(pseudo), "{pseudo}");
+            let why = GO_PROXY.untimed("example.com/m", pseudo).unwrap();
+            assert!(why.contains("pseudo-version"), "{why}");
+            assert!(GO_PROXY
+                .lookup(&endpoints(), "example.com/m", pseudo)
+                .is_none());
+            let body = format!(r#"{{"Version":"{pseudo}","Time":"2024-01-23T18:54:04Z"}}"#);
+            let info = Url::parse(&format!(
+                "https://{PROXY_HOST}/example.com/m/@v/{pseudo}.info"
+            ))
+            .unwrap();
+            assert!(GO_PROXY.published(&info, body.as_bytes()).is_empty());
+        }
+        for tagged in [
+            "v1.6.0",
+            "v1.6.0-rc.1",
+            "v2.0.0+incompatible",
+            "v1.0.0-20240123185404",
+            "v1.0.0-20240123185404-0123456789AB",
+            "v1.0.0-x20240123185404-0123456789ab",
+        ] {
+            assert!(!is_pseudo_version(tagged), "{tagged}");
+            assert_eq!(GO_PROXY.untimed("example.com/m", tagged), None);
+        }
+        assert!(GO_PROXY.time_note().unwrap().contains("author sets"));
     }
 
     #[test]

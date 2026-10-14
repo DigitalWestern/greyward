@@ -436,7 +436,8 @@ mod tests {
     }
 
     /// A harness whose upstream answers api.nuget.org from the recorded
-    /// NuGet rows plus a served Greyward.Fixture 1.0.0 and an empty
+    /// NuGet rows plus a served Greyward.Fixture 1.0.0 (with its
+    /// registration leaf) and an empty
     /// vulnerability base (the recording kept neither body), and whose
     /// proxy every door in this thread uses while it lives.
     fn nuget_harness(label: &str) -> Option<&'static Harness> {
@@ -461,6 +462,12 @@ mod tests {
             (
                 format!("/v3-vulnerabilities/{stamp}/vulnerability.base.json"),
                 b"{}".to_vec(),
+            ),
+            // The registration leaf the door's `young-package` lookup
+            // reads the publish time from.
+            (
+                "/v3/registration5-gz-semver2/greyward.fixture/1.0.0.json".to_string(),
+                br#"{"published":"2020-01-01T00:00:00Z"}"#.to_vec(),
             ),
         ] {
             let file = format!("served{path}.body");

@@ -376,6 +376,26 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   `__file__` is the shipped one, but `__file__`'s directory is the private one, so such a
   script does not see data files placed beside it in `bin/`. Under an ordinary store path
   the script is installed in `bin/` with its `#!` line rewritten, as pip does.
+- **`young-package` is judged once, when the lock is written.** The publish time and the
+  resolution time are fixed in the resolution record then. A `min_age_days` raised later does
+  not judge an already-locked version again; resolving again (`ward update`, or deleting the
+  lock and syncing) does. A package the resolution tool fetched no metadata for is looked up
+  by ward itself, one request per package through the same proxy, so a first lock of a large
+  project makes up to one extra request per locked package. A lookup the registry refuses
+  (rate limit, server error, timeout) leaves the publish time unknown: with the kind denied
+  that refuses the resolution, otherwise it is recorded as unknown. Hex's API allows 100
+  unauthenticated requests a minute, so a mix project with more locked packages than that, and
+  no metadata already fetched for them, can hit it; resolve again a minute later.
+- **`lookalike-name` is a name heuristic.** It compares against a fixed list of each registry's
+  2,000 most popular names, checked in with the binary (`tools/popular.py` regenerates it), so a
+  package that became popular since is not on it, and a legitimate package one edit from a
+  popular one (a fork, a plugin named after its host) trips it. Go publishes no download counts,
+  so its list ranks modules by how many other packages depend on them (packages.ecosyste.ms).
+  Only registry packages are judged: git, path and other-index packages are not.
+- **Records carrying the new kinds need this ward to read them.** A ward built before
+  `young-package` existed reads a resolution record that carries it as malformed and records
+  `unrecorded-resolution` instead of joining it, and its `ward audit` counts either new kind in a
+  closure as of unknown kind. Update every machine that syncs or audits the project.
 
 ## Python
 

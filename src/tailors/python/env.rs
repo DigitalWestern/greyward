@@ -355,6 +355,21 @@ pub(crate) fn realize_env_at_depth(
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Python environment")?;
     agreeing(plan, selected)?;
+    // Every registry package is checked against the effective python list
+    // before any cache is consulted: a warm environment built under another
+    // policy is not reused for a lock the list now refuses.
+    let policy = crate::kernel::policy::effective();
+    for package in plan.packages.iter().filter(|package| package.git.is_none()) {
+        crate::kernel::registries::lock::check(
+            &policy.registries,
+            crate::kernel::registries::config::Ecosystem::Python,
+            &crate::kernel::registries::lock::Entry {
+                name: &package.name,
+                index: package.index.as_deref(),
+                file: &package.url,
+            },
+        )?;
+    }
     let python_obj = python::realize_runtime(store, activity, platform, selected)?;
 
     // Identity planning and realization use exactly the same input builder.

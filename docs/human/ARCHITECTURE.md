@@ -577,8 +577,9 @@ An ecosystem named in `[sources]` is enforced, end to end:
   `.npmrc` scope line naming an unlisted registry is refused before the
   tool starts. The proxy adds the credential upstream: the tools never
   see it.
-- The lock check (`registries::lock`). Before a sync fetches anything,
-  every locked package's file must be under a listed registry (its root or
+- The lock check (`registries::lock`). Before a sync fetches anything or
+  reuses a cached environment, every locked package's file must be under
+  a listed registry (its root or
   its `files` origins), and the registry the lock names (uv's
   `source.registry`, an npm scope) must be the one that serves it.
 - Downloads (`kernel::fetch::registry`). A registry download picks the

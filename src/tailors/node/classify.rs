@@ -288,16 +288,14 @@ pub(super) fn confirm_classified_sources(
 /// candidate the bytes matched.
 pub(super) type FetchedTarball<'a> = (&'a NpmPackage, crate::kernel::fetch::CacheLease, Digest);
 
-/// Download `package`'s tarball, admitting bytes that match any hash of its
-/// integrity's strongest algorithm, from the registry that serves it.
-pub(super) fn fetch_tarball(
-    store: &Store,
-    activity: &StoreActivity,
-    package: &NpmPackage,
-) -> io::Result<(crate::kernel::fetch::CacheLease, Digest)> {
-    // The lock's URL must be the registry the effective node list assigns
-    // the package (its scope's, when one is listed), checked before the
-    // cache so a refused URL is refused offline too.
+/// The registry check of one locked package: the lock's URL must be the
+/// registry the effective node list assigns the package (its scope's, when
+/// one is listed). Git and `file:` directory packages come from no
+/// registry and are not checked.
+pub(super) fn check_registry(package: &NpmPackage) -> io::Result<()> {
+    if package.git.is_some() || super::local_package::source_dir(package).is_some() {
+        return Ok(());
+    }
     crate::kernel::registries::lock::check(
         &crate::kernel::policy::effective().registries,
         Ecosystem::Node,
@@ -306,8 +304,38 @@ pub(super) fn fetch_tarball(
             index: None,
             file: &package.url,
         },
-    )?;
+    )
+    .map(|_| ())
+}
+
+/// Download `package`'s tarball, admitting bytes that match any hash of its
+/// integrity's strongest algorithm, from the registry that serves it.
+pub(super) fn fetch_tarball(
+    store: &Store,
+    activity: &StoreActivity,
+    package: &NpmPackage,
+) -> io::Result<(crate::kernel::fetch::CacheLease, Digest)> {
     let candidates = sri_candidates(&package.integrity)?;
+    // A `file:` directory package was packed from the project into the
+    // cache by its integrity: no registry serves it, so it is read from
+    // the cache alone.
+    if super::local_package::source_dir(package).is_some() {
+        for digest in &candidates {
+            if let Ok(lease) =
+                crate::kernel::fetch::cache_verified_digest_held(store, activity, digest)
+            {
+                return Ok((lease, digest.clone()));
+            }
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{}: {} was not packed into the cache",
+                package.path, package.url
+            ),
+        ));
+    }
+    check_registry(package)?;
     download_registry_any_held(store, activity, Ecosystem::Node, &package.url, &candidates).map_err(
         |e| {
             io::Error::new(

@@ -232,7 +232,7 @@ fn package_url(
             let basename = name.rsplit('/').next().unwrap_or(name);
             Some(format!(
                 "{}{name}/-/{basename}-{version}.tgz",
-                package_registry(name)
+                package_registry(name)?
             ))
         })
 }
@@ -241,8 +241,9 @@ fn package_url(
 /// no tarball: its scope's registry when the effective node `[sources]`
 /// list has one, else the default registry (npmjs unless the machine
 /// policy names another). The tarball URL is built in npm's own shape
-/// under it, which Nexus, Artifactory and Verdaccio serve.
-fn package_registry(name: &str) -> String {
+/// under it, which Nexus, Artifactory and Verdaccio serve. `None` when the
+/// list holds no registry for it: the sync's registry check refuses it.
+fn package_registry(name: &str) -> Option<String> {
     use crate::kernel::registries::{config::Ecosystem, effective::Source};
     let policy = crate::kernel::policy::effective();
     let list = policy.registries.ecosystem(Ecosystem::Node);
@@ -251,12 +252,18 @@ fn package_registry(name: &str) -> String {
         .then(|| name.split_once('/').map(|(scope, _)| scope))
         .flatten();
     let scoped = scope.and_then(|scope| {
-        list.registries()
-            .find(|registry| registry.scopes.iter().any(|s| s == scope))
+        list.registries().find(|registry| {
+            registry
+                .scopes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(scope))
+        })
     });
     match scoped.map(Source::Registry).or(list.default_source()) {
-        Some(Source::Registry(registry)) => registry.url.clone(),
-        Some(Source::Public) | None => "https://registry.npmjs.org/".to_string(),
+        Some(Source::Registry(registry)) => Some(registry.url.clone()),
+        Some(Source::Public) => Some("https://registry.npmjs.org/".to_string()),
+        None if list.enforced => None,
+        None => Some("https://registry.npmjs.org/".to_string()),
     }
 }
 

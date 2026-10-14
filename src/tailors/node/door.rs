@@ -373,7 +373,7 @@ fn check_npmrc_scopes(policy: &Policy, flags: &RegistryFlags, npmrc: &Path) -> i
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    for line in text.lines() {
+    for line in text.trim_start_matches('\u{feff}').lines() {
         let line = line.trim();
         if line.starts_with('#') || line.starts_with(';') {
             continue;
@@ -381,7 +381,13 @@ fn check_npmrc_scopes(policy: &Policy, flags: &RegistryFlags, npmrc: &Path) -> i
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let Some(scope) = key.trim().strip_suffix(":registry") else {
+        let key = key.trim();
+        let Some(scope) = key
+            .len()
+            .checked_sub(":registry".len())
+            .filter(|&at| key.is_char_boundary(at) && key[at..].eq_ignore_ascii_case(":registry"))
+            .map(|at| &key[..at])
+        else {
             continue;
         };
         if !scope.starts_with('@') || flags.scoped.iter().any(|(listed, _)| listed == scope) {
@@ -2248,6 +2254,14 @@ node = {sources}
             "# @other:registry=https://evil.example/\nfund=false\n",
         ] {
             check(&corp, text).unwrap();
+        }
+        for text in [
+            "\u{feff}@other:registry=https://evil.example/\n",
+            "@other:Registry=https://evil.example/\n",
+            "@other:registry=${EVIL_REGISTRY}\n",
+            "@other:registry=https://NEXUS.corp.example/repository/npm\n@other:registry=https://evil.example/\n",
+        ] {
+            assert!(check(&corp, text).is_err(), "{text:?}");
         }
         let error = check(&corp, "@other:registry=https://registry.npmjs.org/\n").unwrap_err();
         assert!(error.to_string().contains("not a listed node registry"));

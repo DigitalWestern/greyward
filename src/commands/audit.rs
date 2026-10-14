@@ -1443,6 +1443,55 @@ python = ["corp", "public"]
         write_closure(dir, "python", "python", Some(host().triple()), body)
     }
 
+    /// A node closure's packages are judged the same way: a git or `file:`
+    /// directory package is skipped, a direct-URL tarball with no registry
+    /// is unattributed, and the scope registry must be a listed one.
+    #[test]
+    fn node_registry_packages_are_judged_and_git_and_local_skipped() {
+        let mut policy = permissive();
+        let machine = r#"
+[[registry]]
+name = "corp"
+ecosystem = "node"
+url = "https://nexus.corp.example/repository/npm/"
+
+[sources]
+node = ["corp"]
+"#;
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, machine).unwrap();
+        policy::merge_file(&mut policy, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+        let closure = |packages: Value| crate::comforter::records::ClosureFile {
+            ecosystem: "node".into(),
+            platform: None,
+            projected_at: None,
+            body: json!({ "packages": packages }),
+            envelope: Value::Null,
+            path: PathBuf::from("/project/.greyward/closures/node.json"),
+            record_sha256: String::new(),
+        };
+        let corp = json!({"name": "corp", "url": "https://nexus.corp.example/repository/npm/"});
+        let public = json!({"name": "public", "url": "https://registry.npmjs.org/"});
+        let findings = registry_findings(
+            &policy,
+            &closure(json!([
+                {"name": "a", "registry": corp},
+                {"name": "g", "git": {"url": "https://example.test/g.git", "commit": "0"}},
+                {"name": "l", "local": "vendor/l"},
+            ])),
+        );
+        assert!(findings.unapproved.is_empty() && !findings.unattributed);
+        let findings = registry_findings(
+            &policy,
+            &closure(json!([{"name": "b", "registry": public}, {"name": "c"}])),
+        );
+        assert_eq!(findings.unapproved.len(), 1);
+        assert_eq!(findings.unapproved[0].subject, "b");
+        assert!(findings.unattributed);
+        let findings = registry_findings(&permissive(), &closure(json!([{"name": "c"}])));
+        assert!(findings.unapproved.is_empty() && !findings.unattributed);
+    }
+
     /// An enforced ecosystem's closure passes when each registry package
     /// names a listed registry at its configured URL; a narrower list, a
     /// same-host repository or a reused name fails it as

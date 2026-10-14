@@ -272,6 +272,10 @@ pub struct Policy {
     /// it; `None` is the default.
     #[serde(skip)]
     pub min_age_source: Option<PathBuf>,
+    /// Which scope that file is: the signed record names the scope, never
+    /// the machine-specific path.
+    #[serde(skip)]
+    pub min_age_origin: Option<SourceOrigin>,
 }
 
 /// What turned strictness on. A refusal names it, because the fix differs:
@@ -478,6 +482,7 @@ fn merge_text(
         && (origin == SourceOrigin::Machine || policy.min_age_days() != before)
     {
         policy.min_age_source = Some(path.to_path_buf());
+        policy.min_age_origin = Some(origin);
     }
     // Only a file that existed and was merged is a source; the optional
     // files that were not there contributed nothing to attribute.
@@ -2394,6 +2399,7 @@ deny = ["git-dependency"]"#,
             merged.min_age_source.as_deref(),
             Some(parent.join(".greyward/policy.toml").as_path())
         );
+        assert_eq!(merged.min_age_origin, Some(SourceOrigin::Project));
         let declared: Vec<Option<u32>> = fixture_sources(&sources, &root)
             .iter()
             .map(|source| source.min_age_days)
@@ -2408,6 +2414,7 @@ deny = ["git-dependency"]"#,
             merged.min_age_source.as_deref(),
             Some(home.join(".greyward/policy.toml").as_path())
         );
+        assert_eq!(merged.min_age_origin, Some(SourceOrigin::Machine));
     }
 
     #[test]

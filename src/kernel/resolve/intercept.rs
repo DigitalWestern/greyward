@@ -407,6 +407,7 @@ fn exchange<'a>(
         keep_alive: request.keep_alive && !request.http10,
         http10: request.http10,
         supplemental: false,
+        wanted: &[],
     }
 }
 

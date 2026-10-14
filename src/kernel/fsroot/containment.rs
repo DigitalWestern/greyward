@@ -127,10 +127,15 @@ impl ProjectRoot {
     /// to the project by the project's path and then names `target` inside
     /// it. Each of those parts is fixed here instead of being opened twice:
     ///
-    /// 1. The link still holds `text`, the text ward planted.
-    /// 2. The project's path still names the held directory
+    /// 1. The link, read in the directory ward holds for it, still holds
+    ///    `text`, the text ward planted.
+    /// 2. That directory, and the anchor its `..` steps climb to, are still
+    ///    where their paths say ([`super::linksite::LinkSite::in_place`]): a forest moved and
+    ///    replaced with a symlink would make the same text climb from
+    ///    somewhere else (Sol round 7).
+    /// 3. The project's path still names the held directory
     ///    ([`ProjectRoot::check_still_named`]), so the climb ends there.
-    /// 3. `target` is opened once from the descriptor with `openat2`
+    /// 4. `target` is opened once from the descriptor with `openat2`
     ///    (`RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`): the kernel follows
     ///    every symlink on the way as it is at that instant and refuses,
     ///    atomically, one that leads out of the project (`EXDEV`, `ELOOP`).
@@ -142,15 +147,22 @@ impl ProjectRoot {
     /// [`ProjectRoot::input_containment`] instead.
     pub(crate) fn link_leads_to(
         &self,
-        link: &Path,
+        site: &super::linksite::LinkSite,
         text: &Path,
         target: &Path,
     ) -> io::Result<LinkEnd> {
-        match fs::read_link(link) {
-            Ok(now) if now == text => {}
-            Ok(_) => return Ok(LinkEnd::Elsewhere),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(LinkEnd::Gone),
+        match site.read() {
+            Ok(Some(now)) if now == text => {}
+            Ok(Some(_)) => return Ok(LinkEnd::Elsewhere),
+            Ok(None) => return Ok(LinkEnd::Gone),
+            // Not a symlink any more.
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+                return Ok(LinkEnd::Elsewhere)
+            }
             Err(error) => return Err(error),
+        }
+        if !site.in_place()? {
+            return Ok(LinkEnd::Elsewhere);
         }
         self.check_still_named()?;
         let opened = match open_beneath_following(self.dir.as_raw_fd(), target) {
@@ -402,31 +414,32 @@ mod tests {
         let text = project.join("src/lib");
         std::os::unix::fs::symlink(&text, &link).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
+        let site = super::super::linksite::LinkSite::hold(&link, &project).unwrap();
         let target = Path::new("src/lib");
         let planted = fd_identity(&fs::File::open(project.join("src/lib")).unwrap()).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, &text, target).unwrap(),
+            root.link_leads_to(&site, &text, target).unwrap(),
             LinkEnd::Target(planted)
         );
         assert_eq!(
-            root.link_leads_to(&link, Path::new("other"), target)
+            root.link_leads_to(&site, Path::new("other"), target)
                 .unwrap(),
             LinkEnd::Elsewhere
         );
         fs::rename(project.join("src"), project.join("src.saved")).unwrap();
         std::os::unix::fs::symlink(scratch.0.join("outside"), project.join("src")).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, &text, target).unwrap(),
+            root.link_leads_to(&site, &text, target).unwrap(),
             LinkEnd::Elsewhere
         );
         fs::remove_file(project.join("src")).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, &text, target).unwrap(),
+            root.link_leads_to(&site, &text, target).unwrap(),
             LinkEnd::Gone
         );
         fs::remove_file(&link).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, &text, target).unwrap(),
+            root.link_leads_to(&site, &text, target).unwrap(),
             LinkEnd::Gone
         );
     }
@@ -447,15 +460,16 @@ mod tests {
         let text = project.join("src/lib");
         std::os::unix::fs::symlink(&text, &link).unwrap();
         let root = ProjectRoot::open(&project).unwrap();
+        let site = super::super::linksite::LinkSite::hold(&link, &project).unwrap();
         let target = Path::new("src/lib");
-        let LinkEnd::Target(planted) = root.link_leads_to(&link, &text, target).unwrap() else {
+        let LinkEnd::Target(planted) = root.link_leads_to(&site, &text, target).unwrap() else {
             panic!("the planted link does not reach its target");
         };
         let moved = scratch.0.join("outside/src");
         fs::rename(project.join("src"), &moved).unwrap();
         std::os::unix::fs::symlink(&moved, project.join("src")).unwrap();
         assert_eq!(
-            root.link_leads_to(&link, &text, target).unwrap(),
+            root.link_leads_to(&site, &text, target).unwrap(),
             LinkEnd::Elsewhere
         );
         fs::rename(&moved, project.join("kept")).unwrap();
@@ -466,7 +480,7 @@ mod tests {
             "the original directory is back inside"
         );
         assert_eq!(
-            root.link_leads_to(&link, &text, target).unwrap(),
+            root.link_leads_to(&site, &text, target).unwrap(),
             LinkEnd::Elsewhere
         );
     }

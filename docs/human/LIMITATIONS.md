@@ -427,7 +427,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   - A module the checksum database does not log has no record number, so its age is unknown.
 - **A requirements file is judged by each version's first file.** PyPI lets a file be added to
   an existing version later. A `uv.lock` names the files it locked, and each version is judged
-  by the latest upload time among them. A compiled requirements file names only versions, so
+  by the latest upload time among them; one named file the index gives no upload time leaves
+  the version's age unknown. A compiled requirements file names only versions, so
   a version is judged by its earliest file, and a wheel added to an old version yesterday is
   not caught there.
 - **A lock `young-package` cannot read refuses the run.** Its reader must account for every

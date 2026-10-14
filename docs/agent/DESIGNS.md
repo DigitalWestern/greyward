@@ -1001,24 +1001,39 @@ addresses, no automatic redirects), not the plain ureq agent of
 #### The proxy
 
 - **One `covers(root, url)` test, used everywhere.** Routing, the uv and
-  npm sync checks, ward's fetches, every redirect hop and closure
-  attribution all ask the same question with the same function, on
-  parsed URLs (the rule of `toolchain/source.rs` `Endpoint::covers`,
-  moved to a shared module): same scheme, host and port; the URL's raw
-  path extends the root's at a segment boundary; no `.` or `..` segment,
-  no backslash, and no percent-escape that decodes to `/`, `\`, `.` or `%`
-  anywhere in the path. Paths are compared raw, never decoded and
-  re-split. The one exception is npm's packument path, whose single
-  package segment may hold `%2f` between `@scope` and the name (the
-  `encoded_slash` rule the npm route already has), and only in that
-  position. A `files` origin covers every path on that origin by the
-  same rules.
+  npm sync checks, ward's fetches, every redirect hop, closure
+  attribution and the pnpm packument-derived tarball all ask the same
+  question with the same function (generalized from
+  `toolchain/source.rs` `Endpoint::covers`, moved to a shared module). It
+  has no per-ecosystem exception, and it runs on the **raw spelling** of
+  the URL as the tool, the lock or the redirect gave it, before any
+  parsing, because the `url` crate removes dot segments and turns `\`
+  into `/` while parsing:
+  - same scheme, host and port as the root (compared after parsing);
+  - the raw path starts with the root's raw path at a segment boundary;
+  - the raw path is split into pieces at every `/` **and** every `%2f` or
+    `%2F`, and no piece is empty (after the first), `.`, `..`, or holds a
+    backslash or a percent-escape that decodes to `\`, `.` or `%`
+    (`%5c`, `%2e`, `%25`, any case);
+  - the URL ward then sends is the parsed and re-serialized form, and it
+    must have the same path as the raw spelling, or the request is
+    refused.
+
+  `%2f` is therefore allowed anywhere but is a separator for the dot and
+  empty checks, so npm's `@scope%2fname` passes and
+  `/root/@s%2f..%2f..%2fother/x.tgz` does not, whether or not the server
+  decodes `%2f`. Roots and `files` entries are validated with the same
+  pieces rule at load. A `files` origin covers every path on its origin
+  under the same rules.
 - **Endpoints carry a root and are matched by longest prefix.**
   `Endpoint` gains a constructor from a configured registry (the
   compiled-in check stays for public hosts), carrying its base URL, its
   root with the lazy credential, its network mode and its trust roots.
   Route choice for an intercepted request is the longest root that
-  covers the URL, across every route of the session. Two npm registries
+  covers the URL, across every route of the session; a `files` origin is
+  chosen only when no root covers the URL. Load refuses a `files` origin
+  that is the `url` origin of any registry, so a root and a `files`
+  origin never compete on one origin. Two npm registries
   on one Artifactory host, or an index and its files on one origin,
   route correctly.
 - **Protocols become instances.** `Route.protocol` is `&'static dyn
@@ -1041,7 +1056,13 @@ addresses, no automatic redirects), not the plain ureq agent of
   metadata. Before any upstream request for it, the session looks it up
   among the claims **that same route's** metadata made in this session;
   without one the request is refused, so an unclaimed URL is never fetched
-  at all. Each claim records the
+  at all. **Mapping:** in the intercepted (TLS) dialect a candidate
+  artifact maps onto the tunnel's own URL unchanged (the request already
+  names its host), and the endpoint, so the credential and the client,
+  is the one whose root or `files` origin covers that URL; the protocol's
+  `upstream()` is not asked to invent a host from a path. In the mirror
+  dialect a path maps onto the registry's `url` origin under its root;
+  `files` origins are reached there only by redirect. Each claim records the
   route that made it (today's claim map is session-wide and keyed by URL
   alone, `resolve/session.rs`; it gains the route id). A URL claimed only
   by another route is refused, so one registry's metadata can never
@@ -1057,7 +1078,7 @@ addresses, no automatic redirects), not the plain ureq agent of
   | protocol | metadata (grammar) | artifact |
   |---|---|---|
   | Python simple | `<url><project>/` | by claim: the file href with its `#sha256=` fragment or PEP 691 `hashes`; its `<href>.metadata` (PEP 658) with the `data-core-metadata` / `core-metadata` hash |
-  | npm | `<url><name>`, `<url>@scope%2fname` | by claim: `dist.tarball` with `dist.integrity` (sha512), or `dist.shasum` alone as a weak claim |
+  | npm | `<url><name>`, `<url>@scope%2fname` (either case), `<url>@scope/name` (pnpm's spelling) | by claim: `dist.tarball` with `dist.integrity` (sha512), or `dist.shasum` alone as a weak claim |
   | Cargo sparse (PR B) | `config.json`, index files under `url` | by claim: the `dl` expansion with the index `cksum`; the `dl` template itself must expand under the root or on a `files` origin, checked when `config.json` is served |
   | rubygems compact (PR B) | `versions`, `info/<gem>` | by claim: `gems/<name>-<ver>.gem` with the `/info` checksum |
   | Go (PR B) | grammar, as today, relative to `url` | grammar: `@v/<ver>.zip`, `.mod`; checked by go against `go.sum` and the checksum database, as today |
@@ -1163,10 +1184,14 @@ effective list (for node, the first without `scopes`).
   registry that shape is a guess (GitHub Packages serves
   `/download/...`), so ward reads the version's packument from the
   package's registry (its scope's, else the default) at sync, takes
-  `dist.tarball` from it, and still checks the bytes against the lock's
-  integrity. Offline with no cached packument, that sync fails naming the
-  package and the fix (sync once online). The public registry keeps
-  today's constructed URL.
+  `dist.tarball` from it, and holds that URL to the same checks as a lock
+  `resolved` URL before fetching: covered by that same registry's root
+  or `files` origins, and the scope's registry for a scoped package. The
+  bytes are still checked against the lock's integrity. Ward keeps no
+  packument cache for this: a package already in the store needs no URL,
+  and an offline sync that must download one fails naming the package
+  and the fix (sync once online). The public registry keeps today's
+  constructed URL.
 - `ward add`'s check reads `<registry><name>` from the scope's registry.
 
 **Go (PR B).** One Go registry: the route's upstream is its `url`
@@ -1264,10 +1289,12 @@ registry.
 
 #### Test plan
 
-- **`covers`** (unit): segment boundary, dot segments, backslash,
-  `%2f`, `%2e`, `%5c`, `%25` refused, raw comparison, npm's `@scope%2fname`
-  allowed only as the packument segment, the same answers from every
-  caller.
+- **`covers`** (unit, and through ward's fetches, npm sync and the pnpm
+  derived tarball, not only the proxy): segment boundary; `.`/`..`
+  pieces split at `/` and at `%2f`; `%2e`, `%5c`, `%25` refused;
+  `/root/@s%2f..%2f..%2fother/x.tgz` refused; `@scope%2fname` allowed;
+  a raw path the parser would change refused; the same answers from
+  every caller.
 - **Policy** (unit): the machine list with and without `[sources]`; a
   project or `--policy` narrowing; a lower layer naming `"public"` or any
   name outside the machine list refused; a project `[[registry]]` or
@@ -1294,8 +1321,8 @@ registry.
   enforced ecosystem refuses an unlisted intercepted host; the default
   permitted set and flags are unchanged; a URL claimed by registry A's
   metadata on registry B's root (same host) is refused and gets no
-  credential; a listed file with no sha256-or-stronger digest is refused
-  in an enforced ecosystem; a missing credential is a hard failure even
+  credential; a listed file with no digest at all is refused in an
+  enforced ecosystem; a missing credential is a hard failure even
   with last-good metadata cached; a git host resolving to a private
   address stays refused in a session with a private-mode registry; an
   artifact of registry A that redirects into registry B's root on the same
@@ -1397,6 +1424,18 @@ stated (5); weak digests stay deniable `weak-integrity`, only digest-less
 files are refused (6); pnpm reads `dist.tarball` from the packument
 instead of guessing a private URL shape (7); Cargo `dl` and NuGet
 resource bases checked by `covers` (8).
+
+#### Review round 4
+
+Muse (2026-10-14), seven findings, all taken: `covers` has no npm
+exception and treats `%2f` as a separator for the dot and empty checks
+(1); it runs on the raw spelling, and the re-serialized URL must keep the
+same path (2); a `files` origin may not be any registry's `url` origin,
+and a root always wins (3); a candidate artifact maps onto the tunnel's
+own URL, the endpoint chosen by `covers` (4); pnpm's `@scope/name`
+packument spelling is metadata (5); the packument-derived pnpm tarball
+gets the same checks as a lock URL, and no packument cache is kept (6);
+the test plan's digest wording matches the rule (7).
 
 **Mac before merge.** Policy loading, registry configuration, and
 authentication are pure logic and need only `cargo test` on the Mac, except

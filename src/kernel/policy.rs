@@ -3,6 +3,8 @@
 //! the collision checks the store consults at commit time.
 
 use crate::kernel::fsroot::ProjectRoot;
+use crate::kernel::registries::config::{CredentialSpec, RegistrySpec};
+use crate::kernel::registries::effective::{Sources, Tables};
 use crate::kernel::signing::{self, KeySet};
 use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
@@ -234,6 +236,21 @@ pub struct Policy {
     /// mistake for `ward audit`), empty means "trust nobody".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<Signing>,
+    /// `[credentials.<name>]`: where each registry secret lives, never the
+    /// secret. Machine scope only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, CredentialSpec>,
+    /// `[[registry]]`: the private registries this machine may use. Machine
+    /// scope only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registry: Vec<RegistrySpec>,
+    /// `[sources]`: per ecosystem, the ordered registry names in use.
+    /// Declared by the machine scope, narrowed by any other.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, Vec<String>>,
+    /// The registry configuration of the merged chain. Not file grammar.
+    #[serde(skip)]
+    pub registries: Sources,
     /// What made this policy strict, and which file denied each kind. Not
     /// part of the file grammar: `serde(skip)` keeps both out of what a
     /// file may set and out of anything this struct is serialized into.
@@ -443,7 +460,7 @@ fn merge_text(
             .entry(kind.clone())
             .or_insert_with(|| path.to_path_buf());
     }
-    merge(policy, &other, origin);
+    merge_file(policy, &other, origin, path)?;
     // Only a file that existed and was merged is a source; the optional
     // files that were not there contributed nothing to attribute.
     sources.push(PolicySource::from_file(origin, path, &other));
@@ -503,6 +520,35 @@ pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
             }
         }
         SourceOrigin::Env => {}
+    }
+}
+
+/// [`merge`] one file's policy, plus its registry tables: checked against
+/// the chain so far (a project or `--policy` file may only narrow the
+/// machine's `[sources]`), then merged. A refusal names `path`.
+pub fn merge_file(
+    policy: &mut Policy,
+    other: &Policy,
+    origin: SourceOrigin,
+    path: &Path,
+) -> io::Result<()> {
+    let tables = other.tables();
+    policy
+        .registries
+        .check(&tables, origin, path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    merge(policy, other, origin);
+    policy.registries.merge(&tables, origin, path);
+    Ok(())
+}
+
+impl Policy {
+    fn tables(&self) -> Tables<'_> {
+        Tables {
+            credentials: &self.credentials,
+            registry: &self.registry,
+            sources: &self.sources,
+        }
     }
 }
 
@@ -2199,6 +2245,78 @@ deny = ["git-dependency"]"#,
             load_with_sources_from(root.path(), Some(&root), false).is_err(),
             "the replacement path must not suppress held policy"
         );
+    }
+
+    #[test]
+    fn registries_load_from_machine_scope_and_projects_only_narrow() {
+        use crate::kernel::registries::config::Ecosystem;
+        let temp = crate::kernel::testutil::TempDir::new();
+        let project = temp.0.join("project");
+        let machine = temp.0.join("machine.toml");
+        fs::create_dir_all(project.join(".greyward")).unwrap();
+        fs::write(
+            &machine,
+            r#"
+[credentials.corp]
+env = "CORP_REGISTRY_TOKEN"
+
+[[registry]]
+name = "corp-pypi"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi-proxy/simple/"
+credential = "corp"
+root = "https://nexus.corp.example/repository/pypi-proxy/"
+
+[sources]
+python = ["corp-pypi", "public"]
+"#,
+        )
+        .unwrap();
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", temp.0.as_os_str());
+        let _policy = EnvVarGuard::set("GREYWARD_POLICY", machine.as_os_str());
+        let (policy, _) = load_with_sources(&project, false).unwrap();
+        let python = policy.registries.ecosystem(Ecosystem::Python);
+        assert!(python.enforced);
+        assert_eq!(python.names(), "corp-pypi, public");
+        assert!(!policy.registries.ecosystem(Ecosystem::Node).enforced);
+
+        fs::write(
+            project.join(".greyward/policy.toml"),
+            "[sources]\npython = [\"corp-pypi\"]\n",
+        )
+        .unwrap();
+        let (policy, _) = load_with_sources(&project, false).unwrap();
+        assert_eq!(
+            policy.registries.ecosystem(Ecosystem::Python).names(),
+            "corp-pypi"
+        );
+
+        fs::write(
+            project.join(".greyward/policy.toml"),
+            "[sources]\npython = [\"other\"]\n",
+        )
+        .unwrap();
+        let error = load_with_sources(&project, false).unwrap_err().to_string();
+        assert!(error.contains("does not list"), "{error}");
+
+        fs::write(
+            project.join(".greyward/policy.toml"),
+            "[[registry]]\nname = \"x\"\necosystem = \"python\"\nurl = \"https://x.example/simple/\"\n",
+        )
+        .unwrap();
+        let error = load_with_sources(&project, false).unwrap_err().to_string();
+        assert!(error.contains("declared only in machine policy"), "{error}");
+        assert!(error.contains("fix:"), "{error}");
+    }
+
+    #[test]
+    fn the_company_template_parses() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/human/policy-company.toml"
+        ));
+        parse_file(path, &fs::read_to_string(path).unwrap()).unwrap();
     }
 
     #[test]

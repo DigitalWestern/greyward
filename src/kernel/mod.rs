@@ -24,6 +24,7 @@ pub mod pep440;
 pub mod platform;
 pub mod policy;
 pub mod provider;
+pub mod registries;
 pub mod resolve;
 pub mod sandbox;
 pub mod semver;

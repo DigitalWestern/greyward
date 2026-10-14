@@ -317,6 +317,14 @@ intermediate). Each signed JSON also carries `signature.expiration`
 `dotnet-sdk-osx-arm64.tar.gz` of SDK 9.0.317 with the catalog's sha512
 digests (`145bf69d...`, `f707a1c7...`).
 
+`openssl cms -verify ... -purpose any` against the system bundle proves
+only that some certificate under a public root signed the JSON, not that
+Microsoft's .NET release certificate did. Printing the signer is part of
+the check, not optional: compare its subject (`O=Microsoft Corporation`,
+`OU=.NET Release`), its Code Signing extended key usage and its sha256
+fingerprint with the values above. A future verifier must pin those, not
+only the root.
+
 ```sh
 xz -dk 9.0-releases.json.xz
 openssl cms -verify -binary -inform DER -purpose any \
@@ -324,9 +332,17 @@ openssl cms -verify -binary -inform DER -purpose any \
   -CAfile /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem -out /dev/null
 openssl cms -verify -binary -inform DER -purpose any \
   -in 9.0-releases.json.20261013194811.p7s -content 9.0-releases.json \
-  -CAfile /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem -out /dev/null
-openssl pkcs7 -inform DER -in 9.0-releases.json.20261013194811.p7s -print_certs -noout
+  -CAfile /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem -out /dev/null \
+  -signer /tmp/dotnet-signer.pem
+openssl x509 -in /tmp/dotnet-signer.pem -noout -subject -serial \
+  -ext extendedKeyUsage -fingerprint -sha256
 ```
+
+`-signer` writes the certificate that actually signed (not the first one
+in the bundle, which is the intermediate). Expect `O=Microsoft
+Corporation, OU=.NET Release`, serial `08728983286CAE83AE10F212DAC51212`,
+`Code Signing`, and fingerprint `DA:5E:05:90:83:9D:D2:EA:55:ED:38:95:80:0B:2E:7A:9F:44:BD:0C:49:55:06:BE:18:A0:B9:CA:6D:7C:BE:81`. Do the same
+for `releases-index.json`.
 
 (`-CAfile` is Fedora's bundle path; on Debian it is
 `/etc/ssl/certs/ca-certificates.crt`.) After the leaf certificate expires

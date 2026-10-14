@@ -360,6 +360,17 @@ impl Tailor for Cargo {
         })
     }
 
+    /// crates.io treats `-` and `_` as one character, and case as none.
+    fn popular(&self) -> Option<&'static crate::kernel::lookalike::Popular> {
+        static POPULAR: std::sync::OnceLock<crate::kernel::lookalike::Popular> =
+            std::sync::OnceLock::new();
+        Some(POPULAR.get_or_init(|| {
+            crate::kernel::lookalike::Popular::parse(include_str!("popular.txt"), |name| {
+                name.to_ascii_lowercase().replace('_', "-")
+            })
+        }))
+    }
+
     fn sbom_components(&self, eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<()> {
         if eco != "cargo" {
             return Ok(());
@@ -367,13 +378,20 @@ impl Tailor for Cargo {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "crates")? {
             let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
-            let mut c = component(
-                &name,
-                &ver,
-                format!("pkg:cargo/{}@{}", purl_encode(&name), purl_encode(&ver)),
-                eco,
-            );
-            push_hash(&mut c, "SHA-256", &required(eco, &p, "sha256")?);
+            let mut purl = format!("pkg:cargo/{}@{}", purl_encode(&name), purl_encode(&ver));
+            // A git crate is not the registry's: its purl names the lock's
+            // git source (`vcs_url`), and it has no `.crate` archive digest.
+            let git = p.get("git").filter(|git| !git.is_null());
+            if let Some(git) = git {
+                let source = git["source"].as_str().ok_or_else(|| {
+                    crate::kernel::cyclonedx::err(format!("{eco} closure: {name}: git: no source"))
+                })?;
+                purl.push_str(&format!("?vcs_url={}", purl_encode(source)));
+            }
+            let mut c = component(&name, &ver, purl, eco);
+            if git.is_none() {
+                push_hash(&mut c, "SHA-256", &required(eco, &p, "sha256")?);
+            }
             out.push(c);
         }
         out.push(toolchain_component(
@@ -740,5 +758,33 @@ mod tests {
                 fs::remove_file(home.join(name)).unwrap();
             }
         });
+    }
+
+    /// A git crate has no archive digest: its component names the lock's
+    /// git source instead, and a registry crate keeps its sha256.
+    #[test]
+    fn sbom_components_name_a_git_crates_source() {
+        use crate::tailors::Tailor;
+        let source = "git+https://github.com/o/gitdep?rev=abc#abc";
+        let body = serde_json::json!({
+            "rust_object": "/store/objects/abc123",
+            "rust_version": "1.98.1",
+            "crates": [
+                {"name": "itoa", "version": "1.0.18", "sha256": "ab".repeat(32), "url": ""},
+                {"name": "gitdep", "version": "1.0.0", "sha256": "", "url": "",
+                 "git": {"source": source, "reference": {"rev": "abc"}}},
+            ],
+        });
+        let mut out = Vec::new();
+        super::Cargo
+            .sbom_components("cargo", &body, &mut out)
+            .unwrap();
+        assert_eq!(out[0]["purl"], "pkg:cargo/itoa@1.0.18");
+        assert_eq!(out[0]["hashes"][0]["content"], "ab".repeat(32));
+        assert_eq!(
+            out[1]["purl"],
+            "pkg:cargo/gitdep@1.0.0?vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2Fo%2Fgitdep%3Frev%3Dabc%23abc"
+        );
+        assert!(out[1].get("hashes").is_none(), "{}", out[1]);
     }
 }

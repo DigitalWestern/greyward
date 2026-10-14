@@ -99,7 +99,8 @@
   run would have told you. The local equivalents:
   - `test` (ci.yml): `cargo fmt --check`, `cargo clippy --locked
     --all-targets -- -D warnings`, `cargo test --locked`,
-    `bash tests/install.sh`, `python3 tools/test_catalog.py`.
+    `bash tests/install.sh`, `python3 tools/test_catalog.py`,
+    `python3 tools/popular.py --check`.
   - `e2e` (heavy.yml): `cargo test --locked --no-fail-fast -- --ignored
     --test-threads=2`, or only the failing suite with `--test <name>`,
     then `bash tests/acceptance.sh`. Point `TMPDIR` at a scratch directory

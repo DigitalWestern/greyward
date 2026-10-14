@@ -1031,6 +1031,11 @@ fn node_closure_body(
             if let Some(dir) = super::local_package::source_dir(p) {
                 row["local"] = dir.into();
             }
+            // A tarball fetched from a URL off the registry names it: the
+            // package is not the registry's package of that name.
+            if let Some(url) = super::locked::off_registry_tarball(p) {
+                row["tarball"] = url.into();
+            }
             row
         }).collect::<Vec<_>>(),
     })

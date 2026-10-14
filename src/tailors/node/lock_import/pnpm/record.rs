@@ -1,12 +1,83 @@
 //! What `pnpm-lock.yaml` records about the manifests it was generated
 //! from (node tailor): each importer's dependencies, the settings and
 //! overrides pnpm applies before comparing, and the workspace members
-//! `pnpm-workspace.yaml` names. The freshness check reads these.
+//! `pnpm-workspace.yaml` names. The freshness check reads these. Also the
+//! registry packages it resolved, which the `young-package` check reads.
 
 use super::*;
 
 mod workspace;
 pub(crate) use workspace::*;
+
+/// `(name, version)` of every `packages` entry `pnpm-lock.yaml` resolves
+/// from the npm registry: a resolution with an `integrity` and no `type`
+/// (git, directory) or `repo`, whose `tarball`, when it names one, is on
+/// the registry, at a version that starts with a digit.
+///
+/// Every entry is accounted for: a git, directory, or off-registry
+/// tarball resolution is known and left out, and anything else (an entry
+/// without a resolution, a registry entry whose key names no version) is
+/// an `InvalidData` error, so no package is passed unjudged. A lock with
+/// no `packages` locks nothing; a `packages` that is not a map is
+/// `InvalidData` too.
+pub(crate) fn pnpm_registry_packages(lock_yaml: &str) -> io::Result<Vec<(String, String)>> {
+    let parsed = parse_yaml(lock_yaml)?;
+    let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
+    let packages = match root.get("packages") {
+        None => return Ok(Vec::new()),
+        Some(YamlValue::Map(packages)) => packages,
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pnpm-lock.yaml: packages is not a map",
+            ))
+        }
+    };
+    let unread = |key: &str, why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pnpm-lock.yaml: packages entry {key:?} {why}"),
+        )
+    };
+    let mut found = Vec::new();
+    for (key, value) in packages {
+        let YamlValue::Map(entry) = value else {
+            return Err(unread(key, "is not a map"));
+        };
+        let Some(YamlValue::Map(resolution)) = entry.get("resolution") else {
+            return Err(unread(key, "has no resolution"));
+        };
+        if ["type", "repo", "commit"]
+            .iter()
+            .any(|field| resolution.get(*field).is_some())
+        {
+            continue;
+        }
+        if let Some(tarball) = resolution.get("tarball") {
+            let host = yaml_str(Some(tarball))
+                .and_then(|tarball| url::Url::parse(tarball).ok())
+                .map(|url| url.host_str().map(str::to_string));
+            match host {
+                Some(Some(host)) if host == crate::tailors::node::registry::REGISTRY_HOST => {}
+                Some(_) => continue,
+                // `file:` tarballs are paths; anything else is unread.
+                None if yaml_str(Some(tarball)).is_some_and(|t| t.starts_with("file:")) => continue,
+                None => return Err(unread(key, "has a tarball that is not a URL")),
+            }
+        }
+        if yaml_str(resolution.get("integrity")).is_none() {
+            return Err(unread(key, "has a registry resolution with no integrity"));
+        }
+        let (name, version) =
+            normalize_pnpm_identity(key).ok_or_else(|| unread(key, "names no version"))?;
+        let version = trim_peer_suffix(&version).to_string();
+        if !version.starts_with(|c: char| c.is_ascii_digit()) {
+            return Err(unread(key, "names no registry version"));
+        }
+        found.push((name, version));
+    }
+    Ok(found)
+}
 
 /// A dependency as an importer of `pnpm-lock.yaml` records it: the
 /// specifier its package.json wrote, verbatim, and the version pnpm resolved

@@ -17,6 +17,7 @@ pub mod inputs;
 pub mod objects;
 pub mod registry;
 mod resolve;
+pub mod sumdb;
 pub(crate) use resolve::{attest_project, gate_cache, go_tool, tidy_project};
 use resolve::{download_closure, is_tidy};
 pub mod tailor;

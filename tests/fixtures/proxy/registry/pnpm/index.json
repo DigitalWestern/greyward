@@ -28,5 +28,31 @@
   "size": 6124,
   "status": 200,
   "url": "https://registry.npmjs.org/is-odd"
+ },
+ {
+  "census_label": "pnpm-publish-time",
+  "file": "registry.npmjs.org/is-odd.full.body",
+  "headers": {
+   "Content-Type": "application/json"
+  },
+  "method": "GET",
+  "request_accept": "application/json",
+  "sha256": "b6d733d29cb921ea30492d808eda615f2a90cd4a487b888434058b4873680e7d",
+  "size": 20171,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-odd"
+ },
+ {
+  "census_label": "pnpm-publish-time",
+  "file": "registry.npmjs.org/is-number.full.body",
+  "headers": {
+   "Content-Type": "application/json"
+  },
+  "method": "GET",
+  "request_accept": "application/json",
+  "sha256": "8fdfbca6f95aa058e4e228ec3a4dc76b5b0a9f53354f06681a3effb2fca7ef92",
+  "size": 36183,
+  "status": 200,
+  "url": "https://registry.npmjs.org/is-number"
  }
 ]

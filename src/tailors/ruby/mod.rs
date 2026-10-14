@@ -12,6 +12,7 @@
 mod door;
 pub mod edit;
 mod gem_home;
+mod locked;
 mod native;
 mod native_libs;
 pub mod objects;

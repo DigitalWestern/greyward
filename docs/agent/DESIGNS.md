@@ -2355,8 +2355,47 @@ on the thread that opened the attribution, records after the tool exits.
 | The door ran without a network fence (the `isolated` tier; see "Isolation tiers") | `unconfined-resolution` (**new**) | refuse before the tool starts | record |
 | Metadata was served from last-good because the upstream was unreachable (offline or transport failure) | `stale-resolution` (**new**; subject = endpoint, detail = number of last-good responses) | the proxy answers 504 for any request it would otherwise serve last-good, so the door fails naming the first such URL | record; the entries are also marked `freshness: last-good` in the portable evidence, which the signature covers |
 | A lock has no attesting resolution record at closure time | `unrecorded-resolution` (**new**) | the sync refuses to publish, and names `ward attest` | record |
+| A locked registry version was published less than `[packages] min_age_days` (default 7) before the resolution, or its publish time could not be had | `young-package` (**new**; subject = `name@version`, detail = the publish time, the resolution time, and the minimum with its source) | the door fails after the tool exits and before the lock is published, naming every young package and the time after which resolving again passes; an unknown publish time refuses too | record in the resolution record, so every sync of the lock replays it |
+| A locked registry package's name is one edit (optimal string alignment) from one of its registry's 2,000 most popular names, compared after the registry's own normalization, and is not that name | `lookalike-name` (**new**; subject = the name, detail = `one edit from popular package <x>`; names under 5 characters are not judged) | the sync refuses to publish the closure | record at every closure publication; `ward add` warns before it edits the manifest |
 | Lifecycle scripts | none | `--ignore-scripts` and `npm_config_ignore_scripts=true` stay as today; a script that ran anyway would be confined | `install-script-failed` stays a realize-time kind |
 | Integrity mismatch (bytes differ from the claimed digest) | not an exception | always a hard failure: 502 to the tool, door fails, nothing cached | no permissive path |
+
+**`young-package` for Go: a place in the checksum database's log.** Go's
+module proxy serves no upload time: a version's `.info` `Time` is its
+commit's, which whoever made the commit sets, so a fresh tag can claim any
+date and a pseudo-version's time is the same commit time. Three
+server-side sources of a first-seen time were weighed (2026-10-14):
+`index.golang.org` lists versions in the order the proxy first saw them,
+but only as a feed from a given time, so finding one version's entry means
+scanning the whole window (about 1.1 million entries a week, measured
+2026-10-14) for every resolution; deps.dev reports the same commit time
+the proxy does; and `sum.golang.org`'s transparency log gives each module
+version a record number in an append-only log whose signed tree heads say
+how many records it held. The log was chosen. Every signed head ward
+serves (go's own `latest` and lookup answers, and ward's lookups through
+the same route) is verified against sum.golang.org's Ed25519 key (Go's
+note format, `ring`'s Ed25519, no new crate) and appended to
+`<store>/resolve/tlog/sum.golang.org` as a checkpoint: the tree size, its
+root hash and the local time, at most one per ten minutes, under a lock.
+A head of a size already kept with another root is a fork and a hard
+failure; no consistency proof between sizes is checked. The history is thinned (all of the last two days, one a
+day back to the longest minimum age, and the largest older one). The
+binary carries a seed checkpoint (`src/tailors/go/sumdb-seed.txt`,
+written by `tools/sumdb_seed.py`, which keeps it only when the Rust test
+verifies its signature; the release workflow runs `tools/sumdb_seed.py
+--check`, which refuses a seed taken more than 60 days before the release
+commit). Each Go version, tagged or pseudo, is judged by
+its record number: below the size of the largest checkpoint observed at
+least `min_age_days` before the resolution, it passes; otherwise its age
+is unknown ("logged after the largest checkpoint older than N days").
+The `.info` time is never read. A head that does not verify, or a lookup
+answer that is not exactly the asked version's two go.sum lines, is a hard
+failure (502, the door fails), never an unknown age. The record number
+is authenticated by TLS and checked to lie inside the signed tree the
+answer carries, without an inclusion proof. LIMITATIONS.md states the
+consequences: a fresh store judges by the seed alone, the local clock
+dates each checkpoint, and the file is as trustworthy as the store's
+permissions.
 
 **`resolution-build`, established by a probe instead of by guessing.** The
 proxy cannot see whether uv executed a build backend: fetching an sdist
@@ -2419,7 +2458,10 @@ compiled in and is exactly today's forced public set: `pypi.org`,
 `files.pythonhosted.org`, `registry.npmjs.org`, `index.crates.io`,
 `static.crates.io`, `crates.io` (the download redirect), `proxy.golang.org`,
 `sum.golang.org`, `rubygems.org`, `index.rubygems.org`, `repo.hex.pm`,
-`api.nuget.org`, plus the hosts PR 0 saw the tools reach through the
+`api.nuget.org`, `hex.pm` (only ward's own publish-time lookup session
+for `young-package` has a route serving it; no tool session does, so a
+tool request to it is refused. Being in the permitted set, it can still be
+a redirect hop from another permitted host), plus the hosts PR 0 saw the tools reach through the
 door: `api.github.com` and `raw.githubusercontent.com` (uv's and cargo's
 GitHub shortcuts for git dependencies, which are git fetches and so
 `git-dependency`). No registry redirected to a CDN host in the census.

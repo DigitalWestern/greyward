@@ -14,7 +14,10 @@
 //!   to sum.golang.org outside the proxy.
 //! - `/sumdb/sum.golang.org/<rest>` (`latest`, `lookup/...`, `tile/...`) goes
 //!   to `https://sum.golang.org/<rest>` byte-for-byte. go verifies the
-//!   signed tree note itself, so the proxy claims nothing about it.
+//!   signed tree note itself, so the proxy claims nothing about it. ward
+//!   verifies each tree head too, for `young-package`, which judges a Go
+//!   version by its record number in the database's log ([`super::sumdb`]):
+//!   a head that does not verify is refused.
 //!
 //! Anything else is refused: another checksum database, a query string, a
 //! module or version outside go's escaped spelling, and the
@@ -24,8 +27,9 @@
 //! database, so the protocol publishes no claims.
 
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, LocalAnswer, ProxyAddress, RegistryProtocol, RequestClass, Upstream,
+    Claim, Endpoint, LocalAnswer, Lookup, ProxyAddress, RegistryProtocol, RequestClass, Upstream,
 };
+use crate::kernel::resolve::tlog::{Head, Log};
 use std::io;
 use url::Url;
 
@@ -94,6 +98,80 @@ impl RegistryProtocol for GoProxy {
     fn claims(&self, _url: &Url, _body: &[u8]) -> Vec<(Url, Claim)> {
         Vec::new()
     }
+
+    /// A checksum-database lookup answer: the version's record number in
+    /// the log, keyed by the escaped module path and version the lookup
+    /// URL names (as [`Self::package_key`] spells a go.sum entry). Only an
+    /// answer whose tree head verifies, whose record is in that tree, and
+    /// whose record is exactly that version's go.sum lines gives one
+    /// ([`super::sumdb::verify_lookup`]); any other answer is refused
+    /// before it gets here, by [`Self::tree_size`]. The module proxy's
+    /// `.info` time is never read: it is the commit's time, which the
+    /// module's author sets.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        let Some((module, version)) = lookup_target(url) else {
+            return Vec::new();
+        };
+        let Ok((answer, _)) = super::sumdb::verify_lookup(body, &module, &version) else {
+            return Vec::new();
+        };
+        match i64::try_from(answer.record) {
+            Ok(record) => vec![(module, version, record)],
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The checksum database's lookup for the version, through the route's
+    /// sum.golang.org endpoint.
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, version: &str) -> Option<Lookup> {
+        let (module, version) = self.package_key(name, version);
+        let rest = format!("lookup/{module}@{version}");
+        check_sumdb_path(&rest).ok()?;
+        Some(Lookup {
+            url: endpoint(endpoints, SUMDB_HOST)
+                .ok()?
+                .url(&format!("/{rest}"))
+                .ok()?,
+            accept: "*/*",
+        })
+    }
+
+    /// The proxy's escaped spelling (`!azure`), which the URLs carry.
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        let escape = |word: &str| {
+            crate::tailors::go::escape_go_path(word).unwrap_or_else(|_| word.to_string())
+        };
+        (escape(name), escape(version))
+    }
+
+    /// Go's ages are judged by record numbers in the checksum database.
+    fn log(&self) -> Option<Log> {
+        Some(super::sumdb::log())
+    }
+
+    /// A `latest` answer is a signed tree head; a lookup answer ends with
+    /// one, and must also be the record of the version the URL asks for.
+    /// Tiles carry none.
+    fn tree_size(&self, url: &Url, body: &[u8]) -> Option<Result<Head, String>> {
+        if url.host_str() != Some(SUMDB_HOST) {
+            return None;
+        }
+        if url.path() == "/latest" {
+            return Some(super::sumdb::verify_tree(body));
+        }
+        let (module, version) = lookup_target(url)?;
+        Some(super::sumdb::verify_lookup(body, &module, &version).map(|(_, head)| head))
+    }
+}
+
+/// The escaped module path and version a checksum-database lookup URL
+/// names.
+fn lookup_target(url: &Url) -> Option<(String, String)> {
+    if url.host_str() != Some(SUMDB_HOST) {
+        return None;
+    }
+    let (module, version) = url.path().strip_prefix("/lookup/")?.rsplit_once('@')?;
+    Some((module.to_string(), version.to_string()))
 }
 
 /// The route endpoint on `host`, which a Go route always has.
@@ -295,6 +373,87 @@ mod tests {
     }
 
     #[test]
+    fn record_numbers_come_from_verified_lookups_in_escaped_spelling() {
+        let body = include_bytes!(
+            "../../../tests/fixtures/proxy/registry/go/sum.golang.org/lookup/github.com/google/uuid@v1.6.0.body"
+        );
+        let url = |host: &str, path: &str| Url::parse(&format!("https://{host}{path}")).unwrap();
+        let lookup = url(SUMDB_HOST, "/lookup/github.com/google/uuid@v1.6.0");
+        assert_eq!(
+            GO_PROXY.published(&lookup, body),
+            vec![(
+                "github.com/google/uuid".to_string(),
+                "v1.6.0".to_string(),
+                22_152_757,
+            )]
+        );
+        let size =
+            |answer: Option<Result<Head, String>>| answer.map(|head| head.map(|head| head.size));
+        assert_eq!(
+            size(GO_PROXY.tree_size(&lookup, body)),
+            Some(Ok(64_828_441))
+        );
+        // The answer must name the version the URL asked for, and is
+        // refused outright when it does not.
+        let other = url(SUMDB_HOST, "/lookup/github.com/google/uuid@v1.5.0");
+        assert!(GO_PROXY.published(&other, body).is_empty());
+        assert!(matches!(GO_PROXY.tree_size(&other, body), Some(Err(_))));
+        // A forged head gives no record, and its tree size is refused.
+        let forged = String::from_utf8_lossy(body).replace("64828441", "94828441");
+        assert!(GO_PROXY.published(&lookup, forged.as_bytes()).is_empty());
+        assert!(matches!(
+            GO_PROXY.tree_size(&lookup, forged.as_bytes()),
+            Some(Err(_))
+        ));
+        // `latest` is a bare head; tiles and the module proxy carry none,
+        // and an `.info` time (the commit's, author-set) is never read.
+        let head = &body[body.windows(2).position(|pair| pair == b"\n\n").unwrap() + 2..];
+        assert_eq!(
+            size(GO_PROXY.tree_size(&url(SUMDB_HOST, "/latest"), head)),
+            Some(Ok(64_828_441))
+        );
+        assert_eq!(
+            GO_PROXY.tree_size(&url(SUMDB_HOST, "/tile/8/0/x086/534"), head),
+            None
+        );
+        let info = url(PROXY_HOST, "/github.com/google/uuid/@v/v1.6.0.info");
+        let info_body = br#"{"Version":"v1.6.0","Time":"2024-01-23T18:54:04Z"}"#;
+        assert!(GO_PROXY.published(&info, info_body).is_empty());
+        assert_eq!(GO_PROXY.tree_size(&info, info_body), None);
+        assert_eq!(GO_PROXY.log().unwrap().name, "sum.golang.org");
+        assert_eq!(
+            GO_PROXY.package_key("github.com/Azure/sdk", "v1.2.0"),
+            ("github.com/!azure/sdk".to_string(), "v1.2.0".to_string())
+        );
+        // Tagged and pseudo-versions alike are looked up in the log.
+        for version in ["v1.2.0", "v0.0.0-20240123185404-0123456789ab"] {
+            let lookup = GO_PROXY
+                .lookup(&endpoints(), "github.com/Azure/sdk", version)
+                .unwrap();
+            assert_eq!(
+                lookup.url.as_str(),
+                format!("https://sum.golang.org/lookup/github.com/!azure/sdk@{version}")
+            );
+        }
+        let sum = "github.com/google/uuid v1.6.0 h1:abc=\n\
+                   github.com/google/uuid v1.6.0/go.mod h1:def=\n\
+                   golang.org/x/sync v0.9.0/go.mod h1:ghi=\n";
+        assert_eq!(
+            crate::tailors::go::tool::go_sum_modules(sum).unwrap(),
+            [crate::kernel::resolve::age::LockedPackage::new(
+                "github.com/google/uuid",
+                "v1.6.0"
+            )]
+        );
+        let error = crate::tailors::go::tool::go_sum_modules(
+            "github.com/google/uuid v1.6.0 h1:abc=\ngithub.com/evil/pkg v1.0.0\n",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("line 2"), "{error}");
+    }
+
+    #[test]
     fn module_proxy_paths_map_to_proxy_golang_org_unchanged() {
         for path in [
             "/github.com/google/uuid/@v/list",
@@ -452,6 +611,20 @@ mod tests {
         let port = harness.upstream.port();
         let store = &harness.store;
         let activity = &harness.activity;
+        // A checkpoint old enough to judge by, as a store that resolved Go
+        // a month ago holds: both recorded versions sit below it.
+        let month_ago =
+            crate::kernel::resolve::age::unix_seconds(std::time::SystemTime::now()) - 30 * 86_400;
+        // The recorded lookup's head, root and all, so no head go fetches
+        // of that size can disagree with it.
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/proxy/registry/go/sum.golang.org/lookup/github.com/google/uuid@v1.6.0.body"
+        );
+        let (_, head) =
+            crate::tailors::go::sumdb::verify_lookup(fixture, "github.com/google/uuid", "v1.6.0")
+                .unwrap();
+        crate::kernel::resolve::tlog::record(store, &GO_PROXY.log().unwrap(), head, month_ago)
+            .unwrap();
         let go_obj = super::super::ensure_go(store, activity, "1.27.0").unwrap();
         let modcache = super::super::gate_cache(store).unwrap();
         let temp = crate::kernel::testutil::TempDir::named("go-mirror-project");
@@ -519,6 +692,10 @@ mod tests {
         let (get, recorded) = run(DoorKind::Edit, &["get", "golang.org/x/sync@v0.10.0"]);
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
         assert!(recorded.is_empty(), "{recorded:?}");
+        // Every tree head go fetched through the mirror verified and is a
+        // checkpoint now, beside the seed and the one written above.
+        let kept = crate::kernel::resolve::tlog::load(store, &GO_PROXY.log().unwrap()).unwrap();
+        assert!(kept.len() > 2, "{kept:?}");
         let gomod = fs::read_to_string(project.join("go.mod")).unwrap();
         assert!(gomod.contains("golang.org/x/sync v0.10.0"), "{gomod}");
         let gosum = fs::read_to_string(project.join("go.sum")).unwrap();

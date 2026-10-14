@@ -93,6 +93,21 @@ pub const UNPINNED_DIGEST: &str = "unpinned-digest";
 /// in the sandbox, but these write the project's own source, which no store
 /// object may hold. The subject is the directory, the detail the script.
 pub const PROJECT_SCRIPT_SKIPPED: &str = "project-script-skipped";
+/// A registry package version the resolution locked was published less
+/// than the policy's minimum age before that resolution (`[packages]
+/// min_age_days`, 7 days when no policy sets it), or its publish time could
+/// not be learned. Judged when the lock is resolved, from the registry's own
+/// timestamp for the exact version; the signed resolution record carries the
+/// finding, so every later sync and `ward audit` replays it. The subject is
+/// `name@version`, the detail the publish time, the resolution time and the
+/// minimum.
+pub const YOUNG_PACKAGE: &str = "young-package";
+/// A locked registry package's name is one edit (an insertion, a deletion,
+/// a substitution, or two neighbours swapped) from the name of one of its
+/// ecosystem's most popular packages without being that package: a typo, or
+/// a name chosen to be mistaken for the popular one. A heuristic, recorded
+/// at every sync. The subject is the name, the detail the popular name.
+pub const LOOKALIKE_NAME: &str = "lookalike-name";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -117,6 +132,8 @@ pub const KINDS: &[&str] = &[
     HOST_GIT_TRANSPORT,
     UNPINNED_DIGEST,
     PROJECT_SCRIPT_SKIPPED,
+    YOUNG_PACKAGE,
+    LOOKALIKE_NAME,
 ];
 
 /// Kinds that describe the project, its lock or its resolution rather than
@@ -138,6 +155,8 @@ pub const PLAN_TIME_KINDS: &[&str] = &[
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
     PROJECT_SCRIPT_SKIPPED,
+    YOUNG_PACKAGE,
+    LOOKALIKE_NAME,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on
@@ -234,6 +253,11 @@ pub struct Policy {
     /// mistake for `ward audit`), empty means "trust nobody".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing: Option<Signing>,
+    /// The `[packages]` table: limits on the registry packages a resolution
+    /// may lock (`min_age_days`). In a merged chain it holds the effective
+    /// values; see [`packages`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Packages>,
     /// What made this policy strict, and which file denied each kind. Not
     /// part of the file grammar: `serde(skip)` keeps both out of what a
     /// file may set and out of anything this struct is serialized into.
@@ -244,6 +268,14 @@ pub struct Policy {
     pub strict_source: Option<StrictSource>,
     #[serde(skip)]
     pub deny_sources: BTreeMap<String, PathBuf>,
+    /// The file whose `min_age_days` is the effective one, when a file set
+    /// it; `None` is the default.
+    #[serde(skip)]
+    pub min_age_source: Option<PathBuf>,
+    /// Which scope that file is: the signed record names the scope, never
+    /// the machine-specific path.
+    #[serde(skip)]
+    pub min_age_origin: Option<SourceOrigin>,
 }
 
 /// What turned strictness on. A refusal names it, because the fix differs:
@@ -373,6 +405,7 @@ pub fn parse_file(path: &Path, text: &str) -> io::Result<Policy> {
             ),
         ));
     }
+    packages::validate(path, &policy)?;
     Ok(policy)
 }
 
@@ -443,7 +476,14 @@ fn merge_text(
             .entry(kind.clone())
             .or_insert_with(|| path.to_path_buf());
     }
+    let before = policy.min_age_days();
     merge(policy, &other, origin);
+    if packages::sets_min_age(&other)
+        && (origin == SourceOrigin::Machine || policy.min_age_days() != before)
+    {
+        policy.min_age_source = Some(path.to_path_buf());
+        policy.min_age_origin = Some(origin);
+    }
     // Only a file that existed and was merged is a source; the optional
     // files that were not there contributed nothing to attribute.
     sources.push(PolicySource::from_file(origin, path, &other));
@@ -491,6 +531,7 @@ pub fn union(policy: &mut Policy, other: &Policy) {
 /// machine or project policy.
 pub fn merge(policy: &mut Policy, other: &Policy, origin: SourceOrigin) {
     union(policy, other);
+    packages::merge(policy, other, origin);
     match origin {
         SourceOrigin::Machine => {
             if let Some(declared) = &other.signing {
@@ -558,6 +599,9 @@ pub struct PolicySource {
     /// Shown per scope so a key the machine does not trust is visible in
     /// the project list that named it.
     pub trusted: Option<KeySet>,
+    /// The `[packages] min_age_days` this scope declared, `None` when it
+    /// declared none.
+    pub min_age_days: Option<u32>,
 }
 
 impl PolicySource {
@@ -573,6 +617,10 @@ impl PolicySource {
                 .signing
                 .as_ref()
                 .map(|signing| signing.trusted.clone()),
+            min_age_days: policy
+                .packages
+                .as_ref()
+                .and_then(|packages| packages.min_age_days),
         }
     }
 }
@@ -731,6 +779,9 @@ pub(crate) fn machine_policy_path() -> io::Result<PathBuf> {
     Ok(home.join(".greyward/policy.toml"))
 }
 
+mod packages;
+pub use packages::{Packages, DEFAULT_MIN_AGE_DAYS, MAX_MIN_AGE_DAYS};
+
 mod strict;
 #[cfg(test)]
 use strict::parse_strict;
@@ -854,10 +905,21 @@ pub fn denied(policy: &Policy, kind: &str) -> bool {
 /// refused it, and the literal edit that would allow it; a reader who has
 /// never opened a policy file can act on it without reading one.
 pub fn refusal(policy: &Policy, kind: &str, subject: &str, detail: &str) -> String {
+    let fix = refusal_fix(policy, kind);
+    format!(
+        "policy denies {}: {subject}: {detail}; {fix}",
+        canonical_kind(kind)
+    )
+}
+
+/// The end of [`refusal`]: the knob that refuses `kind` and the edit that
+/// would allow it, for a refusal that leads with its own remedy
+/// ([`record_with_fix`]).
+pub fn refusal_fix(policy: &Policy, kind: &str) -> String {
     let kind = canonical_kind(kind);
     // Strictness is reported first when both apply: removing the kind from
     // a deny list changes nothing while strict is on.
-    let fix = match (policy.strict, policy.deny_sources.get(kind)) {
+    match (policy.strict, policy.deny_sources.get(kind)) {
         (true, _) => match &policy.strict_source {
             Some(source) => source.fix(),
             None => "this policy refuses every exception kind".to_string(),
@@ -869,8 +931,7 @@ pub fn refusal(policy: &Policy, kind: &str, subject: &str, detail: &str) -> Stri
         (false, None) => {
             format!("'{kind}' is in a policy deny list; remove that line to allow it")
         }
-    };
-    format!("policy denies {kind}: {subject}: {detail}; {fix}")
+    }
 }
 
 pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> io::Result<()> {
@@ -2304,6 +2365,56 @@ deny = ["git-dependency"]"#,
         assert!(merged.deny.contains(GIT_DEPENDENCY));
         assert!(merged.deny.contains(FILE_COLLISION));
         assert!(merged.deny.contains(WEAK_INTEGRITY));
+    }
+
+    /// `min_age_days` only rises through the chain, and the refusal names
+    /// the file that set the value in force; every scope's own value is in
+    /// its source entry (`ward audit --json`).
+    #[test]
+    fn load_with_sources_takes_the_largest_min_age_and_names_its_file() {
+        let scratch = TempDir::named("policy-min-age");
+        let root = scratch.0.clone();
+        let home = root.join("home");
+        let parent = root.join("workspace");
+        let project = parent.join("member");
+        for dir in [&home, &parent, &project] {
+            fs::create_dir_all(dir.join(".greyward")).unwrap();
+        }
+        let write = |dir: &Path, days: u32| {
+            fs::write(
+                dir.join(".greyward/policy.toml"),
+                format!("[packages]\nmin_age_days = {days}\n"),
+            )
+            .unwrap();
+        };
+        write(&home, 10);
+        write(&project, 5);
+        write(&parent, 21);
+        let _env = test_env_lock();
+        let _home = EnvVarGuard::set("HOME", home.as_os_str());
+        let _policy = EnvVarGuard::remove("GREYWARD_POLICY");
+        let (merged, sources) = load_with_sources(&project, false).unwrap();
+        assert_eq!(merged.min_age_days(), 21);
+        assert_eq!(
+            merged.min_age_source.as_deref(),
+            Some(parent.join(".greyward/policy.toml").as_path())
+        );
+        assert_eq!(merged.min_age_origin, Some(SourceOrigin::Project));
+        let declared: Vec<Option<u32>> = fixture_sources(&sources, &root)
+            .iter()
+            .map(|source| source.min_age_days)
+            .collect();
+        assert_eq!(declared, [Some(10), Some(5), Some(21)]);
+        // A project lower than the machine leaves the machine's in force,
+        // and the machine file is the one named.
+        write(&parent, 3);
+        let (merged, _) = load_with_sources(&project, false).unwrap();
+        assert_eq!(merged.min_age_days(), 10);
+        assert_eq!(
+            merged.min_age_source.as_deref(),
+            Some(home.join(".greyward/policy.toml").as_path())
+        );
+        assert_eq!(merged.min_age_origin, Some(SourceOrigin::Machine));
     }
 
     #[test]

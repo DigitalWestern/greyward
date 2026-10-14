@@ -78,6 +78,7 @@ pub(super) fn apply_requested_strictness(
             strict: true,
             deny: BTreeSet::new(),
             trusted: None,
+            min_age_days: None,
         });
     }
     if env_strict {
@@ -87,6 +88,7 @@ pub(super) fn apply_requested_strictness(
             strict: true,
             deny: BTreeSet::new(),
             trusted: None,
+            min_age_days: None,
         });
     }
 }

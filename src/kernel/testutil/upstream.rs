@@ -225,6 +225,13 @@ impl FixtureUpstream {
                 Some(query) => format!("{}?{query}", url.path()),
                 None => url.path().to_string(),
             };
+            // A row with `request_accept` answers only a request with
+            // exactly that `Accept` (a full packument beside the
+            // abbreviated one at the same path).
+            let target = match row["request_accept"].as_str() {
+                Some(accept) => accept_key(&target, accept),
+                None => target,
+            };
             let mut routes = self.routes.lock().unwrap();
             let Some(marker) = row["request_has"].as_str() else {
                 if let Some(Behavior::ByBody(_)) = routes.get(&target) {
@@ -278,6 +285,11 @@ impl Drop for FixtureUpstream {
     }
 }
 
+/// The routes key of `target` asked for with `accept`.
+fn accept_key(target: &str, accept: &str) -> String {
+    format!("{target}\0accept={accept}")
+}
+
 /// Serve one connection: finish the handshake, then answer requests until
 /// the client closes.
 fn serve(
@@ -310,7 +322,14 @@ fn serve(
             body: request.body.clone(),
         };
         seen.lock().unwrap().push(record);
-        let behavior = routes.lock().unwrap().get(&request.target).cloned();
+        let behavior = {
+            let routes = routes.lock().unwrap();
+            let by_accept = request
+                .headers
+                .get("accept")
+                .and_then(|accept| routes.get(&accept_key(&request.target, accept)));
+            by_accept.or_else(|| routes.get(&request.target)).cloned()
+        };
         let holds = |part: &Vec<u8>| {
             request
                 .body

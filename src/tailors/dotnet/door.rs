@@ -11,6 +11,8 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod locked;
+
 /// Why restore runs isolated, for the missing-capability message.
 const WHY: &str = "evaluates the project's MSBuild files and fetches packages from the network";
 
@@ -138,6 +140,7 @@ fn dotnet_confined<'a>(run: &mut DotnetRun<'a>) -> io::Result<ConfinedSpec<'a>> 
             ..Wiring::default()
         })
     }));
+    confined.locked = Some(locked::locked_list(run.outputs.clone()));
     confined.publish(Publish::Project {
         outputs: std::mem::take(&mut run.outputs),
         receipt: run.receipt.take(),

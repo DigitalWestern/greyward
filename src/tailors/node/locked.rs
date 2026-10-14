@@ -6,6 +6,9 @@
 
 use super::lock_import::pnpm_registry_packages;
 use super::registry::REGISTRY_HOST;
+use crate::kernel::fetch::registry::{source_for, Served};
+use crate::kernel::registries::config::Ecosystem;
+use crate::kernel::registries::effective::Sources;
 use crate::kernel::resolve::age::LockedPackage;
 use crate::kernel::resolve::door::{LockedList, Staged};
 use std::io;
@@ -20,20 +23,28 @@ pub(crate) enum NodeLock {
 }
 
 /// The [`LockedList`] of a run whose lock is `lock`, at the lock root.
-pub(crate) fn locked_list<'a>(lock: NodeLock) -> LockedList<'a> {
+/// `sources` are the run's node sources: a tarball one of its configured
+/// registries serves is that registry's package.
+pub(crate) fn locked_list<'a>(lock: NodeLock, sources: Sources) -> LockedList<'a> {
     Box::new(move |staged: &Staged<'_>| {
-        let (file, parse): (&str, fn(&str) -> io::Result<Vec<LockedPackage>>) = match lock {
-            NodeLock::Npm => ("package-lock.json", npm_registry_packages),
-            NodeLock::Pnpm => ("pnpm-lock.yaml", |text| {
-                Ok(pnpm_registry_packages(text)?
-                    .into_iter()
-                    .map(|(name, version)| LockedPackage::new(name, version))
-                    .collect())
-            }),
+        let configured = |url: &str| {
+            matches!(
+                source_for(&sources, Ecosystem::Node, url),
+                Ok(Served::Registry(_))
+            )
         };
-        parse(&String::from_utf8_lossy(
-            &staged.read_lock(Path::new(file))?,
-        ))
+        let file = match lock {
+            NodeLock::Npm => "package-lock.json",
+            NodeLock::Pnpm => "pnpm-lock.yaml",
+        };
+        let text = String::from_utf8_lossy(&staged.read_lock(Path::new(file))?).into_owned();
+        match lock {
+            NodeLock::Npm => npm_registry_packages(&text, &configured),
+            NodeLock::Pnpm => Ok(pnpm_registry_packages(&text, &configured)?
+                .into_iter()
+                .map(|(name, version)| LockedPackage::new(name, version))
+                .collect()),
+        }
     })
 }
 
@@ -48,7 +59,10 @@ pub(crate) fn locked_list<'a>(lock: NodeLock) -> LockedList<'a> {
 /// installed package with no `resolved`, a `resolved` that is no URL, a
 /// registry URL that is not a tarball) is `InvalidData`: a package this
 /// reader skipped would never be judged.
-pub(crate) fn npm_registry_packages(text: &str) -> io::Result<Vec<LockedPackage>> {
+pub(crate) fn npm_registry_packages(
+    text: &str,
+    configured: &dyn Fn(&str) -> bool,
+) -> io::Result<Vec<LockedPackage>> {
     let lock: serde_json::Value = serde_json::from_str(text).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -86,6 +100,16 @@ pub(crate) fn npm_registry_packages(text: &str) -> io::Result<Vec<LockedPackage>
         let url = Url::parse(resolved)
             .map_err(|_| unread(format!("{path} resolves to {resolved:?}, which is no URL")))?;
         if url.host_str() != Some(REGISTRY_HOST) {
+            // A configured registry lays its tarballs out its own way
+            // (Nexus under its repository path, GitHub Packages under
+            // `/download/`): the entry names the package.
+            if configured(resolved) {
+                found.push(entry_identity(path, entry).ok_or_else(|| {
+                    unread(format!(
+                        "{path} resolves to {resolved}, and names no version"
+                    ))
+                })?);
+            }
             continue;
         }
         let package = tarball_identity(&url).ok_or_else(|| {
@@ -113,6 +137,18 @@ pub(crate) fn off_registry_tarball(package: &super::NpmPackage) -> Option<&str> 
         .host_str()
         .map(str::to_string);
     (host.as_deref() != Some(REGISTRY_HOST)).then_some(package.url.as_str())
+}
+
+/// `(name, version)` of a `package-lock.json` entry at `path`: its `name`
+/// (an alias's real name) or the folder under the last `node_modules/`,
+/// and its `version`.
+fn entry_identity(path: &str, entry: &serde_json::Value) -> Option<LockedPackage> {
+    let name = match entry.get("name").and_then(|v| v.as_str()) {
+        Some(name) => name,
+        None => path.rsplit_once("node_modules/")?.1,
+    };
+    let version = entry.get("version").and_then(|v| v.as_str())?;
+    (!name.is_empty() && !version.is_empty()).then(|| LockedPackage::new(name, version))
 }
 
 /// `(name, version)` of a registry tarball URL:
@@ -160,7 +196,7 @@ mod tests {
             "node_modules/member": {"resolved": "packages/member", "link": true}
           }
         }"#;
-        let mut found = npm_registry_packages(lock).unwrap();
+        let mut found = npm_registry_packages(lock, &|_| false).unwrap();
         found.sort();
         assert_eq!(
             found,
@@ -170,6 +206,34 @@ mod tests {
                 LockedPackage::new("is-odd", "3.0.1"),
             ]
         );
+        // A configured registry's tarball, laid out its own way, is named
+        // by the entry; an alias by its `name`. One with no version is
+        // unread.
+        let private = r#"{
+          "lockfileVersion": 3,
+          "packages": {
+            "node_modules/is-odd": {"version": "3.0.1",
+              "resolved": "https://nexus.test/repository/npm/is-odd/-/is-odd-3.0.1.tgz"},
+            "node_modules/w": {"name": "@corp/widget", "version": "1.0.0",
+              "resolved": "https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc"},
+            "node_modules/elsewhere": {"version": "1.0.0",
+              "resolved": "https://example.com/elsewhere-1.0.0.tgz"}
+          }
+        }"#;
+        let configured = |url: &str| !url.starts_with("https://example.com/");
+        let mut found = npm_registry_packages(private, &configured).unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                LockedPackage::new("@corp/widget", "1.0.0"),
+                LockedPackage::new("is-odd", "3.0.1"),
+            ]
+        );
+        let unversioned =
+            r#"{"packages": {"node_modules/x": {"resolved": "https://nexus.test/x.tgz"}}}"#;
+        let error = npm_registry_packages(unversioned, &configured).unwrap_err();
+        assert!(error.to_string().contains("names no version"), "{error}");
         for unread in [
             "{}",
             "not json",
@@ -177,12 +241,14 @@ mod tests {
             r#"{"packages": {"node_modules/x": {"resolved": "not a url"}}}"#,
             r#"{"packages": {"node_modules/x": {"resolved": "https://registry.npmjs.org/x"}}}"#,
         ] {
-            let error = npm_registry_packages(unread).unwrap_err();
+            let error = npm_registry_packages(unread, &|_| false).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unread}");
         }
         let bundled = r#"{"packages": {"": {}, "node_modules/a/node_modules/b":
             {"version": "1.0.0", "inBundle": true}}}"#;
-        assert!(npm_registry_packages(bundled).unwrap().is_empty());
+        assert!(npm_registry_packages(bundled, &|_| false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -220,7 +286,7 @@ mod tests {
             \x20 is-odd@3.0.1:\n\
             \x20   dependencies:\n\
             \x20     is-number: 6.0.0\n";
-        let found = pnpm_registry_packages(lock).unwrap();
+        let found = pnpm_registry_packages(lock, &|_| false).unwrap();
         assert_eq!(
             found,
             [
@@ -229,17 +295,28 @@ mod tests {
                 ("is-odd".to_string(), "3.0.1".to_string()),
             ]
         );
+        // A tarball on a configured registry is that registry's.
+        let found =
+            pnpm_registry_packages(lock, &|url| url == "https://example.com/x.tgz").unwrap();
+        assert!(
+            found.contains(&("from-url".to_string(), "1.0.0".to_string())),
+            "{found:?}"
+        );
         // A lock without packages locks nothing.
         let empty = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
-        assert!(pnpm_registry_packages(empty).unwrap().is_empty());
-        assert!(pnpm_registry_packages("packages: {}\n").unwrap().is_empty());
+        assert!(pnpm_registry_packages(empty, &|_| false)
+            .unwrap()
+            .is_empty());
+        assert!(pnpm_registry_packages("packages: {}\n", &|_| false)
+            .unwrap()
+            .is_empty());
         // A registry tarball URL is still the registry's.
         let tarball = "packages:\n\
             \x20 is-odd@3.0.1:\n\
             \x20   resolution: {integrity: sha512-CCCC, \
             tarball: https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz}\n";
         assert_eq!(
-            pnpm_registry_packages(tarball).unwrap(),
+            pnpm_registry_packages(tarball, &|_| false).unwrap(),
             [("is-odd".to_string(), "3.0.1".to_string())]
         );
         for unread in [
@@ -251,7 +328,7 @@ mod tests {
             "packages: is-odd@3.0.1\n",
             "packages:\n  - is-odd@3.0.1\n",
         ] {
-            let error = pnpm_registry_packages(unread).unwrap_err();
+            let error = pnpm_registry_packages(unread, &|_| false).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unread}");
         }
     }

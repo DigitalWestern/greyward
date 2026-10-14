@@ -111,27 +111,7 @@ impl RegistryProtocol for PypiRegistry {
         if url.host_str() != Some(INDEX_HOST) || !url.path().starts_with("/simple/") {
             return Vec::new();
         }
-        let Ok(page) = serde_json::from_slice::<serde_json::Value>(body) else {
-            return Vec::new();
-        };
-        let Some(name) = page.get("name").and_then(|name| name.as_str()) else {
-            return Vec::new();
-        };
-        page.get("files")
-            .and_then(|files| files.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|file| {
-                let filename = file.get("filename")?.as_str()?;
-                let at = parse_rfc3339(file.get("upload-time")?.as_str()?)?;
-                let version = file_version(name, filename)?;
-                Some([
-                    (name.to_string(), file_key(&version, filename), at),
-                    (name.to_string(), version, at),
-                ])
-            })
-            .flatten()
-            .collect()
+        page_times(body)
     }
 
     /// The project's JSON page (PEP 691), which lists each file's upload
@@ -153,17 +133,50 @@ impl RegistryProtocol for PypiRegistry {
     /// `1.0.post1`); a [`file_key`]'s file name compared without letter
     /// case.
     fn package_key(&self, name: &str, version: &str) -> (String, String) {
-        let version = match version.split_once(' ') {
-            // A lock takes the file name from its URL, percent-encoded
-            // (`%2B` for a local version's `+`); the index names it plain.
-            Some((version, file)) => file_key(
-                &version_key(version),
-                &crate::kernel::gitsrc::percent_decode(file).to_ascii_lowercase(),
-            ),
-            None => version_key(version),
-        };
-        (normalize_name(name), version)
+        package_key(name, version)
     }
+}
+
+/// PyPI's [`RegistryProtocol::package_key`], shared with configured
+/// indexes.
+fn package_key(name: &str, version: &str) -> (String, String) {
+    let version = match version.split_once(' ') {
+        // A lock takes the file name from its URL, percent-encoded
+        // (`%2B` for a local version's `+`); the index names it plain.
+        Some((version, file)) => file_key(
+            &version_key(version),
+            &crate::kernel::gitsrc::percent_decode(file).to_ascii_lowercase(),
+        ),
+        None => version_key(version),
+    };
+    (normalize_name(name), version)
+}
+
+/// The upload times a JSON project page (PEP 691) lists: each file's under
+/// the file's own key ([`file_key`]) and under its version, read from the
+/// file's name. An HTML page carries none.
+fn page_times(body: &[u8]) -> Vec<(String, String, i64)> {
+    let Ok(page) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(name) = page.get("name").and_then(|name| name.as_str()) else {
+        return Vec::new();
+    };
+    page.get("files")
+        .and_then(|files| files.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let filename = file.get("filename")?.as_str()?;
+            let at = parse_rfc3339(file.get("upload-time")?.as_str()?)?;
+            let version = file_version(name, filename)?;
+            Some([
+                (name.to_string(), file_key(&version, filename), at),
+                (name.to_string(), version, at),
+            ])
+        })
+        .flatten()
+        .collect()
 }
 
 /// A version's PEP 440 normal form, compared as PEP 440 compares it: the
@@ -518,6 +531,32 @@ impl RegistryProtocol for ConfiguredSimple {
 
     fn expects_claim(&self, _url: &Url) -> bool {
         true
+    }
+
+    /// A JSON project page's upload times, as on PyPI.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        if !self.is_page(url) {
+            return Vec::new();
+        }
+        page_times(body)
+    }
+
+    /// The project's JSON page under this registry's `url`.
+    fn lookup(&self, _endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        let name = normalize_name(name);
+        check_name(&name).ok()?;
+        let url = Url::parse(&self.base)
+            .ok()?
+            .join(&format!("{name}/"))
+            .ok()?;
+        self.is_page(&url).then_some(Lookup {
+            url,
+            accept: "application/vnd.pypi.simple.v1+json",
+        })
+    }
+
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        package_key(name, version)
     }
 }
 
@@ -1306,6 +1345,50 @@ python = ["corp", "team"]
                 assert_eq!(protocol.classify(&url), class, "{path}");
             }
             assert_eq!(protocol.route_id(), "pypi-corp");
+        }
+
+        /// A configured index's JSON pages give upload times as PyPI's do,
+        /// and its publish-time lookup is the project page under its URL.
+        #[test]
+        fn a_configured_index_reads_upload_times_under_its_url() {
+            let registry = machine(8443, "/t", "/t");
+            let protocol = ConfiguredSimple::new(registry.registries.registry("corp").unwrap());
+            let page = br#"{"name": "demo", "files": [
+                {"filename": "demo-1.0-py3-none-any.whl", "url": "../../packages/demo-1.0-py3-none-any.whl",
+                 "hashes": {}, "upload-time": "2020-01-02T03:04:05.000000Z"}]}"#;
+            let at = parse_rfc3339("2020-01-02T03:04:05Z").unwrap();
+            let url = |raw: &str| Url::parse(raw).unwrap();
+            assert_eq!(
+                protocol.published(
+                    &url("https://registry.test:8443/repo/pypi/simple/demo/"),
+                    page
+                ),
+                [
+                    (
+                        "demo".into(),
+                        file_key("1.0", "demo-1.0-py3-none-any.whl"),
+                        at
+                    ),
+                    ("demo".into(), "1.0".into(), at),
+                ]
+            );
+            // A body outside the registry's pages times nothing.
+            assert!(protocol
+                .published(
+                    &url("https://registry.test:8443/repo/pypi/team/simple/demo/"),
+                    page
+                )
+                .is_empty());
+            let lookup = protocol.lookup(&[], "Demo_Name", "1.0").unwrap();
+            assert_eq!(
+                lookup.url.as_str(),
+                "https://registry.test:8443/repo/pypi/simple/demo-name/"
+            );
+            assert_eq!(lookup.accept, "application/vnd.pypi.simple.v1+json");
+            assert_eq!(
+                protocol.package_key("Demo_Name", "1.0.0"),
+                PYPI_REGISTRY.package_key("Demo_Name", "1.0.0")
+            );
         }
     }
 }

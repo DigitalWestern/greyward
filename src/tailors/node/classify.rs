@@ -318,8 +318,10 @@ pub(super) fn fetch_tarball(
     let candidates = sri_candidates(&package.integrity)?;
     // A `file:` directory package was packed from the project into the
     // cache by its integrity: no registry serves it, so it is read from
-    // the cache alone.
-    if super::local_package::source_dir(package).is_some() {
+    // the cache alone. A `file://` tarball is read from its path, as any
+    // URL is.
+    let local = super::local_package::source_dir(package).is_some_and(|dir| !dir.starts_with("//"));
+    if local {
         let mut last = None;
         for digest in &candidates {
             match crate::kernel::fetch::cache_verified_digest_held(store, activity, digest) {
@@ -336,7 +338,9 @@ pub(super) fn fetch_tarball(
             ),
         ));
     }
-    check_registry(package)?;
+    if super::local_package::source_dir(package).is_none() {
+        check_registry(package)?;
+    }
     download_registry_any_held(store, activity, Ecosystem::Node, &package.url, &candidates).map_err(
         |e| {
             io::Error::new(

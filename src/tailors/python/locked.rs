@@ -19,7 +19,9 @@ const LOCK_TXT: &str = "requirements.lock.txt";
 /// `uv.lock`, ward's `requirements.lock.txt`, or another `.txt`
 /// requirements file uv compiled (its header says so). The outputs name every lock the run may write, and it must leave
 /// one.
-pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>) -> LockedList<'a> {
+/// `indexes` are the listed registries' index URLs: a uv.lock package from
+/// one of them is judged as a PyPI package is.
+pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>, indexes: Vec<String>) -> LockedList<'a> {
     Box::new(move |staged: &Staged<'_>| {
         let mut locked = Vec::new();
         let mut read = false;
@@ -44,7 +46,7 @@ pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>) -> LockedList<'a> {
             if requirements {
                 locked.extend(requirements_packages(&text)?);
             } else {
-                locked.extend(uv_pypi_packages(&text)?.into_iter().map(
+                locked.extend(uv_pypi_packages(&text, &indexes)?.into_iter().map(
                     |(name, version, files)| LockedPackage::new(name, version).with_files(files),
                 ));
             }
@@ -142,16 +144,27 @@ name = "iniconfig"
 version = "2.0.0"
 source = { git = "https://github.com/pytest-dev/iniconfig?rev=v2.0.0#93f5930e668c0d1ddf4597e38dd0dea4e2665e7a" }
 "#;
+        let six = (
+            "six".to_string(),
+            "1.17.0".to_string(),
+            vec![
+                "six-1.17.0.tar.gz".to_string(),
+                "six-1.17.0-py2.py3-none-any.whl".to_string(),
+            ],
+        );
         assert_eq!(
-            uv_pypi_packages(lock).unwrap(),
-            [(
-                "six".to_string(),
-                "1.17.0".to_string(),
-                vec![
-                    "six-1.17.0.tar.gz".to_string(),
-                    "six-1.17.0-py2.py3-none-any.whl".to_string()
-                ]
-            )]
+            uv_pypi_packages(lock, &[]).unwrap(),
+            std::slice::from_ref(&six)
+        );
+        // A package from a listed index is judged too, its URL compared
+        // as the policy compares index URLs.
+        let listed = ["https://EXAMPLE.com/simple/".to_string()];
+        assert_eq!(
+            uv_pypi_packages(lock, &listed).unwrap(),
+            [
+                six,
+                ("private".to_string(), "2.0.0".to_string(), Vec::new())
+            ]
         );
     }
 

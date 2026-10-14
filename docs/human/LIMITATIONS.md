@@ -482,7 +482,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   npm or pnpm starts reads the lock root's and the member's `.npmrc`, not registry
   settings in `pnpm-workspace.yaml`; a scope pointed elsewhere there still fails, at
   the proxy, with a less specific error. A wrong password on a configured registry
-  surfaces as the tool's own 401, with no `fix:` line.
+  surfaces as the tool's own 401, with no `fix:` line. `young-package` reads a
+  configured registry's publish times where PyPI's and npm's are read: a Python
+  index's JSON project page (PEP 691) and an npm registry's full packument. An index
+  that serves HTML pages only, or a packument with no `time` map, gives none, so each
+  package's age is unknown: recorded, or refused where the policy denies the kind.
 
 ## Python
 

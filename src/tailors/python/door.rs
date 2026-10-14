@@ -413,6 +413,7 @@ fn confined<'r>(
         .iter()
         .map(|glob| PathGlob::new(glob))
         .collect::<io::Result<_>>()?;
+    let urls = indexes.urls;
     confined.routes = indexes.routes;
     confined.permitted = indexes.permitted;
     confined.intercept = Intercept::Tls;
@@ -421,7 +422,7 @@ fn confined<'r>(
     let cache = cache.to_path_buf();
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| wiring(wire, &cache)));
     confined.publish(attempt.publish);
-    confined.locked = Some(super::locked::locked_list(confined.outputs.clone()));
+    confined.locked = Some(super::locked::locked_list(confined.outputs.clone(), urls));
     Ok((spec, confined))
 }
 
@@ -1042,8 +1043,9 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
         PROXY_FOR_TEST.with(|slot| slot.set(Some(&harness.proxy)));
         let port = harness.upstream.port();
         let wheel = demo_wheel();
+        // A JSON page (PEP 691), whose upload time the age check reads.
         let page = format!(
-            "<html><body><a href=\"../../packages/demo-1.0-py3-none-any.whl#sha256={}\">demo-1.0-py3-none-any.whl</a></body></html>",
+            r#"{{"meta": {{"api-version": "1.0"}}, "name": "demo", "files": [{{"filename": "demo-1.0-py3-none-any.whl", "url": "../../packages/demo-1.0-py3-none-any.whl", "hashes": {{"sha256": "{}"}}, "upload-time": "2020-01-02T03:04:05.000000Z"}}]}}"#,
             hex::encode(Sha256::digest(&wheel))
         );
         let authorized = |body: &[u8], kind: &str| Behavior::Authorized {
@@ -1052,7 +1054,7 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
         };
         harness.upstream.set(
             "/repo/pypi/simple/demo/",
-            authorized(page.as_bytes(), "text/html"),
+            authorized(page.as_bytes(), "application/vnd.pypi.simple.v1+json"),
         );
         harness.upstream.set(
             "/repo/pypi/packages/demo-1.0-py3-none-any.whl",

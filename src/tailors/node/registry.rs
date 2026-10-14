@@ -283,6 +283,10 @@ fn check_version(version: &str) -> Result<(), String> {
 pub struct ConfiguredNpm {
     id: String,
     base: String,
+    /// The registry's own `scopes`; empty: every name outside `elsewhere`.
+    scopes: Vec<String>,
+    /// The scopes other node registries in the list serve.
+    elsewhere: Vec<String>,
 }
 
 impl ConfiguredNpm {
@@ -290,6 +294,31 @@ impl ConfiguredNpm {
         ConfiguredNpm {
             id: format!("{ROUTE_ID}-{}", registry.name),
             base: registry.url.clone(),
+            scopes: registry.scopes.clone(),
+            elsewhere: Vec::new(),
+        }
+    }
+
+    /// The same route, told which scopes the other registries serve, so a
+    /// publish-time lookup goes to the registry npm asks for that name.
+    pub fn with_scopes_elsewhere(mut self, elsewhere: Vec<String>) -> ConfiguredNpm {
+        self.elsewhere = elsewhere;
+        self
+    }
+
+    /// Whether npm asks this registry for `name`.
+    fn serves(&self, name: &str) -> bool {
+        let scope = name
+            .starts_with('@')
+            .then(|| name.split('/').next())
+            .flatten();
+        let listed = |scopes: &[String]| {
+            scope.is_some_and(|scope| scopes.iter().any(|s| s.eq_ignore_ascii_case(scope)))
+        };
+        if self.scopes.is_empty() {
+            !listed(&self.elsewhere)
+        } else {
+            listed(&self.scopes)
         }
     }
 
@@ -341,6 +370,30 @@ impl RegistryProtocol for ConfiguredNpm {
 
     fn encoded_slash(&self) -> bool {
         true
+    }
+
+    /// A full packument's `time` map, as on the public registry.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        if !self.is_packument(url) {
+            return Vec::new();
+        }
+        packument_times(body)
+    }
+
+    /// The full packument under this registry's `url`, for a name npm
+    /// asks this registry for.
+    fn lookup(&self, _endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        if !self.serves(name) {
+            return None;
+        }
+        let url = Url::parse(&self.base)
+            .ok()?
+            .join(&name.replacen('/', "%2f", 1))
+            .ok()?;
+        self.is_packument(&url).then_some(Lookup {
+            url,
+            accept: "application/json",
+        })
     }
 }
 
@@ -555,6 +608,32 @@ mod tests {
         };
         let route = ConfiguredNpm::new(&registry);
         assert_eq!(route.route_id(), "npm-gh");
+        // Publish times: a packument's `time` map, and a lookup only for
+        // the names this scoped registry serves.
+        let packument = br#"{"name": "@corp/widget", "time": {"created": "2020-01-01T00:00:00Z", "1.0.0": "2020-01-02T03:04:05.000Z"}}"#;
+        let at = parse_rfc3339("2020-01-02T03:04:05Z").unwrap();
+        let packument_url = Url::parse("https://npm.pkg.github.com/corp/@corp%2fwidget").unwrap();
+        assert_eq!(
+            route.published(&packument_url, packument),
+            [("@corp/widget".to_string(), "1.0.0".to_string(), at)]
+        );
+        let tarball_url =
+            Url::parse("https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc").unwrap();
+        assert!(route.published(&tarball_url, packument).is_empty());
+        let lookup = route.lookup(&[], "@CORP/widget", "1.0.0").unwrap();
+        assert_eq!(
+            lookup.url.as_str(),
+            "https://npm.pkg.github.com/corp/@CORP%2fwidget"
+        );
+        assert_eq!(lookup.accept, "application/json");
+        assert!(route.lookup(&[], "left-pad", "1.0.0").is_none());
+        // An unscoped registry answers every name but another's scope.
+        let mut default = registry.clone();
+        default.scopes = Vec::new();
+        let default = ConfiguredNpm::new(&default).with_scopes_elsewhere(vec!["@corp".into()]);
+        assert!(default.lookup(&[], "left-pad", "1.0.0").is_some());
+        assert!(default.lookup(&[], "@other/x", "1.0.0").is_some());
+        assert!(default.lookup(&[], "@Corp/widget", "1.0.0").is_none());
         let class = |url: &str| route.classify(&Url::parse(url).unwrap());
         for packument in [
             "https://npm.pkg.github.com/corp/@corp%2fwidget",

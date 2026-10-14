@@ -1093,6 +1093,113 @@ mod tests {
     use super::testing::TEST_PROTOCOL;
     use super::*;
 
+    /// A compiled-in protocol answers through its route exactly as it
+    /// answers itself: every method the trait has is passed through, so a
+    /// method added later and not forwarded fails here, not silently.
+    #[test]
+    fn a_compiled_in_route_forwards_every_protocol_method() {
+        struct Sentinel;
+        impl RegistryProtocol for Sentinel {
+            fn route_id(&self) -> &str {
+                "sentinel"
+            }
+            fn upstream(&self, endpoints: &[Endpoint], _path: &str) -> io::Result<Upstream> {
+                Ok(Upstream::Fetch(endpoints[0].url("/upstream")?))
+            }
+            fn classify(&self, _url: &Url) -> RequestClass {
+                RequestClass::Sumdb
+            }
+            fn claims(&self, url: &Url, _body: &[u8]) -> Vec<(Url, Claim)> {
+                vec![(
+                    url.clone(),
+                    Claim::one(Digest::sha256(&"7".repeat(64)).unwrap()),
+                )]
+            }
+            fn expects_claim(&self, _url: &Url) -> bool {
+                true
+            }
+            fn request_body_cap(&self) -> u64 {
+                77
+            }
+            fn content_query_keys(&self) -> &'static [&'static str] {
+                &["sentinel"]
+            }
+            fn rewrite(
+                &self,
+                _url: &Url,
+                _body: Vec<u8>,
+                _base: &ProxyAddress,
+            ) -> io::Result<Vec<u8>> {
+                Ok(b"rewritten".to_vec())
+            }
+            fn encoded_slash(&self) -> bool {
+                true
+            }
+            fn published(&self, _url: &Url, _body: &[u8]) -> Vec<(String, String, i64)> {
+                vec![("n".into(), "1".into(), 7)]
+            }
+            fn lookup(
+                &self,
+                endpoints: &[Endpoint],
+                _name: &str,
+                _version: &str,
+            ) -> Option<Lookup> {
+                Some(Lookup {
+                    url: endpoints[0].url("/lookup").ok()?,
+                    accept: "sentinel",
+                })
+            }
+            fn package_key(&self, name: &str, version: &str) -> (String, String) {
+                (format!("key-{name}"), format!("key-{version}"))
+            }
+            fn log(&self) -> Option<super::super::tlog::Log> {
+                Some(crate::tailors::go::sumdb::log())
+            }
+            fn tree_size(
+                &self,
+                _url: &Url,
+                _body: &[u8],
+            ) -> Option<Result<super::super::tlog::Head, String>> {
+                Some(Err("sentinel".into()))
+            }
+        }
+        static SENTINEL: Sentinel = Sentinel;
+        let endpoints = vec![Endpoint::https("pypi.org").unwrap()];
+        let route = Route::new(&SENTINEL, endpoints.clone()).unwrap();
+        let wrapped = &route.protocol;
+        let url = Url::parse("https://pypi.org/x").unwrap();
+        let base = ProxyAddress::new(std::net::SocketAddr::from(([127, 0, 0, 1], 1)), "t");
+        assert_eq!(wrapped.route_id(), "sentinel");
+        assert_eq!(
+            wrapped.upstream(&endpoints, "/x").unwrap(),
+            SENTINEL.upstream(&endpoints, "/x").unwrap()
+        );
+        assert_eq!(wrapped.classify(&url), RequestClass::Sumdb);
+        assert_eq!(wrapped.claims(&url, b""), SENTINEL.claims(&url, b""));
+        assert!(wrapped.expects_claim(&url));
+        assert_eq!(wrapped.request_body_cap(), 77);
+        assert_eq!(wrapped.content_query_keys(), ["sentinel"]);
+        assert_eq!(
+            wrapped.rewrite(&url, Vec::new(), &base).unwrap(),
+            b"rewritten"
+        );
+        assert!(wrapped.encoded_slash());
+        assert_eq!(wrapped.published(&url, b""), SENTINEL.published(&url, b""));
+        assert_eq!(
+            wrapped.lookup(&endpoints, "n", "1"),
+            SENTINEL.lookup(&endpoints, "n", "1")
+        );
+        assert_eq!(
+            wrapped.package_key("n", "1"),
+            ("key-n".into(), "key-1".into())
+        );
+        assert_eq!(wrapped.log().map(|log| log.name), Some("sum.golang.org"));
+        assert_eq!(
+            wrapped.tree_size(&url, b"").unwrap().unwrap_err(),
+            "sentinel"
+        );
+    }
+
     #[test]
     fn route_paths_follow_the_grammar() {
         for good in [

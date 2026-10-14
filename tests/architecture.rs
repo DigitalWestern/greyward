@@ -1853,7 +1853,9 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // on a warm one.
     ("src/kernel/provider/crates.rs", "realize_vendor_inner", 1),
     ("src/tailors/elixir/mod.rs", "realize_deps", 1),
-    ("src/tailors/node/classify.rs", "fetch_tarball", 1),
+    // Twice: a registry tarball, and a `file:` package read from the cache
+    // alone, both by the lock's integrity.
+    ("src/tailors/node/classify.rs", "fetch_tarball", 2),
     ("src/tailors/node/realize.rs", "plant_declared_artifacts", 1),
     (
         "src/tailors/python/build.rs",

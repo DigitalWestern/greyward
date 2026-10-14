@@ -127,7 +127,12 @@ pub(super) fn judge(
         if published_at(&config, observed, package).is_some() {
             continue;
         }
-        let found = config.routes.iter().find_map(|route| {
+        // A configured registry's route is asked before a public one: it
+        // answers only for the names it serves, and the public route for
+        // any name.
+        let configured = config.routes.iter().filter(|route| route.scope().is_some());
+        let public = config.routes.iter().filter(|route| route.scope().is_none());
+        let found = configured.chain(public).find_map(|route| {
             let lookup =
                 route
                     .protocol

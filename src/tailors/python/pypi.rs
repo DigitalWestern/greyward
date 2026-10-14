@@ -366,9 +366,29 @@ pub fn is_requirement_option(line: &str) -> bool {
 
 /// Index configuration is deliberately data-only: ward reports it as an
 /// unattested input and never follows the configured index during locking.
+/// An `--index-url` or `--extra-index-url` naming a registry the effective
+/// python `[sources]` list holds is approved, and is no exception.
 pub fn unattested_index_options(text: &str) -> Vec<String> {
+    let sources = crate::kernel::policy::effective().registries;
+    let listed = |line: &str| {
+        let mut words = line.split_whitespace();
+        let first = words.next().unwrap_or_default();
+        let url = match first.split_once('=') {
+            Some(("--index-url" | "--extra-index-url", url)) => url,
+            None if matches!(first, "--index-url" | "--extra-index-url") => {
+                words.next().unwrap_or_default()
+            }
+            _ => return false,
+        };
+        crate::kernel::registries::lock::listed_index(
+            &sources,
+            crate::kernel::registries::config::Ecosystem::Python,
+            url,
+        )
+    };
     logical_lines(text)
         .into_iter()
+        .filter(|line| !listed(line))
         .filter(|line| {
             let first = line.split_whitespace().next().unwrap_or_default();
             matches!(

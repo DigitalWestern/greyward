@@ -110,24 +110,37 @@ pub(crate) fn go_confined<'a>(
 /// `/go.mod`-only lines are not modules the build uses), for the door's
 /// `young-package` check. Every one came through proxy.golang.org.
 fn locked_list<'a>() -> LockedList<'a> {
-    Box::new(|staged: &Staged<'_>| {
-        Ok(match staged.read(Path::new("go.sum"))? {
+    Box::new(
+        |staged: &Staged<'_>| match staged.read(Path::new("go.sum"))? {
             Some(bytes) => go_sum_modules(&String::from_utf8_lossy(&bytes)),
-            None => Vec::new(),
-        })
-    })
+            None => Ok(Vec::new()),
+        },
+    )
 }
 
 /// `module version h1:...` lines of `go.sum`, without the `/go.mod` ones.
-pub(crate) fn go_sum_modules(text: &str) -> Vec<LockedPackage> {
-    text.lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            let (module, version) = (words.next()?, words.next()?);
-            words.next()?;
-            (!version.ends_with("/go.mod")).then(|| LockedPackage::new(module, version))
-        })
-        .collect()
+/// A line that is not three words is `InvalidData`: a module this reader
+/// skipped would never be judged.
+pub(crate) fn go_sum_modules(text: &str) -> io::Result<Vec<LockedPackage>> {
+    let mut modules = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words[..] {
+            [] => {}
+            [module, version, _hash] => {
+                if !version.ends_with("/go.mod") {
+                    modules.push(LockedPackage::new(module, version));
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("go.sum line {} is not `module version hash`", number + 1),
+                ))
+            }
+        }
+    }
+    Ok(modules)
 }
 
 /// Run the store go confined through `door`. A Detached run's ledger is

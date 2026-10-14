@@ -579,21 +579,29 @@ fn check_result(
     if door.kind == DoorKind::Planner {
         return Ok(());
     }
-    let packages = match locked(&staged) {
-        Ok(packages) => packages,
-        // A lock its reader cannot parse names no package: planning refuses
-        // that lock before anything is fetched from it.
-        Err(error) if error.kind() == io::ErrorKind::InvalidData => Vec::new(),
-        Err(error) => return Err(error),
-    };
+    let mut config = session_config(door, confined, policy);
+    // Off, or a run that reached no registry: nothing to judge, and the
+    // lock is not read for it.
+    if policy.min_age_days() == 0 || config.routes.is_empty() {
+        return Ok(());
+    }
+    config.routes.append(&mut confined.lookup_routes);
+    // A lock its reader cannot read would name no package, and so pass
+    // every package in it unjudged: refuse it instead.
+    let packages = locked(&staged).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "{}: the lock could not be read for young-package: {error}; nothing was \
+                 published",
+                confined.name
+            ),
+        )
+    })?;
     let proxy = match confined.proxy {
         Some(proxy) => proxy,
         None => process_proxy()?,
     };
-    let mut config = session_config(door, confined, policy);
-    if !config.routes.is_empty() {
-        config.routes.append(&mut confined.lookup_routes);
-    }
     let judged = age::judge(
         proxy,
         config,
@@ -3179,6 +3187,49 @@ exit 37
             .map(|entry| entry.url.as_str())
             .collect();
         assert_eq!(looked_up, [fx.harness.upstream_url("/meta/old.json")]);
+    }
+
+    #[test]
+    fn a_lock_the_young_package_reader_cannot_read_publishes_nothing() {
+        let Some(relay) = relay("a_lock_the_young_package_reader_cannot_read_publishes_nothing")
+        else {
+            return;
+        };
+        let fx = fixture("door-unreadable-lock");
+        let before = tree(&fx.project);
+        let unreadable = |confined: &mut ConfinedSpec<'_>| {
+            confined.locked = Some(Box::new(|_: &Staged<'_>| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "deps.lock line 3 is not a package",
+                ))
+            }));
+        };
+        let refused = run_door(
+            &fx,
+            Some(relay.clone()),
+            "echo new > deps.lock\n",
+            Policy::default(),
+            unreadable,
+        );
+        let error = refused.result.unwrap_err().to_string();
+        assert!(
+            error.contains("the lock could not be read for young-package"),
+            "{error}"
+        );
+        assert!(error.contains("line 3 is not a package"), "{error}");
+        assert_untouched(&fx, &before);
+        // With the check off the lock is not read, and the run publishes.
+        let off = Policy {
+            packages: Some(policy::Packages {
+                min_age_days: Some(0),
+            }),
+            ..Policy::default()
+        };
+        let published = run_door(&fx, Some(relay), "echo new > deps.lock\n", off, unreadable);
+        let report = published.result.unwrap();
+        assert!(report.status.success());
+        assert_eq!(fs::read(fx.project.join("deps.lock")).unwrap(), b"new\n");
     }
 
     #[test]

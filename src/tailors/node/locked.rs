@@ -31,10 +31,9 @@ pub(crate) fn locked_list<'a>(lock: NodeLock) -> LockedList<'a> {
                     .collect())
             }),
         };
-        match staged.read(Path::new(file))? {
-            Some(bytes) => parse(&String::from_utf8_lossy(&bytes)),
-            None => Ok(Vec::new()),
-        }
+        parse(&String::from_utf8_lossy(
+            &staged.read_lock(Path::new(file))?,
+        ))
     })
 }
 
@@ -42,6 +41,13 @@ pub(crate) fn locked_list<'a>(lock: NodeLock) -> LockedList<'a> {
 /// `resolved` is a tarball on the public registry, named and versioned by
 /// that tarball, so an alias (`"x": "npm:y@1"`) reads as the package it
 /// really is.
+///
+/// Every entry is accounted for. The root, a workspace member, a link, a
+/// bundled dependency, and a git, `file:` or off-registry tarball are
+/// known and left out. Anything else (a lock without `packages`, an
+/// installed package with no `resolved`, a `resolved` that is no URL, a
+/// registry URL that is not a tarball) is `InvalidData`: a package this
+/// reader skipped would never be judged.
 pub(crate) fn npm_registry_packages(text: &str) -> io::Result<Vec<LockedPackage>> {
     let lock: serde_json::Value = serde_json::from_str(text).map_err(|error| {
         io::Error::new(
@@ -49,13 +55,47 @@ pub(crate) fn npm_registry_packages(text: &str) -> io::Result<Vec<LockedPackage>
             format!("package-lock.json does not parse: {error}"),
         )
     })?;
-    let Some(packages) = lock.get("packages").and_then(|p| p.as_object()) else {
-        return Ok(Vec::new());
+    let unread = |why: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("package-lock.json: {why}"),
+        )
     };
-    Ok(packages
-        .values()
-        .filter_map(|entry| tarball_identity(entry.get("resolved")?.as_str()?))
-        .collect())
+    let Some(packages) = lock.get("packages").and_then(|p| p.as_object()) else {
+        return Err(unread(
+            "no packages object (ward reads lockfileVersion 2 and 3)".into(),
+        ));
+    };
+    let mut found = Vec::new();
+    for (path, entry) in packages {
+        let flag = |name: &str| entry.get(name).and_then(|v| v.as_bool()) == Some(true);
+        // The root, a workspace member's folder, a link to one, and a
+        // dependency bundled inside its parent's tarball.
+        if path.is_empty() || !path.contains("node_modules/") || flag("link") || flag("inBundle") {
+            continue;
+        }
+        let Some(resolved) = entry.get("resolved").and_then(|v| v.as_str()) else {
+            return Err(unread(format!("{path} has no resolved")));
+        };
+        if ["git+", "git:", "github:", "file:"]
+            .iter()
+            .any(|scheme| resolved.starts_with(scheme))
+        {
+            continue;
+        }
+        let url = Url::parse(resolved)
+            .map_err(|_| unread(format!("{path} resolves to {resolved:?}, which is no URL")))?;
+        if url.host_str() != Some(REGISTRY_HOST) {
+            continue;
+        }
+        let package = tarball_identity(&url).ok_or_else(|| {
+            unread(format!(
+                "{path} resolves to {resolved}, which is not a registry tarball"
+            ))
+        })?;
+        found.push(package);
+    }
+    Ok(found)
 }
 
 /// The URL a package's tarball was fetched from, when that is not the
@@ -77,11 +117,7 @@ pub(crate) fn off_registry_tarball(package: &super::NpmPackage) -> Option<&str> 
 
 /// `(name, version)` of a registry tarball URL:
 /// `/<name>/-/<name>-<version>.tgz` or `/@<scope>/<name>/-/<name>-<version>.tgz`.
-fn tarball_identity(resolved: &str) -> Option<LockedPackage> {
-    let url = Url::parse(resolved).ok()?;
-    if url.host_str() != Some(REGISTRY_HOST) {
-        return None;
-    }
+fn tarball_identity(url: &Url) -> Option<LockedPackage> {
     let parts: Vec<&str> = url.path().trim_start_matches('/').split('/').collect();
     let (name, base, file) = match parts.as_slice() {
         [name, "-", file] => (name.to_string(), *name, *file),
@@ -134,8 +170,19 @@ mod tests {
                 LockedPackage::new("is-odd", "3.0.1"),
             ]
         );
-        assert!(npm_registry_packages("{}").unwrap().is_empty());
-        assert!(npm_registry_packages("not json").is_err());
+        for unread in [
+            "{}",
+            "not json",
+            r#"{"packages": {"node_modules/x": {"version": "1.0.0"}}}"#,
+            r#"{"packages": {"node_modules/x": {"resolved": "not a url"}}}"#,
+            r#"{"packages": {"node_modules/x": {"resolved": "https://registry.npmjs.org/x"}}}"#,
+        ] {
+            let error = npm_registry_packages(unread).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unread}");
+        }
+        let bundled = r#"{"packages": {"": {}, "node_modules/a/node_modules/b":
+            {"version": "1.0.0", "inBundle": true}}}"#;
+        assert!(npm_registry_packages(bundled).unwrap().is_empty());
     }
 
     #[test]
@@ -182,6 +229,24 @@ mod tests {
                 ("is-odd".to_string(), "3.0.1".to_string()),
             ]
         );
+        // A registry tarball URL is still the registry's.
+        let tarball = "packages:\n\
+            \x20 is-odd@3.0.1:\n\
+            \x20   resolution: {integrity: sha512-CCCC, \
+            tarball: https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz}\n";
+        assert_eq!(
+            pnpm_registry_packages(tarball).unwrap(),
+            [("is-odd".to_string(), "3.0.1".to_string())]
+        );
+        for unread in [
+            "packages:\n  is-odd@3.0.1:\n    engines: {node: '>=0.10.0'}\n",
+            "packages:\n  is-odd@3.0.1:\n    resolution: {tarball: 'not a url'}\n",
+            "packages:\n  is-odd@latest:\n    resolution: {integrity: sha512-CCCC}\n",
+            "packages:\n  is-odd@3.0.1:\n    resolution: {}\n",
+        ] {
+            let error = pnpm_registry_packages(unread).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unread}");
+        }
     }
 
     #[test]

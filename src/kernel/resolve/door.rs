@@ -92,6 +92,18 @@ impl<'s> Staged<'s> {
             Err(error) => Err(error),
         }
     }
+
+    /// The lock `relative` as the run leaves it, which the tool always
+    /// writes: a run that leaves none is `InvalidData`, never an empty
+    /// lock, so `young-package` never passes a lock it did not read.
+    pub fn read_lock(&self, relative: &Path) -> io::Result<Vec<u8>> {
+        self.read(relative)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the run left no {}", relative.display()),
+            )
+        })
+    }
 }
 
 /// Where a confined run's accepted outputs go.

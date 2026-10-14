@@ -11,12 +11,10 @@ use std::path::Path;
 
 /// The [`LockedList`] of a Bundler run: its `Gemfile.lock`.
 pub(crate) fn locked_list<'a>() -> LockedList<'a> {
-    Box::new(
-        |staged: &Staged<'_>| match staged.read(Path::new("Gemfile.lock"))? {
-            Some(bytes) => rubygems_specs(&String::from_utf8_lossy(&bytes)),
-            None => Ok(Vec::new()),
-        },
-    )
+    Box::new(|staged: &Staged<'_>| {
+        let bytes = staged.read_lock(Path::new("Gemfile.lock"))?;
+        rubygems_specs(&String::from_utf8_lossy(&bytes))
+    })
 }
 
 /// The `name (version)` lines at four spaces under `specs:` in every

@@ -108,14 +108,26 @@ pub(crate) fn go_confined<'a>(
 
 /// The modules a published go.sum names with a content hash (its
 /// `/go.mod`-only lines are not modules the build uses), for the door's
-/// `young-package` check. Every one came through proxy.golang.org.
+/// `young-package` check. Every one came through proxy.golang.org. go
+/// writes no go.sum for a module that requires nothing; a run that leaves
+/// none while its go.mod has a `require` is `InvalidData`.
 fn locked_list<'a>() -> LockedList<'a> {
-    Box::new(
-        |staged: &Staged<'_>| match staged.read(Path::new("go.sum"))? {
-            Some(bytes) => go_sum_modules(&String::from_utf8_lossy(&bytes)),
-            None => Ok(Vec::new()),
-        },
-    )
+    Box::new(|staged: &Staged<'_>| {
+        if let Some(bytes) = staged.read(Path::new("go.sum"))? {
+            return go_sum_modules(&String::from_utf8_lossy(&bytes));
+        }
+        let go_mod = staged.read_lock(Path::new("go.mod"))?;
+        let requires = String::from_utf8_lossy(&go_mod)
+            .lines()
+            .any(|line| line.trim_start().starts_with("require"));
+        if requires {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the run left no go.sum, but go.mod requires modules",
+            ));
+        }
+        Ok(Vec::new())
+    })
 }
 
 /// `module version h1:...` lines of `go.sum`, without the `/go.mod` ones.

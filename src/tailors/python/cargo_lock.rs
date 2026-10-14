@@ -129,15 +129,39 @@ pub(super) fn read_cached_lock(path: &Path, at: &Path) -> Option<CachedLock> {
     (cached.at == at).then_some(cached)
 }
 
-/// Cache `lock` at `path`, one file written whole.
+/// Cache `lock` at `path`, one file written whole: through a temporary
+/// name of this writer's own in the same directory (its pid and a counter),
+/// renamed into place, so two syncs caching the same entry at once do not
+/// take each other's file. A rename that fails while the entry already
+/// holds these exact bytes is a success.
 pub(super) fn write_cached_lock(path: &Path, lock: &CachedLock) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec(lock).map_err(io::Error::other)?;
-    let partial = path.with_extension("partial");
-    fs::write(&partial, bytes)?;
-    fs::rename(partial, path)
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let partial = path.with_file_name(format!(
+        ".{name}.{}-{}.partial",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&partial, &bytes)?;
+    match fs::rename(&partial, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&partial);
+            if fs::read(path).is_ok_and(|found| found == bytes) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Put a cached generated `Cargo.lock` back where cargo wrote it. Its
@@ -344,6 +368,37 @@ mod tests {
             fs::write(&cache, format!("{bad}\n")).unwrap();
             assert_eq!(read_cached_root(&cache, &source, manifest), None, "{bad}");
         }
+    }
+
+    /// Writers caching the same entry at once (two syncs planning one
+    /// sdist) all succeed, the entry reads back whole, and no temporary
+    /// file is left beside it.
+    #[test]
+    fn concurrent_writers_cache_one_entry() {
+        let temp = TempDir::named("python-cached-lock-race");
+        let entry = temp.0.join("cache/entry");
+        let lock = CachedLock {
+            text: "version = 4\n".to_string(),
+            at: PathBuf::from("Cargo.lock"),
+            exceptions: Vec::new(),
+        };
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| (0..50).try_for_each(|_| write_cached_lock(&entry, &lock))))
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(
+            read_cached_lock(&entry, Path::new("Cargo.lock")),
+            Some(lock)
+        );
+        let left: Vec<_> = fs::read_dir(temp.0.join("cache"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["entry"], "{left:?}");
     }
 
     fn deny_transports() -> PolicyScope {

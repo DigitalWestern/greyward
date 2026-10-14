@@ -73,6 +73,16 @@ impl PublicKey {
     pub fn hex(&self) -> String {
         hex::encode(self.0)
     }
+
+    /// Does `signature` (64 raw bytes) sign exactly `message` under this
+    /// key? A detached signature over a file's bytes, as `openssl pkeyutl
+    /// -sign -rawin` writes it: ward's release archives are signed this way
+    /// (`tools/release-sign.sh`), and `update --self` checks them here.
+    pub fn verify_detached(&self, message: &[u8], signature: &[u8]) -> bool {
+        UnparsedPublicKey::new(&ED25519, self.0)
+            .verify(message, signature)
+            .is_ok()
+    }
 }
 
 impl fmt::Display for PublicKey {
@@ -386,6 +396,25 @@ pub fn verify(envelope: &Value) -> Verification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A detached signature verifies over exactly the bytes it signed,
+    /// under exactly the key that made it, and nothing shorter than 64
+    /// bytes is a signature.
+    #[test]
+    fn a_detached_signature_covers_the_bytes_and_the_key() {
+        let key = SigningKey::from_seed(&[7; 32]).unwrap();
+        let other = SigningKey::from_seed(&[8; 32]).unwrap();
+        let message = b"greyward-x86_64-unknown-linux-gnu.tar.gz bytes";
+        let signature = key.pair.sign(message);
+        let public = key.public_key();
+        assert!(public.verify_detached(message, signature.as_ref()));
+        assert!(!public.verify_detached(b"other bytes", signature.as_ref()));
+        assert!(!other
+            .public_key()
+            .verify_detached(message, signature.as_ref()));
+        assert!(!public.verify_detached(message, &signature.as_ref()[..63]));
+        assert!(!public.verify_detached(message, &[]));
+    }
 
     /// The read is bounded: an endless reader is refused after `cap + 1`
     /// bytes instead of being read forever, and exactly `cap` bytes pass.

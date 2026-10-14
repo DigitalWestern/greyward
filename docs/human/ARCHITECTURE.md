@@ -670,7 +670,12 @@ already shipped are re-verified against the choices they record and must be
 identical, an upstream re-publish becomes a new release with a higher
 `revision` beside the old one, and the default moves only with
 `--set-default <release>`. `--check` rewrites nothing and
-fails if the file would change. A unit test holds each file to the
+fails if the file would change. On a pull request that changes a catalog,
+heavy.yml's `catalog` job runs `--against <base commit>`: it fails on any
+release the base ships that the pull request removes or changes, and
+verifies every checked-in row, the added ones included, against upstream
+(an upstream release the catalog does not ship yet is reported, not a
+failure). A unit test holds each file to the
 generator's canonical spelling, and `tests/catalog_upstream.rs`
 (`--ignored`) re-checks the default, newest and oldest release of each
 against upstream. The kernel

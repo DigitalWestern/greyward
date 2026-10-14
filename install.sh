@@ -29,6 +29,15 @@
 # environments, they can be several GiB, and --uninstall leaves them alone
 # and says so.
 #
+# What it trusts: the archive must be signed by the release key below
+# (RELEASE_PUBLIC_KEY), checked with openssl 3.0 or newer, and the new binary
+# must run here before it replaces the old one: `ward --version` exits 0 and
+# prints exactly the version of the tag being installed. The latest release
+# is the tag in its LATEST asset, signed by the same key. Without
+# --version, a ward newer than the latest release (SemVer 2.0 precedence),
+# or one whose --version is not the one line `ward <version>`, is left
+# alone; naming an older version installs it, and says it is a downgrade.
+#
 # A script cannot change the PATH of the shell that piped it in. The last
 # line it prints is the one command that finishes the job for the current
 # terminal; every new terminal picks it up on its own.
@@ -44,6 +53,15 @@ if [ -z "${HOME:-}" ]; then
 fi
 
 REPO="DigitalWestern/greyward"
+# The release key. Every greyward-<triple>.tar.gz is signed by its private
+# half, which never leaves the maintainer's machine (tools/release-sign.sh),
+# in <asset>.sig next to it; the .sha256 beside it comes from the same
+# release, so it only catches a corrupt download. `ward update --self`
+# compiles in the same value (src/commands/selfupdate.rs).
+RELEASE_PUBLIC_KEY="ed25519:ba1310b1b3eb6bc182ee4aef6058aaa2d643eaa71699ab87a2f6d02009fd32dd"
+# Test hook, like GREYWARD_DOWNLOAD_BASE: tests/install.sh signs its release
+# with a throwaway key.
+RELEASE_KEY="${GREYWARD_RELEASE_PUBLIC_KEY:-$RELEASE_PUBLIC_KEY}"
 VERSION="${GREYWARD_VERSION:-latest}"
 INSTALL_DIR="${GREYWARD_INSTALL_DIR:-$HOME/.local/bin}"
 # Only a real value turns PATH editing off: GREYWARD_NO_MODIFY_PATH=0 used to
@@ -84,6 +102,35 @@ shquote() {
         _sq_rest=${_sq_rest#*"$_sq_q"}
     done
     printf '%s%s%s' "$_sq_q" "$_sq_out$_sq_rest" "$_sq_q"
+}
+
+# $1 single-quoted for fish, whose single quotes treat a backslash as an
+# escape: every backslash and apostrophe gets one in front of it. One byte at
+# a time, with parameter expansion, for the same reason as shquote.
+fishquote() {
+    _fq_rest="$1"
+    _fq_out=""
+    while [ -n "$_fq_rest" ]; do
+        _fq_c="${_fq_rest%"${_fq_rest#?}"}"
+        _fq_rest="${_fq_rest#?}"
+        case "$_fq_c" in
+            "'" | \\) _fq_out="$_fq_out\\$_fq_c" ;;
+            *) _fq_out="$_fq_out$_fq_c" ;;
+        esac
+    done
+    printf "'%s'" "$_fq_out"
+}
+
+# Write the bytes the hex string $1 spells, two digits a byte. POSIX printf
+# has no \x escape, so each byte goes out as the octal one it does have.
+hex_to_bin() {
+    _hb_rest="$1"
+    while [ -n "$_hb_rest" ]; do
+        _hb_byte="${_hb_rest%"${_hb_rest#??}"}"
+        _hb_rest="${_hb_rest#??}"
+        # shellcheck disable=SC2059 # the format is the escape being written
+        printf "\\$(printf '%03o' "$((0x$_hb_byte))")"
+    done
 }
 
 usage() {
@@ -142,14 +189,141 @@ resolve_path() {
 # program: it may block on a tty, a socket, or a lock. `timeout` is not in
 # POSIX and stock macOS does not ship it, so where it is missing the probe
 # runs unbounded -- which is what every version of this script did before.
-# Empty output, or a non-zero exit, is reported as no version at all.
-probe_version() {
+# run_version keeps the program's exit status; probe_version reports empty
+# output, or a non-zero exit, as no version at all.
+run_version() {
     if command -v timeout >/dev/null 2>&1; then
-        timeout 5 "$1" --version 2>/dev/null || true
+        timeout 5 "$1" --version 2>/dev/null
     else
-        "$1" --version 2>/dev/null || true
+        "$1" --version 2>/dev/null
     fi
 }
+probe_version() { run_version "$1" || true; }
+# version_of <path>: its --version output in version_out, and its exit
+# status. The output goes to a file first, every byte of it: a command
+# substitution would drop trailing newlines and NUL bytes. Over 512 bytes,
+# or holding a NUL, it is no version. Otherwise, when it is exactly one
+# version line and its newline, the line goes in version_seen; else that is
+# empty. Needs $tmp.
+NL='
+'
+version_of() {
+    _vo_file="$tmp/version-output"
+    _vo_status=0
+    run_version "$1" >"$_vo_file" || _vo_status=$?
+    version_seen=""
+    _vo_bytes="$(wc -c <"$_vo_file")"
+    if [ "$((_vo_bytes))" -gt 512 ] || ! tr -d '\000' <"$_vo_file" | cmp -s - "$_vo_file"; then
+        # Shown, never read: its first bytes without the NULs.
+        version_out="$(dd if="$_vo_file" bs=80 count=1 2>/dev/null | tr -d '\000')"
+        return "$_vo_status"
+    fi
+    version_out="$(cat "$_vo_file"; printf x)"
+    version_out="${version_out%x}"
+    case "$version_out" in
+        *"$NL") version_line "${version_out%"$NL"}" && version_seen="${version_out%"$NL"}" ;;
+    esac
+    return "$_vo_status"
+}
+# The first line of version_out, at most 80 bytes, for a message.
+version_shown() { printf '%s\n' "$version_out" | head -n 1 | cut -c 1-80; }
+
+# >>> semver (tests/install.sh reads this block out of the script)
+# SemVer 2.0 precedence of version $1 against version $2: prints -1, 0 or 1,
+# or `bad` when either is not a version. Both are first held to the full
+# SemVer 2.0 grammar (semver.org's regular expression, plus an optional
+# leading `v`): no leading zeros in a number, no empty identifier, build
+# metadata well formed when present. Then the `v` and the build metadata
+# (which precedence ignores) are dropped, major.minor.patch compare, a
+# release sorts above its pre-releases, and pre-release identifiers compare
+# dot by dot: an all-digit identifier below any other, two all-digit ones
+# by length and then digit by digit (so any size compares exactly), others
+# in ASCII order, and a shorter list below a longer one it is a prefix of.
+# No arithmetic anywhere: 0.3.0-alpha < 0.3.0-alpha.1 < 0.3.0-alpha.beta <
+# 0.3.0-beta < 0.3.0-rc.9 < 0.3.0-rc.10 < 0.3.0, and 1.0.0--1 < 1.0.0--2.
+# A version longer than 256 bytes is no version: nothing past the cap is
+# ever compared. (The grammar is ASCII only, so a string of at most 256
+# characters that matches it is also at most 256 bytes.)
+SEMVER_ID='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+SEMVER_BODY="v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-$SEMVER_ID(\\.$SEMVER_ID)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
+SEMVER_MAX=256
+semver_valid() {
+    case "$1" in
+        "" | *"
+"*) return 1 ;;
+    esac
+    [ "${#1}" -le "$SEMVER_MAX" ] || return 1
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq "^$SEMVER_BODY\$"
+}
+# The one line an installed ward's --version must print to be read:
+# `ward <version>`, or `ward <version> (<commit> <date>)` the way ward
+# prints it (`(unknown unknown)` for a build outside git). Two lines, a
+# word after it, or an over-long version is no version line.
+version_line() {
+    case "$1" in
+        *"
+"*) return 1 ;;
+    esac
+    [ "${#1}" -le $((SEMVER_MAX + 90)) ] || return 1
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq "^ward $SEMVER_BODY( \\([0-9A-Za-z.-]{1,40} [0-9A-Za-z.-]{1,40}\\))?\$"
+}
+# 0 when $1 sorts before $2 byte by byte: awk compares two strings (never
+# numbers, the "" forces it) in the C locale's byte order.
+semver_before() {
+    _sb_a="$1" _sb_b="$2" LC_ALL=C awk 'BEGIN { exit !((ENVIRON["_sb_a"] "") < (ENVIRON["_sb_b"] "")) }'
+}
+# Two identifiers (never empty): -1, 0 or 1.
+semver_id_cmp() {
+    case "$1" in *[!0-9]*) _si_kind=w ;; *) _si_kind=n ;; esac
+    case "$2" in *[!0-9]*) _si_kind="${_si_kind}w" ;; *) _si_kind="${_si_kind}n" ;; esac
+    case "$_si_kind" in
+        nw) echo -1; return ;;
+        wn) echo 1; return ;;
+        nn)
+            # No leading zeros, so the longer number is the larger one.
+            if [ "${#1}" -lt "${#2}" ]; then echo -1; return; fi
+            if [ "${#1}" -gt "${#2}" ]; then echo 1; return; fi
+            ;;
+    esac
+    if [ "$1" = "$2" ]; then
+        echo 0
+    elif semver_before "$1" "$2"; then
+        echo -1
+    else
+        echo 1
+    fi
+}
+# Two dot-separated identifier lists, left to right: -1, 0 or 1.
+semver_list_cmp() {
+    _sl_a="$1"; _sl_b="$2"
+    while [ -n "$_sl_a" ] && [ -n "$_sl_b" ]; do
+        _sl_x="${_sl_a%%.*}"; _sl_y="${_sl_b%%.*}"
+        case "$_sl_a" in *.*) _sl_a="${_sl_a#*.}" ;; *) _sl_a="" ;; esac
+        case "$_sl_b" in *.*) _sl_b="${_sl_b#*.}" ;; *) _sl_b="" ;; esac
+        _sl_c="$(semver_id_cmp "$_sl_x" "$_sl_y")"
+        if [ "$_sl_c" != 0 ]; then echo "$_sl_c"; return; fi
+    done
+    if [ -n "$_sl_a" ]; then echo 1
+    elif [ -n "$_sl_b" ]; then echo -1
+    else echo 0
+    fi
+}
+semver_cmp() {
+    if ! semver_valid "$1" || ! semver_valid "$2"; then echo bad; return; fi
+    _sc_a="${1#v}"; _sc_a="${_sc_a%%+*}"
+    _sc_b="${2#v}"; _sc_b="${_sc_b%%+*}"
+    # The core holds no `-`; everything after the first one is the pre-release.
+    _sc_c="$(semver_list_cmp "${_sc_a%%-*}" "${_sc_b%%-*}")"
+    if [ "$_sc_c" != 0 ]; then echo "$_sc_c"; return; fi
+    case "$_sc_a" in *-*) _sc_ap="${_sc_a#*-}" ;; *) _sc_ap="" ;; esac
+    case "$_sc_b" in *-*) _sc_bp="${_sc_b#*-}" ;; *) _sc_bp="" ;; esac
+    if [ -z "$_sc_ap" ] && [ -z "$_sc_bp" ]; then echo 0
+    elif [ -z "$_sc_ap" ]; then echo 1
+    elif [ -z "$_sc_bp" ]; then echo -1
+    else semver_list_cmp "$_sc_ap" "$_sc_bp"
+    fi
+}
+# <<< semver
 
 # --- uninstall --------------------------------------------------------------
 # Removes exactly what the header says this script writes, and nothing else.
@@ -319,20 +493,13 @@ fi
 
 # --- download ---------------------------------------------------------------
 asset="greyward-$triple.tar.gz"
-case "$VERSION" in
-    latest) base="https://github.com/$REPO/releases/latest/download" ;;
-    v*)     base="https://github.com/$REPO/releases/download/$VERSION" ;;
-    *)      base="https://github.com/$REPO/releases/download/v$VERSION" ;;
-esac
-# Test hook: serve the two asset files from anywhere (tests/install.sh uses it).
-base="${GREYWARD_DOWNLOAD_BASE:-$base}"
 
 if command -v curl >/dev/null 2>&1; then
     fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q -O "$2" "$1"; }
 else
-    fail "need curl or wget to download $base/$asset"
+    fail "need curl or wget to download the $asset release asset"
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -343,8 +510,97 @@ else
     fail "need sha256sum or shasum to verify the download"
 fi
 
+# The signature check needs OpenSSL 3.0 or newer (`pkeyutl -rawin`, Ed25519).
+command -v openssl >/dev/null 2>&1 \
+    || fail "need openssl (3.0 or newer) to verify the release signature. Install it, or download
+  the release by hand and check it with:  gh attestation verify <asset> --repo $REPO"
+key_hex="${RELEASE_KEY#ed25519:}"
+case "$RELEASE_KEY" in ed25519:*) ;; *) key_hex="" ;; esac
+case "$key_hex" in *[!0-9a-f]*) key_hex="" ;; esac
+[ "${#key_hex}" = 64 ] || fail "release key '$RELEASE_KEY' is not ed25519:<64 lower-case hex>"
+
 tmp="$(mktemp -d 2>/dev/null || mktemp -d -t greyward-install)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# A signature: Ed25519 over a file's bytes, one line of base64 in its .sig.
+# The public key goes to openssl as DER, the fixed SubjectPublicKeyInfo
+# prefix for Ed25519 followed by the key's 32 bytes. verify_sig <file> <sig>
+# fails for a .sig that is not base64 or not by the release key.
+hex_to_bin "302a300506032b6570032100$key_hex" >"$tmp/release-key.der"
+verify_sig() {
+    openssl base64 -d -A -in "$2" -out "$2.bin" 2>/dev/null || return 1
+    openssl pkeyutl -verify -pubin -keyform DER -inkey "$tmp/release-key.der" -rawin \
+        -in "$1" -sigfile "$2.bin" >/dev/null 2>&1
+}
+
+# The exact release this run installs, as a tag, and whether it was named.
+# A named version may replace a newer installed ward (a downgrade, said as
+# one); `latest` never does. `latest` is the tag in the newest release's
+# LATEST asset: one line, signed by the release key like the archives
+# (tools/release-sign.sh writes it), fetched from GitHub's
+# releases/latest/download/LATEST, whose redirects curl or wget follow on
+# their own. It is read before anything else is downloaded, so the binary
+# is held to that tag below: an older release's validly signed assets,
+# uploaded into a newer release, do not install. GREYWARD_LATEST_TAG names
+# the tag for a caller that resolved it already (action.yml, with its
+# token), and GREYWARD_LATEST_URL another LATEST to read (tests/install.sh).
+case "$VERSION" in
+    latest)
+        named=0
+        tag="${GREYWARD_LATEST_TAG:-}"
+        if [ -z "$tag" ]; then
+            latest_url="${GREYWARD_LATEST_URL:-https://github.com/$REPO/releases/latest/download/LATEST}"
+            # Twice at most: the latest release can change between the two
+            # downloads (another release becoming latest), and then the
+            # pair is read again from the start.
+            latest_signed=0
+            for _ in 1 2; do
+                fetch "$latest_url" "$tmp/LATEST" \
+                    || fail "cannot read the latest release from $latest_url; name one with --version=<tag>"
+                fetch "$latest_url.sig" "$tmp/LATEST.sig" \
+                    || fail "$latest_url has no signature next to it; refusing to trust it. Name a release with --version=<tag>"
+                if verify_sig "$tmp/LATEST" "$tmp/LATEST.sig"; then
+                    latest_signed=1
+                    break
+                fi
+            done
+            [ "$latest_signed" = 1 ] \
+                || fail "$latest_url is not signed by ward's release key ($RELEASE_KEY); refusing to trust it. Name a release with --version=<tag>"
+            # Exactly one line, the tag and its newline, and the tag a
+            # v-prefixed SemVer 2.0 version: anything else is refused.
+            latest_bytes="$(wc -c <"$tmp/LATEST")"
+            [ "$((latest_bytes))" -le $((SEMVER_MAX + 2)) ] \
+                || fail "$latest_url is not one release tag; name one with --version=<tag>"
+            tag="$(cat "$tmp/LATEST")"
+            case "$tag" in *"
+"*) tag="" ;; esac
+            [ -n "$tag" ] && printf '%s\n' "$tag" | cmp -s - "$tmp/LATEST" \
+                || fail "$latest_url is not one release tag on one line; name one with --version=<tag>"
+            case "$tag" in
+                v*) semver_valid "$tag" || tag="" ;;
+                *) tag="" ;;
+            esac
+            [ -n "$tag" ] \
+                || fail "$latest_url does not name a release tag (v<SemVer 2.0 version>); name one with --version=<tag>"
+        fi
+        ;;
+    v*) named=1; tag="$VERSION" ;;
+    *)  named=1; tag="v$VERSION" ;;
+esac
+case "$tag" in
+    v[0-9]*) ;;
+    *) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
+esac
+case "$tag" in
+    *[!A-Za-z0-9.+-]*) fail "'$tag' is not a release tag (v<major>.<minor>.<patch>)" ;;
+esac
+want="${tag#v}"
+base="https://github.com/$REPO/releases/download/$tag"
+# Test hook: serve the three asset files (the archive, its .sha256 and its
+# .sig) from anywhere (tests/install.sh and action.yml use it). The files are
+# still verified against the release key, and the binary against $tag, so
+# the hook moves where they come from, never what is trusted.
+base="${GREYWARD_DOWNLOAD_BASE:-$base}"
 
 say "downloading $base/$asset"
 fetch "$base/$asset" "$tmp/$asset" \
@@ -361,29 +617,92 @@ actual="$(digest "$tmp/$asset")"
   expected $expected
   got      $actual"
 
+fetch "$base/$asset.sig" "$tmp/$asset.sig" \
+    || fail "signature file missing next to the release asset; refusing to install an unverified binary"
+verify_sig "$tmp/$asset" "$tmp/$asset.sig" \
+    || fail "$asset is not signed by ward's release key ($RELEASE_KEY); refusing to install it.
+  (This needs OpenSSL 3.0 or newer; 'openssl version' says: $(openssl version 2>&1))"
+
 tar -xzf "$tmp/$asset" -C "$tmp" || fail "cannot extract $asset"
 [ -f "$tmp/ward" ] || fail "archive did not contain a 'ward' binary"
 
 # --- install ----------------------------------------------------------------
 # What is being replaced, if anything: read it before the file is overwritten.
 previous=""
+existing=0
+probed=""
 if [ -x "$INSTALL_DIR/ward" ]; then
-    previous="$(probe_version "$INSTALL_DIR/ward")"
-    # Only a ward version belongs in an "upgraded X -> Y" line.
-    case "$previous" in
-        "ward "*) ;;
-        *) previous="" ;;
+    existing=1
+    # A --version that fails or times out tells nothing, like no output.
+    # Only one exact version line and its newline is read: a second line,
+    # a blank one, or anything after the version is no version at all.
+    if version_of "$INSTALL_DIR/ward"; then
+        probed="$version_out"
+        previous="$version_seen"
+    fi
+fi
+# `ward 0.3.0 (abc1234 2026-10-13)`: the version is the second word.
+previous_version="${previous#ward }"
+previous_version="${previous_version%% *}"
+downgrade=0
+if [ "$existing" = 1 ]; then
+    # An installed ward whose version cannot be read might be newer, so it
+    # counts as unreadable: latest leaves it alone, a named version does not.
+    if [ -n "$previous" ]; then
+        order="$(semver_cmp "$want" "$previous_version")"
+        seen="it says '$previous'"
+    else
+        order=bad
+        if [ -n "$probed" ]; then
+            # At most 80 bytes of its first line: it may print anything.
+            seen="its '--version' printed '$(version_shown)'"
+            case "${probed%"$NL"}" in *"$NL"*) seen="$seen and more lines" ;; esac
+        else
+            seen="its '--version' printed nothing, failed or timed out"
+        fi
+    fi
+    case "$order" in
+        -1)
+            [ "$named" = 1 ] || fail "$INSTALL_DIR/ward is $previous, newer than the latest release ($tag); it is untouched.
+  To install the older release anyway, name it:  --version=$tag"
+            downgrade=1
+            ;;
+        0 | 1) ;;
+        *)
+            # Unreadable, so it might be newer: latest leaves it alone.
+            [ "$named" = 1 ] || fail "cannot tell whether $INSTALL_DIR/ward is older than the latest release ($tag): $seen, which is not the one line 'ward <SemVer 2.0 version>'. It is untouched.
+  To replace it anyway, name the release:  --version=$tag"
+            ;;
     esac
 fi
 mkdir -p "$INSTALL_DIR" || fail "cannot create $INSTALL_DIR"
-# Copy to a sibling and rename so a running `ward` never sees a half-written file.
-cp "$tmp/ward" "$INSTALL_DIR/.greyward.tmp.$$" || fail "cannot write to $INSTALL_DIR"
-chmod 755 "$INSTALL_DIR/.greyward.tmp.$$"
-mv -f "$INSTALL_DIR/.greyward.tmp.$$" "$INSTALL_DIR/ward"
-installed="$("$INSTALL_DIR/ward" --version 2>/dev/null || true)"
-[ -n "$installed" ] || fail "$INSTALL_DIR/ward does not run on this machine"
-if [ -z "$previous" ]; then
+# Copy to a sibling, run it there, and only then rename it over the old
+# binary: a running `ward` never sees a half-written file, and a release that
+# cannot run here (another glibc, a broken build) never replaces one that
+# can. It is run from the install directory, not $tmp, because that is
+# where it will run from (and $tmp may be mounted noexec).
+staged="$INSTALL_DIR/.greyward.tmp.$$"
+trap 'rm -rf "$tmp"; rm -f "$staged"' EXIT
+trap 'rm -rf "$tmp"; rm -f "$staged"; exit 1' INT TERM
+cp "$tmp/ward" "$staged" || fail "cannot write to $INSTALL_DIR"
+chmod 755 "$staged"
+version_of "$staged" \
+    || fail "the downloaded ward does not run on this machine ('--version' failed); $INSTALL_DIR/ward is untouched"
+# The same one version line the installed ward is held to, and the version
+# is the tag's: a release whose archive is another release's binary is
+# refused, the way `ward update --self` refuses it.
+installed="$version_seen"
+case "$installed" in
+    "ward $want" | "ward $want ("*")") ;;
+    *) fail "the downloaded ward says '$(version_shown)', not the one line 'ward $want'; the release's asset does not match its tag $tag, and $INSTALL_DIR/ward is untouched" ;;
+esac
+mv -f "$staged" "$INSTALL_DIR/ward" || fail "cannot replace $INSTALL_DIR/ward"
+if [ -z "$previous" ] && [ "$existing" = 1 ]; then
+    say "replaced $INSTALL_DIR/ward, whose version could not be read, with $installed (--version=$tag was named)"
+elif [ -z "$previous" ]; then
     say "installed $installed to $INSTALL_DIR/ward"
+elif [ "$downgrade" = 1 ]; then
+    say "downgraded $previous -> $installed in $INSTALL_DIR (--version=$tag was named)"
 elif [ "$previous" = "$installed" ]; then
     say "reinstalled $installed to $INSTALL_DIR/ward (same version)"
 else
@@ -401,13 +720,18 @@ case ":$PATH:" in
 esac
 
 mkdir -p "$GREYWARD_HOME"
+# The install directory as the startup code spells it: quoted, so a --dir
+# holding `"`, `$(...)` or a backtick is a path at every shell start and
+# never a command.
+dir_sh="$(shquote "$INSTALL_DIR")"
+dir_fish="$(fishquote "$INSTALL_DIR")"
 # ~/.greyward/env is POSIX sh: it is read by sh, bash, and zsh alike. Idempotent
 # so sourcing it twice does not grow PATH.
 cat >"$GREYWARD_HOME/env" <<EOF
 # ward: put the ward binary on PATH. Written by install.sh; safe to source repeatedly.
 case ":\${PATH}:" in
-    *":$INSTALL_DIR:"*) ;;
-    *) export PATH="$INSTALL_DIR:\$PATH" ;;
+    *:$dir_sh:*) ;;
+    *) export PATH=$dir_sh:"\$PATH" ;;
 esac
 EOF
 
@@ -451,8 +775,8 @@ if [ "$MODIFY_PATH" = 1 ] && [ "$on_path" = 0 ]; then
         fish_confd="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d"
         mkdir -p "$fish_confd" 2>/dev/null && cat >"$fish_confd/ward.fish" <<EOF
 # ward: put the ward binary on PATH. Written by install.sh.
-if not contains -- "$INSTALL_DIR" \$PATH
-    set -gx PATH "$INSTALL_DIR" \$PATH
+if not contains -- $dir_fish \$PATH
+    set -gx PATH $dir_fish \$PATH
 end
 EOF
         say "added PATH setup to $fish_confd/ward.fish"
@@ -518,11 +842,11 @@ if [ "$on_path" = 1 ]; then
     say "done. '$INSTALL_DIR' is already on PATH: try 'ward --version'"
 elif [ "$MODIFY_PATH" = 0 ]; then
     say "done. '$INSTALL_DIR' is not on PATH and --no-modify-path was given; add it yourself:"
-    printf '\n    export PATH="%s:$PATH"\n\n' "$INSTALL_DIR" >&2
+    printf '\n    export PATH=%s:"$PATH"\n\n' "$dir_sh" >&2
 else
     say "done. New terminals already have ward. For this one, run:"
     if [ "$shell_name" = fish ]; then
-        printf '\n    set -gx PATH "%s" $PATH\n\n' "$INSTALL_DIR" >&2
+        printf '\n    set -gx PATH %s $PATH\n\n' "$dir_fish" >&2
     else
         printf '\n    source "$HOME/.greyward/env"\n\n' >&2
     fi

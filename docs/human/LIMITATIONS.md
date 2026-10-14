@@ -118,12 +118,41 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   a change after that date is proven by test, not by two machines.
 - **A committed lock is a set of URLs to review.** A lock row's URL must sit under an
   endpoint the source policy admits for the row's own `provider`, and so must every
-  redirect, but a hostile lock can still name another file under that publisher's
-  endpoints, or name a different shipped publisher as its provider. Reviewing a lock
+  redirect. GitHub's asset CDN (`objects.githubusercontent.com`,
+  `release-assets.githubusercontent.com`) is admitted only as the target of a redirect
+  from the publisher's own `github.com/<repo>/releases/download/` URL, never as the URL
+  a row names, so every GitHub-hosted row says which repository it comes from. The
+  conda-forge native libraries Python and npm builds link against go through the same
+  policy, as the `conda-forge` publisher. A hostile lock can still name another file
+  under that publisher's endpoints, or name a different shipped publisher as its provider. Reviewing a lock
   diff is reviewing its URLs and providers. A downloaded toolchain row can no longer
   name `file://` (a Rust `source = "path"` row names a local tree and downloads
   nothing); the generic fetch helper that package-registry downloads use still
   accepts it.
+- **Greyward's own binary is trusted through one release key.** `install.sh`, `ward
+  update --self` and the GitHub Action install a release only when its archive carries an
+  Ed25519 signature by the release key, whose public half is compiled into ward and
+  written into `install.sh`. The private half never reaches CI: release.yml makes a draft,
+  and `tools/release-sign.sh` signs and publishes it on the maintainer's machine, so a
+  token that can write releases cannot ship a binary those three accept. Before signing,
+  it checks each archive's provenance attestation names the release workflow, the tag and
+  the commit the repository's tag points at, so an older release's archive uploaded into a
+  new draft is not signed. Each installer also requires the binary to report the release's
+  own version, and only a named version replaces a newer ward. `install.sh` finds the
+  latest release in the signed `LATEST` asset (one line, the tag) that
+  `tools/release-sign.sh` keeps on the highest signed stable release only, and marks
+  that release GitHub's latest. A writer of releases can point it only at a
+  release the key signed: an older one installs on a machine with no ward, and the
+  downgrade check refuses it over a newer one. Without curl, `install.sh` leaves the
+  redirect to wget: busybox wget reads a relative `Location` as a host name, so behind a
+  mirror that sends relative redirects, install curl or a full wget (GitHub's own
+  redirect is absolute). Whoever holds the
+  key can, and a lost key means a new one ships in a new `install.sh` and a new ward,
+  which every existing ward must reach by `install.sh` once. The installer needs OpenSSL
+  3.0 or newer to check the signature, and refuses without it. The `.sha256` beside each
+  archive comes from the same release, so it only catches a corrupt download; the build
+  provenance attestation (`gh attestation verify`) is a second check for people who use
+  `gh`, not one any installer runs.
 - **Frozen validation reads declarative files only.** A project whose only statement of
   its runtime version is computed — `setup.py` metadata, `mix.exs` compatibility, a
   Gemfile `ruby` directive — cannot be validated under `--frozen` and is refused with the

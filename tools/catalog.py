@@ -29,6 +29,12 @@ Usage, from the repository root:
     python3 tools/catalog.py go node         # just these
     python3 tools/catalog.py --check go      # verify, write nothing, exit 1 on drift
     python3 tools/catalog.py --set-default go-1.27.1 go
+    python3 tools/catalog.py --against origin/main   # a PR's catalogs: append-only, rows verified
+
+`--against` is what heavy.yml's `catalog` job runs on a pull request that
+changes a catalog: it fails on a release the base ships that the PR drops or
+changes, and verifies every checked-in row, the added ones too, against
+upstream. A catalog the PR does not change is skipped without a request.
 
 Needs network access, `gpgv` (Node's SHASUMS256.txt and Rust's channel
 manifest signatures) and `tar`.
@@ -1253,17 +1259,93 @@ def generate_cargo(existing, report):
 # --------------------------------------------------------------------------
 
 
+def generate(eco, existing, report, default):
+    """`eco`'s generator: every row of `existing` verified against
+    upstream (a Failure when one does not), plus upstream's new releases."""
+    if eco == "python":
+        return generate_python(existing, report, default)
+    return globals()[f"generate_{eco}"](existing, report)
+
+
+def base_document(eco, ref):
+    """`eco`'s catalog as the git revision `ref` has it, or None when `ref`
+    has no such file."""
+    if subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                      capture_output=True).returncode != 0:
+        raise Failure(f"no git revision {ref}")
+    shown = subprocess.run(["git", "-C", REPO, "show", f"{ref}:{FILES[eco]}"], capture_output=True)
+    if shown.returncode != 0:
+        return None
+    doc = tomllib.loads(shown.stdout.decode())
+    for r in doc.get("release", []):
+        r.setdefault("revision", None)
+    return doc
+
+
+def appended(eco, base, doc):
+    """The release keys `doc` adds to `base`. A release `base` ships that
+    `doc` drops or changes, or a key `doc` repeats, is a Failure: a
+    project's lock names a release by key, so a shipped row never moves."""
+    old = {r["key"]: normalized(r) for r in (base or {}).get("release", [])}
+    new = {}
+    problems = []
+    for r in (doc or {}).get("release", []):
+        if r["key"] in new:
+            problems.append(f"{eco}: {r['key']}: listed twice")
+        new[r["key"]] = normalized(r)
+    for key, rel in old.items():
+        if key not in new:
+            problems.append(f"{eco}: {key}: removed; shipped rows are append-only")
+        elif new[key] != rel:
+            problems.append(f"{eco}: {key}: changed; shipped rows are append-only\n"
+                            f"  was: {rel}\n  now: {new[key]}")
+    if problems:
+        raise Failure("\n".join(problems))
+    return [key for key in new if key not in old]
+
+
+def run_against(eco, ref):
+    """A pull request's catalog checked against `ref` (its base branch):
+    append-only, every checked-in row verified against upstream, and the
+    file in canonical spelling. Upstream releases the catalog does not ship
+    yet are not this change's business, so unlike --check they pass."""
+    doc, base = read_document(eco), base_document(eco, ref)
+    if doc == base:
+        print(f"{eco}: unchanged from {ref}")
+        return True
+    if doc is None:
+        raise Failure(f"{eco}: {FILES[eco]} is gone; {ref} ships it and shipped rows are append-only")
+    added = appended(eco, base, doc)
+    existing = doc["release"]
+    report = Report(eco)
+    out = generate(eco, existing, report, doc["default"])
+    if doc["default"] not in {r["key"] for r in existing}:
+        raise Failure(f"{eco}: default {doc['default']} is not a release of the catalog")
+    with open(os.path.join(REPO, FILES[eco])) as f:
+        current = f.read()
+    if current != render(eco, doc["default"], existing):
+        print(f"{eco}: {FILES[eco]} is not what `python3 tools/catalog.py {eco}` writes; regenerate it")
+        return False
+    print(f"{eco}: {len(existing)} releases, {sum(len(r['artifacts']) for r in existing)} rows "
+          f"verified against upstream; {len(added)} added since {ref}")
+    for key in added:
+        print(f"  + {key}")
+    waiting = [key for key in out if key not in {r["key"] for r in existing}]
+    if waiting:
+        print(f"  note: upstream also publishes {', '.join(waiting)}, not shipped yet")
+    return True
+
+
 def run(eco, args):
+    if args.against:
+        return run_against(eco, args.against)
     report = Report(eco)
     doc = read_document(eco)
     existing = doc["release"] if doc else []
     default = args.set_default or (doc and doc["default"])
     if not default:
         raise Failure(f"{eco}: no checked-in catalog; pass --set-default <release key>")
-    if eco == "python":
-        out = generate_python(existing, report, doc["default"] if doc else default)
-    else:
-        out = globals()[f"generate_{eco}"](existing, report)
+    out = generate(eco, existing, report, doc["default"] if doc else default)
     report.kept = len(existing)
     report.verified_rows = sum(len(r["artifacts"]) for r in out.values())
     if default not in out:
@@ -1296,7 +1378,12 @@ def main():
                         help="verify and compare with the checked-in file; write nothing")
     parser.add_argument("--set-default", metavar="RELEASE",
                         help="make RELEASE the default (one ecosystem only)")
+    parser.add_argument("--against", metavar="REF",
+                        help="check the checked-in catalogs against git revision REF: no row "
+                             "of REF removed or changed, every row verified upstream; write nothing")
     args = parser.parse_args()
+    if args.against and (args.check or args.set_default):
+        parser.error("--against verifies only; it takes neither --check nor --set-default")
     ecosystems = args.ecosystems or list(FILES)
     unknown = [eco for eco in ecosystems if eco not in FILES]
     if unknown:

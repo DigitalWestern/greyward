@@ -11,9 +11,10 @@ use crate::comforter::{
     ClosureRefs, InputRecord,
 };
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_verified_held;
+use crate::kernel::fetch::download_registry_held;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::hostfallback::{self, FallbackRecords, RUNTIME_ONLY_VIEW};
+use crate::kernel::registries::config::Ecosystem;
 use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
@@ -393,7 +394,8 @@ pub(crate) fn realize_env_at_depth(
     // extraction and publication.
     for (p, path) in &mut artifacts {
         if p.kind == ArtifactKind::Wheel {
-            let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+            let lease =
+                download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
             *path = lease.to_path_buf();
             _cache_leases.push(lease);
         }
@@ -519,7 +521,8 @@ fn realize_artifacts<'p>(
     for &p in packages {
         let wheel_file = match p.kind {
             ArtifactKind::Wheel => {
-                let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+                let lease =
+                    download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
                 let path = lease.to_path_buf();
                 drop(lease);
                 path

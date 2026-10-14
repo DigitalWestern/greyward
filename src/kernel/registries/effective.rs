@@ -1,5 +1,5 @@
 //! The registry list in force after the policy chain is merged
-//! (docs/agent/DESIGNS.md §4 "Who may say what"). The machine scope declares
+//!. The machine scope declares
 //! registries, credentials and its `[sources]` lists; a project or
 //! `--policy` layer may only narrow a list, and any name outside the
 //! machine list is a load error.

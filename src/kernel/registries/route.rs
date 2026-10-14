@@ -1,7 +1,6 @@
 //! A configured registry as a resolution-proxy route: its root's origin
 //! carrying the lazy credential, its `files` origins carrying none, both on
-//! the client its `ca` and `network` select (docs/agent/DESIGNS.md §4 "The
-//! proxy"). The protocol instance is the tailor's.
+//! the client its `ca` and `network` select. The protocol instance is the tailor's.
 
 use super::config::Registry;
 use super::credential::Credential;

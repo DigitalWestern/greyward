@@ -6,7 +6,8 @@
 use super::unpack::tarball_has_binding_gyp;
 use super::*;
 use crate::kernel::digest::sri_candidates;
-use crate::kernel::fetch::download_verified_any_held;
+use crate::kernel::fetch::download_registry_any_held;
+use crate::kernel::registries::config::Ecosystem;
 
 pub(super) const ARCHIVE_CLASSIFICATION_SCHEMA: &str = "npm-archive-classification/1";
 
@@ -295,12 +296,14 @@ pub(super) fn fetch_tarball(
     package: &NpmPackage,
 ) -> io::Result<(crate::kernel::fetch::CacheLease, Digest)> {
     let candidates = sri_candidates(&package.integrity)?;
-    download_verified_any_held(store, activity, &package.url, &candidates).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("{}: fetch {}: {e}", package.path, package.url),
-        )
-    })
+    download_registry_any_held(store, activity, Ecosystem::Node, &package.url, &candidates).map_err(
+        |e| {
+            io::Error::new(
+                e.kind(),
+                format!("{}: fetch {}: {e}", package.path, package.url),
+            )
+        },
+    )
 }
 
 pub(super) fn fetch_npm_tarballs<'a>(

@@ -318,7 +318,7 @@ fn check_file_path(path: &str) -> Result<(), String> {
 }
 
 /// A configured Python registry's simple API (PEP 503 and 691), as a
-/// route of its own (docs/agent/DESIGNS.md §4 "The proxy"). Its grammar
+/// route of its own. Its grammar
 /// decides metadata only: `<url><project>/` is a project page, read for
 /// claims exactly as PyPI's is. Every other URL the route owns is a file,
 /// wherever the registry put it (Nexus links `../../packages/...`,
@@ -673,7 +673,7 @@ mod tests {
     }
 
     /// A configured registry through interception, against an
-    /// authenticated fixture (docs/agent/DESIGNS.md §4 "Test plan", proxy).
+    /// authenticated fixture.
     mod configured {
         use super::*;
         use crate::kernel::policy::{self, Policy, SourceOrigin};

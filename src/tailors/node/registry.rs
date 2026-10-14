@@ -228,9 +228,8 @@ fn check_version(version: &str) -> Result<(), String> {
     }
 }
 
-/// A configured npm registry, as a route of its own (docs/agent/DESIGNS.md
-/// §4 "The proxy"). Its grammar decides metadata only: a packument under
-/// its `url` (`<name>`, `@scope%2fname` in either case, `@scope/name`).
+/// A configured npm registry, as a route of its own. Its grammar decides
+/// metadata only: a packument under its `url` (`<name>`, `@scope%2fname` in either case, `@scope/name`).
 /// Every other URL the route owns is a tarball wherever the registry put
 /// it (GitHub Packages serves `/download/...` and redirects to a blob
 /// host), fetched only when this registry's own packuments claimed it.

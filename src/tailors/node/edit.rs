@@ -540,6 +540,7 @@ fn npm_edit(
     door::run_node_checked(
         door,
         NodeRun {
+            policy: None,
             tool: NodeTool::Npm {
                 node_obj: &node_obj,
             },
@@ -665,6 +666,7 @@ fn pnpm_edit(
     door::run_node_checked(
         door,
         NodeRun {
+            policy: None,
             tool: NodeTool::Pnpm {
                 node_obj: &node_obj,
                 program: &pinned.program,

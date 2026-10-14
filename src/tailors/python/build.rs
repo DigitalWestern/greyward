@@ -8,9 +8,10 @@ use super::cargo_lock::{
 };
 use super::sdist_view::{self, SdistWheel};
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::fetch::{download_registry_held, Digest};
 use crate::kernel::hostfallback::RUNTIME_ONLY_VIEW;
 use crate::kernel::platform::Platform;
+use crate::kernel::registries::config::Ecosystem;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::HostView;
 use crate::kernel::sandbox::Sandbox;
@@ -438,7 +439,7 @@ pub(crate) fn plan_sdist_identity_input(
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
     // One lease for the whole plan: the archive children, the staged work
     // directory and the Cargo run all borrow it.
-    let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+    let sdist = download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(activity, &sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
     let fast_sdist = fast_requirements
@@ -466,7 +467,8 @@ pub(crate) fn plan_sdist_identity_input(
     let identity = if info.rust_build {
         let work = store.stage_with_activity(activity)?;
         let result: io::Result<Identity> = (|| {
-            let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+            let sdist =
+                download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
             let source =
                 build_requires::extract_sdist_for(activity, &sdist, &work.join("source"), &info)?;
             drop(sdist);
@@ -1025,7 +1027,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
 
     // One lease for the whole build: the archive children, the staged work
     // directory and the Cargo run all borrow it.
-    let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+    let sdist = download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(activity, &sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
@@ -1060,7 +1062,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     // Re-verify and reacquire the lease for the actual copy/extraction below,
     // so gc cannot collect the cached artifact while it is being used.
-    let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+    let sdist = download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
 
     let work = store.stage_with_activity(activity)?;
     let outdir = work.join("out");
@@ -1455,7 +1457,8 @@ mod tests {
         writer.finish().unwrap();
         let sha256 = hex::encode(sha2::Sha256::digest(std::fs::read(&archive).unwrap()));
         let url = format!("file://{}", archive.display());
-        let lease = super::download_verified_held(&store, &activity, &url, &sha256).unwrap();
+        let lease =
+            crate::kernel::fetch::download_verified_held(&store, &activity, &url, &sha256).unwrap();
         let info = super::build_requires::inspect_sdist(&lease).unwrap();
         assert!(!info.rust_build);
         let work = store.stage_with_activity(&activity).unwrap();

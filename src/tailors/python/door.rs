@@ -71,6 +71,10 @@ impl Uv {
         platform: Platform,
         selected: &Selected,
     ) -> io::Result<Uv> {
+        // A cold store needs both tarballs: download them side by side.
+        crate::kernel::provider::cpython::prefetch_uv_and_runtime(
+            store, activity, platform, selected,
+        )?;
         let obj = super::realize_uv(store, activity, platform, selected)?;
         let runtime = super::realize_runtime(store, activity, platform, selected)?;
         let version = selected.version("uv")?.to_string();

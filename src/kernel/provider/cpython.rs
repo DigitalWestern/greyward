@@ -334,6 +334,43 @@ pub fn realize_uv(
         .map(|(path, _)| path)
 }
 
+/// Download the uv and CPython tarballs `selected` names side by side, for
+/// a caller about to realize both ([`realize_uv`], then
+/// [`realize_runtime`]): the two are independent downloads, and each
+/// realize then finds its tarball in the cache and verifies it again. Only
+/// the artifacts whose objects are missing are fetched, and only when both
+/// are; one alone is fetched by its realize, as before. The first failure
+/// in that order (uv, then CPython) is the one reported, with the text the
+/// realize would have printed.
+pub fn prefetch_uv_and_runtime(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<()> {
+    crate::kernel::platform::require_host(platform, "uv")?;
+    let uv = row(selected, platform, "uv", UV_RECIPE)?;
+    let cpython = row(selected, platform, "cpython", CPYTHON_RECIPE)?;
+    for identity in [
+        uv_identity_of(&uv, platform)?,
+        cpython_identity_of(&cpython, platform)?,
+    ] {
+        if store.has_with_activity(activity, &identity.object_id())? {
+            return Ok(());
+        }
+    }
+    crate::kernel::fetch::fetch_all(&[uv, cpython], |spec| {
+        download_toolchain_artifact_held(
+            store,
+            activity,
+            &spec.provider,
+            &spec.url,
+            &Digest::sha256(artifact_sha256(spec)?)?,
+        )
+    })?;
+    Ok(())
+}
+
 /// Realize the CPython this selection names. Returns the object path
 /// (interpreter at <path>/bin/python3).
 ///

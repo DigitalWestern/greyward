@@ -66,11 +66,19 @@ publish_asset "$WORK/stage"
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
 # A file server that also answers /redirect/<path> with a 302 to /<path>,
 # the way GitHub's releases/latest/download/<name> redirects to the latest
-# release's asset: curl and wget must follow it on their own.
+# release's asset: curl and wget must follow it on their own. Under
+# /race/<path>, the first request for a file serves <path>.first when it
+# exists: what changed between two downloads.
 cat > "$WORK/serve.py" <<'PY'
-import functools, http.server, sys
+import functools, http.server, os, sys
+seen = set()
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/race/"):
+            rest = self.path[len("/race"):]
+            first = os.path.join(sys.argv[2], rest.lstrip("/") + ".first")
+            self.path = rest + ".first" if rest not in seen and os.path.exists(first) else rest
+            seen.add(rest)
         if self.path.startswith("/redirect/"):
             self.send_response(302)
             self.send_header("Location", self.path[len("/redirect"):])
@@ -651,6 +659,14 @@ latest_case noprefix "$TEST_VERSION\n"
 latest_refused "a LATEST without its v" noprefix "does not name a release tag"
 latest_case path "v0.2.0/../../x\n"
 latest_refused "a LATEST holding a path" path "does not name a release tag"
+# The latest release changed between the two downloads: the first LATEST
+# is another release's, so the pair is read again, once, and installs.
+latest_case race "$TEST_TAG\n"
+printf 'v0.0.1\n' > "$WORK/release/l-race/LATEST.first"
+H="$WORK/h-latest-race"
+out="$(LATEST_TAG_OVERRIDE="" LATEST_URL="$GREYWARD_DOWNLOAD_BASE/race/l-race/LATEST" \
+    run_installer "$H" /bin/bash "$BASE_PATH" 2>&1)" || { echo "$out"; bad "latest did not read LATEST again after a mismatch"; }
+check "a LATEST that changed mid-read is read again" sh -c "'$H/.local/bin/ward' --version 2>/dev/null | grep -q '^ward $TEST_VERSION'"
 # Missing, and missing its signature.
 latest_refused "a missing LATEST" missing "cannot read the latest release"
 latest_case nosig "$TEST_TAG\n"

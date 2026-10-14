@@ -399,6 +399,9 @@ fn open_beneath(dirfd: RawFd, target: &Path, flags: libc::c_int) -> io::Result<f
     Ok(unsafe { fs::File::from_raw_fd(fd as RawFd) })
 }
 
+/// Unsupported: callers walk instead. A macOS version must choose its own
+/// flags: [`PLACE_FLAG`] there is `O_RDONLY`, which needs read permission
+/// and blocks opening a FIFO, where `O_PATH` does neither.
 #[cfg(not(target_os = "linux"))]
 fn open_beneath(_dirfd: RawFd, _target: &Path, _flags: libc::c_int) -> io::Result<fs::File> {
     Err(io::Error::from_raw_os_error(libc::ENOSYS))

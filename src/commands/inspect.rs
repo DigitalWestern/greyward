@@ -1146,7 +1146,7 @@ fn macos_isolation_checks(sandbox: io::Result<String>) -> Vec<Check> {
             Ok(detail) => check(
                 "sandbox",
                 Level::Ok,
-                format!("{detail}; builds run here, resolvers do not"),
+                format!("{detail}; the build sandbox, which isolates no resolution tool"),
             ),
             Err(error) => check("sandbox", Level::Fail, error.to_string()),
         },
@@ -1154,8 +1154,8 @@ fn macos_isolation_checks(sandbox: io::Result<String>) -> Vec<Check> {
             "isolation",
             Level::Fail,
             format!(
-                "{}, so commands that change a lock (add, remove, update, a missing lock, \
-                 attest) are not supported on macOS yet; fix: {}",
+                "{}, so any command that needs a resolution tool (npm, cargo, uv, Bundler and \
+                 the rest, to change or write a lock) is refused here; fix: {}",
                 gap.reason, gap.fix
             ),
         ),
@@ -1391,7 +1391,8 @@ mod tests {
         assert_eq!(checks[1].name, "isolation");
         assert_eq!(checks[1].level, Level::Fail);
         let text = render_doctor(&checks, false).unwrap();
-        assert!(text.contains("not supported on macOS yet"), "{text}");
+        assert!(text.contains("no isolation engine for macOS yet"), "{text}");
+        assert!(text.contains("is refused here"), "{text}");
         for needle in ["bubblewrap", "podman", "subuid", "cgroup"] {
             assert!(!text.contains(needle), "{needle}: {text}");
         }

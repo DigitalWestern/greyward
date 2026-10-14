@@ -101,10 +101,26 @@ pub fn probe_tiers(activity: &StoreActivity) -> io::Result<(Vec<TierOffer>, Vec<
     if let Some(tiers) = TIERS_FOR_TEST.with(|tiers| tiers.borrow().clone()) {
         return Ok(tiers);
     }
+    if cfg!(target_os = "macos") {
+        return Ok((Vec::new(), vec![macos_gap()]));
+    }
     tiers_from(
         sandbox::bwrap_preflight_with_activity(Some(activity)).map(|_| ()),
         || super::container::preflight(activity).map(|_| ()),
     )
+}
+
+/// The one gap on macOS, where no engine can isolate a resolution tool
+/// yet. Bubblewrap and podman are Linux engines (podman would mount this
+/// Mach-O binary as the relay in a Linux container), so neither is probed
+/// and no Linux fix is offered (#732).
+pub fn macos_gap() -> Missing {
+    Missing {
+        capability: "macOS isolation",
+        reason: "ward has no isolation engine for macOS yet".to_string(),
+        fix: "run the command on a Linux machine or in Linux CI and commit the lock it writes"
+            .to_string(),
+    }
 }
 
 /// The offers and gaps the preflights make: bubblewrap first, and the
@@ -170,6 +186,26 @@ pub fn choose_tier(
     tool: &str,
     why: &str,
 ) -> io::Result<TierOffer> {
+    choose_tier_on(
+        cfg!(target_os = "macos"),
+        offers,
+        missing,
+        unconfined_denied,
+        tool,
+        why,
+    )
+}
+
+/// [`choose_tier`] with the host named, so the macOS refusal is testable
+/// anywhere.
+fn choose_tier_on(
+    macos: bool,
+    offers: &[TierOffer],
+    missing: &[Missing],
+    unconfined_denied: bool,
+    tool: &str,
+    why: &str,
+) -> io::Result<TierOffer> {
     if let Some(offer) = offers.iter().find(|offer| offer.fenced) {
         return Ok(*offer);
     }
@@ -192,10 +228,12 @@ pub fn choose_tier(
             gap.capability, gap.reason, gap.fix
         ));
     }
-    message.push_str(
+    message.push_str(if macos {
+        MACOS_UNSUPPORTED
+    } else {
         ". This build of ward has no isolation helper (greyward-isolate), so enable one of the \
-         above and run the command again (`ward doctor --isolation` shows each)",
-    );
+         above and run the command again (`ward doctor --isolation` shows each)"
+    });
     // An engine is here and the policy turned it down: a refusal. No
     // engine at all: something this machine does not support.
     Err(match unfenced {
@@ -203,6 +241,10 @@ pub fn choose_tier(
         None => io::Error::new(io::ErrorKind::Unsupported, message),
     })
 }
+
+/// How a macOS refusal ends: what cannot run there, said plainly.
+const MACOS_UNSUPPORTED: &str = ". Commands that change a lock (add, remove, update, a missing \
+     lock, attest) are not supported on macOS yet";
 
 // ---------------------------------------------------------------------------
 // Forced program settings
@@ -1658,6 +1700,44 @@ mod tests {
         ] {
             assert!(message.contains(needle), "{needle}: {message}");
         }
+    }
+
+    /// On macOS the refusal names the missing macOS engine and gives no
+    /// Linux repair steps; the Linux refusal is unchanged (#732).
+    #[test]
+    fn a_macos_refusal_gives_no_linux_advice() {
+        let error =
+            choose_tier_on(true, &[], &[macos_gap()], false, "npm", "runs scripts").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        let message = error.to_string();
+        for needle in [
+            "bubblewrap",
+            "podman",
+            "subuid",
+            "subgid",
+            "cgroup",
+            "namespaces",
+        ] {
+            assert!(!message.contains(needle), "{needle}: {message}");
+        }
+        for needle in [
+            "npm runs scripts",
+            "macOS isolation: ward has no isolation engine for macOS yet",
+            "not supported on macOS yet",
+        ] {
+            assert!(message.contains(needle), "{needle}: {message}");
+        }
+        let linux = choose_tier_on(false, &[], &missing(), false, "Bundler", "evaluates")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            linux,
+            "Bundler evaluates, so it runs only in isolation, and this machine cannot isolate \
+             it. bubblewrap: setting up uid map: Permission denied (fix: install bubblewrap and \
+             allow it unprivileged user namespaces). This build of ward has no isolation helper \
+             (greyward-isolate), so enable one of the above and run the command again (`ward \
+             doctor --isolation` shows each)"
+        );
     }
 
     fn fixture(tool_dir: &str) -> Value {

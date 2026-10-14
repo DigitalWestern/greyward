@@ -764,6 +764,38 @@ impl Exchange<'_> {
             .all(|(name, version)| known.contains(&protocol.package_key(name, version)))
     }
 
+    /// Verify the signed tree head `body` carries, when the protocol's log
+    /// has one there ([`RegistryProtocol::tree_size`]), and keep a fresh
+    /// one as a checkpoint ([`super::tlog`]). A head that does not verify
+    /// refuses the body. A checkpoint that cannot be written only goes
+    /// into the record's detail: a missing one passes fewer versions.
+    ///
+    /// [`RegistryProtocol::tree_size`]: super::routes::RegistryProtocol::tree_size
+    fn tree_head(
+        &self,
+        url: &Url,
+        body: &[u8],
+        freshness: Freshness,
+        record: &mut Record,
+    ) -> Result<(), String> {
+        let protocol = self.route.protocol;
+        let (Some(log), Some(size)) = (protocol.log(), protocol.tree_size(url, body)) else {
+            return Ok(());
+        };
+        let size = size.map_err(|why| format!("{}: {why}", record.url))?;
+        if freshness == Freshness::Live {
+            let checkpoint = super::tlog::Checkpoint {
+                size,
+                observed: super::age::unix_seconds(std::time::SystemTime::now()),
+            };
+            if let Err(error) = super::tlog::record(&self.state.config.store, log.name, checkpoint)
+            {
+                record.detail = Some(format!("checkpoint not written: {error}"));
+            }
+        }
+        Ok(())
+    }
+
     /// The upstream is unreachable: serve last-good if policy allows and a
     /// copy exists, else 504.
     fn last_good(
@@ -853,6 +885,10 @@ impl Exchange<'_> {
             ..
         } = cached;
         if success && !self.head_only() {
+            if let Err(reason) = self.tree_head(url, &upstream, freshness, &mut record) {
+                self.state.hard_failure(reason.clone());
+                return self.fail(out, record, 502, reason);
+            }
             self.state
                 .add_published(self.route, protocol.published(url, &upstream));
         }

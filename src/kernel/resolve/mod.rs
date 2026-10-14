@@ -47,6 +47,7 @@ pub mod snapshot;
 pub mod ssrf;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod tlog;
 pub mod transaction;
 pub(crate) mod tripwire;
 

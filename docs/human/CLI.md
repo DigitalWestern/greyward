@@ -971,10 +971,16 @@ had, the detail says why (the registry's answer, a rate limit, an
 unreachable registry, offline with nothing cached): a policy that denies
 the kind refuses then too, and otherwise it is recorded. The minimum's
 source is named by scope (`set by the machine policy`, `set by a project
-policy`), never by a path on one machine. Go is weaker: its module proxy
-records no upload time, so a tagged Go version is judged by its commit
-time, which the module's author sets, and the detail says so, while a
-pseudo-version's age is unknown. A policy that denies it refuses the
+policy`), never by a path on one machine. Go's module proxy records no
+upload time ward can trust (its time is the commit's, which the module's
+author sets), so every Go version, tagged or a pseudo-version, is judged
+by its record number in the `sum.golang.org` checksum database's log: it
+passes when the log held it before a signed tree head ward saw at least
+the minimum age before the resolution, and otherwise its age is unknown
+(`logged after the newest checkpoint older than 7 days`). A fresh store
+has only the head built into ward, so until that head is the minimum age
+old every Go version's age is unknown (see LIMITATIONS.md). A policy that
+denies it refuses the
 resolution before the lock is written, names every young package, and
 says when resolving again would pass. The company template denies it.
 The machine policy sets the minimum (`[packages] min_age_days = 14`; `0`

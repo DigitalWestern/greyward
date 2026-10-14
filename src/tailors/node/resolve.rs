@@ -28,10 +28,18 @@ const INPUTS: [&str; 3] = [".npmrc", "pnpm-workspace.yaml", ".pnpmfile.cjs"];
 /// and every lock a door writes there, and the `package.json` of every
 /// workspace member ([`workspace_members`]): npm and pnpm read each to
 /// resolve, and an edit made in a member writes it.
+///
+/// Each manifest is read here through [`super::inputs::read_manifest`],
+/// beneath the project and its own directory, so one that leads out of
+/// either is the fixed refusal before the record hashes it; the read is
+/// observed, so a manifest swapped before the record's own read is refused
+/// as a changed input (#694).
 pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    super::inputs::read_manifest(root, Path::new("."))?;
     let mut outputs = vec![PathBuf::from("package.json")];
     outputs.extend(LOCKS.iter().map(PathBuf::from));
     for member in workspace_members(root)? {
+        super::inputs::read_manifest(root, &member)?;
         outputs.push(member.join("package.json"));
     }
     Ok(outputs)
@@ -60,7 +68,7 @@ pub(crate) fn resolution_inputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> 
 /// could not read it anyway. (pnpm 10 also takes the setting in
 /// `pnpm-workspace.yaml`; ward reads that file's `packages` alone.)
 fn patched_dependency_files(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    let Some(text) = root.read_input_string(Path::new("package.json"))? else {
+    let Some(text) = super::inputs::read_manifest(root, Path::new("."))? else {
         return Ok(Vec::new());
     };
     let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -262,7 +270,7 @@ pub(crate) fn npm_manifest_named(root: &ProjectRoot) -> io::Result<Vec<(String, 
 }
 
 fn npm_manifest_membership(root: &ProjectRoot) -> io::Result<super::npm_members::Found> {
-    let Some(text) = root.read_input_string(Path::new("package.json"))? else {
+    let Some(text) = super::inputs::read_manifest(root, Path::new("."))? else {
         return Ok(super::npm_members::Found::default());
     };
     let package: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
@@ -344,7 +352,7 @@ pub(crate) fn refuse_external_path_dependencies(root: &ProjectRoot) -> io::Resul
             .map(|member| member.join("package.json")),
     );
     for manifest in manifests {
-        let Some(text) = root.read_input_string(&manifest)? else {
+        let Some(text) = super::inputs::read_manifest_at(root, &manifest)? else {
             continue;
         };
         let Ok(package) = serde_json::from_str::<serde_json::Value>(&text) else {

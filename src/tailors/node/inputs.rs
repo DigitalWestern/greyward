@@ -149,7 +149,15 @@ pub fn load_npm_plan_with_basis(
         return planned("pnpm-lock.yaml", &text, plan).map(Some);
     }
     if project.is_input_file(Path::new("yarn.lock")) {
-        let package = read_input(project, "package.json")?;
+        let package = read_manifest(project, Path::new("."))?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{}: not found",
+                    project.path().join("package.json").display()
+                ),
+            )
+        })?;
         let text = read_input(project, "yarn.lock")?;
         let plan = lock_import::plan_yarn(platform, &text, &package, project, node_version)?;
         // yarn.lock is no door's output and no record names it; the basis
@@ -183,6 +191,45 @@ pub(crate) fn input_exists(project: &ProjectRoot, relative: impl AsRef<Path>) ->
         project.input_entry(relative.as_ref()),
         Ok(Entry::Absent) | Err(_)
     )
+}
+
+/// The `package.json` of the project (`dir` is `.`) or of the workspace
+/// member `dir`, as text. Every project manifest ward reads goes through
+/// here ([`ProjectRoot::read_member_manifest`]): it is opened beneath the
+/// held project and beneath its own directory, so a manifest swapped for a
+/// symlink out of either is never read. A missing one is `None`; any other
+/// failure is the one fixed refusal ([`node::npm_members::manifest_refused`]),
+/// which says nothing of what a host file holds (#694).
+pub(crate) fn read_manifest(project: &ProjectRoot, dir: &Path) -> io::Result<Option<String>> {
+    use crate::kernel::fsroot::MemberManifest;
+    let refused = |why: String| node::npm_members::manifest_refused(project, &why);
+    match project.read_member_manifest(dir) {
+        Ok(MemberManifest::Read(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| refused(format!("{}/package.json is not UTF-8", dir.display()))),
+        Ok(MemberManifest::Missing) => Ok(None),
+        Ok(MemberManifest::Refused) => Err(refused(format!(
+            "{}/package.json leads outside the project or its own directory",
+            dir.display()
+        ))),
+        Err(error) => Err(refused(format!("{}/package.json: {error}", dir.display()))),
+    }
+}
+
+/// [`read_manifest`] for the manifest at the project-relative `path`
+/// (`package.json`, `<dir>/package.json`).
+pub(crate) fn read_manifest_at(project: &ProjectRoot, path: &Path) -> io::Result<Option<String>> {
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new("package.json")) {
+        return Err(io::Error::other(format!(
+            "internal: {} is not a package.json",
+            path.display()
+        )));
+    }
+    read_manifest(project, dir)
 }
 
 /// `fs::read_to_string` of a project input through the held descriptor: an

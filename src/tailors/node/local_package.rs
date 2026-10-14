@@ -90,7 +90,8 @@ pub(crate) fn integrity(project: &ProjectRoot, dir: &str) -> io::Result<String> 
 /// or when the directory has no package.json (Node still loads its
 /// `index.js`).
 pub(crate) fn version(project: &ProjectRoot, dir: &str) -> io::Result<String> {
-    let Some(manifest) = project.read_input_string(&Path::new(dir).join("package.json"))? else {
+    let Some(manifest) = crate::tailors::node::inputs::read_manifest(project, Path::new(dir))?
+    else {
         return Ok("0.0.0".into());
     };
     let value: serde_json::Value =

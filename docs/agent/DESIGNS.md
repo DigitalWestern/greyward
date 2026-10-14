@@ -1990,9 +1990,10 @@ compiled in and is exactly today's forced public set: `pypi.org`,
 `files.pythonhosted.org`, `registry.npmjs.org`, `index.crates.io`,
 `static.crates.io`, `crates.io` (the download redirect), `proxy.golang.org`,
 `sum.golang.org`, `rubygems.org`, `index.rubygems.org`, `repo.hex.pm`,
-`api.nuget.org`, `hex.pm` (reached only by ward's own publish-time
-lookups for `young-package`, never by a tool: the Hex route refuses a
-tool request to it), plus the hosts PR 0 saw the tools reach through the
+`api.nuget.org`, `hex.pm` (only ward's own publish-time lookup session
+for `young-package` has a route serving it; no tool session does, so a
+tool request to it is refused. Being in the permitted set, it can still be
+a redirect hop from another permitted host), plus the hosts PR 0 saw the tools reach through the
 door: `api.github.com` and `raw.githubusercontent.com` (uv's and cargo's
 GitHub shortcuts for git dependencies, which are git fetches and so
 `git-dependency`). No registry redirected to a CDN host in the census.

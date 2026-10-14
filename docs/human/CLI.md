@@ -967,8 +967,14 @@ it. The detail names both times and the minimum:
 time comes from the metadata the tool fetched; for a package it did not
 fetch metadata for, ward asks the registry itself, through the same proxy,
 and those lookups are in the record's ledger. When no publish time can be
-had, the detail says so: a policy that denies the kind refuses then too,
-and otherwise it is recorded. A policy that denies it refuses the
+had, the detail says why (the registry's answer, a rate limit, an
+unreachable registry, offline with nothing cached): a policy that denies
+the kind refuses then too, and otherwise it is recorded. The minimum's
+source is named by scope (`set by the machine policy`, `set by a project
+policy`), never by a path on one machine. Go is weaker: its module proxy
+records no upload time, so a tagged Go version is judged by its commit
+time, which the module's author sets, and the detail says so, while a
+pseudo-version's age is unknown. A policy that denies it refuses the
 resolution before the lock is written, names every young package, and
 says when resolving again would pass. The company template denies it.
 The machine policy sets the minimum (`[packages] min_age_days = 14`; `0`

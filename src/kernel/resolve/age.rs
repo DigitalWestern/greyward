@@ -18,7 +18,11 @@
 //! in a second proxy session ([`RegistryProtocol::lookup`]), through the
 //! same cache, resolver, permitted set and ledger. A version whose time is
 //! still unknown is a fact too: under a policy that denies the kind it is
-//! refused like a young one (fail closed); otherwise it is recorded.
+//! refused like a young one (fail closed); otherwise it is recorded. So is
+//! a version whose protocol says no time it has can be trusted
+//! ([`RegistryProtocol::untimed`]: a Go pseudo-version's only time is its
+//! commit's). A protocol whose time is not an upload time says what it is
+//! ([`RegistryProtocol::time_note`]), and the detail carries that.
 //!
 //! The fact's detail carries the publish time, the resolution time and the
 //! minimum in force, so the signed record says what was judged, and
@@ -26,6 +30,8 @@
 //!
 //! [`RegistryProtocol::published`]: super::routes::RegistryProtocol::published
 //! [`RegistryProtocol::lookup`]: super::routes::RegistryProtocol::lookup
+//! [`RegistryProtocol::untimed`]: super::routes::RegistryProtocol::untimed
+//! [`RegistryProtocol::time_note`]: super::routes::RegistryProtocol::time_note
 
 use super::proxy::{LookupAnswer, Proxy};
 use super::routes::{file_key, Lookup};

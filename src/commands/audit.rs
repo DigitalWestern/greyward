@@ -728,6 +728,9 @@ fn source_line(source: &PolicySource) -> String {
         Some(keys) => line.push_str(&format!(" trusts {}", key_list(keys))),
         None => {}
     }
+    if let Some(days) = source.min_age_days {
+        line.push_str(&format!(" min_age_days {days}"));
+    }
     line
 }
 
@@ -770,6 +773,9 @@ struct JsonPolicySource {
     /// `null` when the scope declared no `[signing]` table, `[]` when it
     /// explicitly trusts nobody.
     trusted: Option<KeySet>,
+    /// The `[packages] min_age_days` this scope declared; absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_age_days: Option<u32>,
 }
 
 fn json_sources(sources: &[PolicySource]) -> Vec<JsonPolicySource> {
@@ -784,6 +790,7 @@ fn json_sources(sources: &[PolicySource]) -> Vec<JsonPolicySource> {
                 strict: source.strict,
                 deny: source.deny.clone(),
                 trusted: source.trusted.clone(),
+                min_age_days: source.min_age_days,
             }
         })
         .collect()
@@ -847,12 +854,13 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
             .signing
             .as_ref()
             .map(|signing| signing.trusted.clone());
-        let value = json!({
+        let mut value = json!({
             "project": project,
             "policy": {
                 "strict": report.policy.strict,
                 "deny": report.policy.deny,
                 "trusted": trusted,
+                "min_age_days": report.policy.min_age_days(),
                 "sources": json_sources(&report.sources),
             },
             "signatures_checked": report.signatures_checked,
@@ -860,7 +868,6 @@ pub fn render(dir: &Path, report: &Report, json: bool) -> io::Result<String> {
             "closures": closures,
             "missing": report.missing,
         });
-        let mut value = value;
         if let Some(project_bytes) = project_bytes {
             value["project_bytes"] = json!(project_bytes);
         }
@@ -1506,6 +1513,7 @@ mod tests {
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: None,
+                min_age_days: None,
             }],
             verdicts: Vec::new(),
             missing: Vec::new(),
@@ -1537,6 +1545,7 @@ mod tests {
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: None,
+                min_age_days: None,
             }],
             verdicts: Vec::new(),
             missing: Vec::new(),
@@ -1545,6 +1554,48 @@ mod tests {
 
         let output = render(Path::new("project"), &report, false).unwrap();
         assert_eq!(output, "policy: machine \"policy-\\n.toml\"\n");
+    }
+
+    /// Each scope's `[packages] min_age_days` is reported where it was
+    /// declared, and the effective value beside the merged deny list.
+    #[test]
+    fn policy_sources_report_their_min_age_days() {
+        let mut policy = permissive();
+        let declared = Policy {
+            packages: Some(policy::Packages {
+                min_age_days: Some(14),
+            }),
+            ..Policy::default()
+        };
+        policy::merge(&mut policy, &declared, SourceOrigin::Project);
+        let report = Report {
+            policy,
+            sources: vec![PolicySource {
+                origin: SourceOrigin::Project,
+                path: Some(PathBuf::from("/p/.greyward/policy.toml")),
+                strict: false,
+                deny: BTreeSet::new(),
+                trusted: None,
+                min_age_days: Some(14),
+            }],
+            verdicts: Vec::new(),
+            missing: Vec::new(),
+            signatures_checked: true,
+        };
+        let text = render(Path::new("project"), &report, false).unwrap();
+        assert_eq!(
+            text,
+            "policy: project \"/p/.greyward/policy.toml\" min_age_days 14\n"
+        );
+        let value: Value =
+            serde_json::from_str(&render(Path::new("project"), &report, true).unwrap()).unwrap();
+        assert_eq!(value["policy"]["min_age_days"], 14);
+        assert_eq!(value["policy"]["sources"][0]["min_age_days"], 14);
+        let mut unset = report;
+        unset.sources[0].min_age_days = None;
+        let value: Value =
+            serde_json::from_str(&render(Path::new("project"), &unset, true).unwrap()).unwrap();
+        assert!(value["policy"]["sources"][0].get("min_age_days").is_none());
     }
 
     #[test]
@@ -2368,11 +2419,16 @@ mod tests {
             policy::EXTERNAL_TOOLCHAIN,
             policy::UNRECORDED_RESOLUTION,
             policy::UNCONFINED_RESOLUTION,
+            policy::YOUNG_PACKAGE,
         ]
         .iter()
         .map(|kind| kind.to_string())
         .collect();
         assert_eq!(template.deny, expected);
+        // The template leaves the minimum at the default; it only says
+        // where to raise it.
+        assert_eq!(template.min_age_days(), policy::DEFAULT_MIN_AGE_DAYS);
+        assert!(text.contains("min_age_days"));
         // Every kind the template deliberately leaves permitted is named in
         // its comments, so the file cannot silently fall behind KINDS.
         for kind in policy::KINDS {
@@ -2732,6 +2788,7 @@ mod tests {
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: Some([test_key().public_key()].into_iter().collect()),
+                min_age_days: None,
             },
             PolicySource {
                 origin: SourceOrigin::Project,
@@ -2739,6 +2796,7 @@ mod tests {
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: Some([other_key().public_key()].into_iter().collect()),
+                min_age_days: None,
             },
             PolicySource {
                 origin: SourceOrigin::Flag,
@@ -2746,6 +2804,7 @@ mod tests {
                 strict: false,
                 deny: BTreeSet::new(),
                 trusted: Some(KeySet::new()),
+                min_age_days: None,
             },
             PolicySource {
                 origin: SourceOrigin::Env,
@@ -2753,6 +2812,7 @@ mod tests {
                 strict: true,
                 deny: BTreeSet::new(),
                 trusted: None,
+                min_age_days: None,
             },
         ];
         let verdicts = judge_with_sources(dir, &chain, &sources, std::slice::from_ref(&by_test));

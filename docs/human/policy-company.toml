@@ -90,7 +90,22 @@ deny = [
     # pass; enable unprivileged user namespaces for bubblewrap, or install
     # rootless podman (`ward doctor --isolation` shows which works).
     "unconfined-resolution",
+
+    # A resolution locked a registry package version published less than
+    # [packages] min_age_days (7 unless a policy raises it) before the
+    # resolution, or one whose publish time ward could not learn. Most
+    # malicious versions pushed to a public registry (a hijacked
+    # maintainer account, a typosquat) are reported and pulled within
+    # days, so waiting a week keeps a project off most of them. Denied: pin
+    # an older version, or resolve again once the version is old enough.
+    "young-package",
 ]
+
+# The minimum age young-package judges by. This file can only raise it: a
+# project policy that sets a lower value changes nothing.
+#
+# [packages]
+# min_age_days = 7
 
 # Deliberately NOT denied. These kinds are recorded so the audit can count
 # them, but they are not security findings:
@@ -190,6 +205,17 @@ deny = [
 #                                    makes. Teams whose projects depend on
 #                                    such a script may add this kind to the
 #                                    list above.
+#   lookalike-name                   a locked package's name is one edit
+#                                    from one of its ecosystem's 2,000 most
+#                                    popular names without being it (reqests
+#                                    for requests). Every sync warns. It is
+#                                    a heuristic: legitimate packages trip
+#                                    it (a fork, a plugin named after its
+#                                    host, a real project with a close
+#                                    name), so denying it would stop builds
+#                                    that are fine. A company that would
+#                                    rather review each one may add this
+#                                    kind to the list above.
 
 # Closure signing. With a [signing] table in the machine policy, `ward audit`
 # accepts only records signed by a key it lists; a project or --policy copy

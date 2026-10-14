@@ -223,8 +223,11 @@ again for each of them, and an answer that changes within one command
 each member as `node_modules/<name>` to its directory. A planted workspace
 link registers a check with `comforter::publication`, which the closure
 writer runs as the last step before the store registers the root and signs
-the closure, after the resolution join: one `openat2` beneath the held
-project must still reach the directory recorded when the link was planted. Before planning, `plan` and `sync`
+the closure, after the resolution join: the link is read in its directory,
+held open since planting (`fsroot::LinkSite`), which must still be at its
+path with no symlink below the directory it shares with the project's path,
+and one `openat2` beneath the held project must still reach the directory
+recorded when the link was planted. Before planning, `plan` and `sync`
 refuse a lock that disagrees with the package.json files it was generated
 from, as `npm ci` and `--frozen-lockfile` installs do: npm's per-manifest
 dependency maps (the root's and each workspace member's, `peerDependencies` included), the

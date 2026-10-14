@@ -2,6 +2,7 @@
 //! node_modules forest, workspace links, bin links, and the closure record.
 
 use super::*;
+use crate::kernel::fsroot::linksite::LinkSite;
 use crate::kernel::fsroot::{LinkEnd, ProjectRoot};
 use std::os::unix::fs::MetadataExt as _;
 
@@ -762,8 +763,18 @@ fn link_workspace_sources(
                 .ok_or_else(|| err("workspace link has no parent"))?,
             &project_dir.join(resolved),
         )?;
+        // The link's directory is held from here on, and the link is made
+        // in it: every later check reads it there, and first proves the
+        // directory is still where its path says (Sol round 7).
+        let site = LinkSite::hold(&link, project_dir).map_err(|error| {
+            err(format!(
+                "workspace link {} cannot be planted in {}: {error}",
+                l.path,
+                link.parent().unwrap_or(&link).display()
+            ))
+        })?;
         match link.symlink_metadata() {
-            Err(_) => std::os::unix::fs::symlink(&target, &link)?,
+            Err(_) => site.plant(&target)?,
             // The link an earlier sync planted here.
             Ok(_) if fs::read_link(&link).is_ok_and(|existing| existing == target) => {}
             // A cloned package can ship something of its own where the lock
@@ -779,13 +790,13 @@ fn link_workspace_sources(
             }
         }
         let identity =
-            refuse_link_leading_out(project, &link, &target, Path::new(resolved), &l.path)?;
+            refuse_link_leading_out(project, &site, &target, Path::new(resolved), &l.path)?;
         // The kernel's own walk of the link agrees: the text ward computed
         // by path really reaches the directory the held descriptor found.
         // This can only refuse; the check that guards the link is the one
         // above, run again before publication.
         if !fs::metadata(&link).is_ok_and(|reached| (reached.dev(), reached.ino()) == identity) {
-            fs::remove_file(&link)?;
+            site.remove()?;
             return Err(err(format!(
                 "workspace link {} does not reach {resolved} in the project; the link was \
                  removed, so check the project and run the sync again",
@@ -793,7 +804,7 @@ fn link_workspace_sources(
             )));
         }
         planted.push(PlantedLink {
-            link,
+            site,
             text: target,
             target: PathBuf::from(resolved),
             name: l.path.clone(),
@@ -830,7 +841,7 @@ const LINKS_CHECK: &str = "node workspace links";
 /// A workspace link as it was planted: where it is, the project input it
 /// leads to, and that directory's device and inode then.
 struct PlantedLink {
-    link: PathBuf,
+    site: LinkSite,
     text: PathBuf,
     target: PathBuf,
     name: String,
@@ -854,13 +865,13 @@ fn recheck_links_before_publication(
             for planted in &planted {
                 let still = refuse_link_leading_out(
                     &held,
-                    &planted.link,
+                    &planted.site,
                     &planted.text,
                     &planted.target,
                     &planted.name,
                 )?;
                 if still != planted.identity {
-                    fs::remove_file(&planted.link)?;
+                    planted.site.remove()?;
                     return Err(err(format!(
                         "workspace link {} leads to another directory than when it was planted: \
                          {} was replaced while the sync ran; the link was removed, so check the \
@@ -885,7 +896,7 @@ fn recheck_links_before_publication(
 /// target appears there later (#692).
 fn refuse_link_leading_out(
     project: &ProjectRoot,
-    link: &Path,
+    link: &LinkSite,
     text: &Path,
     target: &Path,
     name: &str,
@@ -900,7 +911,7 @@ fn refuse_link_leading_out(
             "has no target: a workspace link target must exist when the link is planted"
         }
     };
-    fs::remove_file(link)?;
+    link.remove()?;
     Err(err(format!(
         "workspace link {name} {why}; the link was removed, so check the project and run the \
          sync again"
@@ -1392,7 +1403,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("outside"), project.join("src")).unwrap();
         let error = refuse_link_leading_out(
             &held,
-            &forest.join("lib"),
+            &LinkSite::hold(&forest.join("lib"), &project).unwrap(),
             &text("src/lib"),
             Path::new("src/lib"),
             "node_modules/lib",
@@ -1402,7 +1413,7 @@ mod tests {
         assert!(forest.join("lib").symlink_metadata().is_err());
         refuse_link_leading_out(
             &held,
-            &forest.join("kept"),
+            &LinkSite::hold(&forest.join("kept"), &project).unwrap(),
             &text("kept/lib"),
             Path::new("kept/lib"),
             "node_modules/kept",
@@ -1420,7 +1431,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("empty"), project.join("tools")).unwrap();
         let error = refuse_link_leading_out(
             &held,
-            &forest.join("cli"),
+            &LinkSite::hold(&forest.join("cli"), &project).unwrap(),
             &text("tools/cli"),
             Path::new("tools/cli"),
             "node_modules/cli",
@@ -1435,7 +1446,7 @@ mod tests {
         fs::remove_dir(project.join("gone/pkg")).unwrap();
         let error = refuse_link_leading_out(
             &held,
-            &forest.join("gone"),
+            &LinkSite::hold(&forest.join("gone"), &project).unwrap(),
             &text("gone/pkg"),
             Path::new("gone/pkg"),
             "node_modules/gone",
@@ -1443,6 +1454,61 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("has no target"), "{error}");
         assert!(forest.join("gone").symlink_metadata().is_err());
+    }
+
+    /// Sol's moved forest: after planting, the forest directory is moved
+    /// beneath another directory and its old place made a symlink to it.
+    /// The link's text is unchanged and the project's target is still
+    /// there, but the text's `..` steps now climb from the new place and
+    /// reach a look-alike outside the project. The check refuses it and
+    /// removes the link (#692, Sol round 7).
+    #[test]
+    fn a_link_in_a_forest_moved_and_replaced_with_a_symlink_is_refused() {
+        let scratch = TempDir::named("link-moved-forest");
+        let root = scratch.0.clone();
+        let project = root.join("project");
+        let forest = root.join("store/forests/id");
+        let modules = forest.join("node_modules");
+        fs::create_dir_all(project.join("src/lib")).unwrap();
+        fs::create_dir_all(&modules).unwrap();
+        let held = ProjectRoot::open(&project).unwrap();
+        let text = relative_path(&modules, &project.join("src/lib")).unwrap();
+        let site = LinkSite::hold(&modules.join("lib"), &project).unwrap();
+        site.plant(&text).unwrap();
+        let planted = refuse_link_leading_out(
+            &held,
+            &site,
+            &text,
+            Path::new("src/lib"),
+            "node_modules/lib",
+        )
+        .unwrap();
+        // The same depth below another directory, with a look-alike
+        // project there.
+        let elsewhere = root.join("other/store/forests/id");
+        fs::create_dir_all(root.join("other/project/src/lib")).unwrap();
+        fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        fs::rename(&forest, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &forest).unwrap();
+        let reached = fs::metadata(modules.join("lib")).unwrap();
+        assert_ne!(
+            (reached.dev(), reached.ino()),
+            planted,
+            "the moved link reaches the look-alike"
+        );
+        let error = refuse_link_leading_out(
+            &held,
+            &site,
+            &text,
+            Path::new("src/lib"),
+            "node_modules/lib",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("leads outside"), "{error}");
+        assert!(elsewhere
+            .join("node_modules/lib")
+            .symlink_metadata()
+            .is_err());
     }
 
     /// Sol's move-out, after planting: the target's directory moved out of

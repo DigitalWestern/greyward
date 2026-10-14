@@ -520,8 +520,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
 - **Workspace links are checked when they are planted and right before publication, not
   afterwards.** A `node_modules` link to a workspace package is planted to the target's
   symlink-free path, resolved through the held project descriptor. Every check of a link is
-  one step: the link's text must still be the text planted, the project must still be at
-  its path, and the target is opened once from the held descriptor with `openat2`
+  one step: the link's text, read in the store directory Greyward holds open for it, must
+  still be the text planted; that directory, walked down again with no symlink followed from
+  the deepest directory it shares with the project's path, must still be the one held (so a
+  forest moved and replaced with a symlink, which would make the same text climb from
+  somewhere else, is refused); the project must still be at its path; and the target is opened once from the held descriptor with `openat2`
   (`RESOLVE_BENEATH`, so a symlink on the way that leads out of the project fails the open);
   the directory opened must be the very one recorded when the link was planted. So a
   directory on the way that a concurrent writer swapped for a symlink out of

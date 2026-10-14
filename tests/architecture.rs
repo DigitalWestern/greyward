@@ -1826,6 +1826,11 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // authorizes the URL for the row's publisher, hit or miss.
     ("src/kernel/provider/cpython.rs", "realize_runtime", 1),
     ("src/kernel/provider/cpython.rs", "realize_uv", 1),
+    (
+        "src/kernel/provider/cpython.rs",
+        "prefetch_uv_and_runtime",
+        1,
+    ),
     ("src/kernel/provider/rust.rs", "realize_runtime", 1),
     ("src/kernel/provider/rust_extras.rs", "load_manifest", 1),
     ("src/kernel/provider/rust_extras.rs", "realize_component", 1),

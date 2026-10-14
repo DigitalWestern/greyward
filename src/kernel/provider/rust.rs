@@ -328,16 +328,11 @@ pub fn realize_runtime(
         return Ok(store.object_path(&id));
     }
 
-    let mut tarballs = Vec::new();
-    for row in &rows {
-        tarballs.push(download_toolchain_artifact_held(
-            store,
-            activity,
-            &row.provider,
-            &row.url,
-            &row.digest,
-        )?);
-    }
+    // The components (rustc, rust-std, cargo) are independent downloads:
+    // fetch them on the pool, in row order, first failure in row order.
+    let tarballs = crate::kernel::fetch::fetch_all(&rows, |row| {
+        download_toolchain_artifact_held(store, activity, &row.provider, &row.url, &row.digest)
+    })?;
 
     let names: Vec<&str> = rows.iter().map(|row| row.component.as_str()).collect();
     let staged = store.stage_with_activity(activity)?;

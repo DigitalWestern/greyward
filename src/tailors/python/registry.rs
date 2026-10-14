@@ -176,7 +176,12 @@ impl RegistryProtocol for PypiRegistry {
     /// case.
     fn package_key(&self, name: &str, version: &str) -> (String, String) {
         let version = match version.split_once(' ') {
-            Some((version, file)) => file_key(&version_key(version), &file.to_ascii_lowercase()),
+            // A lock takes the file name from its URL, percent-encoded
+            // (`%2B` for a local version's `+`); the index names it plain.
+            Some((version, file)) => file_key(
+                &version_key(version),
+                &crate::kernel::gitsrc::percent_decode(file).to_ascii_lowercase(),
+            ),
             None => version_key(version),
         };
         (normalize_name(name), version)
@@ -531,6 +536,10 @@ mod tests {
         assert_eq!(
             key(&file_key("1.0-1", "Demo-1.0-1-py3-none-any.whl")),
             key(&file_key("1.0.post1", "demo-1.0-1-py3-none-any.whl"))
+        );
+        assert_eq!(
+            key(&file_key("1.0+cpu", "demo-1.0%2Bcpu-py3-none-any.whl")),
+            key(&file_key("1.0+cpu", "demo-1.0+cpu-py3-none-any.whl"))
         );
         let page = br#"{"name": "demo", "files": [
             {"filename": "demo-1_2.0-py3-none-any.whl", "upload-time": "2024-02-12T23:43:59Z"}

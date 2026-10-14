@@ -190,6 +190,69 @@ fn a_warm_npm_git_environment_replays_its_fetch_exceptions() {
     attribution.discard();
 }
 
+/// The transport is a fetch-time record like `git-dependency`: a
+/// `file://` git dependency realized cold under the default policy stores
+/// `host-git-transport` with the environment, and a warm sync under a
+/// policy denying only that kind refuses the cached object.
+#[test]
+#[ignore]
+fn a_warm_npm_git_environment_replays_its_host_git_transport() {
+    let _serial = serial();
+    let platform = Platform::host().expect("host platform");
+    let root = TempDir::new("gitdep-npm-warm-transport");
+    let (url, commit) = fixture_repo(&root.0);
+    assert!(url.starts_with("git+file://"), "{url}");
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let lock = format!(
+        r#"{{"lockfileVersion":3,"packages":{{"":{{}},"node_modules/git-dep":{{"version":"1.0.0","resolved":"{url}#{commit}"}}}}}}"#
+    );
+
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let plan = node::plan_npm(platform, &lock).expect("plan");
+    let env = node::realize_node_env(&store, activity, platform, &plan, &[]).expect("cold");
+    attribution.discard();
+
+    let id = env.file_name().unwrap().to_str().unwrap();
+    let record = greyward::kernel::objmeta::read_store_record(&store, id).unwrap();
+    assert!(
+        record
+            .exceptions
+            .iter()
+            .any(|e| e.kind == policy::HOST_GIT_TRANSPORT),
+        "the cold realization stored no host-git-transport: {:?}",
+        record.exceptions
+    );
+
+    let _deny = policy::PolicyScope::install(policy::Policy {
+        deny: [policy::HOST_GIT_TRANSPORT.to_string()].into(),
+        ..Default::default()
+    });
+    let attribution = policy::Attribution::open("node").expect("test attribution");
+    let error = without_staging(&store, || {
+        node::realize_node_env(&store, activity, platform, &plan, &[])
+    })
+    .expect_err("a warm environment dropped its host-git-transport exception");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains(policy::HOST_GIT_TRANSPORT),
+        "{error}"
+    );
+    // The cached environment's own record refused it, not a cold fetch
+    // that a cache miss would have run.
+    assert!(
+        error.to_string().contains(&format!("cached object {id}")),
+        "{error}"
+    );
+    attribution.discard();
+}
+
 #[test]
 fn an_unpinned_git_reference_is_refused() {
     let platform = Platform::host().expect("host platform");
@@ -265,12 +328,29 @@ fn git_relative_submodule_is_pinned_and_raw() {
         commit,
         subdirectory: None,
     };
+    // The file submodule records host-git-transport, into the sync's
+    // attribution, before it is fetched.
+    let attribution = policy::Attribution::open("node").expect("test attribution");
     let object = ensure_git_source(&store, activity, &source).expect("realize relative submodule");
+    let recorded = attribution.recorded();
+    attribution.discard();
     assert_eq!(
         std::fs::read_to_string(object.join("sub/sub.txt")).unwrap(),
         "submodule\n"
     );
     assert!(!object.join("sub/.git").exists());
+    let subrepo = std::fs::canonicalize(&root.0).unwrap().join("subrepo");
+    assert!(
+        recorded
+            .iter()
+            .any(|exception| exception.kind == policy::HOST_GIT_TRANSPORT
+                && Path::new(exception.subject.trim_start_matches("file://"))
+                    .canonicalize()
+                    .ok()
+                    .as_deref()
+                    == Some(subrepo.as_path())),
+        "{recorded:?}"
+    );
 
     let (url, commit) = relative_submodule_fixture(&root.0, true);
     let transformed = GitSource {
@@ -278,9 +358,11 @@ fn git_relative_submodule_is_pinned_and_raw() {
         commit,
         subdirectory: None,
     };
+    let attribution = policy::Attribution::open("node").expect("test attribution");
     let error = ensure_git_source(&store, activity, &transformed)
         .expect_err("attribute-transformed submodule must be rejected")
         .to_string();
+    attribution.discard();
     assert!(error.contains("transformed"), "{error}");
 }
 
@@ -457,4 +539,28 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     })
     .expect("second vendor was not a cache hit");
     assert_eq!(vendor, again);
+
+    // The file:// source's host-git-transport, recorded cold, stays with
+    // the vendor object: a warm sync under a policy denying only that kind
+    // refuses the cached object rather than publish without it.
+    let id = vendor.file_name().unwrap().to_str().unwrap().to_string();
+    let kept: Vec<String> = store
+        .exceptions(&id)
+        .unwrap()
+        .into_iter()
+        .map(|exception| exception.kind)
+        .collect();
+    assert_eq!(
+        kept,
+        [policy::GIT_DEPENDENCY, policy::HOST_GIT_TRANSPORT].map(String::from)
+    );
+    let mut deny = policy::Policy::default();
+    deny.deny.insert(policy::HOST_GIT_TRANSPORT.to_string());
+    let _scope = policy::PolicyScope::install(deny);
+    let warm = policy::Attribution::open("cargo").expect("test attribution");
+    let error = greyward::tailors::cargo::realize_vendor(&store, activity, &plan)
+        .expect_err("a denied kind must refuse the cached vendor object")
+        .to_string();
+    warm.discard();
+    assert!(error.contains(policy::HOST_GIT_TRANSPORT), "{error}");
 }

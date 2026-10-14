@@ -154,6 +154,26 @@ deny = [
 #                                    still verified. A team that must never
 #                                    resolve against old metadata may add
 #                                    this kind to the list above.
+#   host-git-transport               a git source was fetched over ssh://
+#                                    (offering this machine's ssh agent keys
+#                                    under its ssh configuration) or read
+#                                    from a file:// path on this machine.
+#                                    The content is still pinned by commit;
+#                                    the lock chose which host or path the
+#                                    sync reaches. Every such source is also
+#                                    a git-dependency, which the list above
+#                                    denies already. A team that allows git
+#                                    dependencies over https only may add
+#                                    this kind to the list above.
+#   unpinned-digest                  a Gemfile.lock has no CHECKSUMS entry
+#                                    for a gem, so ward verified the gem
+#                                    against the sha256 rubygems.org served
+#                                    the first time it asked (trust on first
+#                                    use; the store keeps that answer).
+#                                    Every byte is still checked. Teams that
+#                                    require lock-pinned digests may add this
+#                                    kind to the list above; locks then need
+#                                    `bundle lock --add-checksums`.
 #   project-script-skipped           the project's own package.json, or a
 #                                    workspace member's, has a preinstall,
 #                                    install, postinstall or prepare script

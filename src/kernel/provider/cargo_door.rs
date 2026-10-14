@@ -27,8 +27,8 @@
 use super::crates_index;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::confine;
-use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
-use crate::kernel::resolve::session::Intercept;
+use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Staged, Target, Wire, Wiring};
+use crate::kernel::resolve::session::{Fact, Intercept};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use std::ffi::OsString;
@@ -247,24 +247,59 @@ pub struct ConfigFile {
 /// is refused by name. An entry cargo itself would reject (not a list, not
 /// `.toml`, a missing required file) is left for cargo to report.
 pub fn config_files(dir: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
-    let mut queue: Vec<PathBuf> = CONFIG_FILES
-        .iter()
-        .rev()
-        .map(|name| dir.join(name))
-        .collect();
+    config_files_from(
+        CONFIG_FILES.iter().map(|name| dir.join(name)).collect(),
+        bound,
+    )
+}
+
+/// The configuration a `CARGO_HOME` holds: `config.toml` and `config`
+/// (cargo's two names, never another file beside them: ward's own
+/// `greyward-config.toml` lives there too and is passed with `--config`),
+/// with their includes, read as [`config_files`] reads them.
+pub fn cargo_home_config_files(home: &Path, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
+    config_files_from(
+        HOME_CONFIG_FILES
+            .iter()
+            .map(|name| home.join(name))
+            .collect(),
+        bound,
+    )
+}
+
+/// cargo's configuration files in a `CARGO_HOME`.
+pub const HOME_CONFIG_FILES: [&str; 2] = ["config.toml", "config"];
+
+/// Where a config file was reached, as cargo resolves what it includes:
+/// the file itself and the directory it was named in, both resolved. One
+/// file reached through symlinks in two directories is two places, since
+/// each resolves its relative includes beside its own name; the same pair
+/// again is the same place (a cycle through a symlinked directory
+/// included), and the set of pairs is finite, so the walk ends.
+type Visit = (PathBuf, PathBuf);
+
+/// [`config_files`] from the files `starts` names, in order.
+fn config_files_from(starts: Vec<PathBuf>, bound: &Bound) -> io::Result<Vec<ConfigFile>> {
+    let mut queue: Vec<PathBuf> = starts.into_iter().rev().collect();
     let mut found: Vec<ConfigFile> = Vec::new();
+    let mut visited: Vec<Visit> = Vec::new();
     while let Some(path) = queue.pop() {
         let Some(real) = bound.resolve(&path)? else {
             continue;
         };
-        if found.iter().any(|file| file.real == real) {
+        let base = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+        let visit = (
+            real.clone(),
+            std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone()),
+        );
+        if visited.contains(&visit) {
             continue;
         }
+        visited.push(visit);
         let Some(text) = bound.read(&path)? else {
             continue;
         };
         let table = parse_toml(&path, &text)?;
-        let base = path.parent().unwrap_or(dir).to_path_buf();
         let entries = table
             .get("include")
             .and_then(|include| include.as_array())
@@ -317,6 +352,7 @@ fn held_config_files_with(
         .map(|name| dir.join(name))
         .collect();
     let mut found: Vec<ConfigFile> = Vec::new();
+    let mut visited: Vec<Visit> = Vec::new();
     while let Some(relative) = queue.pop() {
         let shown = root.path().join(&relative);
         let Some(mut file) = root.open_optional_input_file(&relative)? else {
@@ -347,9 +383,20 @@ fn held_config_files_with(
                 ),
             ));
         }
-        if found.iter().any(|file| file.real == real) {
+        let base = relative.parent().unwrap_or(dir).to_path_buf();
+        let held_base = match root.input_subdir(if base.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            &base
+        })? {
+            Some(held) => held.current_name()?,
+            None => root_real.join(&base),
+        };
+        let visit = (real.clone(), held_base);
+        if visited.contains(&visit) {
             continue;
         }
+        visited.push(visit);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|error| {
             io::Error::new(error.kind(), format!("read {}: {error}", shown.display()))
@@ -362,7 +409,6 @@ fn held_config_files_with(
         })?;
         let table = parse_toml(&shown, &text)?;
         after_read(&relative);
-        let base = relative.parent().unwrap_or(dir).to_path_buf();
         let entries = table
             .get("include")
             .and_then(|include| include.as_array())
@@ -423,6 +469,26 @@ pub fn configured_registries(lock_root: &Path) -> io::Result<Vec<String>> {
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+pub use super::cargo_settings::{
+    cargo_locks, forced_env_names, lock_sources, network_lock_source, network_url,
+    record_exceptions, refuse_lock_sources, refuse_unneutralized_settings, transport_exceptions,
+};
+
+/// [`refuse_unneutralized_settings`] for cargo's configuration in each of
+/// `dirs`, every file read through `bound` ([`config_files`]). The door
+/// itself reads the files once and records what they reach as well
+/// (`run_cargo_with`); the tests judge them through this.
+#[cfg(test)]
+pub fn refuse_project_config<'a>(
+    dirs: impl IntoIterator<Item = &'a Path>,
+    bound: &Bound,
+) -> io::Result<()> {
+    for dir in dirs {
+        refuse_unneutralized_settings(&config_files(dir, bound)?)?;
+    }
+    Ok(())
 }
 
 /// The directories outside `lock_root` that cargo reads as `path`
@@ -602,26 +668,40 @@ pub fn manifest_path_dependencies(manifest: &Path) -> io::Result<Vec<String>> {
     path_dependencies(manifest, &Bound::new(dir)?)
 }
 
-/// The `path` of every dependency-like entry in `manifest`: the
-/// dependency tables (also under `target.<cfg>` and `workspace`),
-/// `[patch.<source>]`, and `[replace]`. `[lib]` and `[[bin]]` paths name
-/// files of the package itself and are not read. A manifest that does not
-/// parse is left for cargo to report.
+/// The `path` of every dependency-like entry in `manifest`
+/// ([`dependency_entries`]). `[lib]` and `[[bin]]` paths name files of the
+/// package itself and are not read. A manifest that does not parse is left
+/// for cargo to report.
 fn path_dependencies(manifest: &Path, keys: &Bound) -> io::Result<Vec<String>> {
-    const TABLES: [&str; 5] = [
-        "dependencies",
-        "dev-dependencies",
-        "build-dependencies",
-        "patch",
-        "replace",
-    ];
     keys.refuse_if_key(manifest)?;
     let text = std::fs::read_to_string(manifest)?;
     let Ok(value) = toml::from_str::<toml::Table>(&text) else {
         return Ok(Vec::new());
     };
-    let mut paths = Vec::new();
-    let mut tables: Vec<&toml::Table> = vec![&value];
+    Ok(dependency_entries(&value)
+        .into_iter()
+        .filter_map(|(_, entry)| entry.get("path").and_then(|p| p.as_str()))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Every dependency-like entry of a manifest, with the name it is listed
+/// under: the dependency tables (`dependencies`, `dev-dependencies`,
+/// `build-dependencies` and their underscore spellings, also under
+/// `target.<triple or cfg>` and `workspace`), `[patch.<source>]`, and
+/// `[replace]`.
+fn dependency_entries(value: &toml::Table) -> Vec<(&str, &toml::Table)> {
+    const TABLES: [&str; 7] = [
+        "dependencies",
+        "dev-dependencies",
+        "dev_dependencies",
+        "build-dependencies",
+        "build_dependencies",
+        "patch",
+        "replace",
+    ];
+    let mut found = Vec::new();
+    let mut tables: Vec<&toml::Table> = vec![value];
     if let Some(workspace) = value.get("workspace").and_then(|w| w.as_table()) {
         tables.push(workspace);
     }
@@ -633,21 +713,107 @@ fn path_dependencies(manifest: &Path, keys: &Bound) -> io::Result<Vec<String>> {
             let Some(entries) = table.get(name).and_then(|d| d.as_table()) else {
                 continue;
             };
-            // `[patch.<source>]` nests one level deeper than the others.
-            let mut stack: Vec<&toml::Value> = entries.values().collect();
-            while let Some(entry) = stack.pop() {
-                let Some(entry) = entry.as_table() else {
-                    continue;
-                };
-                match entry.get("path").and_then(|p| p.as_str()) {
-                    Some(path) => paths.push(path.to_string()),
-                    None if name == "patch" => stack.extend(entry.values()),
-                    None => {}
-                }
+            // `[patch.<source>]` nests one level deeper than the others:
+            // each source's table maps crate names, any name (`version`,
+            // `git`, `path` included), to dependencies, as cargo's schema
+            // reads it.
+            let groups: Vec<&toml::Table> = if name == "patch" {
+                entries
+                    .values()
+                    .filter_map(|source| source.as_table())
+                    .collect()
+            } else {
+                vec![entries]
+            };
+            for group in groups {
+                found.extend(
+                    group
+                        .iter()
+                        .filter_map(|(key, entry)| Some((key.as_str(), entry.as_table()?))),
+                );
             }
         }
     }
-    Ok(paths)
+    found
+}
+
+/// Refuse a dependency's `registry-index` that is not a network index
+/// ([`network_url`]) in a manifest of the workspace ([`workspace_manifests`]),
+/// in every dependency table ([`dependency_entries`]), before cargo starts.
+/// A manifest names one with no config at all.
+///
+/// This is the early, clearer refusal, not the guarantee: a git
+/// dependency's manifest is fetched by cargo after any scan, so the door
+/// checks the lock cargo leaves ([`refuse_lock_sources`]) before anything
+/// is published.
+fn refuse_manifest_registry_indexes(lock_root: &Path) -> io::Result<()> {
+    let keys = Bound::new(lock_root)?;
+    for manifest in workspace_manifests(lock_root, &keys)? {
+        let text = std::fs::read_to_string(&manifest)?;
+        let Ok(value) = toml::from_str::<toml::Table>(&text) else {
+            continue;
+        };
+        for (name, entry) in dependency_entries(&value) {
+            let Some(url) = entry.get("registry-index").and_then(|url| url.as_str()) else {
+                continue;
+            };
+            if !network_url(url) {
+                return Err(crate::kernel::error::refused(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} names registry-index {url:?} for {name}; ward resolves a \
+                         dependency only from a registry index over https (sparse+https://, \
+                         https://) or a git index over ssh:// or git://, since a file or \
+                         path index is read without the proxy that checks every index",
+                        manifest.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The manifests a cargo starting at `lock_root` reads from the project:
+/// the root's, each member's as cargo's member discovery finds them
+/// ([`member_dirs`], hidden directories included), every `Cargo.toml` the
+/// tree walk finds ([`manifests_under`]), those under each path
+/// dependency or member outside the root ([`path_dependency_roots`],
+/// which bounds them), and, followed from each of these, every path
+/// dependency's. Canonical, each once; the signing key refused.
+fn workspace_manifests(lock_root: &Path, keys: &Bound) -> io::Result<Vec<PathBuf>> {
+    let mut queue = manifests_under(lock_root)?;
+    queue.push(lock_root.join("Cargo.toml"));
+    // A members list cargo cannot read is cargo's to report; the lock
+    // check still holds for what it then resolves.
+    if let Ok(members) = ProjectRoot::open(lock_root).and_then(|root| member_dirs(&root)) {
+        queue.extend(
+            members
+                .listed
+                .iter()
+                .map(|dir| lock_root.join(dir).join("Cargo.toml")),
+        );
+    }
+    for root in path_dependency_roots(lock_root)? {
+        queue.extend(manifests_under(&root)?);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(manifest) = queue.pop() {
+        let Ok(real) = std::fs::canonicalize(&manifest) else {
+            continue;
+        };
+        if !real.is_file() || seen.contains(&real) {
+            continue;
+        }
+        let dir = real.parent().unwrap_or(Path::new("/")).to_path_buf();
+        queue.extend(
+            path_dependencies(&real, keys)?
+                .into_iter()
+                .map(|path| dir.join(path).join("Cargo.toml")),
+        );
+        seen.insert(real);
+    }
+    Ok(seen.into_iter().collect())
 }
 
 /// A workspace's members inside its root, as cargo 1.98 finds them.
@@ -1135,6 +1301,10 @@ pub fn cargo_confined<'a>(
     confined.forced.cargo_registries = registries;
     confined.store_reads = vec![run.rust_obj.to_path_buf()];
     confined.extra_roots = path_dependency_roots(run.lock_root)?;
+    // The configuration cargo reads here: its transports (an ssh mirror
+    // replacing crates.io, which the lock still names as crates.io) join
+    // the lock's in the result check's one set.
+    let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
     // cargo's build output is not a resolution input.
     confined.exclude = vec![PathGlob::new("target")?];
     confined.routes = vec![crates_index::route()?];
@@ -1169,7 +1339,41 @@ pub fn cargo_confined<'a>(
             confined.target = Target::Detached;
         }
     }
+    // Every run (lock generation, an update, attest's metadata) is judged
+    // by the locks it leaves, before anything is published.
+    // What it accepts, the transports of its locks and of the configuration
+    // ([`transport_exceptions`], one set) are facts of the run: the door
+    // records them under the run's policy (a deny refuses the run) with the
+    // session's, and carries them in the signed record.
+    let locks = cargo_locks(run.args, &confined.outputs);
+    confined.check = Some(Box::new(move |staged: &Staged<'_>| {
+        let mut sources: Vec<String> = Vec::new();
+        for lock in &locks {
+            let Some(bytes) = staged.read(lock)? else {
+                continue;
+            };
+            sources.extend(refuse_lock_sources(&bytes)?);
+        }
+        transport_exceptions(sources.iter().map(String::as_str), &files)
+            .into_iter()
+            .map(fact_of)
+            .collect()
+    }));
     Ok(confined)
+}
+
+/// `exception` as a fact of the run, under the policy kind it names.
+fn fact_of(exception: crate::kernel::policy::Exception) -> io::Result<Fact> {
+    let kind = crate::kernel::policy::KINDS
+        .iter()
+        .copied()
+        .find(|kind| *kind == exception.kind)
+        .ok_or_else(|| io::Error::other(format!("unknown exception kind {}", exception.kind)))?;
+    Ok(Fact {
+        kind,
+        subject: exception.subject,
+        detail: exception.detail,
+    })
 }
 
 /// `--config` pairs, forced ones included, before the subcommand; a scratch
@@ -1200,9 +1404,28 @@ fn wiring(wire: &Wire<'_>) -> io::Result<Wiring> {
 
 /// Run the store cargo confined through `door`. A Detached run's ledger
 /// ids come back in the report for the caller to root.
-pub fn run_cargo(
+pub fn run_cargo(door: &mut ResolutionDoor<'_>, run: CargoRun<'_>) -> io::Result<DelegateReport> {
+    run_cargo_with(door, run, None)
+}
+
+/// [`run_cargo`], with the `CARGO_HOME` the run used, as cargo was given it
+/// and resolved (`<scratch>/cargo-home`; the scratch is gone once the run
+/// returns): what `cargo metadata`'s `manifest_path`s of downloaded crates
+/// lie under.
+pub fn run_cargo_reading_home(
+    door: &mut ResolutionDoor<'_>,
+    run: CargoRun<'_>,
+) -> io::Result<(DelegateReport, Vec<PathBuf>)> {
+    let homes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let report = run_cargo_with(door, run, Some(homes.clone()))?;
+    let homes = homes.take();
+    Ok((report, homes))
+}
+
+fn run_cargo_with(
     door: &mut ResolutionDoor<'_>,
     mut run: CargoRun<'_>,
+    homes: Option<std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>>,
 ) -> io::Result<DelegateReport> {
     let publish = std::mem::replace(
         &mut run.publish,
@@ -1210,16 +1433,36 @@ pub fn run_cargo(
             outputs: Vec::new(),
         },
     );
+    // The lock root is where cargo starts, and inside the sandbox the only
+    // directory of its configuration chain that holds the project's files.
+    // An ssh index there is this machine's git transport, recorded as a
+    // git dependency's is.
+    let files = config_files(run.lock_root, &Bound::new(run.lock_root)?)?;
+    refuse_unneutralized_settings(&files)?;
+    record_exceptions(&transport_exceptions([], &files))?;
+    refuse_manifest_registry_indexes(run.lock_root)?;
     let registries = configured_registries(run.lock_root)?;
-    let confined = cargo_confined(&run, publish, &registries)?;
+    let mut confined = cargo_confined(&run, publish, &registries)?;
+    if let Some(homes) = homes {
+        confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
+            let home = wire.scratch.join("cargo-home");
+            let real = std::fs::canonicalize(wire.scratch)
+                .map(|scratch| scratch.join("cargo-home"))
+                .unwrap_or_else(|_| home.clone());
+            homes.borrow_mut().extend([home, real]);
+            wiring(wire)
+        }));
+    }
     let spec = cargo_spec(run.rust_obj, run.lock_root, run.args);
     spec.trace();
-    door.run_confined(spec, confined).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("store cargo {}: {error}", run.args.join(" ")),
-        )
-    })
+    door.run_confined(spec, confined)
+        .map_err(|error| cargo_failure(run.args, error))
+}
+
+/// A confined cargo run's error, named by its arguments, keeping its class:
+/// a refusal stays one (exit 3, `"refused"` in `--json`).
+fn cargo_failure(args: &[&str], error: io::Error) -> io::Error {
+    crate::kernel::error::context(error, format_args!("store cargo {}", args.join(" ")))
 }
 
 /// `run_cargo` that fails on a nonzero exit, naming cargo's own words.
@@ -1663,6 +1906,50 @@ mod tests {
         assert!(error.contains("outside"), "{error}");
     }
 
+    /// Two includes in different directories, each a symlink to one file
+    /// that includes `extra.toml`: cargo reads the file twice, each time
+    /// resolving `extra.toml` beside the symlink it came through, so both
+    /// `extra.toml`s are read. A file that includes itself through a
+    /// symlinked directory ends the walk instead of looping.
+    fn symlinked_include_fixture(root: &Path) {
+        use std::os::unix::fs::symlink;
+        for dir in [".cargo/a", ".cargo/b", ".cargo/shared"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let write = |relative: &str, text: &str| std::fs::write(root.join(relative), text).unwrap();
+        write(
+            ".cargo/config.toml",
+            "include = [\"a/link.toml\", \"b/link.toml\", \"loop/self.toml\"]\n",
+        );
+        write(".cargo/shared/target.toml", "include = [\"extra.toml\"]\n");
+        symlink("../shared/target.toml", root.join(".cargo/a/link.toml")).unwrap();
+        symlink("../shared/target.toml", root.join(".cargo/b/link.toml")).unwrap();
+        write(".cargo/a/extra.toml", "paths = [\"evil/dep\"]\n");
+        write(".cargo/b/extra.toml", "");
+        // `loop -> .`: `loop/self.toml` includes `loop/self.toml` again,
+        // one directory deeper by name, the same place on disk.
+        symlink(".", root.join(".cargo/loop")).unwrap();
+        write(".cargo/self.toml", "include = [\"loop/self.toml\"]\n");
+    }
+
+    #[test]
+    fn a_shared_include_is_read_in_each_place_it_is_included_from() {
+        let temp = TempDir::named("cargo-include-contexts");
+        let root = temp.0.join("ws");
+        symlinked_include_fixture(&root);
+        let error = refuse_project_config([root.as_path()], &Bound::new(&root).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a/extra.toml sets paths"), "{error}");
+
+        let held = ProjectRoot::open(&root).unwrap();
+        let files = held_config_files(&held, Path::new(""), &[]).unwrap();
+        let error = refuse_unneutralized_settings(&files)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a/extra.toml sets paths"), "{error}");
+    }
+
     /// A project door keeps its receipt for a self-contained workspace and
     /// drops it when the workspace reads a path dependency outside its
     /// root, which a record cannot name.
@@ -1711,6 +1998,975 @@ mod tests {
         )
         .unwrap();
         assert!(!confined(&root), "an external path dependency drops it");
+    }
+
+    /// Each setting no forced flag undoes is refused by its key and file,
+    /// in the config itself or only in a file it includes. Replacement by
+    /// a network registry (a mirror, a chain of them), registries without
+    /// a provider of their own, plain aliases and `[env]` entries pass.
+    #[test]
+    fn settings_no_forced_flag_undoes_are_refused_by_name() {
+        let temp = TempDir::named("cargo-unneutralized");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        let marker = root.join("marker.sh").display().to_string();
+        let check = |text: &str| {
+            std::fs::write(root.join(".cargo/config.toml"), text).unwrap();
+            refuse_project_config([root.as_path()], &Bound::new(&root).unwrap())
+        };
+        let replacement = "[source.crates-io]\nreplace-with = \"mirror\"\n\
+                           [source.mirror]\nregistry = \"sparse+https://mirror.test/\"\n";
+        for (text, key) in [
+            ("paths = [\"evil/dep\"]\n".to_string(), "paths"),
+            (
+                format!("{replacement}[registry]\nglobal-credential-providers = [\"{marker}\"]\n"),
+                "registry.global-credential-providers",
+            ),
+            (
+                format!("registry.credential-provider = \"{marker}\"\n"),
+                "registry.credential-provider",
+            ),
+            (
+                format!(
+                    "[registries.evil]\nindex = \"sparse+https://evil.test/\"\n\
+                     credential-provider = [\"{marker}\"]\n"
+                ),
+                "registries.evil.credential-provider",
+            ),
+            (
+                format!("[credential-alias]\nmine = [\"{marker}\"]\n"),
+                "credential-alias",
+            ),
+            // ward's own source, redirected or redefined: the build's
+            // crates.io replacement would lead wherever the project says.
+            (
+                "[source.greyward-vendor]\nreplace-with = \"evil\"\n\
+                 [source.evil]\nregistry = \"sparse+https://evil.test/\"\n"
+                    .to_string(),
+                "source.greyward-vendor",
+            ),
+            (
+                "[source.crates-io]\nreplace-with = \"greyward-vendor\"\n".to_string(),
+                "source.crates-io.replace-with",
+            ),
+            // A directory or local registry is a source whose checksums
+            // the project writes itself.
+            (
+                "[source.crates-io]\nreplace-with = \"vendored\"\n\
+                 [source.vendored]\ndirectory = \"vendor\"\n"
+                    .to_string(),
+                "source.vendored.directory",
+            ),
+            (
+                "[source.local]\nlocal-registry = \"registry\"\n".to_string(),
+                "source.local.local-registry",
+            ),
+            // An alias that adds `--config` or `-Z` gets past the wrapper,
+            // which sees only the alias name.
+            (
+                "[alias]\nb = \"build --config source.crates-io.replace-with='x'\"\n".to_string(),
+                "alias.b",
+            ),
+            (
+                "[alias]\nc = [\"build\", \"--config=net.offline=false\"]\n".to_string(),
+                "alias.c",
+            ),
+            (
+                "[alias]\nz = [\"build\", \"-Zunstable-options\"]\n".to_string(),
+                "alias.z",
+            ),
+            (
+                "[alias]\nz = \"build -Z unstable-options\"\n".to_string(),
+                "alias.z",
+            ),
+            // The dynamic loader's variables run project code in every
+            // program cargo starts, the compiler probe included, and a
+            // variable ward forces is ward's.
+            (
+                "[env]\nLD_PRELOAD = { value = \"evil.so\", force = true }\n".to_string(),
+                "env.LD_PRELOAD",
+            ),
+            (
+                "[env]\nLD_LIBRARY_PATH = \"evil\"\n".to_string(),
+                "env.LD_LIBRARY_PATH",
+            ),
+            (
+                "[env]\nRUSTC_WRAPPER = \"evil\"\n".to_string(),
+                "env.RUSTC_WRAPPER",
+            ),
+            (
+                "[env]\nCARGO_HOME = \"evil\"\n".to_string(),
+                "env.CARGO_HOME",
+            ),
+            // A registry, index or source read from files rather than over
+            // the network: git and cargo read them without the proxy, so no
+            // index or git check of ward's sees them.
+            (
+                "[source.crates-io]\nreplace-with = \"filereg\"\n\
+                 [source.filereg]\nregistry = \"file:///project/index\"\n"
+                    .to_string(),
+                "source.filereg.registry",
+            ),
+            (
+                "[registries.evil]\nindex = \"file:///project/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registries.evil]\nindex = \"/project/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registries.evil]\nindex = \"sparse+file:///project/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registry]\nindex = \"FILE:///project/index\"\n".to_string(),
+                "registry.index",
+            ),
+            (
+                "[source.g]\ngit = \"file:///project/repo\"\n".to_string(),
+                "source.g.git",
+            ),
+            (
+                "[registries.evil]\nindex = \"http://evil.test/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            (
+                "[registries.evil]\nindex = \"ssh://-oProxyCommand=evil/index\"\n".to_string(),
+                "registries.evil.index",
+            ),
+            // Unstable compiler flags (a codegen backend is a library rustc
+            // loads) and what turns them on for the stable compiler.
+            (
+                "[env]\nRUSTC_BOOTSTRAP = \"1\"\n".to_string(),
+                "env.RUSTC_BOOTSTRAP",
+            ),
+            // git reads GIT_CONFIG_PARAMETERS after ward's forced
+            // GIT_CONFIG_COUNT entries; every GIT_ variable is git's.
+            (
+                "[env]\nGIT_CONFIG_PARAMETERS = \"'protocol.ext.allow'='always'\"\n".to_string(),
+                "env.GIT_CONFIG_PARAMETERS",
+            ),
+            (
+                "[env]\nGIT_ALLOW_PROTOCOL = { value = \"ext:https\", force = true }\n".to_string(),
+                "env.GIT_ALLOW_PROTOCOL",
+            ),
+            (
+                "[env]\nGIT_TEMPLATE_DIR = \"hooks\"\n".to_string(),
+                "env.GIT_TEMPLATE_DIR",
+            ),
+            (
+                "[env]\nRUSTC_BOOTSTRAP_PROC_MACRO = \"1\"\n".to_string(),
+                "env.RUSTC_BOOTSTRAP_PROC_MACRO",
+            ),
+            (
+                "[target.x86_64-unknown-linux-gnu]\n\
+                 rustflags = [\"-Zcodegen-backend=/project/evil.so\"]\n"
+                    .to_string(),
+                "target.x86_64-unknown-linux-gnu.rustflags",
+            ),
+            (
+                "[target.'cfg(unix)']\nrustflags = \"-C codegen-backend=/project/evil.so\"\n"
+                    .to_string(),
+                "target.cfg(unix).rustflags",
+            ),
+            (
+                "[build]\nrustflags = \"-Z unstable-options\"\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustdocflags = [\"-Zunstable-options\"]\n".to_string(),
+                "build.rustdocflags",
+            ),
+            (
+                "[build]\nrustflags = [\"@/project/args\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            // Each spelling of the codegen option, and `-Z` apart from its
+            // value.
+            (
+                "[build]\nrustflags = [\"-C\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-Ccodegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = \"--codegen codegen-backend=/p/evil.so\"\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"--codegen=codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-C\", \"codegen_backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-Copt-level=2\", \"-Z\", \"x\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            // Short options cluster as getopts reads them: `-g` then `-Z`,
+            // its value the rest of the word or the next one. getopts also
+            // takes `--Z` as the short option.
+            (
+                "[build]\nrustflags = [\"-gZcodegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-gZ\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-OgCcodegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-gC\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"--Z=codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            // A Z before the first value-taking short option is still in
+            // the option part.
+            (
+                "[build]\nrustflags = [\"-gZL/x\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"-Zfoo\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustflags = [\"--Z\", \"codegen-backend=/p/evil.so\"]\n".to_string(),
+                "build.rustflags",
+            ),
+            (
+                "[build]\nrustdocflags = \"-e extra.css --Z unstable-options\"\n".to_string(),
+                "build.rustdocflags",
+            ),
+            (
+                "[env]\nRUSTFLAGS = \"-Copt-level=2 -Zcodegen-backend=x\"\n".to_string(),
+                "env.RUSTFLAGS",
+            ),
+            (
+                "[env]\nCARGO_ENCODED_RUSTFLAGS = \"-Copt-level=2\\u001f-Zx\"\n".to_string(),
+                "env.CARGO_ENCODED_RUSTFLAGS",
+            ),
+            (
+                "[env]\nRUSTDOCFLAGS = { value = \"-Z x\", force = true }\n".to_string(),
+                "env.RUSTDOCFLAGS",
+            ),
+        ] {
+            let error = check(&text).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{key}");
+            let error = error.to_string();
+            let named = error
+                .split_once(" sets ")
+                .and_then(|(_, rest)| rest.split_once(';'))
+                .map(|(keys, _)| keys.split(", ").any(|named| named == key));
+            assert_eq!(named, Some(true), "{key}: {error}");
+            assert!(error.contains("config.toml"), "{key}: {error}");
+        }
+
+        // Only in an included file: the walk follows the include.
+        std::fs::write(root.join(".cargo/more.toml"), "paths = [\"evil/dep\"]\n").unwrap();
+        let error = check("include = [\"more.toml\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more.toml sets paths"), "{error}");
+
+        // A replacement chain that ends at a directory source defined in
+        // another file is named where it starts.
+        std::fs::write(
+            root.join(".cargo/more.toml"),
+            "[source.mid]\nreplace-with = \"local\"\n\
+             [source.local]\ndirectory = \"vendor\"\n",
+        )
+        .unwrap();
+        let error = check(
+            "include = [\"more.toml\"]\n\
+             [source.crates-io]\nreplace-with = \"mid\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("config.toml sets source.crates-io.replace-with"),
+            "{error}"
+        );
+
+        for allowed in [
+            replacement.to_string(),
+            // A chain of network registries.
+            "[source.crates-io]\nreplace-with = \"a\"\n\
+             [source.a]\nreplace-with = \"b\"\n\
+             [source.b]\nregistry = \"sparse+https://mirror.test/\"\n"
+                .to_string(),
+            "[registries.internal]\nindex = \"sparse+https://internal.test/\"\n\
+             [registry]\ndefault = \"internal\"\n"
+                .to_string(),
+            "[alias]\nt = \"test --workspace\"\nr = [\"run\", \"--release\"]\n".to_string(),
+            // Network indexes: https, sparse over https, and a git index
+            // over ssh or git.
+            "[registries.a]\nindex = \"https://git.internal.test/index\"\n\
+             [registries.b]\nindex = \"ssh://git@git.internal.test/index\"\n\
+             [registries.c]\nindex = \"git://git.internal.test/index\"\n\
+             [registry]\nindex = \"https://github.com/rust-lang/crates.io-index\"\n\
+             [source.g]\ngit = \"https://git.internal.test/repo\"\n"
+                .to_string(),
+            "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n\
+             rustdocflags = \"--cfg docsrs\"\n\
+             [target.'cfg(unix)']\nrustflags = \"-Copt-level=2\"\n\
+             [env]\nRUSTFLAGS = \"-Copt-level=2\"\n"
+                .to_string(),
+            // `codegen-backend` as the value of another option is no
+            // backend: a feature name, a remapped path.
+            "[build]\nrustflags = [\"--cfg\", 'feature=\"codegen-backend\"']\n\
+             [target.'cfg(unix)']\n\
+             rustflags = \"--remap-path-prefix=/home/x/codegen-backend=/src\"\n\
+             [env]\nRUSTFLAGS = \"--remap-path-prefix /x/codegen-backend=/src -L /x/-Zdir\"\n\
+             CARGO_ENCODED_RUSTFLAGS = \"--cfg\\u001ffeature=\\\"codegen-backend\\\"\"\n"
+                .to_string(),
+            // Flag-only short options cluster; a value-taking one keeps
+            // the rest of its word, or the next word, as its value.
+            "[build]\nrustflags = [\"-gO\", \"-Dwarnings\", \"-L\", \"native=/x/-Zdir\", \
+             \"-lstatic=z\", \"-Wunused\", \"-Cdebuginfo=1\"]\n"
+                .to_string(),
+            // A value attached to a short option that takes one is not its
+            // name: a library directory under /home/Zoe.
+            "[build]\nrustflags = [\"-L/home/Zoe/native\", \"-lZ\", \"-gLnative=/Z\"]\n\
+             [env]\nRUSTFLAGS = \"-L/home/Zoe/native -Cdebuginfo=1\"\n"
+                .to_string(),
+            // rustdoc's own short options, which rustc does not have.
+            "[build]\nrustdocflags = [\"-e\", \"extra.css\", \"-whtml\"]\n\
+             [env]\nRUSTDOCFLAGS = \"-e extra.css -w html --cfg docsrs\"\n"
+                .to_string(),
+            "[env]\nMY_SETTING = \"1\"\nOPENSSL_DIR = { value = \"/opt\", force = true }\n"
+                .to_string(),
+            String::new(),
+        ] {
+            check(&allowed).unwrap_or_else(|error| panic!("{allowed}: {error}"));
+        }
+    }
+
+    /// The `-Z` refusal reads a capital `Z` anywhere in a flag's option
+    /// part as `-Z`, which needs no table of rustc's options: no option
+    /// rustc or rustdoc lists but `-Z` itself has one in its name. Checked
+    /// against the help of the toolchain the tests build with.
+    #[test]
+    fn no_rustc_or_rustdoc_option_but_z_names_a_capital_z() {
+        for (tool, args) in [
+            ("rustc", &["--help", "-v"][..]),
+            ("rustdoc", &["--help"][..]),
+        ] {
+            let Ok(output) = std::process::Command::new(tool).args(args).output() else {
+                panic!("{tool} is not on PATH");
+            };
+            let help = String::from_utf8_lossy(&output.stdout);
+            let names: Vec<&str> = help
+                .lines()
+                .flat_map(|line| {
+                    line.split_whitespace()
+                        .map(|word| word.trim_end_matches(','))
+                        .take_while(|word| word.starts_with('-'))
+                })
+                .collect();
+            assert!(names.contains(&"--cfg"), "{tool}: {help}");
+            let with_z: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|name| name.contains('Z') && *name != "-Z")
+                .collect();
+            assert!(with_z.is_empty(), "{tool}: {with_z:?}");
+        }
+    }
+
+    /// A git index over ssh is recorded as `host-git-transport`, as a git
+    /// dependency over ssh is: cargo's git reaches it with this machine's
+    /// ssh configuration and agent, not through the proxy, and so is one
+    /// over the git protocol, which this machine dials unauthenticated. An
+    /// https index records nothing.
+    #[test]
+    fn an_ssh_index_is_a_host_git_transport() {
+        let temp = TempDir::named("cargo-index-transport");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[registries.a]\nindex = \"ssh://git@git.internal.test/index\"\n\
+             [registries.b]\nindex = \"git://git.internal.test/index\"\n\
+             [registries.c]\nindex = \"sparse+https://internal.test/\"\n\
+             [source.m]\nregistry = \"ssh://git@git.internal.test/mirror\"\n",
+        )
+        .unwrap();
+        let files = config_files(&root, &Bound::new(&root).unwrap()).unwrap();
+        let found: Vec<(String, String)> = transport_exceptions([], &files)
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "ssh://git@git.internal.test/index",
+                "git://git.internal.test/index",
+                "ssh://git@git.internal.test/mirror"
+            ]
+            .map(|url| (
+                crate::kernel::policy::HOST_GIT_TRANSPORT.to_string(),
+                url.to_string()
+            ))
+            .to_vec()
+        );
+    }
+
+    /// The door refuses a project credential provider before cargo starts:
+    /// the replacement source in this config is the shape whose provider
+    /// cargo would run in spite of the forced settings.
+    #[test]
+    fn run_cargo_refuses_a_project_credential_provider_before_cargo_starts() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-door-provider");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"ws\"\n").unwrap();
+        let ran = temp.0.join("marker-ran");
+        let marker = root.join("marker.sh");
+        std::fs::write(
+            &marker,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[source.crates-io]\nreplace-with = \"mirror\"\n\
+                 [source.mirror]\nregistry = \"sparse+https://mirror.test/\"\n\
+                 [registry]\nglobal-credential-providers = [\"{}\"]\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let store = crate::kernel::store::Store::for_test(temp.0.join("absent-store"));
+        let mut scope = crate::kernel::testutil::DoorScope::new();
+        let mut door = scope.door(
+            &store,
+            &activity,
+            crate::kernel::platform::Platform::host().unwrap(),
+            crate::kernel::resolve::DoorKind::MissingLock,
+        );
+        let error = run_cargo(
+            &mut door,
+            CargoRun {
+                rust_obj: Path::new("/nonexistent/rust"),
+                lock_root: &root,
+                args: &["generate-lockfile"],
+                publish: CargoPublish::Detached {
+                    outputs: Vec::new(),
+                },
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("sets registry.global-credential-providers"),
+            "{error}"
+        );
+        assert!(!ran.exists(), "the project's provider ran");
+    }
+
+    /// A dependency's `registry-index` in any manifest cargo reads (the
+    /// root, a member, its target-specific and build or dev tables, a
+    /// patch) is held to the network rule before cargo starts: lock
+    /// generation would otherwise read a file index and its archives.
+    #[test]
+    fn run_cargo_refuses_a_manifest_registry_index_before_cargo_starts() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-door-registry-index");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        let store = crate::kernel::store::Store::for_test(temp.0.join("absent-store"));
+        let run = |root: &Path| {
+            let mut scope = crate::kernel::testutil::DoorScope::new();
+            let mut door = scope.door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::MissingLock,
+            );
+            run_cargo(
+                &mut door,
+                CargoRun {
+                    rust_obj: Path::new("/nonexistent/rust"),
+                    lock_root: root,
+                    args: &["generate-lockfile"],
+                    publish: CargoPublish::Detached {
+                        outputs: Vec::new(),
+                    },
+                },
+            )
+            .map(drop)
+            .unwrap_err()
+            .to_string()
+        };
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"m\"]\n\
+             [workspace.dependencies]\nw = { version = \"1\", registry-index = \"https://w.test/index\" }\n",
+        )
+        .unwrap();
+        for (table, url) in [
+            (
+                "[target.'cfg(unix)'.build-dependencies]",
+                "file:///ws/index",
+            ),
+            ("[dev_dependencies]", "/ws/index"),
+            ("[dependencies]", "sparse+file:///ws/index"),
+            ("[patch.crates-io]", "file:///ws/index"),
+        ] {
+            std::fs::write(
+                root.join("m/Cargo.toml"),
+                format!(
+                    "[package]\nname = \"m\"\nversion = \"0.1.0\"\n\
+                     {table}\nx = {{ version = \"1\", registry-index = \"{url}\" }}\n"
+                ),
+            )
+            .unwrap();
+            let error = run(&root);
+            assert!(
+                error.contains("registry-index") && error.contains(url),
+                "{table}: {error}"
+            );
+            assert!(error.contains("m/Cargo.toml"), "{table}: {error}");
+        }
+        // A network index passes the check (cargo then fails on the
+        // absent toolchain, which is not this check's error).
+        std::fs::write(
+            root.join("m/Cargo.toml"),
+            "[package]\nname = \"m\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nx = { version = \"1\", registry-index = \"sparse+https://x.test/\" }\n",
+        )
+        .unwrap();
+        assert!(!run(&root).contains("registry-index"));
+    }
+
+    /// The guarantee: the lock a cargo run leaves is refused when a package
+    /// in it comes from a registry that is not a network index, whatever
+    /// manifest named it. Each lock here is what cargo writes for one of
+    /// three manifests the pre-scan cannot (or once could not) see: a
+    /// member under a hidden directory, a `[patch]` entry for a crate named
+    /// `version`, and a git dependency's own manifest, fetched after any
+    /// pre-scan.
+    #[test]
+    fn a_lock_from_a_file_registry_is_refused() {
+        let lock = |source: &str| {
+            format!(
+                "version = 4\n\
+                 [[package]]\nname = \"ws\"\nversion = \"0.1.0\"\n\
+                 [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 [[package]]\nname = \"bad\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
+            )
+        };
+        for source in [
+            // `.hidden/member/Cargo.toml`'s registry-index.
+            "registry+file:///ws/index",
+            // `[patch.crates-io] version = { registry-index = ... }`.
+            "sparse+file:///ws/index",
+            // A fetched git dependency's manifest.
+            "registry+file:///ws/.git-dep-index",
+            "registry+http://mirror.test/index",
+            "sparse+http://mirror.test/",
+            "registry+ssh://-oProxyCommand=x/index",
+            "directory+file:///ws/vendor",
+            "git+ext::sh -c x",
+            "unknown",
+        ] {
+            let error = refuse_lock_sources(lock(source).as_bytes()).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{source}");
+            assert_eq!(
+                crate::kernel::error::class_of(&error),
+                Some(crate::kernel::error::Class::Refused),
+                "{source}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("bad@1.0.0") && text.contains(source),
+                "{text}"
+            );
+            assert!(!text.contains("itoa"), "{text}");
+            assert!(text.contains("nothing was published"), "{text}");
+        }
+        for source in [
+            "registry+https://github.com/rust-lang/crates.io-index",
+            "sparse+https://index.crates.io/",
+            "registry+ssh://git@git.test/index",
+            "registry+git://git.test/index",
+            "git+https://github.com/a/b?branch=main#0123456789abcdef0123456789abcdef01234567",
+            "git+ssh://git@git.test/a/b#0123456789abcdef0123456789abcdef01234567",
+            "git+file:///srv/repo#0123456789abcdef0123456789abcdef01234567",
+        ] {
+            refuse_lock_sources(lock(source).as_bytes()).unwrap();
+        }
+        // Path packages carry no source; a lock that is not TOML is refused.
+        refuse_lock_sources(b"version = 4\n[[package]]\nname = \"m\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        assert!(refuse_lock_sources(b"[[package").is_err());
+    }
+
+    /// The check runs inside the door on every cargo run: lock
+    /// generation, an update, attest's metadata run. Its refusal leaves
+    /// the project as it was, no record written (the door's own test,
+    /// `a_result_check_refusal_publishes_nothing`, shows the order).
+    #[test]
+    fn every_cargo_run_checks_the_lock_it_leaves() {
+        let temp = TempDir::named("cargo-door-result-check");
+        std::fs::write(
+            temp.0.join("Cargo.toml"),
+            "[package]\nname = \"ws\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let run = CargoRun {
+            rust_obj: Path::new("/nonexistent/rust"),
+            lock_root: &temp.0,
+            args: &["generate-lockfile"],
+            publish: CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+        };
+        for publish in [
+            CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+            CargoPublish::Project {
+                outputs: Vec::new(),
+                receipt: None,
+            },
+        ] {
+            let confined = cargo_confined(&run, publish, &[]).unwrap();
+            assert!(confined.check.is_some());
+        }
+    }
+
+    /// The pre-scan reads the manifests cargo reads, as member discovery
+    /// finds them: a member under a hidden directory (which a walk of the
+    /// tree skips) and a path dependency of one are checked too. And every
+    /// `[patch.<source>]` entry is a dependency, whatever the crate's name:
+    /// a crate named `version` does not hide its source's table.
+    #[test]
+    fn the_registry_index_pre_scan_reads_hidden_members_and_every_patch() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-door-registry-index-members");
+        let store = crate::kernel::store::Store::for_test(temp.0.join("absent-store"));
+        let run = |root: &Path| {
+            let mut scope = crate::kernel::testutil::DoorScope::new();
+            let mut door = scope.door(
+                &store,
+                &activity,
+                crate::kernel::platform::Platform::host().unwrap(),
+                crate::kernel::resolve::DoorKind::MissingLock,
+            );
+            run_cargo(
+                &mut door,
+                CargoRun {
+                    rust_obj: Path::new("/nonexistent/rust"),
+                    lock_root: root,
+                    args: &["generate-lockfile"],
+                    publish: CargoPublish::Detached {
+                        outputs: Vec::new(),
+                    },
+                },
+            )
+            .map(drop)
+            .unwrap_err()
+            .to_string()
+        };
+        let bad = "x = { version = \"1\", registry-index = \"file:///ws/index\" }\n";
+        let package = "[package]\nname = \"m\"\nversion = \"0.1.0\"\n";
+        let cases: [(&str, Vec<(&str, String)>, &str); 4] = [
+            (
+                "hidden-member",
+                vec![
+                    ("Cargo.toml", "[workspace]\nmembers = [\".hidden/*\"]\n".into()),
+                    (
+                        ".hidden/m/Cargo.toml",
+                        format!("{package}[dependencies]\n{bad}"),
+                    ),
+                ],
+                ".hidden/m/Cargo.toml",
+            ),
+            (
+                "hidden-path-dependency",
+                vec![
+                    (
+                        "Cargo.toml",
+                        format!("{package}[dependencies]\nd = {{ path = \".deps/d\" }}\n"),
+                    ),
+                    (
+                        ".deps/d/Cargo.toml",
+                        format!(
+                            "[package]\nname = \"d\"\nversion = \"0.1.0\"\n[build-dependencies]\n{bad}"
+                        ),
+                    ),
+                ],
+                ".deps/d/Cargo.toml",
+            ),
+            (
+                "patch-named-version",
+                vec![(
+                    "Cargo.toml",
+                    format!(
+                        "{package}[patch.crates-io]\n\
+                         version = {{ version = \"1\", registry-index = \"file:///ws/index\" }}\n"
+                    ),
+                )],
+                "Cargo.toml",
+            ),
+            (
+                "patch-beside-git",
+                vec![(
+                    "Cargo.toml",
+                    format!(
+                        "{package}[patch.crates-io]\n\
+                         git = {{ git = \"https://g.test/git\" }}\n{bad}"
+                    ),
+                )],
+                "Cargo.toml",
+            ),
+        ];
+        for (name, files, manifest) in cases {
+            let root = temp.0.join(name);
+            for (path, text) in files {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            }
+            let error = run(&root);
+            assert!(
+                error.contains("registry-index") && error.contains("file:///ws/index"),
+                "{name}: {error}"
+            );
+            assert!(error.contains(manifest), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_patch_entry_named_like_a_field_still_yields_its_path() {
+        let table: toml::Table = toml::from_str(
+            "[patch.crates-io]\nversion = { path = \"v\" }\npath = { path = \"p\" }\n\
+             other = { path = \"o\" }\n",
+        )
+        .unwrap();
+        let mut names: Vec<&str> = dependency_entries(&table)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["other", "path", "version"]);
+    }
+
+    /// The hook reads every lock cargo may leave: with `--manifest-path`
+    /// (Python's sdist build runs `--manifest-path native/Cargo.toml` at the
+    /// source root) the lock is beside that manifest, or in a directory
+    /// above it, and the root has none.
+    #[test]
+    fn the_lock_check_reads_the_lock_beside_the_manifest_path() {
+        assert_eq!(
+            cargo_locks(
+                &["generate-lockfile", "--manifest-path", "native/Cargo.toml"],
+                &[
+                    PathBuf::from("native/Cargo.lock"),
+                    PathBuf::from("Cargo.lock")
+                ],
+            ),
+            [
+                PathBuf::from("Cargo.lock"),
+                PathBuf::from("native/Cargo.lock")
+            ]
+        );
+        assert_eq!(
+            cargo_locks(
+                &[
+                    "update",
+                    "--manifest-path=a/b/Cargo.toml",
+                    "--",
+                    "--manifest-path=x/Cargo.toml"
+                ],
+                &[PathBuf::from("c/Cargo.lock"), PathBuf::from("Cargo.toml")],
+            ),
+            [
+                PathBuf::from("Cargo.lock"),
+                PathBuf::from("a/b/Cargo.lock"),
+                PathBuf::from("a/Cargo.lock"),
+                PathBuf::from("c/Cargo.lock"),
+            ]
+        );
+
+        let temp = TempDir::named("cargo-door-nested-lock");
+        let root = temp.0.join("src");
+        std::fs::create_dir_all(root.join("native")).unwrap();
+        std::fs::write(
+            root.join("native/Cargo.toml"),
+            "[package]\nname = \"native\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("native/Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"bad\"\nversion = \"1.0.0\"\n\
+             source = \"registry+file:///src/index\"\n",
+        )
+        .unwrap();
+        let run = CargoRun {
+            rust_obj: Path::new("/nonexistent/rust"),
+            lock_root: &root,
+            args: &["generate-lockfile", "--manifest-path", "native/Cargo.toml"],
+            publish: CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+        };
+        let check = |outputs: Vec<PathBuf>| {
+            let confined = cargo_confined(&run, CargoPublish::Detached { outputs }, &[]).unwrap();
+            (confined.check.unwrap())(&Staged::in_dir(&root))
+        };
+        let error = check(vec![PathBuf::from("native/Cargo.lock")]).unwrap_err();
+        assert!(error.to_string().contains("bad@1.0.0"), "{error}");
+        // Found from the manifest path alone, too.
+        assert!(check(Vec::new()).is_err());
+        // A git dependency read from a path here is returned to record.
+        std::fs::write(
+            root.join("native/Cargo.lock"),
+            "version = 4\n[[package]]\nname = \"g\"\nversion = \"1.0.0\"\n\
+             source = \"git+file:///srv/repo?branch=main#0123456789abcdef0123456789abcdef01234567\"\n",
+        )
+        .unwrap();
+        let facts = check(Vec::new()).unwrap();
+        assert_eq!(facts.len(), 1, "{facts:?}");
+        assert_eq!(facts[0].kind, crate::kernel::policy::HOST_GIT_TRANSPORT);
+        assert_eq!(facts[0].subject, "file:///srv/repo");
+    }
+
+    /// What the lock check accepts it returns the transports of, each
+    /// `host-git-transport` once: git over file:// and ssh://, an ssh
+    /// registry index, git and an index over git://. https records nothing.
+    #[test]
+    fn the_lock_check_returns_each_host_git_transport() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let lock = format!(
+            "version = 4\n\
+             [[package]]\nname = \"a\"\nversion = \"1.0.0\"\nsource = \"git+file:///srv/a#{commit}\"\n\
+             [[package]]\nname = \"a2\"\nversion = \"1.0.0\"\nsource = \"git+file:///srv/a?rev={commit}#{commit}\"\n\
+             [[package]]\nname = \"b\"\nversion = \"1.0.0\"\nsource = \"git+ssh://git@g.test/b#{commit}\"\n\
+             [[package]]\nname = \"c\"\nversion = \"1.0.0\"\nsource = \"registry+ssh://git@g.test/index\"\n\
+             [[package]]\nname = \"d\"\nversion = \"1.0.0\"\nsource = \"git+https://g.test/d#{commit}\"\n\
+             [[package]]\nname = \"e\"\nversion = \"1.0.0\"\nsource = \"git+git://g.test/e#{commit}\"\n\
+             [[package]]\nname = \"f\"\nversion = \"1.0.0\"\nsource = \"registry+git://g.test/index\"\n\
+             [[package]]\nname = \"i\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        );
+        let sources = refuse_lock_sources(lock.as_bytes()).unwrap();
+        let found = transport_exceptions(sources.iter().map(String::as_str), &[]);
+        let subjects: Vec<&str> = found.iter().map(|e| e.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            [
+                "file:///srv/a",
+                "ssh://git@g.test/b",
+                "ssh://git@g.test/index",
+                "git://g.test/e",
+                "git://g.test/index"
+            ]
+        );
+        assert!(found
+            .iter()
+            .all(|e| e.kind == crate::kernel::policy::HOST_GIT_TRANSPORT));
+    }
+
+    /// An ssh mirror replacing crates.io is a transport the lock never
+    /// names (it still says crates.io): the result check returns it in one
+    /// set with the lock's ([`transport_exceptions`]), which the door
+    /// records under the run's policy and carries into the signed record,
+    /// each once, the lock's first.
+    #[test]
+    fn a_config_transport_is_a_fact_of_the_confined_run() {
+        let temp = TempDir::named("cargo-config-fact");
+        let root = temp.0.join("ws");
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"ws\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[source.crates-io]\nreplace-with = \"m\"\n\
+             [source.m]\nregistry = \"ssh://git@mirror.test/index\"\n",
+        )
+        .unwrap();
+        let run = CargoRun {
+            rust_obj: Path::new("/nonexistent/rust"),
+            lock_root: &root,
+            args: &["generate-lockfile"],
+            publish: CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+        };
+        let confined = cargo_confined(
+            &run,
+            CargoPublish::Detached {
+                outputs: Vec::new(),
+            },
+            &[],
+        )
+        .unwrap();
+        assert!(confined.facts.is_empty(), "{:?}", confined.facts);
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\
+             [[package]]\nname = \"g\"\nversion = \"1.0.0\"\n\
+             source = \"git+git://g.test/g#0123456789abcdef0123456789abcdef01234567\"\n\
+             [[package]]\nname = \"m\"\nversion = \"1.0.0\"\n\
+             source = \"registry+ssh://git@mirror.test/index\"\n",
+        )
+        .unwrap();
+        let facts = (confined.check.unwrap())(&Staged::in_dir(&root)).unwrap();
+        let facts: Vec<(&str, &str)> = facts
+            .iter()
+            .map(|fact| (fact.kind, fact.subject.as_str()))
+            .collect();
+        assert_eq!(
+            facts,
+            [
+                (crate::kernel::policy::HOST_GIT_TRANSPORT, "git://g.test/g"),
+                (
+                    crate::kernel::policy::HOST_GIT_TRANSPORT,
+                    "ssh://git@mirror.test/index"
+                )
+            ]
+        );
+    }
+
+    /// A refusal from inside the door keeps its class through the cargo
+    /// run's error, so the CLI exits 3 and `--json` says "refused".
+    #[test]
+    fn a_cargo_run_refusal_keeps_its_class() {
+        let refused = crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            "cargo resolved bad@1.0.0 from a file index; nothing was published",
+        );
+        let error = cargo_failure(&["generate-lockfile"], refused);
+        let class = crate::kernel::error::class_of(&error);
+        assert_eq!(class, Some(crate::kernel::error::Class::Refused));
+        assert_eq!(class.map(|class| class.exit_code()), Some(3));
+        assert_eq!(class.map(|class| class.name()), Some("refused"));
+        let text = error.to_string();
+        assert!(
+            text.starts_with("store cargo generate-lockfile: "),
+            "{text}"
+        );
+        assert!(text.contains("bad@1.0.0"), "{text}");
     }
 
     #[test]

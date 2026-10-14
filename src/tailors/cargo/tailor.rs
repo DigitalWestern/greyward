@@ -54,6 +54,17 @@ fn realize_and_project(
     let vendor_obj = cargo::realize_vendor(store, activity, &inputs.plan)?;
     let workspace = &inputs.workspace;
     workspace.check_still_named()?;
+    // Refused here as well as where cargo starts, so a sync stops on it
+    // rather than leave a cargo-home that `ward run` and `ward build` refuse.
+    // An ssh index the configuration names is recorded into the sync's
+    // closure, as a git dependency's transport is.
+    for exception in cargo::refuse_project_cargo_config(
+        workspace.path(),
+        workspace.path(),
+        Some(&workspace.path().join(".greyward/cargo-home")),
+    )? {
+        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
     if fresh {
         workspace.remove_dir_all(Path::new(".greyward/cargo-home"))?;
     }
@@ -261,13 +272,21 @@ impl Tailor for Cargo {
         &self,
         ctx: &Context,
         project: &ProjectRoot,
-        _cwd: &Path,
+        cwd: &Path,
         _cmd: &[String],
         command: &mut Command,
     ) -> io::Result<Vec<String>> {
         let activity = &ctx.activity;
         let mut prefix = Vec::new();
         if project.input_entry(Path::new(".greyward/cargo-home"))? != Entry::Absent {
+            // The wrapper's cargo starts in `cwd` and reads the
+            // configuration there and above it, unsandboxed: a `paths`
+            // override or a project credential provider is refused before
+            // the command starts, as the build refuses it. Its CARGO_HOME
+            // is the project's own, so the config there is checked too.
+            let root = project.current_name()?;
+            let home = root.join(".greyward/cargo-home");
+            cargo::refuse_project_cargo_config(&root, cwd, Some(&home))?;
             let closure = comforter::read_closure_in(project, "cargo")?;
             // Store-contained resolution: a project-editable closure must never
             // inject arbitrary executable paths.
@@ -677,5 +696,49 @@ mod tests {
             "{error}"
         );
         assert!(Path::new(&temp.0.join("elsewhere")).is_dir());
+    }
+
+    /// The wrapper's cargo runs with the project's `.greyward/cargo-home`
+    /// as `CARGO_HOME`, and cargo reads `config.toml` and `config` there
+    /// too: a `paths` override or a provider in either is refused before
+    /// the command starts. ward's own `greyward-config.toml` beside them,
+    /// which names a directory source, is not read as project config.
+    #[test]
+    fn the_run_check_reads_the_project_cargo_home() {
+        use crate::tailors::Tailor as _;
+        super::cargo::tests::with_temp_store(|_store, store_dir| {
+            let ctx = crate::kernel::context::Context::open(
+                crate::kernel::platform::Platform::host().unwrap(),
+            )
+            .unwrap();
+            let dir = store_dir.join("ws");
+            let home = dir.join(".greyward/cargo-home");
+            fs::create_dir_all(&home).unwrap();
+            fs::write(
+                home.join("greyward-config.toml"),
+                "[source.crates-io]\nreplace-with = \"greyward-vendor\"\n\
+                 [source.greyward-vendor]\ndirectory = \"/store/vendor\"\n",
+            )
+            .unwrap();
+            let project = ProjectRoot::open(&dir).unwrap();
+            for (name, text, key) in [
+                ("config.toml", "paths = [\"evil/itoa\"]\n", "sets paths"),
+                (
+                    "config",
+                    "registry.credential-provider = \"/bin/false\"\n",
+                    "sets registry.credential-provider",
+                ),
+            ] {
+                fs::write(home.join(name), text).unwrap();
+                let mut command = std::process::Command::new("unused");
+                let error = super::Cargo
+                    .run_env(&ctx, &project, project.path(), &[], &mut command)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(key), "{name}: {error}");
+                assert!(error.contains(name), "{name}: {error}");
+                fs::remove_file(home.join(name)).unwrap();
+            }
+        });
     }
 }

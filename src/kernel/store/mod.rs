@@ -1479,7 +1479,7 @@ mod tests {
             name: "valid-example".into(),
             version: "1".into(),
             inputs: BTreeMap::from([
-                ("schema".into(), "git-source/2".into()),
+                ("schema".into(), "git-source/3".into()),
                 ("url".into(), "https://example.invalid/repo.git".into()),
                 ("commit".into(), "a".repeat(40)),
             ]),
@@ -1492,7 +1492,7 @@ mod tests {
             name: "example".into(),
             version: "1".into(),
             inputs: BTreeMap::from([
-                ("schema".into(), "git-source/2".into()),
+                ("schema".into(), "git-source/3".into()),
                 ("url".into(), "https://example.invalid/repo.git".into()),
             ]),
         };

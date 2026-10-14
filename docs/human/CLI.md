@@ -928,6 +928,27 @@ kind names use one separator, the hyphen (`weak-integrity`,
 spellings are still read from policy files and from closures written by
 earlier versions, and are judged and printed as the hyphenated name.
 
+`host-git-transport` is recorded, under the repository URL, for a git
+dependency fetched over `ssh://` (or `git@host:repo`), which offers this
+machine's ssh agent keys under its ssh configuration, over `git://`, which
+this machine dials directly, unauthenticated and unencrypted, or read from
+a `file://` path on this machine. It is recorded before the fetch, so a
+policy that denies it stops the sync before the host or path is reached.
+An `https://` source, which goes through Greyward's proxy, does not record
+it. A cargo registry index or source over `ssh://` or `git://`, named by
+the lock or by a `.cargo/config.toml`, records it too. Submodules are
+checked the same way, one level at a time: each submodule URL, as git
+resolves it, records the kind before that level is fetched, at any depth
+and under any source, and the exceptions stay with the stored checkout,
+so a later sync that reuses it is judged by them too.
+
+`unpinned-digest` is recorded, per gem, when a `Gemfile.lock` has no
+`CHECKSUMS` entry for it: the gem's bytes are then verified against the
+sha256 rubygems.org's API served on first use (which the store keeps), not
+one the lock pins. It is recorded before any gem is fetched. A policy that
+denies it, or `--strict`, refuses such a lock; `bundle lock
+--add-checksums` writes the section.
+
 A refusal names the knob that refused and the edit that lifts it, not just
 the kind: `policy denies weak-integrity: left-pad: sha1 integrity;
 'weak-integrity' is in the deny list in /etc/greyward/policy.toml; remove that

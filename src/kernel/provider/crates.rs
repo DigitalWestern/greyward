@@ -51,6 +51,19 @@ pub struct CargoGitSource {
     pub inner: crate::kernel::gitsrc::GitSource,
 }
 
+impl CargoGitSource {
+    /// The repository URL as the lock spells it: `source` without its
+    /// `git+` prefix, `?` query and `#` commit. Cargo matches a replacement
+    /// stanza against the lock's source by this URL, userinfo included, so
+    /// the stanza names it, not the normalized URL the object identity uses
+    /// (which drops an https userinfo).
+    pub fn locked_url(&self) -> &str {
+        let url = self.source.strip_prefix("git+").unwrap_or(&self.source);
+        let url = url.split_once('#').map_or(url, |(before, _)| before);
+        url.split_once('?').map_or(url, |(before, _)| before)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CargoGitReference {
     Branch(String),
@@ -298,8 +311,13 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
         if depth > 3 {
             continue;
         }
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
+        // In name order, so a repository holding the same crate twice gives
+        // the same answer on every filesystem, not the first `read_dir`
+        // happens to list.
+        let mut entries = fs::read_dir(&dir)?.collect::<io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut below = Vec::new();
+        for entry in entries {
             if !entry.file_type()?.is_dir() {
                 continue;
             }
@@ -320,8 +338,10 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
                 }
                 continue;
             }
-            stack.push((path, depth + 1));
+            below.push((path, depth + 1));
         }
+        // Popped first-name first: depth first, in name order.
+        stack.extend(below.into_iter().rev());
     }
     let versions = mismatches
         .iter()
@@ -374,6 +394,7 @@ fn realize_vendor_inner(
 ) -> io::Result<PathBuf> {
     let (crates, identity) = vendor_identity(plan)?;
     let id = identity.object_id();
+    let recorded = record_git_crates(&crates)?;
     if store.has_with_activity(activity, &id)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
@@ -395,11 +416,6 @@ fn realize_vendor_inner(
                         ),
                     )
                 })?;
-            crate::kernel::policy::record(
-                crate::kernel::policy::GIT_DEPENDENCY,
-                &format!("{}@{}", krate.name, krate.version),
-                &format!("{} at {}", git.inner.url, git.inner.commit),
-            )?;
             git_roots.push((krate.clone(), object));
             continue;
         }
@@ -520,10 +536,58 @@ fn realize_vendor_inner(
             deps.cache_digest(Digest::sha256(&krate.sha256)?);
         }
     }
+    let exceptions = vendor_exceptions(store, recorded, &git_roots)?;
     store
-        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
+        .commit_with_activity_and_deps(activity, &identity, &staged, &exceptions, &deps)
         .map(|(path, _)| path)
         .map_err(|e| io::Error::new(e.kind(), format!("commit cargo vendor object: {e}")))
+}
+
+/// Record `git-dependency` for each git crate and the transports of the
+/// lock's git sources ([`transport_exceptions`](super::cargo_settings::transport_exceptions),
+/// the set every cargo path takes), before anything is fetched or a cached
+/// vendor object is reused: a policy denying either kind refuses here, a
+/// vendor object made before these were kept with it included.
+fn record_git_crates(crates: &[CargoCrate]) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    let git: Vec<(&CargoCrate, &CargoGitSource)> = crates
+        .iter()
+        .filter_map(|krate| Some((krate, krate.git.as_ref()?)))
+        .collect();
+    let mut recorded: Vec<crate::kernel::policy::Exception> = git
+        .iter()
+        .map(|(krate, git)| crate::kernel::policy::Exception {
+            kind: crate::kernel::policy::GIT_DEPENDENCY.into(),
+            subject: format!("{}@{}", krate.name, krate.version),
+            detail: format!("{} at {}", git.inner.url, git.inner.commit),
+        })
+        .collect();
+    recorded.extend(super::cargo_settings::transport_exceptions(
+        git.iter().map(|(_, git)| git.source.as_str()),
+        &[],
+    ));
+    super::cargo_settings::record_exceptions(&recorded)?;
+    Ok(recorded)
+}
+
+/// What the vendor object keeps, so a cached copy replays it
+/// (`policy::check_cached_with_activity`): each git crate's `recorded`
+/// exceptions and those its git checkout keeps (a submodule's transport).
+fn vendor_exceptions(
+    store: &Store,
+    mut recorded: Vec<crate::kernel::policy::Exception>,
+    git_roots: &[(CargoCrate, PathBuf)],
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    for (_, object) in git_roots {
+        let id = crate::kernel::store::object_id_from_path(object)?;
+        recorded.extend(store.exceptions(&id)?);
+    }
+    let mut kept = Vec::new();
+    for exception in recorded {
+        if !kept.contains(&exception) {
+            kept.push(exception);
+        }
+    }
+    Ok(kept)
 }
 
 pub fn vendor_identity(plan: &CargoPlan) -> io::Result<(Vec<CargoCrate>, Identity)> {
@@ -699,6 +763,11 @@ pub fn lock_digest(lock_toml: &str) -> String {
     hex::encode(Sha256::digest(lock_toml.as_bytes()))
 }
 
+/// The name of the source ward's forced config replaces crates.io (and
+/// each git source) with: the vendor object. A project config may not
+/// name it (`cargo_door::refuse_unneutralized_settings`).
+pub const VENDOR_SOURCE: &str = "greyward-vendor";
+
 /// The forced cargo config: source replacement into the vendor object plus
 /// offline, applied via CLI `--config` (which outranks every config file).
 /// Every git source in the plan gets its own `[source."git+…"]` stanza
@@ -712,8 +781,8 @@ pub fn ward_config_text_for(
     let vendor = serde_json::to_string(&vendor_obj.to_string_lossy().to_string())?;
     let mut text = format!(
         "[source.crates-io]\n\
-         replace-with = \"greyward-vendor\"\n\
-         [source.greyward-vendor]\n\
+         replace-with = \"{VENDOR_SOURCE}\"\n\
+         [source.{VENDOR_SOURCE}]\n\
          directory = {vendor}\n"
     );
     let mut seen = BTreeSet::new();
@@ -722,7 +791,7 @@ pub fn ward_config_text_for(
             continue;
         }
         let key = serde_json::to_string(&git.source)?;
-        let url = serde_json::to_string(&git.inner.url)?;
+        let url = serde_json::to_string(git.locked_url())?;
         let reference = match &git.reference {
             CargoGitReference::Branch(branch) => {
                 format!("branch = {}\n", serde_json::to_string(branch)?)
@@ -736,7 +805,7 @@ pub fn ward_config_text_for(
             "[source.{key}]\n\
              git = {url}\n\
              {reference}\
-             replace-with = \"greyward-vendor\"\n"
+             replace-with = \"{VENDOR_SOURCE}\"\n"
         ));
     }
     text.push_str("[net]\noffline = true\n");
@@ -830,6 +899,33 @@ mod tests {
         let tag_text = ward_config_text_for(Path::new("/store/vendor"), &[tag]).unwrap();
         assert!(tag_text.contains("tag = \"v1\""), "{tag_text}");
         assert!(text.trim_end().ends_with("offline = true"), "{text}");
+
+        // An https userinfo is part of the URL cargo matches the stanza by,
+        // though the object identity drops it.
+        let userinfo = format!("git+https://user:tok@github.com/o/r?rev={commit}#{commit}");
+        let git = parse_cargo_git_source(&userinfo).unwrap();
+        assert_eq!(git.inner.url, "https://github.com/o/r");
+        let text = ward_config_text_for(Path::new("/store/vendor"), &[git]).unwrap();
+        assert!(
+            text.contains("git = \"https://user:tok@github.com/o/r\""),
+            "{text}"
+        );
+    }
+
+    /// A repository holding the same crate at the same version twice
+    /// yields the first in name order, whatever order the filesystem lists.
+    #[test]
+    fn a_duplicated_git_crate_is_found_in_name_order() {
+        let temp = TempDir::named("cargo-git-duplicate");
+        let manifest = "[package]\nname = \"dup\"\nversion = \"1.0.0\"\n";
+        for dir in ["z/dup", "m/dup", "a/dup", "b/dup"] {
+            fs::create_dir_all(temp.0.join(dir)).unwrap();
+            fs::write(temp.0.join(dir).join("Cargo.toml"), manifest).unwrap();
+        }
+        assert_eq!(
+            crate_dir_in_repo(&temp.0, "dup", "1.0.0").unwrap(),
+            temp.0.join("a/dup")
+        );
     }
 
     /// `cargo-vendor/2` golden, from fixed inputs. A vendor identity has no
@@ -1041,5 +1137,47 @@ mod tests {
         fs::remove_file(tree.join("big")).unwrap();
         let (_, size) = inspect_crate(&tree, &hard_link_crate()).unwrap();
         assert_eq!(size, 2);
+    }
+
+    /// A sync from a committed lock records each git crate's transport from
+    /// the one cargo set, `git://` included, before anything is fetched or
+    /// a cached vendor object is reused, and a policy denying
+    /// `host-git-transport` refuses it.
+    #[test]
+    fn a_committed_git_protocol_crate_records_its_transport() {
+        use crate::kernel::policy::{self, Attribution, Policy, PolicyScope, HOST_GIT_TRANSPORT};
+        let _serial = policy::attribution_test_lock();
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let krate = CargoCrate {
+            name: "g".into(),
+            version: "1.0.0".into(),
+            sha256: String::new(),
+            url: String::new(),
+            git: parse_cargo_git_source(&format!("git+git://g.test/g#{commit}")),
+        };
+        assert!(krate.git.is_some());
+        let attribution = Attribution::open("cargo").unwrap();
+        let recorded = record_git_crates(std::slice::from_ref(&krate)).unwrap();
+        attribution.discard();
+        let found: Vec<(&str, &str)> = recorded
+            .iter()
+            .map(|e| (e.kind.as_str(), e.subject.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (policy::GIT_DEPENDENCY, "g@1.0.0"),
+                (HOST_GIT_TRANSPORT, "git://g.test/g")
+            ]
+        );
+
+        let _deny = PolicyScope::install(Policy {
+            deny: [HOST_GIT_TRANSPORT.to_string()].into_iter().collect(),
+            ..Policy::default()
+        });
+        let attribution = Attribution::open("cargo").unwrap();
+        let error = record_git_crates(std::slice::from_ref(&krate)).unwrap_err();
+        attribution.discard();
+        assert!(error.to_string().contains("host-git-transport"), "{error}");
     }
 }

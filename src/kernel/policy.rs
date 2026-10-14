@@ -71,6 +71,17 @@ pub const RESOLUTION_BUILD: &str = "resolution-build";
 /// files are verified like any other package's; its install scripts are not
 /// run.
 pub const FOREIGN_PLATFORM_PACKAGE: &str = "foreign-platform-package";
+/// A git source the lock names was fetched over `ssh://` (offering this
+/// machine's ssh agent keys, under its ssh configuration) or read from a
+/// `file://` path on this machine. The content is still pinned by commit;
+/// what the lock chose is which host or path the sync reaches, and with
+/// which credentials. The subject is the URL.
+pub const HOST_GIT_TRANSPORT: &str = "host-git-transport";
+/// The lock pinned no digest for a package (a `Gemfile.lock` without a
+/// `CHECKSUMS` section), so its bytes were verified against the digest the
+/// registry's API served on first use, or ward's store record of that
+/// answer. The subject is the package.
+pub const UNPINNED_DIGEST: &str = "unpinned-digest";
 /// A lifecycle script of the project itself or of one of its workspace
 /// members (`preinstall`, `install`, `postinstall`, `prepare`) that npm
 /// would run on install and ward did not. ward runs dependencies' scripts
@@ -98,6 +109,8 @@ pub const KINDS: &[&str] = &[
     UNRECORDED_RESOLUTION,
     RESOLUTION_BUILD,
     FOREIGN_PLATFORM_PACKAGE,
+    HOST_GIT_TRANSPORT,
+    UNPINNED_DIGEST,
     PROJECT_SCRIPT_SKIPPED,
 ];
 
@@ -1550,6 +1563,8 @@ deny = ["git-dependency"]"#,
             BUILT_FROM_SOURCE,
             EXTERNAL_TOOLCHAIN,
             HOST_BUILD_INPUTS,
+            HOST_GIT_TRANSPORT,
+            UNPINNED_DIGEST,
         ];
         for kind in KINDS {
             let object = OBJECT_KINDS.contains(kind);
@@ -1607,17 +1622,17 @@ deny = ["git-dependency"]"#,
         let _guard = exception_guard();
         let permissive = Policy::default();
         let attribution = Attribution::open("node").unwrap();
-        for kind in KINDS.iter().copied().chain(["host-git-transport"]) {
+        for kind in KINDS {
             record_with(&permissive, kind, "dep@1.0.0", "fetched").unwrap();
         }
         let stored: Vec<String> = object_exceptions().into_iter().map(|e| e.kind).collect();
         let expected: Vec<&str> = KINDS
             .iter()
             .copied()
-            .chain(["host-git-transport"])
             .filter(|kind| !PLAN_TIME_KINDS.contains(kind))
             .collect();
         assert_eq!(stored, expected);
+        assert!(stored.iter().any(|kind| kind == HOST_GIT_TRANSPORT));
         attribution.discard();
     }
 

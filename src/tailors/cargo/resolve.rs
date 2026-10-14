@@ -169,7 +169,7 @@ pub(crate) fn attest_project(
     spec.require_unchanged = true;
     spec.publish_receipt = false;
     let slot = record::RecordSlot::default();
-    let report = cargo_door::run_cargo(
+    let (report, homes) = cargo_door::run_cargo_reading_home(
         door,
         CargoRun {
             rust_obj,
@@ -191,8 +191,148 @@ pub(crate) fn attest_project(
             )
         )));
     }
+    // `paths` and directory sources are refused before cargo starts; this
+    // is the check that does not depend on finding them: a crate the lock
+    // pins to a registry or a git commit must be read from cargo's own
+    // download of it, never from a directory.
+    let lock = project
+        .read_input_string(Path::new("Cargo.lock"))?
+        .unwrap_or_default();
+    let swapped = path_resolved_locked_packages(&report.stdout, &lock, &homes)?;
+    if !swapped.is_empty() {
+        let them = if swapped.len() == 1 { "it" } else { "them" };
+        return Err(crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "cargo read {} in {} from a local directory or a file-backed registry rather \
+                 than its own network download, though Cargo.lock pins {them} to a registry or \
+                 a git commit, so the lock is not attested; a `paths` override, a directory \
+                 source, a `file://` registry index or another configuration swapped {them} in",
+                swapped.join(", "),
+                project.path().display(),
+            ),
+        ));
+    }
     let signed = slot.borrow_mut().take();
     signed.ok_or_else(|| err("cargo's lock check published no record".into()))
+}
+
+/// The `name@version` of every package `cargo metadata` (its JSON in
+/// `metadata`) read from anywhere but cargo's own download of it, although
+/// `lock` gives it a `source`. A registry crate must be read from
+/// `<home>/registry/src/` and a git crate from `<home>/git/checkouts/`,
+/// where `home` is one of `homes` (the run's `CARGO_HOME`, as given and
+/// resolved): cargo put it there itself, a registry crate after checking
+/// the downloaded `.crate` against the lock's checksum. The source id in
+/// metadata does not show a replacement (a directory source replacing
+/// crates.io keeps the registry's id), and metadata prints no checksum, so
+/// where cargo read the crate is the evidence: a `paths` override or a
+/// directory source reads it from elsewhere. A registry crate whose lock
+/// source is not a network registry ([`cargo_door::network_url`]: a
+/// manifest's `registry-index = "file://..."` needs no config) is named as
+/// well, since cargo extracts a file registry's archives into the same
+/// `registry/src`. Workspace members and path dependencies have no source
+/// in either.
+fn path_resolved_locked_packages(
+    metadata: &[u8],
+    lock: &str,
+    homes: &[PathBuf],
+) -> io::Result<Vec<String>> {
+    let metadata: serde_json::Value = serde_json::from_slice(metadata).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("cargo metadata printed no JSON: {error}"),
+        )
+    })?;
+    let lock = cargo_door::parse_toml(Path::new("Cargo.lock"), lock)?;
+    // Every locked package, its source kept: two packages may share a
+    // name and version from different sources (renamed dependencies on
+    // crates.io's and a file registry's), and each is checked as itself.
+    let locked: Vec<((&str, &str), Option<&str>)> = lock
+        .get("package")
+        .and_then(|packages| packages.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|package| {
+            Some((
+                (
+                    package.get("name")?.as_str()?,
+                    package.get("version")?.as_str()?,
+                ),
+                package.get("source").and_then(|source| source.as_str()),
+            ))
+        })
+        .collect();
+    let mut swapped: Vec<String> = metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|package| {
+            let name = package["name"].as_str()?;
+            let version = package["version"].as_str()?;
+            let sources: Vec<Option<&str>> = locked
+                .iter()
+                .filter(|(key, _)| *key == (name, version))
+                .map(|(_, source)| *source)
+                .collect();
+            // Nothing the lock pins by this name and version: a member or
+            // a path dependency.
+            if !sources.iter().any(Option::is_some) {
+                return None;
+            }
+            let read_correctly = match package["source"].as_str() {
+                // A path package where the lock pins a source, unless the
+                // lock also holds a path package by that name and version.
+                None => sources.contains(&None),
+                Some(source) => {
+                    let cache = if source.starts_with("git+") {
+                        "git/checkouts"
+                    } else {
+                        "registry/src"
+                    };
+                    let read_from = package["manifest_path"].as_str().map(Path::new);
+                    sources
+                        .iter()
+                        .flatten()
+                        .any(|locked| same_source(locked, source))
+                        && network_source(source)
+                        && read_from.is_some_and(|path| {
+                            homes.iter().any(|home| path.starts_with(home.join(cache)))
+                        })
+                }
+            };
+            (!read_correctly).then(|| format!("{name}@{version}"))
+        })
+        .collect();
+    swapped.sort();
+    swapped.dedup();
+    Ok(swapped)
+}
+
+/// Whether a source id from `cargo metadata` is a network registry or a
+/// git source, as the one cargo resolved the package from: a file-backed
+/// registry (`registry+file://`, `sparse+file://`) is extracted into
+/// `registry/src` like a download, though no network registry served it.
+/// The door's lock check reads the same rule
+/// ([`cargo_door::network_lock_source`]).
+fn network_source(source: &str) -> bool {
+    cargo_door::network_lock_source(source)
+}
+
+/// Whether a lock's `source` and a metadata source id name the same
+/// source. They are spelled alike; a git source is also matched by its URL
+/// and commit, in case the reference query is encoded differently.
+fn same_source(locked: &str, metadata: &str) -> bool {
+    if locked == metadata {
+        return true;
+    }
+    let git = |source: &str| -> Option<(String, String)> {
+        let rest = source.strip_prefix("git+")?;
+        let (url, commit) = rest.rsplit_once('#')?;
+        let url = url.split('?').next().unwrap_or(url);
+        Some((url.to_string(), commit.to_string()))
+    };
+    matches!((git(locked), git(metadata)), (Some(a), Some(b)) if a == b)
 }
 
 #[cfg(test)]
@@ -209,6 +349,119 @@ mod tests {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
         )
         .unwrap();
+    }
+
+    /// A locked registry or git crate that cargo read from anywhere but
+    /// its own download of it is named: as a path package (a `paths`
+    /// override), or with its source id intact from a directory (a
+    /// directory source replacing crates.io). Members and path
+    /// dependencies, sourceless in both, are not named.
+    #[test]
+    fn a_locked_crate_read_from_a_directory_is_named() {
+        let lock = "version = 4\n\
+                    [[package]]\nname = \"ws\"\nversion = \"0.1.0\"\n\
+                    [[package]]\nname = \"local\"\nversion = \"0.2.0\"\n\
+                    [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                    [[package]]\nname = \"leaf\"\nversion = \"0.1.0\"\n\
+                    source = \"git+https://github.com/o/leaf#0123\"\n";
+        let home = PathBuf::from("/scratch/cargo-home");
+        let homes = [home.clone(), PathBuf::from("/real/scratch/cargo-home")];
+        let registry = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index");
+        let git = serde_json::json!("git+https://github.com/o/leaf#0123");
+        let in_registry = "/scratch/cargo-home/registry/src/index.crates.io-1949/itoa-1.0.18/\
+                           Cargo.toml";
+        let in_checkouts = "/real/scratch/cargo-home/git/checkouts/leaf-1/0123/Cargo.toml";
+        let metadata = |itoa: (&serde_json::Value, &str), leaf: (&serde_json::Value, &str)| {
+            serde_json::to_vec(&serde_json::json!({"packages": [
+                {"name": "ws", "version": "0.1.0", "source": null,
+                 "manifest_path": "/ws/Cargo.toml"},
+                {"name": "local", "version": "0.2.0", "source": null,
+                 "manifest_path": "/ws/local/Cargo.toml"},
+                {"name": "itoa", "version": "1.0.18", "source": itoa.0, "manifest_path": itoa.1},
+                {"name": "leaf", "version": "0.1.0", "source": leaf.0, "manifest_path": leaf.1},
+            ]}))
+            .unwrap()
+        };
+        let null = serde_json::Value::Null;
+        let check = |metadata: &[u8]| path_resolved_locked_packages(metadata, lock, &homes);
+        let clean = metadata((&registry, in_registry), (&git, in_checkouts));
+        assert!(check(&clean).unwrap().is_empty());
+        let swapped = metadata(
+            (&null, "/ws/evil/itoa/Cargo.toml"),
+            (&null, "/ws/evil/leaf/Cargo.toml"),
+        );
+        assert_eq!(check(&swapped).unwrap(), ["itoa@1.0.18", "leaf@0.1.0"]);
+        // A directory source replacing crates.io keeps the registry's
+        // source id in metadata; only where cargo read it from shows it.
+        let replaced = metadata(
+            (&registry, "/ws/vendor/itoa-1.0.18/Cargo.toml"),
+            (&git, in_checkouts),
+        );
+        assert_eq!(check(&replaced).unwrap(), ["itoa@1.0.18"]);
+        // A git checkout is not a registry download, nor the reverse.
+        let crossed = metadata(
+            (&registry, &in_checkouts.replace("leaf", "itoa")),
+            (
+                &git,
+                &format!("{}/registry/src/x/leaf/Cargo.toml", home.display()),
+            ),
+        );
+        assert_eq!(check(&crossed).unwrap(), ["itoa@1.0.18", "leaf@0.1.0"]);
+        assert!(check(b"not json").is_err());
+        // A registry read from files (a manifest's `registry-index =
+        // "file://..."` needs no config) is extracted into the run's own
+        // registry/src like a download, but no network registry served it.
+        let file_lock = lock.replace(
+            "registry+https://github.com/rust-lang/crates.io-index",
+            "registry+file:///ws/index",
+        );
+        let file_registry = serde_json::json!("registry+file:///ws/index");
+        let from_files = metadata((&file_registry, in_registry), (&git, in_checkouts));
+        assert_eq!(
+            path_resolved_locked_packages(&from_files, &file_lock, &homes).unwrap(),
+            ["itoa@1.0.18"]
+        );
+        // Two renamed dependencies on the same itoa, one from crates.io
+        // and one from a file registry: each locked package is matched by
+        // its source too, so the crates.io one, last in the lock, does not
+        // stand for the other.
+        let both_lock = "version = 4\n\
+                         [[package]]\nname = \"ws\"\nversion = \"0.1.0\"\n\
+                         [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+                         source = \"registry+file:///ws/index\"\n\
+                         [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+                         source = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+        let both = serde_json::to_vec(&serde_json::json!({"packages": [
+            {"name": "ws", "version": "0.1.0", "source": null,
+             "manifest_path": "/ws/Cargo.toml"},
+            {"name": "itoa", "version": "1.0.18", "source": "registry+file:///ws/index",
+             "manifest_path": "/scratch/cargo-home/registry/src/ws-1/itoa-1.0.18/Cargo.toml"},
+            {"name": "itoa", "version": "1.0.18", "source": registry, "manifest_path": in_registry},
+        ]}))
+        .unwrap();
+        assert_eq!(
+            path_resolved_locked_packages(&both, both_lock, &homes).unwrap(),
+            ["itoa@1.0.18"]
+        );
+        // And with only the crates.io one in metadata, nothing is named.
+        let one = serde_json::to_vec(&serde_json::json!({"packages": [
+            {"name": "itoa", "version": "1.0.18", "source": registry, "manifest_path": in_registry},
+        ]}))
+        .unwrap();
+        assert!(path_resolved_locked_packages(&one, both_lock, &homes)
+            .unwrap()
+            .is_empty());
+        // A metadata source the lock does not hold is named.
+        let other = serde_json::to_vec(&serde_json::json!({"packages": [
+            {"name": "itoa", "version": "1.0.18", "source": "registry+https://other.test/index",
+             "manifest_path": in_registry},
+        ]}))
+        .unwrap();
+        assert_eq!(
+            path_resolved_locked_packages(&other, both_lock, &homes).unwrap(),
+            ["itoa@1.0.18"]
+        );
     }
 
     /// Path dependencies inside the workspace are implicit members: their

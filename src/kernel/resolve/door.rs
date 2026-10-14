@@ -42,6 +42,49 @@ pub type ReceiptProducer<'a> =
 /// Points the tool at the session: arguments, variables, config files.
 pub type Wirer<'a> = Box<dyn FnOnce(&Wire<'_>) -> io::Result<Wiring> + 'a>;
 
+/// Judges what the tool left, once it has exited and its outputs are
+/// copied, before the ledger is committed and anything (the outputs, the
+/// receipt) is published or written back. An error refuses the run. The
+/// exceptions it returns (a transport the result shows the tool used) are
+/// recorded under the run's policy, so a denied kind refuses the run too,
+/// and are carried in the receipt with the session's.
+pub type ResultCheck<'a> = Box<dyn FnOnce(&Staged<'_>) -> io::Result<Vec<Fact>> + 'a>;
+
+/// What a [`ResultCheck`] reads: the lock root's files as the run leaves
+/// them, the copied output where the tool changed one, else the staged
+/// baseline.
+pub struct Staged<'s> {
+    outputs: Option<&'s Outputs>,
+    lock_root: &'s Path,
+}
+
+impl<'s> Staged<'s> {
+    /// A tool's tests: the files of `lock_root` as they are, no outputs.
+    #[cfg(test)]
+    pub fn in_dir(lock_root: &'s Path) -> Self {
+        Staged {
+            outputs: None,
+            lock_root,
+        }
+    }
+
+    /// `relative` (to the lock root) as the run leaves it; `None` when
+    /// there is no such file.
+    pub fn read(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
+        if let Some((outputs, file)) = self
+            .outputs
+            .and_then(|outputs| Some((outputs, outputs.get(relative)?)))
+        {
+            return outputs.contents(file).map(Some);
+        }
+        match fs::read(self.lock_root.join(relative)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 /// Where a confined run's accepted outputs go.
 pub enum Target<'a> {
     /// The lock root is a project: the outputs (and the receipt, when a
@@ -144,6 +187,8 @@ pub struct ConfinedSpec<'a> {
     pub expected_inputs: BTreeMap<String, String>,
     /// Also refuse newly added project files outside the consumed generation.
     pub complete_inputs: bool,
+    /// The tool's own check of its result ([`ResultCheck`]).
+    pub check: Option<ResultCheck<'a>>,
 }
 
 impl<'a> ConfinedSpec<'a> {
@@ -174,6 +219,7 @@ impl<'a> ConfinedSpec<'a> {
             facts: Vec::new(),
             expected_inputs: BTreeMap::new(),
             complete_inputs: false,
+            check: None,
         }
     }
 
@@ -351,7 +397,7 @@ pub(super) fn run(
             ),
         ));
     }
-    let facts = record_facts(&confined, &policy, &ran)?;
+    let mut facts = record_facts(&confined, &policy, &ran)?;
     if !status.success() {
         // The call site words a failing tool. Nothing was published and no ledger is kept.
         let mut failed = report(status, ran.outcome, None);
@@ -371,6 +417,18 @@ pub(super) fn run(
         return Ok(failed);
     }
     let outputs = check_outputs(store, activity, &confined, &snapshot, &ran)?;
+    if let Some(check) = confined.check.take() {
+        let found = check(&Staged {
+            outputs: Some(&outputs),
+            lock_root: &snapshot.lock_root().staged,
+        })?;
+        for fact in found {
+            policy::record_with(&policy, fact.kind, &fact.subject, &fact.detail)?;
+            if !facts.contains(&fact) {
+                facts.push(fact);
+            }
+        }
+    }
     let diagnostics = diagnostics(
         store,
         door,
@@ -1403,6 +1461,144 @@ exit 37
             );
             assert_eq!(tree(&fx.project), before, "{bad}: the project changed");
         }
+    }
+
+    /// A tool's result check ([`ResultCheck`]) reads the outputs as the
+    /// tool left them and the rest of the lock root as staged, and its
+    /// refusal comes before the receipt is made or anything is published.
+    #[test]
+    fn a_result_check_refusal_publishes_nothing() {
+        let Some(relay) = relay("a_result_check_refusal_publishes_nothing") else {
+            return;
+        };
+        let fx = fixture("door-result-check");
+        let before = tree(&fx.project);
+        let produced = std::rc::Rc::new(std::cell::Cell::new(false));
+        let read = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "echo file:///x > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                let produced = produced.clone();
+                confined.target = Target::Project {
+                    receipt: Some(Box::new(move |_: &PublishFacts<'_>| {
+                        produced.set(true);
+                        Ok(Some(b"receipt\n".to_vec()))
+                    })),
+                };
+                let read = read.clone();
+                confined.check = Some(Box::new(move |staged: &Staged<'_>| {
+                    let lock = staged.read(Path::new("deps.lock"))?.unwrap_or_default();
+                    let manifest = staged.read(Path::new("package.json"))?;
+                    let absent = staged.read(Path::new("absent.lock"))?;
+                    read.borrow_mut().extend([
+                        Some(lock.clone()),
+                        manifest.map(|bytes| bytes.len().to_string().into_bytes()),
+                        absent,
+                    ]);
+                    if String::from_utf8_lossy(&lock).contains("file://") {
+                        return Err(crate::kernel::error::refused(
+                            io::ErrorKind::PermissionDenied,
+                            "deps.lock names a file source; nothing was published",
+                        ));
+                    }
+                    Ok(Vec::new())
+                }));
+            },
+        );
+        let error = outcome.result.unwrap_err();
+        assert!(error.to_string().contains("file source"), "{error}");
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused)
+        );
+        assert!(!produced.get(), "the receipt was made");
+        assert_eq!(
+            *read.borrow(),
+            [
+                Some(b"file:///x\n".to_vec()),
+                Some(PACKAGE_JSON.len().to_string().into_bytes()),
+                None,
+            ]
+        );
+        assert_untouched(&fx, &before);
+    }
+
+    /// The exceptions a result check returns are recorded under the run's
+    /// policy and carried in the receipt; a policy denying their kind
+    /// refuses the run before the receipt is made or anything published.
+    #[test]
+    fn a_result_check_exception_is_recorded_or_denied_before_publication() {
+        let Some(relay) =
+            relay("a_result_check_exception_is_recorded_or_denied_before_publication")
+        else {
+            return;
+        };
+        let check = || -> Option<ResultCheck<'static>> {
+            Some(Box::new(|_: &Staged<'_>| {
+                Ok(vec![Fact {
+                    kind: policy::HOST_GIT_TRANSPORT,
+                    subject: "file:///srv/repo".into(),
+                    detail: "read from a repository path on this machine".into(),
+                }])
+            }))
+        };
+        let receipt = |seen: std::rc::Rc<std::cell::RefCell<Vec<String>>>| Target::Project {
+            receipt: Some(Box::new(move |facts: &PublishFacts<'_>| {
+                seen.borrow_mut()
+                    .extend(facts.exceptions.iter().map(|fact| fact.subject.clone()));
+                Ok(Some(b"receipt\n".to_vec()))
+            })),
+        };
+
+        let fx = fixture("door-result-check-denied");
+        let before = tree(&fx.project);
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let outcome = run_door(
+            &fx,
+            Some(relay.clone()),
+            "echo ok > deps.lock\n",
+            deny(&[policy::HOST_GIT_TRANSPORT]),
+            |confined| {
+                confined.target = receipt(seen.clone());
+                confined.check = check();
+            },
+        );
+        let error = outcome.result.unwrap_err();
+        assert!(error.to_string().contains("host-git-transport"), "{error}");
+        assert_eq!(
+            crate::kernel::error::class_of(&error),
+            Some(crate::kernel::error::Class::Refused),
+            "{error}"
+        );
+        assert!(seen.borrow().is_empty(), "the receipt was made");
+        assert_untouched(&fx, &before);
+
+        let fx = fixture("door-result-check-recorded");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let outcome = run_door(
+            &fx,
+            Some(relay),
+            "echo ok > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                confined.target = receipt(seen.clone());
+                confined.check = check();
+            },
+        );
+        let report = outcome.result.unwrap();
+        assert!(report.status.success());
+        assert_eq!(*seen.borrow(), ["file:///srv/repo"]);
+        assert!(
+            outcome.recorded.iter().any(|exception| {
+                exception.kind == policy::HOST_GIT_TRANSPORT
+                    && exception.subject == "file:///srv/repo"
+            }),
+            "{:?}",
+            outcome.recorded
+        );
     }
 
     #[test]

@@ -216,6 +216,50 @@ fn reject_user_config(args: &[String]) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuse the cargo configuration no forced setting undoes
+/// ([`cargo_door::refuse_unneutralized_settings`]: a `paths` override, a
+/// credential provider, a directory source, ...) in `dir` and each directory above it up to the
+/// workspace `root`, every file it includes too: cargo reads its
+/// configuration from where it starts and every ancestor, and the
+/// project's files end at the workspace. `dir` outside `root` checks
+/// `root` alone. `home` is the `CARGO_HOME` cargo runs with when it is the
+/// project's own (`.greyward/cargo-home`, under `ward run`): cargo reads
+/// `config.toml` and `config` there as well, so they are checked the same
+/// way. Each file is followed wherever it leads, as the cargo that reads
+/// it follows it; only the signing key is refused. Returns the transport
+/// exceptions of the indexes and sources the files name
+/// ([`cargo_door::transport_exceptions`]), for a sync to record; `ward run`
+/// and the offline build have no attribution and read none.
+///
+/// [`cargo_door::refuse_unneutralized_settings`]: crate::kernel::provider::cargo_door::refuse_unneutralized_settings
+/// [`cargo_door::transport_exceptions`]: crate::kernel::provider::cargo_door::transport_exceptions
+pub(crate) fn refuse_project_cargo_config(
+    root: &Path,
+    dir: &Path,
+    home: Option<&Path>,
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    use crate::kernel::provider::cargo_door;
+    let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (root, dir) = (real(root), real(dir));
+    let mut files = Vec::new();
+    let bound = cargo_door::Bound::new(Path::new("/"))?;
+    let dirs: Vec<&Path> = if dir.starts_with(&root) {
+        dir.ancestors()
+            .take_while(|ancestor| ancestor.starts_with(&root))
+            .collect()
+    } else {
+        vec![root.as_path()]
+    };
+    for dir in dirs {
+        files.extend(cargo_door::config_files(dir, &bound)?);
+    }
+    if let Some(home) = home {
+        files.extend(cargo_door::cargo_home_config_files(home, &bound)?);
+    }
+    cargo_door::refuse_unneutralized_settings(&files)?;
+    Ok(cargo_door::transport_exceptions([], &files))
+}
+
 /// Project Cargo with a writable home, forced directory-source replacement,
 /// and provenance for the exact toolchain/vendor closure. `toolchain` is the
 /// selection the run honored: the closure records it so the release this
@@ -328,6 +372,9 @@ pub fn build_sandboxed(
     args: &[String],
 ) -> io::Result<()> {
     reject_user_config(args)?;
+    // The build starts in the workspace root: the configuration there is
+    // what this cargo reads.
+    refuse_project_cargo_config(project.path(), project.path(), None)?;
     let store = Store::open()?;
     store.require_activity(activity, "cargo build")?;
     let project_dir = project.path().to_path_buf();
@@ -1780,5 +1827,67 @@ checksum = "{hash_b}"
                 "{bad}: {error}"
             );
         }
+    }
+
+    /// A `paths` override in the workspace's cargo config would build
+    /// project code in place of the vendored crate with the lock unchanged:
+    /// the build refuses it before the store is opened.
+    #[test]
+    fn build_refuses_a_paths_override() {
+        let (_lease_store, activity) = crate::kernel::testutil::detached_lease();
+        let temp = TempDir::named("cargo-build-paths");
+        fs::create_dir_all(temp.0.join(".cargo")).unwrap();
+        fs::write(
+            temp.0.join(".cargo/config.toml"),
+            "paths = [\"evil/itoa\"]\n",
+        )
+        .unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let error = build_sandboxed(
+            Platform::host().unwrap(),
+            &activity,
+            &project,
+            Path::new("/nonexistent"),
+            Path::new("/nonexistent"),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("sets paths"), "{error}");
+    }
+
+    /// `ward run` checks the configuration cargo reads from where it
+    /// starts, a member directory included, up to the workspace root and
+    /// no further.
+    #[test]
+    fn the_run_check_reads_from_the_start_directory_up_to_the_workspace() {
+        let temp = TempDir::named("cargo-run-config");
+        let root = temp.0.join("ws");
+        let member = root.join("crates/app");
+        fs::create_dir_all(member.join(".cargo")).unwrap();
+        fs::create_dir_all(temp.0.join(".cargo")).unwrap();
+        // Above the workspace: the user's own, not the project's.
+        fs::write(temp.0.join(".cargo/config.toml"), "paths = [\"x\"]\n").unwrap();
+        refuse_project_cargo_config(&root, &member, None).unwrap();
+        fs::write(
+            member.join(".cargo/config.toml"),
+            "registry.credential-provider = \"/bin/false\"\n",
+        )
+        .unwrap();
+        let error = refuse_project_cargo_config(&root, &member, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("sets registry.credential-provider"),
+            "{error}"
+        );
+        // A start outside the workspace checks the workspace alone.
+        refuse_project_cargo_config(&root, &temp.0, None).unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(root.join(".cargo/config.toml"), "paths = [\"x\"]\n").unwrap();
+        let error = refuse_project_cargo_config(&root, &temp.0, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sets paths"), "{error}");
     }
 }

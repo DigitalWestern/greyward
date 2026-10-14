@@ -755,6 +755,7 @@ puts JSON.generate("native" => File.realpath(native), "value" => value,
 /// Linux project whose only gem is the source `zlib` gem. Its extension
 /// needs `zlib.h` and `libz.so`, which the C-runtime-only view hides, and it
 /// bundles no zlib source of its own.
+#[cfg(target_os = "linux")]
 fn zlib_project_files(project: &Path) {
     std::fs::write(
         project.join("Gemfile"),
@@ -887,6 +888,7 @@ fn ruby_gem_needing_a_pinned_library_builds_against_the_native_libs() {
 /// needs `gdbm.h` and `libgdbm`, which neither the C runtime nor ward's
 /// native library set has, so its build against the C runtime alone fails
 /// whatever the host has installed.
+#[cfg(target_os = "linux")]
 fn gdbm_project_files(project: &Path) {
     std::fs::write(
         project.join("Gemfile"),
@@ -919,6 +921,7 @@ BUNDLED WITH
 /// A stand-in for the host's `gdbm-devel` package: what the gem's
 /// `extconf.rb` probes (`gdbm_open` in `libgdbm`, `gdbm.h`) and what its
 /// `gdbm.c` compiles against. The functions are declared, never run.
+#[cfg(target_os = "linux")]
 const STUB_GDBM_H: &str = r#"
 #ifndef GREYWARD_STUB_GDBM_H
 #define GREYWARD_STUB_GDBM_H
@@ -959,6 +962,7 @@ const char *gdbm_strerror(int);
 "#;
 
 /// The one symbol `have_library("gdbm", "gdbm_open")` links against.
+#[cfg(target_os = "linux")]
 const STUB_LIBGDBM_C: &str = r#"
 #include <gdbm.h>
 int gdbm_errno;
@@ -974,6 +978,7 @@ GDBM_FILE gdbm_open(const char *name, int block, int flags, int mode, void (*fat
 /// header under `usr/include`, `libgdbm.so` under `usr/lib`, built with the
 /// host's gcc, with the real library's soname so the extension's NEEDED
 /// entry reads the same on a host that has `libgdbm-dev` installed.
+#[cfg(target_os = "linux")]
 fn stub_host_dev_files(dev: &Path) {
     let include = dev.join("usr/include");
     let lib = dev.join("usr/lib");

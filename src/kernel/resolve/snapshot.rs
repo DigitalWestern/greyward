@@ -965,7 +965,7 @@ fn copy_file(
     }
     // Decided on the open file itself, so no rename in between can slip
     // the key past it.
-    if forbidden.contains(&(stat.st_dev, stat.st_ino)) {
+    if forbidden.contains(&store::stat_identity(&stat)) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(

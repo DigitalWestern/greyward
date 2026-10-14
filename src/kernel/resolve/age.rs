@@ -27,11 +27,11 @@
 //! [`RegistryProtocol::published`]: super::routes::RegistryProtocol::published
 //! [`RegistryProtocol::lookup`]: super::routes::RegistryProtocol::lookup
 
-use super::proxy::Proxy;
-use super::routes::Lookup;
+use super::proxy::{LookupAnswer, Proxy};
+use super::routes::{file_key, Lookup};
 use super::session::{Fact, PublishTimes, SessionConfig, SessionReport};
-use crate::kernel::policy::{self, Policy, YOUNG_PACKAGE};
-use std::collections::BTreeSet;
+use crate::kernel::policy::{self, Policy, SourceOrigin, YOUNG_PACKAGE};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -52,6 +52,11 @@ const LOOKUP_WORKERS: usize = 4;
 pub struct LockedPackage {
     pub name: String,
     pub version: String,
+    /// The version's files the lock names (a uv.lock's wheels and sdist),
+    /// when it names them. A registry may add a file to an old version, so
+    /// these are judged by the latest of their own upload times rather than
+    /// the version's first. Empty: the version is judged.
+    pub files: Vec<String>,
 }
 
 impl LockedPackage {
@@ -59,7 +64,13 @@ impl LockedPackage {
         Self {
             name: name.into(),
             version: version.into(),
+            files: Vec::new(),
         }
+    }
+
+    pub fn with_files(mut self, files: Vec<String>) -> Self {
+        self.files = files;
+        self
     }
 }
 
@@ -99,8 +110,20 @@ pub(super) fn judge(
         });
     }
     let packages: BTreeSet<&LockedPackage> = packages.iter().collect();
-    let mut wanted: Vec<(String, Lookup)> = Vec::new();
+    // Why a package's time is unknown, for those that stay unknown.
+    let mut causes: BTreeMap<&LockedPackage, String> = BTreeMap::new();
+    // One lookup per document, however many locked versions it times.
+    let mut wanted: BTreeMap<(String, String), Wanted> = BTreeMap::new();
+    let mut asks: BTreeMap<&LockedPackage, (String, String)> = BTreeMap::new();
     for package in &packages {
+        let untimed = config
+            .routes
+            .iter()
+            .find_map(|route| route.protocol.untimed(&package.name, &package.version));
+        if let Some(why) = untimed {
+            causes.insert(package, why);
+            continue;
+        }
         if published_at(&config, observed, package).is_some() {
             continue;
         }
@@ -111,13 +134,45 @@ pub(super) fn judge(
                     .lookup(&route.endpoints, &package.name, &package.version)?;
             Some((route.protocol.route_id().to_string(), lookup))
         });
-        wanted.extend(found);
+        let Some((route, lookup)) = found else {
+            causes.insert(
+                package,
+                "the metadata the tool read named none, and the registry has no document \
+                 ward can ask"
+                    .to_string(),
+            );
+            continue;
+        };
+        let key = (route.clone(), lookup.url.to_string());
+        let entry = wanted.entry(key.clone()).or_insert_with(|| Wanted {
+            route,
+            lookup,
+            versions: Vec::new(),
+            answer: None,
+        });
+        entry
+            .versions
+            .push((package.name.clone(), package.version.clone()));
+        for file in &package.files {
+            entry
+                .versions
+                .push((package.name.clone(), file_key(&package.version, file)));
+        }
+        asks.insert(package, key);
     }
+    let mut wanted: Vec<Wanted> = wanted.into_values().collect();
     let lookups = if wanted.is_empty() {
         None
     } else {
-        Some(look_up(proxy, &config, &wanted)?)
+        Some(look_up(proxy, &config, &mut wanted)?)
     };
+    let answers: BTreeMap<(String, String), &LookupAnswer> = wanted
+        .iter()
+        .filter_map(|wanted| {
+            let key = (wanted.route.clone(), wanted.lookup.url.to_string());
+            Some((key, wanted.answer.as_ref()?))
+        })
+        .collect();
     let mut times = observed.clone();
     if let Some(report) = &lookups {
         for (key, at) in &report.published {
@@ -129,46 +184,84 @@ pub(super) fn judge(
     }
     let now = unix_seconds(now);
     let minimum = days as i64 * SECONDS_PER_DAY;
-    let source = match &policy.min_age_source {
-        Some(path) => format!("set in {}", path.display()),
-        None => "the default".to_string(),
+    let source = match policy.min_age_origin {
+        Some(SourceOrigin::Machine) => "set by the machine policy",
+        Some(SourceOrigin::Project) => "set by a project policy",
+        Some(SourceOrigin::Flag) => "set by the --policy file",
+        Some(SourceOrigin::Env) => "set by the environment",
+        None => "the default",
     };
     let young = packages
         .into_iter()
         .filter_map(|package| {
             let subject = format!("{}@{}", package.name, package.version);
             let rule = format!("the minimum age is {days} days ({source})");
-            match published_at(&config, &times, package) {
-                Some(at) if now - at >= minimum => None,
-                Some(at) => Some(Young {
+            let timed = if causes.contains_key(package) {
+                None
+            } else {
+                published_at(&config, &times, package)
+            };
+            match timed {
+                Some((at, _)) if now - at >= minimum => None,
+                Some((at, note)) => Some(Young {
                     fact: Fact {
                         kind: YOUNG_PACKAGE,
                         subject,
                         detail: format!(
-                            "published {}, {} this resolution at {}; {rule}",
+                            "published {}{}, {} this resolution at {}; {rule}",
                             format_utc(at),
+                            note.map(|note| format!(" ({note})")).unwrap_or_default(),
                             describe_age(now - at),
                             format_utc(now)
                         ),
                     },
                     ready: Some(at + minimum),
                 }),
-                None => Some(Young {
-                    fact: Fact {
-                        kind: YOUNG_PACKAGE,
-                        subject,
-                        detail: format!(
-                            "the registry gave no publish time for this version, so its age \
-                             is unknown at this resolution at {}; {rule}",
-                            format_utc(now)
-                        ),
-                    },
-                    ready: None,
-                }),
+                None => {
+                    let cause = causes.get(package).cloned().unwrap_or_else(|| {
+                        let answer = asks.get(package).and_then(|key| answers.get(key));
+                        unknown_cause(answer.copied())
+                    });
+                    Some(Young {
+                        fact: Fact {
+                            kind: YOUNG_PACKAGE,
+                            subject,
+                            detail: format!(
+                                "its publish time is unknown at this resolution at {}: \
+                                 {cause}; {rule}",
+                                format_utc(now)
+                            ),
+                        },
+                        ready: None,
+                    })
+                }
             }
         })
         .collect();
     Ok(Judged { young, lookups })
+}
+
+/// One document ward fetches itself, the versions it is fetched for, and
+/// how it was answered.
+struct Wanted {
+    route: String,
+    lookup: Lookup,
+    versions: Vec<(String, String)>,
+    answer: Option<LookupAnswer>,
+}
+
+/// Why a looked-up version's time is still unknown, from how its lookup
+/// was answered.
+fn unknown_cause(answer: Option<&LookupAnswer>) -> String {
+    let Some(answer) = answer else {
+        return "the lookup was not answered".to_string();
+    };
+    match (answer.status, &answer.reason) {
+        (200..=299, _) => "the registry's answer names no publish time for it".to_string(),
+        (429, _) => "the registry rate-limited the lookup (429), twice".to_string(),
+        (_, Some(reason)) => reason.clone(),
+        (status, None) => format!("the registry answered the lookup with {status}"),
+    }
 }
 
 /// Record the flagged packages under `policy`, on the attribution's
@@ -220,25 +313,47 @@ pub(super) fn record(policy: &Policy, young: &[Young]) -> io::Result<Vec<Fact>> 
     Ok(young.iter().map(|young| young.fact.clone()).collect())
 }
 
-/// The publish time `times` holds for `package` under any route's key.
+/// The publish time `times` holds for `package` under any route's key,
+/// and that route's note on what the time is. When the lock names the
+/// version's files and every one has a time, the latest of those is the
+/// package's time; otherwise the version's.
 fn published_at(
     config: &SessionConfig,
     times: &PublishTimes,
     package: &LockedPackage,
-) -> Option<i64> {
+) -> Option<(i64, Option<&'static str>)> {
     config.routes.iter().find_map(|route| {
-        let (name, version) = route.protocol.package_key(&package.name, &package.version);
-        times
-            .get(&(route.protocol.route_id().to_string(), name, version))
-            .copied()
+        let protocol = route.protocol;
+        let route_id = protocol.route_id().to_string();
+        let time = |version: &str| {
+            let (name, version) = protocol.package_key(&package.name, version);
+            times.get(&(route_id.clone(), name, version)).copied()
+        };
+        let files: Option<Vec<i64>> = package
+            .files
+            .iter()
+            .map(|file| time(&file_key(&package.version, file)))
+            .collect();
+        let at = match files {
+            Some(files) if !files.is_empty() => files.into_iter().max(),
+            _ => time(&package.version),
+        }?;
+        Some((at, protocol.time_note()))
     })
 }
 
-/// Fetch every lookup in one session, a few at a time.
+/// How long ward waits before asking a rate-limited registry once more,
+/// when the registry names no wait, and the longest wait it honors.
+const RATE_LIMIT_WAIT: u64 = 2;
+const RATE_LIMIT_MAX_WAIT: u64 = 10;
+
+/// Fetch every lookup in one session, a few at a time, and record how
+/// each was answered. A rate-limited lookup is asked once more, after the
+/// registry's `Retry-After` (capped).
 fn look_up(
     proxy: &Proxy,
     config: &SessionConfig,
-    wanted: &[(String, Lookup)],
+    wanted: &mut [Wanted],
 ) -> io::Result<SessionReport> {
     let session = proxy.open_session(SessionConfig {
         ecosystem: config.ecosystem.clone(),
@@ -253,17 +368,34 @@ fn look_up(
     })?;
     let next = AtomicUsize::new(0);
     let failure: Mutex<Option<io::Error>> = Mutex::new(None);
+    let slots: Vec<Mutex<&mut Wanted>> = wanted.iter_mut().map(Mutex::new).collect();
     std::thread::scope(|scope| {
-        for _ in 0..LOOKUP_WORKERS.min(wanted.len()) {
+        for _ in 0..LOOKUP_WORKERS.min(slots.len()) {
             scope.spawn(|| loop {
                 let index = next.fetch_add(1, Ordering::SeqCst);
-                let Some((route, lookup)) = wanted.get(index) else {
+                let Some(slot) = slots.get(index) else {
                     break;
                 };
-                if let Err(error) = session.lookup(route, lookup) {
-                    let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
-                    slot.get_or_insert(error);
-                    break;
+                let mut wanted = slot.lock().unwrap_or_else(|e| e.into_inner());
+                let ask = || session.lookup(&wanted.route, &wanted.lookup, &wanted.versions);
+                let answer = ask().and_then(|answer| {
+                    if answer.status != 429 {
+                        return Ok(answer);
+                    }
+                    let wait = answer
+                        .retry_after
+                        .unwrap_or(RATE_LIMIT_WAIT)
+                        .min(RATE_LIMIT_MAX_WAIT);
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                    ask()
+                });
+                match answer {
+                    Ok(answer) => wanted.answer = Some(answer),
+                    Err(error) => {
+                        let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                        slot.get_or_insert(error);
+                        break;
+                    }
                 }
             });
         }
@@ -547,7 +679,11 @@ mod tests {
         assert_eq!(subjects, ["gone@4.0", "young@1.0"]);
         let gone = &judged.young[0];
         assert_eq!(gone.ready, None);
-        assert!(gone.fact.detail.contains("no publish time"), "{gone:?}");
+        assert_eq!(
+            gone.fact.detail,
+            "its publish time is unknown at this resolution at 2026-10-12T00:00:00Z: the \
+             registry answered the lookup with 404; the minimum age is 7 days (the default)"
+        );
         let young = &judged.young[1];
         assert_eq!(young.ready, Some(NOW + 5 * SECONDS_PER_DAY));
         assert_eq!(
@@ -583,7 +719,7 @@ mod tests {
             url: url::Url::parse("https://elsewhere.test/meta/young.json").unwrap(),
             accept: "application/json",
         };
-        let error = session.lookup("fixture", &off_route).unwrap_err();
+        let error = session.lookup("fixture", &off_route, &[]).unwrap_err();
         assert!(error.to_string().contains("on no endpoint"), "{error}");
         let report = session.finish();
         assert_eq!(
@@ -674,5 +810,121 @@ mod tests {
         assert!(!unknown.contains("resolve again"), "{unknown}");
         assert!(attribution.recorded().is_empty());
         attribution.discard();
+    }
+
+    fn deny() -> Policy {
+        Policy {
+            deny: BTreeSet::from([YOUNG_PACKAGE.to_string()]),
+            ..Policy::default()
+        }
+    }
+
+    /// Judge `packages` with nothing observed, under `policy` and `mode`.
+    fn judge_unobserved(
+        harness: &Harness,
+        policy: &Policy,
+        mode: Mode,
+        packages: &[LockedPackage],
+    ) -> Judged {
+        judge(
+            &harness.proxy,
+            harness.config(policy.clone(), mode),
+            &PublishTimes::new(),
+            packages,
+            at(NOW),
+            policy,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn one_document_is_fetched_once_and_a_cached_answer_is_not_asked_again() {
+        let harness = Harness::new("age-dedup");
+        let body = format!(
+            r#"{{"published": {{"pkg@1.0": "{}", "pkg@1.1": "{}"}}}}"#,
+            format_utc(NOW - 30 * SECONDS_PER_DAY),
+            format_utc(NOW - 20 * SECONDS_PER_DAY)
+        );
+        harness.upstream.set(
+            "/meta/pkg.json",
+            Behavior::Reply(
+                Reply::new(200, body.as_bytes()).header("Content-Type", "application/json"),
+            ),
+        );
+        let packages = [
+            LockedPackage::new("pkg", "1.0"),
+            LockedPackage::new("pkg", "1.1"),
+        ];
+        let judged = judge_unobserved(&harness, &deny(), Mode::Online, &packages);
+        assert!(judged.young.is_empty(), "{:?}", judged.young);
+        assert_eq!(harness.upstream.hits("/meta/pkg.json"), 1);
+        // A later resolution finds both times in the cache: no request.
+        let judged = judge_unobserved(&harness, &deny(), Mode::Online, &packages);
+        assert!(judged.young.is_empty(), "{:?}", judged.young);
+        assert_eq!(harness.upstream.hits("/meta/pkg.json"), 1);
+        let dispositions: Vec<String> = judged
+            .lookups
+            .unwrap()
+            .diagnostics
+            .requests
+            .iter()
+            .map(|row| row.disposition.clone())
+            .collect();
+        assert_eq!(dispositions, ["hit"]);
+        // A version the cached copy does not time is asked about.
+        let judged = judge_unobserved(
+            &harness,
+            &deny(),
+            Mode::Online,
+            &[LockedPackage::new("pkg", "1.2")],
+        );
+        assert_eq!(judged.young.len(), 1);
+        assert_eq!(harness.upstream.hits("/meta/pkg.json"), 2);
+    }
+
+    /// A lookup the registry does not answer leaves the time unknown, the
+    /// detail says why, and a policy that denies the kind refuses it.
+    fn refused_unanswered(harness: &Harness, mode: Mode, cause: &str) {
+        let packages = [LockedPackage::new("pkg", "1.0")];
+        let judged = judge_unobserved(harness, &deny(), mode, &packages);
+        assert_eq!(judged.young.len(), 1, "{:?}", judged.young);
+        let detail = &judged.young[0].fact.detail;
+        assert!(detail.contains(cause), "{detail}");
+        let _serial = policy::attribution_test_lock();
+        let attribution = policy::Attribution::open("fixture").unwrap();
+        let error = record(&deny(), &judged.young).unwrap_err().to_string();
+        assert!(error.contains("pkg@1.0"), "{error}");
+        assert!(attribution.recorded().is_empty());
+        attribution.discard();
+    }
+
+    #[test]
+    fn a_rate_limited_lookup_is_asked_once_more_then_refused_when_denied() {
+        let harness = Harness::new("age-429");
+        harness.upstream.set(
+            "/meta/pkg.json",
+            Behavior::Reply(Reply::new(429, b"slow down").header("Retry-After", "0")),
+        );
+        refused_unanswered(&harness, Mode::Online, "rate-limited the lookup (429)");
+        assert_eq!(harness.upstream.hits("/meta/pkg.json"), 2);
+    }
+
+    #[test]
+    fn an_unreachable_registry_is_refused_when_denied() {
+        let harness = Harness::new("age-503");
+        harness
+            .upstream
+            .set("/meta/pkg.json", Behavior::Reply(Reply::new(503, b"down")));
+        refused_unanswered(&harness, Mode::Online, "upstream answered 503");
+        let harness = Harness::new("age-drop");
+        harness.upstream.set("/meta/pkg.json", Behavior::Drop);
+        refused_unanswered(&harness, Mode::Online, "is unreachable");
+    }
+
+    #[test]
+    fn an_offline_miss_is_refused_when_denied() {
+        let harness = Harness::new("age-offline");
+        refused_unanswered(&harness, Mode::Offline, "offline, and");
+        assert!(harness.upstream.seen().is_empty());
     }
 }

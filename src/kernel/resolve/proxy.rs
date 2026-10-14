@@ -60,6 +60,64 @@ const GIT_PORT: u16 = 9418;
 /// The `User-Agent` of ward's own publish-time lookups ([`Session::lookup`]).
 const LOOKUP_USER_AGENT: &str = "ward (https://github.com/DigitalWestern/greyward)";
 
+/// How a publish-time lookup ([`Session::lookup`]) was answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupAnswer {
+    /// The status served: the registry's, or the proxy's own (504 for an
+    /// unreachable registry or an offline miss).
+    pub status: u16,
+    /// The proxy's own reason, when it answered instead of the registry.
+    pub reason: Option<String>,
+    /// The registry's `Retry-After`, in seconds, when it gave one.
+    pub retry_after: Option<u64>,
+}
+
+/// The first bytes of a served response: enough for its status line, its
+/// headers and the proxy's one-line reason. The rest is dropped.
+#[derive(Default)]
+struct Capture(Vec<u8>);
+
+impl Capture {
+    const KEEP: usize = 16 << 10;
+
+    fn parse(self) -> LookupAnswer {
+        let text = String::from_utf8_lossy(&self.0);
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse().ok())
+            .unwrap_or(0);
+        let retry_after = lines
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("retry-after"))
+            .and_then(|(_, value)| value.trim().parse().ok());
+        let reason = body
+            .strip_prefix("ward: ")
+            .and_then(|reason| reason.lines().next())
+            .filter(|_| !(200..300).contains(&status))
+            .map(str::to_string);
+        LookupAnswer {
+            status,
+            reason,
+            retry_after,
+        }
+    }
+}
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let room = Self::KEEP.saturating_sub(self.0.len());
+        self.0.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// How the process's proxy is built.
 pub struct ProxyConfig {
     /// The certificate authorities upstream registries may chain to.
@@ -296,8 +354,16 @@ impl Session {
     /// last-good and offline mode, the validating resolver, the permitted
     /// set and the ledger all apply as to the tool's own requests. What the
     /// body says lands in the session's publish times; the body itself is
-    /// dropped. `Err` only when the lookup names no endpoint of the route.
-    pub fn lookup(&self, route_id: &str, lookup: &PublishLookup) -> io::Result<()> {
+    /// dropped. `wanted` are the versions the document is fetched for: a
+    /// cached copy that already times every one of them is served without
+    /// asking the registry again, since a publish time never changes.
+    /// `Err` only when the lookup names no endpoint of the route.
+    pub fn lookup(
+        &self,
+        route_id: &str,
+        lookup: &PublishLookup,
+        wanted: &[(String, String)],
+    ) -> io::Result<LookupAnswer> {
         let state = &*self.state;
         let route = state
             .route(route_id)
@@ -330,8 +396,11 @@ impl Session {
             keep_alive: false,
             http10: false,
             supplemental: true,
+            wanted,
         };
-        exchange.lookup(&lookup.url, &mut io::sink())
+        let mut answer = Capture::default();
+        exchange.lookup(&lookup.url, &mut answer)?;
+        Ok(answer.parse())
     }
 
     /// Stop serving and hand back everything the session recorded.
@@ -1088,6 +1157,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         keep_alive: request.keep_alive && !request.http10,
         http10: request.http10,
         supplemental: false,
+        wanted: &[],
     };
     match upstream {
         Upstream::Local(answer) => exchange.local(answer, out)?,

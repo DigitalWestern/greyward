@@ -431,6 +431,27 @@ pub trait RegistryProtocol: Sync {
     fn package_key(&self, name: &str, version: &str) -> (String, String) {
         (name.to_string(), version.to_string())
     }
+
+    /// Why `name` at `version` has no publish time this protocol can
+    /// trust, whatever its metadata says, so it is neither read nor looked
+    /// up and its age is unknown (Go's pseudo-versions). `None`: judge it.
+    fn untimed(&self, _name: &str, _version: &str) -> Option<String> {
+        None
+    }
+
+    /// What this protocol's publish time is, when it is not the registry's
+    /// own upload time: written into each `young-package` detail beside
+    /// the time (Go's commit times).
+    fn time_note(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// The publish-time key of one file of a version (`young-package` reads
+/// a version's files when the lock names them): the version and the file
+/// name, joined by a space, which no version spelling holds.
+pub fn file_key(version: &str, file: &str) -> String {
+    format!("{version} {file}")
 }
 
 /// A publish-time document ward fetches itself ([`RegistryProtocol::lookup`]).

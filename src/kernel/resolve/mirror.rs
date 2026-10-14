@@ -57,6 +57,7 @@ const SERVED_RESPONSE_HEADERS: &[&str] = &[
     "content-disposition",
     "expires",
     "vary",
+    "retry-after",
 ];
 
 const MAX_REDIRECTS: usize = 10;
@@ -313,6 +314,11 @@ pub(crate) struct Exchange<'a> {
     /// good as a fresh one, and nothing the tool resolved came from it. An
     /// address the SSRF rule refuses still fails the door.
     pub supplemental: bool,
+    /// The (name, version) pairs a publish-time lookup asks about: a cached
+    /// copy that already names a time for each is served without asking
+    /// the registry again, since a published version's time never changes.
+    /// Empty for every tool request.
+    pub wanted: &'a [(String, String)],
 }
 
 /// The ledger class of a publish-time lookup ([`Exchange::supplemental`]).
@@ -609,7 +615,7 @@ impl Exchange<'_> {
         // Every body this request holds (the cached copy, a fetched one,
         // the rewritten one served) is reserved here first.
         let mut held = self.budget.reservation();
-        let cached = if cacheable {
+        let mut cached = if cacheable {
             match self.state.meta.load(&key, &mut held) {
                 Ok(cached) => cached,
                 Err(error) if http::OverBudget::is(&error) => {
@@ -623,6 +629,19 @@ impl Exchange<'_> {
         } else {
             None
         };
+        if let Some(cached) = cached.take_if(|cached| self.answers_wanted(url, cached)) {
+            record.served = Some(200);
+            return self.serve_metadata(
+                out,
+                url,
+                200,
+                cached,
+                Freshness::LastGood,
+                "hit",
+                record,
+                &mut held,
+            );
+        }
         if self.state.config.mode == Mode::Offline {
             return self.last_good(url, cached, record, "offline".into(), &mut held, out);
         }
@@ -694,7 +713,11 @@ impl Exchange<'_> {
                 return self.last_good(url, cached, record, error.to_string(), &mut held, out)
             }
         };
-        let fresh = Cached::new(url.as_str(), &response.headers, body);
+        let mut fresh = Cached::new(url.as_str(), &response.headers, body);
+        // A rate limit's wait is passed on (never cached: only a 200 is).
+        if let Some(wait) = response.header("retry-after").filter(|_| status == 429) {
+            fresh.headers.push(("Retry-After".into(), wait.to_string()));
+        }
         let vary = response
             .headers
             .iter()
@@ -717,6 +740,23 @@ impl Exchange<'_> {
             record,
             &mut held,
         )
+    }
+
+    /// A publish-time lookup whose cached copy names a time for every
+    /// version it asks about ([`Exchange::wanted`]).
+    fn answers_wanted(&self, url: &Url, cached: &Cached) -> bool {
+        if !self.supplemental || self.wanted.is_empty() || self.head_only() {
+            return false;
+        }
+        let protocol = self.route.protocol;
+        let known: std::collections::HashSet<(String, String)> = protocol
+            .published(url, &cached.body)
+            .into_iter()
+            .map(|(name, version, _)| protocol.package_key(&name, &version))
+            .collect();
+        self.wanted
+            .iter()
+            .all(|(name, version)| known.contains(&protocol.package_key(name, version)))
     }
 
     /// The upstream is unreachable: serve last-good if policy allows and a

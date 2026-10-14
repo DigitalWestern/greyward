@@ -137,11 +137,11 @@ pub(super) struct UvDependency {
     pub(super) extras: BTreeSet<String>,
 }
 
-/// `(name, version)` of every uv.lock package locked from the public PyPI
-/// index (no `source`, or a registry source on PyPI's hosts): what the
-/// `young-package` check judges. Local, git, URL and other-index packages
-/// are left out.
-pub fn uv_pypi_packages(text: &str) -> io::Result<Vec<(String, String)>> {
+/// `(name, version, file names)` of every uv.lock package locked from the
+/// public PyPI index (no `source`, or a registry source on PyPI's hosts):
+/// what the `young-package` check judges. Local, git, URL and other-index
+/// packages are left out.
+pub fn uv_pypi_packages(text: &str) -> io::Result<Vec<(String, String, Vec<String>)>> {
     Ok(parse_uv_lock(text)?
         .into_iter()
         .filter(|package| match uv_source(&package.source) {
@@ -150,7 +150,14 @@ pub fn uv_pypi_packages(text: &str) -> io::Result<Vec<(String, String)>> {
             }
             _ => false,
         })
-        .map(|package| (package.name, package.version))
+        .map(|package| {
+            let files = package
+                .files
+                .into_iter()
+                .map(|file| file.filename)
+                .collect();
+            (package.name, package.version, files)
+        })
         .collect())
 }
 

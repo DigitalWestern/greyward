@@ -23,9 +23,10 @@
 
 use super::pypi::normalize_name;
 use crate::kernel::fetch::Digest;
+use crate::kernel::pep440::Version;
 use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, Lookup, RegistryProtocol, RequestClass, Route, Upstream,
+    file_key, Claim, Endpoint, Lookup, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -124,8 +125,10 @@ impl RegistryProtocol for PypiRegistry {
     }
 
     /// A JSON project page's `upload-time` per file, each file's version
-    /// read from its name; a version's earliest file is when it was
-    /// published. An HTML page carries no upload times.
+    /// read from its name: under the version (whose earliest file is when
+    /// it was published) and under the file's own key ([`file_key`]), since
+    /// a file can be added to a version long after its first. An HTML page
+    /// carries no upload times.
     fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
         if url.host_str() != Some(INDEX_HOST) || !url.path().starts_with("/simple/") {
             return Vec::new();
@@ -143,8 +146,13 @@ impl RegistryProtocol for PypiRegistry {
             .filter_map(|file| {
                 let filename = file.get("filename")?.as_str()?;
                 let at = parse_rfc3339(file.get("upload-time")?.as_str()?)?;
-                Some((name.to_string(), file_version(name, filename)?, at))
+                let version = file_version(name, filename)?;
+                Some([
+                    (name.to_string(), file_key(&version, filename), at),
+                    (name.to_string(), version, at),
+                ])
             })
+            .flatten()
             .collect()
     }
 
@@ -163,10 +171,32 @@ impl RegistryProtocol for PypiRegistry {
         })
     }
 
-    /// PEP 503 names; versions compared without letter case.
+    /// PEP 503 names and PEP 440 normalized versions (`1.0-1` is
+    /// `1.0.post1`); a [`file_key`]'s file name compared without letter
+    /// case.
     fn package_key(&self, name: &str, version: &str) -> (String, String) {
-        (normalize_name(name), version.to_ascii_lowercase())
+        let version = match version.split_once(' ') {
+            Some((version, file)) => file_key(&version_key(version), &file.to_ascii_lowercase()),
+            None => version_key(version),
+        };
+        (normalize_name(name), version)
     }
+}
+
+/// A version's PEP 440 normal form. A wheel file name may spell an epoch's
+/// `!` as `_` (`1_2.0` is `1!2.0`); a version that does not parse either
+/// way is compared as written, without letter case.
+fn version_key(version: &str) -> String {
+    let canonical = |text: &str| Version::parse(text).ok().map(|parsed| parsed.canonical());
+    canonical(version)
+        .or_else(|| {
+            let (epoch, rest) = version.split_once('_')?;
+            if epoch.is_empty() || !epoch.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            canonical(&format!("{epoch}!{rest}"))
+        })
+        .unwrap_or_else(|| version.to_ascii_lowercase())
 }
 
 /// The version in a distribution's file name for project `project`: a
@@ -481,6 +511,45 @@ mod tests {
         assert_eq!(
             PYPI_REGISTRY.package_key("Python_Dateutil", "2.9.0.POST0"),
             ("python-dateutil".to_string(), "2.9.0.post0".to_string())
+        );
+    }
+
+    /// A lock and a page that spell one version differently meet at its
+    /// PEP 440 normal form, epochs included, and so do their files.
+    #[test]
+    fn versions_and_files_compare_in_pep_440_normal_form() {
+        let key = |version: &str| PYPI_REGISTRY.package_key("Demo", version).1;
+        assert_eq!(key("1.0-1"), key("1.0.post1"));
+        assert_eq!(key("1.0.POST1"), "1.0.post1");
+        assert_eq!(key("1.0RC1"), "1.0rc1");
+        assert_eq!(key("v2.0"), "2.0");
+        assert_eq!(key("1!2.0"), "1!2.0");
+        // A wheel name writes the epoch's `!` as `_`.
+        assert_eq!(key("1_2.0"), "1!2.0");
+        assert_ne!(key("1!2.0"), key("2.0"));
+        assert_eq!(key("not a version"), "not a version");
+        assert_eq!(
+            key(&file_key("1.0-1", "Demo-1.0-1-py3-none-any.whl")),
+            key(&file_key("1.0.post1", "demo-1.0-1-py3-none-any.whl"))
+        );
+        let page = br#"{"name": "demo", "files": [
+            {"filename": "demo-1_2.0-py3-none-any.whl", "upload-time": "2024-02-12T23:43:59Z"}
+        ]}"#;
+        let url = Url::parse("https://pypi.org/simple/demo/").unwrap();
+        let keys: Vec<(String, String)> = PYPI_REGISTRY
+            .published(&url, page)
+            .into_iter()
+            .map(|(name, version, _)| PYPI_REGISTRY.package_key(&name, &version))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (
+                    "demo".to_string(),
+                    file_key("1!2.0", "demo-1_2.0-py3-none-any.whl")
+                ),
+                ("demo".to_string(), "1!2.0".to_string()),
+            ]
         );
     }
 

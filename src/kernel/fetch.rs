@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::{ffi::OsStr, ops::Deref};
 
 pub mod pinned;
+mod pool;
+pub(crate) use pool::{fetch_all, fetch_each};
 
 /// A verified cache path with the GC lock held shared until the caller
 /// drops it.
@@ -3139,5 +3141,58 @@ mod integrity_tests {
         assert!(output.status.success(), "{report}");
         // The child ran the test rather than filtering it out.
         assert!(report.contains("1 passed"), "{report}");
+    }
+
+    /// Several threads verifying and publishing the same digest at once
+    /// each get the one good cache entry, and no temporary is left: every
+    /// attempt streams into its own randomly named file.
+    #[test]
+    fn concurrent_downloads_of_one_digest_publish_one_entry() {
+        let (_scratch, store) = scratch_store("fetch-batch-same-digest");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let bytes = vec![7u8; 1 << 20];
+        let hex = sha256_hex(&bytes);
+        let source = store.root.join("source");
+        fs::write(&source, &bytes).unwrap();
+        let url = format!("file://{}", source.display());
+        let jobs = vec![url.as_str(); 8];
+        let leases = fetch_all(&jobs, |url| {
+            download_verified_held(&store, activity, url, &hex)
+        })
+        .unwrap();
+        let cache = store.cache_path("sha256", &hex);
+        assert!(leases.iter().all(|lease| **lease == *cache));
+        assert_eq!(fs::read(&cache).unwrap(), bytes);
+        assert!(leftover_downloads(&store).is_empty());
+    }
+
+    /// A batch with one bad artifact fails with the text that artifact
+    /// fails with alone, and leaves nothing behind, partial or otherwise.
+    #[test]
+    fn a_batch_with_a_bad_artifact_fails_as_it_alone_would() {
+        let (_scratch, store) = scratch_store("fetch-batch-mismatch");
+        let activity = &store.activity(ActivityMode::Shared).unwrap();
+        let mut jobs = Vec::new();
+        for (name, body) in [("a", "alpha"), ("b", "bravo"), ("c", "charlie")] {
+            let source = store.root.join(name);
+            fs::write(&source, body).unwrap();
+            jobs.push((
+                format!("file://{}", source.display()),
+                sha256_hex(body.as_bytes()),
+            ));
+        }
+        jobs[1].1 = sha256_hex(b"not bravo");
+        let alone = download_verified_held(&store, activity, &jobs[1].0, &jobs[1].1)
+            .err()
+            .unwrap()
+            .to_string();
+        let error = fetch_all(&jobs, |(url, hex)| {
+            download_verified_held(&store, activity, url, hex)
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), alone);
+        assert!(!store.cache_path("sha256", &jobs[1].1).exists());
+        assert!(leftover_downloads(&store).is_empty());
     }
 }

@@ -11,7 +11,7 @@ use crate::comforter::{
     ClosureRefs, InputRecord,
 };
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_verified_held;
+use crate::kernel::fetch::{download_verified_held, fetch_all, fetch_each};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::hostfallback::{self, FallbackRecords, RUNTIME_ONLY_VIEW};
 use crate::kernel::resolve::ledger::LedgerObjects;
@@ -387,17 +387,7 @@ pub(crate) fn realize_env_at_depth(
         host_inputs,
     } = realize_artifacts(door, &packages, selected, rust, plan, sdist_depth)?;
     // Keep verified cache leases alive until every wheel has been extracted.
-    let mut _cache_leases = Vec::new();
-    // Sdist realization may recursively fetch toolchains. Re-verify all
-    // wheel inputs only after that work, then hold their leases through wheel
-    // extraction and publication.
-    for (p, path) in &mut artifacts {
-        if p.kind == ArtifactKind::Wheel {
-            let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
-            *path = lease.to_path_buf();
-            _cache_leases.push(lease);
-        }
-    }
+    let _cache_leases = reverify_wheels(store, activity, &mut artifacts)?;
 
     let minor = plan
         .python_version
@@ -493,6 +483,30 @@ pub(crate) fn realize_env_at_depth(
     Ok(object)
 }
 
+/// Sdist realization may recursively fetch toolchains. Re-verify all wheel
+/// inputs only after that work, point each at its verified cache entry, and
+/// return the leases for the caller to hold through wheel extraction and
+/// publication. Each re-verification is a hash of a cache hit (or a fresh
+/// download), so they run on the fetch pool; the first failure in package
+/// order is the one reported, as in a loop.
+fn reverify_wheels(
+    store: &crate::kernel::store::Store,
+    activity: &StoreActivity,
+    artifacts: &mut [(&crate::kernel::types::LockedPackage, PathBuf)],
+) -> io::Result<Vec<crate::kernel::fetch::CacheLease>> {
+    let wheels: Vec<usize> = (0..artifacts.len())
+        .filter(|&i| artifacts[i].0.kind == ArtifactKind::Wheel)
+        .collect();
+    let leases = fetch_all(&wheels, |&i| {
+        let p = artifacts[i].0;
+        download_verified_held(store, activity, &p.url, &p.sha256)
+    })?;
+    for (&i, lease) in wheels.iter().zip(&leases) {
+        artifacts[i].1 = lease.to_path_buf();
+    }
+    Ok(leases)
+}
+
 /// Every package of an environment as a wheel file, in `packages` order:
 /// a wheel from the verified cache, an sdist built into a wheel (network
 /// denied). The sdists whose wheels fell back to the whole host are listed
@@ -516,14 +530,25 @@ fn realize_artifacts<'p>(
     let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
     let mut fell_back = Vec::new();
     let mut host_inputs = None;
+    // The wheels are independent downloads: fetch them on the pool first,
+    // then walk the packages in order as before, taking each wheel's result
+    // where its download used to be. An sdist that fails ahead of a wheel
+    // that failed is still the error reported.
+    let wheels: Vec<&crate::kernel::types::LockedPackage> = packages
+        .iter()
+        .copied()
+        .filter(|p| p.kind == ArtifactKind::Wheel)
+        .collect();
+    let mut fetched = fetch_each(&wheels, |p| {
+        let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+        Ok(lease.to_path_buf())
+    })
+    .into_iter();
     for &p in packages {
         let wheel_file = match p.kind {
-            ArtifactKind::Wheel => {
-                let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
-                let path = lease.to_path_buf();
-                drop(lease);
-                path
-            }
+            ArtifactKind::Wheel => fetched
+                .next()
+                .ok_or_else(|| io::Error::other("internal: a wheel was not fetched"))??,
             // sdist -> wheel via sandboxed derivation (network denied).
             ArtifactKind::Sdist => {
                 let owned;

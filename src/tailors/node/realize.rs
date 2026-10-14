@@ -414,6 +414,26 @@ fn fetch_plan_sources(
     let mut git_objects: Vec<(NpmPackage, PathBuf)> = Vec::new();
     let mut downloaded = BTreeMap::<(String, String), (PathBuf, Digest)>::new();
     let mut matched = BTreeMap::<String, Digest>::new();
+    // Each distinct registry tarball once, on the fetch pool, in the order
+    // the loop below first meets it. The loop then takes each result where
+    // its download used to be, so a git source that fails ahead of a
+    // tarball that failed is still the error reported.
+    let mut distinct: Vec<&NpmPackage> = Vec::new();
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for p in plan.packages.iter().filter(|p| p.git.is_none()) {
+            if seen.insert((&p.url, &p.integrity)) {
+                distinct.push(p);
+            }
+        }
+    }
+    let mut prefetched: BTreeMap<(String, String), io::Result<_>> = distinct
+        .iter()
+        .map(|p| (p.url.clone(), p.integrity.clone()))
+        .zip(crate::kernel::fetch::fetch_each(&distinct, |&p| {
+            fetch_tarball(store, activity, p)
+        }))
+        .collect();
     for p in &plan.packages {
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
@@ -436,7 +456,10 @@ fn fetch_plan_sources(
         let (t, digest) = if let Some(fetched) = downloaded.get(&cache_key) {
             fetched.clone()
         } else {
-            let (lease, digest) = fetch_tarball(store, activity, p)?;
+            let (lease, digest) = match prefetched.remove(&cache_key) {
+                Some(fetched) => fetched?,
+                None => fetch_tarball(store, activity, p)?,
+            };
             let path = lease.to_path_buf();
             leases.push((lease, digest.clone()));
             downloaded.insert(cache_key, (path.clone(), digest.clone()));

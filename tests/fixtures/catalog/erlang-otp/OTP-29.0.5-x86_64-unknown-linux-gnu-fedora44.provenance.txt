@@ -1,0 +1,24 @@
+artifact: OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz
+18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4  /tmp/claude-1000/-home-ethan/016492b0-9612-4e72-9ecd-d0a196cd5461/scratchpad/otp-build/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz
+built: 2026-09-05T14:00:58-04:00 on m6-fedora (Linux 7.1.13-200.fc44.x86_64 x86_64)
+source: https://github.com/erlang/otp/releases/download/OTP-29.0.5/otp_src_29.0.5.tar.gz sha256=86f6f40d4638852b0383235b02a70d8450184e441e83a06a108bf8e5bf1b2e04 (matches GitHub release asset digest)
+sandbox: bwrap via bwrap-proto/sandbox.sh, network denied, env cleared, SOURCE_DATE_EPOCH=315532800
+configure: --with-ssl=/usr --with-ssl-lib-subdir=lib64 --enable-dynamic-ssl-lib --with-ssl-rpath=no --with-termcap --without-wx --without-javac --without-odbc --disable-saved-compile-time
+MAKEFLAGS=-j12
+toolchain: gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2); GNU ld version 2.46.1-1.fc44; glibc 2.43
+host packages: gcc-16.2.1-2.fc44.x86_64 binutils-2.46.1-1.fc44.x86_64 glibc-devel-2.43-8.fc44.x86_64 openssl-devel-3.5.8-1.fc44.x86_64 ncurses-devel-6.6-1.fc44.x86_64 make-4.4.1-12.fc44.x86_64 
+openssl: OpenSSL 3.5.8 25 Aug 2026 (Library: OpenSSL 3.5.8 25 Aug 2026)
+ELF needs (beam.smp):
+  [libtinfo.so.6]
+  [libstdc++.so.6]
+  [libm.so.6]
+  [libgcc_s.so.1]
+  [libc.so.6]
+glibc symbol versions required (beam.smp):
+  GLIBC_2.34
+  GLIBC_2.38
+  GLIBC_2.43
+crypto.so needs:
+  [libcrypto.so.3]
+  [libc.so.6]
+build wall time: 59s

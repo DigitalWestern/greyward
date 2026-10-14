@@ -19,9 +19,14 @@ const LOCK_TXT: &str = "requirements.lock.txt";
 /// `uv.lock`, ward's `requirements.lock.txt`, or another `.txt`
 /// requirements file uv compiled (its header says so). The outputs name every lock the run may write, and it must leave
 /// one.
-/// `indexes` are the listed registries' index URLs: a uv.lock package from
-/// one of them is judged as a PyPI package is.
-pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>, indexes: Vec<String>) -> LockedList<'a> {
+/// `indexes` are the listed registries' index URLs and their routes, the
+/// default first: each package is judged by the registry that served it, a
+/// uv.lock package by its `source`, a compiled requirements pin by the
+/// default (the one index uv is given).
+pub(crate) fn locked_list<'a>(
+    outputs: Vec<PathBuf>,
+    indexes: Vec<(String, String)>,
+) -> LockedList<'a> {
     Box::new(move |staged: &Staged<'_>| {
         let mut locked = Vec::new();
         let mut read = false;
@@ -44,10 +49,20 @@ pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>, indexes: Vec<String>) -> Lo
             }
             read = true;
             if requirements {
-                locked.extend(requirements_packages(&text)?);
+                let default = indexes.first().map(|(_, route)| route.clone());
+                locked.extend(requirements_packages(&text)?.into_iter().map(
+                    |package| match &default {
+                        Some(route) => package.on_route(route.clone()),
+                        None => package,
+                    },
+                ));
             } else {
                 locked.extend(uv_pypi_packages(&text, &indexes)?.into_iter().map(
-                    |(name, version, files)| LockedPackage::new(name, version).with_files(files),
+                    |(name, version, files, route)| {
+                        LockedPackage::new(name, version)
+                            .with_files(files)
+                            .on_route(route)
+                    },
                 ));
             }
         }
@@ -151,19 +166,28 @@ source = { git = "https://github.com/pytest-dev/iniconfig?rev=v2.0.0#93f5930e668
                 "six-1.17.0.tar.gz".to_string(),
                 "six-1.17.0-py2.py3-none-any.whl".to_string(),
             ],
+            "pypi".to_string(),
         );
         assert_eq!(
             uv_pypi_packages(lock, &[]).unwrap(),
             std::slice::from_ref(&six)
         );
-        // A package from a listed index is judged too, its URL compared
-        // as the policy compares index URLs.
-        let listed = ["https://EXAMPLE.com/simple/".to_string()];
+        // A package from a listed index is judged too, by that index's
+        // route, its URL compared as the policy compares index URLs.
+        let listed = [(
+            "https://EXAMPLE.com/simple/".to_string(),
+            "pypi-corp".to_string(),
+        )];
         assert_eq!(
             uv_pypi_packages(lock, &listed).unwrap(),
             [
                 six,
-                ("private".to_string(), "2.0.0".to_string(), Vec::new())
+                (
+                    "private".to_string(),
+                    "2.0.0".to_string(),
+                    Vec::new(),
+                    "pypi-corp".to_string()
+                )
             ]
         );
     }

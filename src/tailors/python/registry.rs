@@ -111,7 +111,7 @@ impl RegistryProtocol for PypiRegistry {
         if url.host_str() != Some(INDEX_HOST) || !url.path().starts_with("/simple/") {
             return Vec::new();
         }
-        page_times(body)
+        page_times(url, body)
     }
 
     /// The project's JSON page (PEP 691), which lists each file's upload
@@ -155,13 +155,23 @@ fn package_key(name: &str, version: &str) -> (String, String) {
 /// The upload times a JSON project page (PEP 691) lists: each file's under
 /// the file's own key ([`file_key`]) and under its version, read from the
 /// file's name. An HTML page carries none.
-fn page_times(body: &[u8]) -> Vec<(String, String, i64)> {
+/// A page that names another project than its URL (`.../<project>/`)
+/// times nothing, since upload times, unlike files, are not checked
+/// against a digest.
+fn page_times(url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
     let Ok(page) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Vec::new();
     };
     let Some(name) = page.get("name").and_then(|name| name.as_str()) else {
         return Vec::new();
     };
+    let requested = url
+        .path_segments()
+        .and_then(|segments| segments.rev().find(|segment| !segment.is_empty()))
+        .map(crate::kernel::gitsrc::percent_decode);
+    if requested.is_none_or(|requested| normalize_name(&requested) != normalize_name(name)) {
+        return Vec::new();
+    }
     page.get("files")
         .and_then(|files| files.as_array())
         .into_iter()
@@ -538,7 +548,7 @@ impl RegistryProtocol for ConfiguredSimple {
         if !self.is_page(url) {
             return Vec::new();
         }
-        page_times(body)
+        page_times(url, body)
     }
 
     /// The project's JSON page under this registry's `url`.
@@ -1372,6 +1382,13 @@ python = ["corp", "team"]
                     ("demo".into(), "1.0".into(), at),
                 ]
             );
+            // A page that names another project than its URL times nothing.
+            assert!(protocol
+                .published(
+                    &url("https://registry.test:8443/repo/pypi/simple/other/"),
+                    page
+                )
+                .is_empty());
             // A body outside the registry's pages times nothing.
             assert!(protocol
                 .published(

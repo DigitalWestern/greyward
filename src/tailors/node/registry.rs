@@ -111,7 +111,7 @@ impl RegistryProtocol for NpmRegistry {
         if url.host_str() != Some(REGISTRY_HOST) || is_tarball_path(url.path()) {
             return Vec::new();
         }
-        packument_times(body)
+        packument_times(body, url.path().trim_start_matches('/'))
     }
 
     /// The full packument (`Accept: application/json`), which carries
@@ -131,7 +131,10 @@ impl RegistryProtocol for NpmRegistry {
 
 /// `(name, version, published)` for each version a packument's `time` map
 /// names (`created` and `modified` are not versions).
-fn packument_times(body: &[u8]) -> Vec<(String, String, i64)> {
+/// `requested` is the packument's path as asked for (`@scope%2fname`):
+/// a body that names another package times nothing, since publish times,
+/// unlike tarballs, are not checked against a digest.
+fn packument_times(body: &[u8], requested: &str) -> Vec<(String, String, i64)> {
     let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Vec::new();
     };
@@ -141,6 +144,9 @@ fn packument_times(body: &[u8]) -> Vec<(String, String, i64)> {
     ) else {
         return Vec::new();
     };
+    if !crate::kernel::gitsrc::percent_decode(requested).eq_ignore_ascii_case(name) {
+        return Vec::new();
+    }
     times
         .iter()
         .filter(|(version, _)| !matches!(version.as_str(), "created" | "modified"))
@@ -289,10 +295,15 @@ pub struct ConfiguredNpm {
     elsewhere: Vec<String>,
 }
 
+/// The route id of a configured npm registry's route.
+pub fn configured_route_id(registry: &Registry) -> String {
+    format!("{ROUTE_ID}-{}", registry.name)
+}
+
 impl ConfiguredNpm {
     pub fn new(registry: &Registry) -> ConfiguredNpm {
         ConfiguredNpm {
-            id: format!("{ROUTE_ID}-{}", registry.name),
+            id: configured_route_id(registry),
             base: registry.url.clone(),
             scopes: registry.scopes.clone(),
             elsewhere: Vec::new(),
@@ -323,16 +334,18 @@ impl ConfiguredNpm {
     }
 
     fn is_packument(&self, url: &Url) -> bool {
+        self.packument_path(url).is_some()
+    }
+
+    /// The packument's path under this registry's `url`, as asked for.
+    fn packument_path(&self, url: &Url) -> Option<String> {
         if url.query().is_some() || !covers::covers(&self.base, url.as_str()) {
-            return false;
+            return None;
         }
-        let Ok(base) = Url::parse(&self.base) else {
-            return false;
-        };
-        let Some(rest) = url.path().strip_prefix(base.path()) else {
-            return false;
-        };
-        check_packument_path(&format!("/{rest}")).is_ok()
+        let base = Url::parse(&self.base).ok()?;
+        let rest = url.path().strip_prefix(base.path())?;
+        check_packument_path(&format!("/{rest}")).ok()?;
+        Some(rest.to_string())
     }
 }
 
@@ -374,10 +387,10 @@ impl RegistryProtocol for ConfiguredNpm {
 
     /// A full packument's `time` map, as on the public registry.
     fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
-        if !self.is_packument(url) {
+        let Some(path) = self.packument_path(url) else {
             return Vec::new();
-        }
-        packument_times(body)
+        };
+        packument_times(body, &path)
     }
 
     /// The full packument under this registry's `url`, for a name npm
@@ -617,6 +630,9 @@ mod tests {
             route.published(&packument_url, packument),
             [("@corp/widget".to_string(), "1.0.0".to_string(), at)]
         );
+        // A packument that names another package than its URL times nothing.
+        let other = Url::parse("https://npm.pkg.github.com/corp/@corp%2fother").unwrap();
+        assert!(route.published(&other, packument).is_empty());
         let tarball_url =
             Url::parse("https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc").unwrap();
         assert!(route.published(&tarball_url, packument).is_empty());

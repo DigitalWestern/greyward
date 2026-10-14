@@ -20,10 +20,13 @@ pub(crate) use workspace::*;
 /// an `InvalidData` error, so no package is passed unjudged. A lock with
 /// no `packages` locks nothing; a `packages` that is not a map is
 /// `InvalidData` too.
+///
+/// `route_of(name, tarball)` names the route of the registry that served a
+/// package: `None` for a tarball no registry serves, which is left out.
 pub(crate) fn pnpm_registry_packages(
     lock_yaml: &str,
-    configured: &dyn Fn(&str) -> bool,
-) -> io::Result<Vec<(String, String)>> {
+    route_of: &dyn Fn(&str, Option<&str>) -> Option<String>,
+) -> io::Result<Vec<(String, String, String)>> {
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
     let packages = match root.get("packages") {
@@ -62,7 +65,9 @@ pub(crate) fn pnpm_registry_packages(
                 .map(|url| url.host_str().map(str::to_string));
             match host {
                 Some(Some(host)) if host == crate::tailors::node::registry::REGISTRY_HOST => {}
-                Some(_) if yaml_str(Some(tarball)).is_some_and(configured) => {}
+                Some(_)
+                    if yaml_str(Some(tarball)).is_some_and(|t| route_of("", Some(t)).is_some()) => {
+                }
                 Some(_) => continue,
                 // `file:` tarballs are paths; anything else is unread.
                 None if yaml_str(Some(tarball)).is_some_and(|t| t.starts_with("file:")) => continue,
@@ -78,7 +83,10 @@ pub(crate) fn pnpm_registry_packages(
         if !version.starts_with(|c: char| c.is_ascii_digit()) {
             return Err(unread(key, "names no registry version"));
         }
-        found.push((name, version));
+        let Some(route) = route_of(&name, yaml_str(resolution.get("tarball"))) else {
+            continue;
+        };
+        found.push((name, version, route));
     }
     Ok(found)
 }

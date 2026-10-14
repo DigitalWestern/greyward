@@ -349,13 +349,10 @@ pub fn ensure_cargo_lock(
          (confined, through the resolution proxy)...",
     );
     super::resolve::generate_lock(door, workspace, rust_obj, toolchain).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "could not generate Cargo.lock: {e}; \
-                 run `ward` after fixing the project or network"
-            ),
-        )
+        let message = format!(
+            "could not generate Cargo.lock: {e}; run `ward` after fixing the project or network"
+        );
+        crate::kernel::error::describe(e, message)
     })
 }
 

@@ -45,7 +45,7 @@ pub fn is_safe_component(value: &str) -> bool {
 /// `normalize_url` turns `-oProxyCommand=x:repo` into
 /// `ssh://-oProxyCommand=x/repo`, so a leading dash has to be caught on the
 /// authority, not only on the whole URL.
-fn option_looking_authority(url: &str) -> bool {
+pub(crate) fn option_looking_authority(url: &str) -> bool {
     let Some((_, rest)) = url.split_once("://") else {
         return false;
     };
@@ -119,6 +119,79 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Record `host-git-transport` for a source fetched over ssh or the git
+/// protocol, or read from a local path, before anything is fetched: a
+/// policy that denies the kind stops the sync before git contacts the host.
+/// `git@host:repo` is already `ssh://` once normalized. https, which goes
+/// through the proxy, records nothing.
+/// Called inside the sync's attribution, by [`record_git_dependency`] or a
+/// realizer that records no `git-dependency` of its own.
+pub fn record_transport(source: &GitSource) -> io::Result<()> {
+    match transport_exception(source) {
+        Some(exception) => {
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)
+        }
+        None => Ok(()),
+    }
+}
+
+/// The `host-git-transport` exception for `source`, if this machine's git
+/// reaches it rather than the proxy: over `ssh://` (with its ssh agent and
+/// configuration), `git://` (dialled directly, unauthenticated and
+/// unencrypted) or `file://` (a path here), the scheme in any case. The one
+/// classifier of the kind: every ecosystem's git dependency, a submodule,
+/// and each cargo path ([`transport_exceptions`](crate::kernel::provider::cargo_settings::transport_exceptions))
+/// take it from here.
+pub(crate) fn transport_exception(source: &GitSource) -> Option<crate::kernel::policy::Exception> {
+    let scheme = |prefix: &str| {
+        source
+            .url
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    let detail = if scheme("ssh://") {
+        "fetched over ssh from this machine, offering its ssh agent's keys under its ssh \
+         configuration"
+    } else if scheme("git://") {
+        "fetched over the git protocol from this machine, unauthenticated and unencrypted, \
+         outside the proxy"
+    } else if scheme("file://") {
+        "read from a repository path on this machine"
+    } else {
+        return None;
+    };
+    Some(crate::kernel::policy::Exception {
+        kind: crate::kernel::policy::HOST_GIT_TRANSPORT.into(),
+        subject: source.url.clone(),
+        detail: detail.into(),
+    })
+}
+
+/// Record `git-dependency` for the package `subject` realized from
+/// `source`, and its transport ([`record_transport`]), before the fetch: a
+/// policy denying either kind stops the sync before git contacts the host.
+pub fn record_git_dependency(subject: &str, source: &GitSource) -> io::Result<()> {
+    record_git_dependency_kept(subject, source).map(drop)
+}
+
+/// [`record_git_dependency`], returning what it recorded, for a realizer
+/// that keeps the exceptions with the object it builds.
+pub fn record_git_dependency_kept(
+    subject: &str,
+    source: &GitSource,
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    let mut recorded = vec![crate::kernel::policy::Exception {
+        kind: crate::kernel::policy::GIT_DEPENDENCY.into(),
+        subject: subject.into(),
+        detail: format!("{} at {}", source.url, source.commit),
+    }];
+    recorded.extend(transport_exception(source));
+    for exception in &recorded {
+        crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+    }
+    Ok(recorded)
 }
 
 pub fn is_full_commit(value: &str) -> bool {
@@ -198,7 +271,9 @@ fn identity(source: &GitSource) -> Identity {
         name: slug(&source.url),
         version: source.commit.clone(),
         inputs: BTreeMap::from([
-            ("schema".to_string(), "git-source/2".to_string()),
+            // 3: an object keeps the host-git-transport exceptions of the
+            // submodules it was checked out with; a /2 object kept none.
+            ("schema".to_string(), "git-source/3".to_string()),
             ("url".to_string(), source.url.clone()),
             ("commit".to_string(), source.commit.clone()),
         ]),
@@ -703,7 +778,7 @@ pub fn ensure_git_source(
     }
 
     let work = store.stage_with_activity(activity)?;
-    let result = (|| -> io::Result<()> {
+    let result = (|| -> io::Result<Vec<crate::kernel::policy::Exception>> {
         git_ok_with_activity(
             &["init", "-q", "--template="],
             Some(&work),
@@ -789,56 +864,124 @@ pub fn ensure_git_source(
                 source.url, source.commit
             )));
         }
-        if work.join(".gitmodules").is_file() {
-            let submodule_args: &[&str] = if source.url.starts_with("file://") {
-                // Git rejects the file transport for submodules by default.
-                // A file:// source was explicitly selected by the lockfile,
-                // so permit its relative submodules while keeping the safer
-                // default for network repositories.
-                &[
-                    "-c",
-                    "protocol.file.allow=always",
-                    "submodule",
-                    "update",
-                    "--init",
-                    "--recursive",
-                    "--depth",
-                    "1",
-                ]
-            } else {
-                &[
-                    "submodule",
-                    "update",
-                    "--init",
-                    "--recursive",
-                    "--depth",
-                    "1",
-                ]
-            };
-            git_ok_with_activity(
-                submodule_args,
-                Some(&work),
-                "git submodule update",
-                activity,
-            )?;
-        }
+        // Level by level, each submodule URL checked and its transport
+        // recorded before git fetches it.
+        let recorded = update_submodules(&work, 0, activity)?;
         validate_checkout_tree_with_activity(&work, activity)?;
         remove_git_dirs(&work)?;
-        validate_symlinks(&work)
+        validate_symlinks(&work)?;
+        Ok(recorded)
     })();
-    if let Err(e) = result {
-        let _ = crate::kernel::store::remove_tree(&work);
-        return Err(e);
-    }
+    let recorded = match result {
+        Ok(recorded) => recorded,
+        Err(e) => {
+            let _ = crate::kernel::store::remove_tree(&work);
+            return Err(e);
+        }
+    };
+    // The submodules' exceptions stay with the object: a later sync that
+    // finds it cached replays them (`check_cached_with_activity`) and
+    // refuses it under a policy that denies one.
     store
         .commit_with_activity_and_deps(
             activity,
             &identity,
             &work,
-            &[],
+            &recorded,
             &crate::kernel::store::ObjectDeps::new(),
         )
         .map(|(path, _)| path)
+}
+
+/// Check out the submodules of the checkout at `dir`, one level at a
+/// time, `depth` levels below the source: each level's URLs are resolved
+/// by git (`submodule init`, a relative URL against that repository's own
+/// origin), then each is checked like a source ([`validate_source`]'s
+/// scheme and option rules) and its transport recorded
+/// ([`record_transport`]) before that level is fetched, so a policy
+/// denying `host-git-transport` stops an ssh submodule of an https source
+/// before git dials it. What was recorded is returned, so the object keeps
+/// it and a cached copy replays it ([`ensure_git_source`]). git refuses
+/// the file transport for submodules unless told otherwise: a level whose
+/// file submodules were just recorded, and so allowed by the policy, is
+/// told.
+fn update_submodules(
+    dir: &Path,
+    depth: usize,
+    activity: &StoreActivity,
+) -> io::Result<Vec<crate::kernel::policy::Exception>> {
+    if depth > 32 {
+        return Err(err("git submodule nesting exceeds 32 levels"));
+    }
+    let mut recorded = Vec::new();
+    if !dir.join(".gitmodules").is_file() {
+        return Ok(recorded);
+    }
+    git_ok_with_activity(
+        &["submodule", "init", "--quiet"],
+        Some(dir),
+        "git submodule init",
+        activity,
+    )?;
+    // `(name, value)` of each `submodule.<name>.<suffix>` the config
+    // holds. `-z` ends each record with NUL and puts a newline between key
+    // and value: a name may hold spaces (`x https://innocent`), so the
+    // space git prints between them otherwise is no boundary.
+    let listed = |file: &[&str], suffix: &str| -> io::Result<Vec<(String, String)>> {
+        let pattern = format!(r"^submodule\..*\.{suffix}$");
+        let mut args = vec!["config", "-z"];
+        args.extend_from_slice(file);
+        args.extend(["--get-regexp", &pattern]);
+        let output = run_git_with_activity(&args, Some(dir), activity)?;
+        // `--get-regexp` exits 1 when nothing matches.
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(err(format!("git {} failed", args.join(" "))));
+        }
+        let suffix = format!(".{suffix}");
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                let (key, value) = record.split_once('\n').unwrap_or((record, ""));
+                let name = key
+                    .strip_prefix("submodule.")
+                    .and_then(|rest| rest.strip_suffix(suffix.as_str()))
+                    .ok_or_else(|| err(format!("unexpected git config key {key:?}")))?;
+                Ok((name.to_string(), value.to_string()))
+            })
+            .collect()
+    };
+    let urls = listed(&["--local"], "url")?;
+    let mut file_transport = false;
+    for (name, url) in &urls {
+        let source = GitSource {
+            url: normalize_url(url),
+            commit: "0".repeat(40),
+            subdirectory: None,
+        };
+        validate_source(&source)
+            .map_err(|e| err(format!("submodule {name:?} of {}: {e}", dir.display())))?;
+        if let Some(exception) = transport_exception(&source) {
+            crate::kernel::policy::record(&exception.kind, &exception.subject, &exception.detail)?;
+            file_transport |= source.url.starts_with("file://");
+            recorded.push(exception);
+        }
+    }
+    let mut update = vec!["submodule", "update", "--depth", "1"];
+    if file_transport {
+        update.splice(0..0, ["-c", "protocol.file.allow=always"]);
+    }
+    git_ok_with_activity(&update, Some(dir), "git submodule update", activity)?;
+    for (name, path) in listed(&["--file", ".gitmodules"], "path")? {
+        if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            return Err(err(format!(
+                "git submodule {name:?} path {path:?} in {} escapes the checkout",
+                dir.display()
+            )));
+        }
+        recorded.extend(update_submodules(&dir.join(path), depth + 1, activity)?);
+    }
+    Ok(recorded)
 }
 
 #[cfg(test)]
@@ -894,6 +1037,57 @@ mod tests {
         assert_eq!(
             normalize_url("file:///tmp/repo.git"),
             "file:///tmp/repo.git"
+        );
+    }
+
+    /// ssh, file and git:// sources record `host-git-transport` under their
+    /// URL, https records nothing, and a policy denying the kind refuses
+    /// before anything is fetched.
+    #[test]
+    fn ssh_and_file_sources_record_their_transport() {
+        use crate::kernel::policy::{self, Attribution, PolicyScope, HOST_GIT_TRANSPORT};
+        let _serial = policy::attribution_test_lock();
+        let source = |url: &str| GitSource {
+            url: normalize_url(url),
+            commit: "a".repeat(40),
+            subdirectory: None,
+        };
+        let attribution = Attribution::open("test").unwrap();
+        for url in [
+            "git@github.com:o/r.git",
+            "file:///srv/repo.git",
+            "https://github.com/o/r",
+            "git://github.com/o/r",
+        ] {
+            record_transport(&source(url)).unwrap();
+        }
+        let recorded: Vec<(String, String)> = attribution
+            .recorded()
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject))
+            .collect();
+        attribution.discard();
+        assert_eq!(
+            recorded,
+            [
+                (HOST_GIT_TRANSPORT, "ssh://git@github.com/o/r.git"),
+                (HOST_GIT_TRANSPORT, "file:///srv/repo.git"),
+                (HOST_GIT_TRANSPORT, "git://github.com/o/r"),
+            ]
+            .map(|(kind, subject)| (kind.to_string(), subject.to_string()))
+        );
+
+        let mut deny = policy::Policy::default();
+        deny.deny.insert(HOST_GIT_TRANSPORT.to_string());
+        let _scope = PolicyScope::install(deny);
+        let attribution = Attribution::open("test").unwrap();
+        let error = record_transport(&source("ssh://git@intranet.test/r.git"))
+            .unwrap_err()
+            .to_string();
+        attribution.discard();
+        assert!(
+            error.contains("policy denies host-git-transport"),
+            "{error}"
         );
     }
 
@@ -1012,6 +1206,153 @@ mod realization_tests {
         git_ok(&["commit", "-qm", "one"], Some(&repo), "commit").unwrap();
         let commit = git_ok(&["rev-parse", "HEAD"], Some(&repo), "rev-parse").unwrap();
         (format!("file://{}", repo.display()), commit)
+    }
+
+    /// A local repository `name` under `root` with one file and, when
+    /// `submodule` names a URL and a commit, a submodule `sub` at it.
+    /// Returns the commit.
+    fn repo_with_submodule(root: &Path, name: &str, submodule: Option<(&str, &str)>) -> String {
+        repo_with_named_submodule(root, name, "sub", submodule)
+    }
+
+    /// [`repo_with_submodule`], its submodule (at `sub`) named `sub_name`.
+    fn repo_with_named_submodule(
+        root: &Path,
+        name: &str,
+        sub_name: &str,
+        submodule: Option<(&str, &str)>,
+    ) -> String {
+        let repo = root.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| git_ok(args, Some(&repo), "fixture git").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join(format!("{name}.txt")), format!("{name}\n")).unwrap();
+        if let Some((url, _)) = submodule {
+            std::fs::write(
+                repo.join(".gitmodules"),
+                format!("[submodule \"{sub_name}\"]\n\tpath = sub\n\turl = {url}\n"),
+            )
+            .unwrap();
+        }
+        // Staged before the gitlink: `add -A` would stage the missing
+        // `sub` directory as its removal.
+        git(&["add", "-A"]);
+        if let Some((_, commit)) = submodule {
+            git(&[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{commit},sub"),
+            ]);
+        }
+        git(&["commit", "-qm", name]);
+        git(&["rev-parse", "HEAD"])
+    }
+
+    /// Each level of submodules is listed and checked before it is
+    /// fetched: a file submodule two levels down records
+    /// `host-git-transport` like the first, both are kept with the object
+    /// so a later sync under a policy denying the kind refuses the cached
+    /// object, and an ssh submodule is refused by name before git dials it.
+    #[test]
+    fn submodule_transports_are_recorded_per_level_and_kept_with_the_object() {
+        use crate::kernel::policy::{self, Attribution, PolicyScope, HOST_GIT_TRANSPORT};
+        let _serial = policy::attribution_test_lock();
+        let root = TempDir::named("gitsrc-submodule-transport");
+        let real = root.0.canonicalize().unwrap();
+        let leaf = repo_with_submodule(&real, "leaf", None);
+        let mid = repo_with_submodule(&real, "mid", Some(("../leaf", &leaf)));
+        let top = repo_with_submodule(&real, "top", Some(("../mid", &mid)));
+        let store = store_at(&real);
+        let activity = &store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let source = GitSource {
+            url: format!("file://{}", real.join("top").display()),
+            commit: top,
+            subdirectory: None,
+        };
+        let attribution = Attribution::open("test").unwrap();
+        let object = ensure_git_source(&store, activity, &source).unwrap();
+        let recorded: Vec<(String, String)> = attribution
+            .recorded()
+            .into_iter()
+            .map(|exception| (exception.kind, exception.subject))
+            .collect();
+        attribution.discard();
+        assert_eq!(
+            std::fs::read_to_string(object.join("sub/sub/leaf.txt")).unwrap(),
+            "leaf\n"
+        );
+        let expected: Vec<(String, String)> = ["mid", "leaf"]
+            .map(|name| {
+                (
+                    HOST_GIT_TRANSPORT.to_string(),
+                    format!("file://{}", real.join(name).display()),
+                )
+            })
+            .to_vec();
+        assert_eq!(recorded, expected);
+
+        let mut deny = policy::Policy::default();
+        deny.deny.insert(HOST_GIT_TRANSPORT.to_string());
+        let _scope = PolicyScope::install(deny);
+        let attribution = Attribution::open("test").unwrap();
+        let error = ensure_git_source(&store, activity, &source)
+            .unwrap_err()
+            .to_string();
+        attribution.discard();
+        assert!(error.contains("cached object"), "{error}");
+        assert!(error.contains(HOST_GIT_TRANSPORT), "{error}");
+
+        let ssh = "ssh://git@example.invalid/leaf.git";
+        let over_ssh = repo_with_submodule(&real, "over-ssh", Some((ssh, &leaf)));
+        let attribution = Attribution::open("test").unwrap();
+        let error = ensure_git_source(
+            &store,
+            activity,
+            &GitSource {
+                url: format!("file://{}", real.join("over-ssh").display()),
+                commit: over_ssh,
+                subdirectory: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        attribution.discard();
+        assert!(
+            error.contains(&format!("policy denies {HOST_GIT_TRANSPORT}: {ssh}")),
+            "{error}"
+        );
+
+        // A name holding a space and a URL: git prints
+        // `submodule.x https://innocent.url ssh://...`, and splitting that
+        // at its first space would check an https URL instead.
+        let crafted = repo_with_named_submodule(
+            &real,
+            "crafted-name",
+            "x https://innocent",
+            Some((ssh, &leaf)),
+        );
+        let attribution = Attribution::open("test").unwrap();
+        let error = ensure_git_source(
+            &store,
+            activity,
+            &GitSource {
+                url: format!("file://{}", real.join("crafted-name").display()),
+                commit: crafted,
+                subdirectory: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        attribution.discard();
+        assert!(
+            error.contains(&format!("policy denies {HOST_GIT_TRANSPORT}: {ssh}")),
+            "{error}"
+        );
     }
 
     fn store_at(root: &Path) -> crate::kernel::store::Store {

@@ -431,7 +431,11 @@ Selection covers every patch of each maintained CPython minor that python-build-
   Branch/tag/bare URLs and ambient Git config fail closed. npm runs a git dep's `prepare`
   script; Greyward does not. Python and Cargo git deps work the same way, but Cargo's are not
   re-verified against the project's Cargo.lock at `run` — a post-sync lock edit is caught by
-  cargo, not Greyward.
+  cargo, not Greyward. Git sources are fetched on the host, not through the sandbox: an
+  `ssh://` source offers the user's ssh agent keys to the host the lock names, and a `file://`
+  source reads a path on the machine. Both record `host-git-transport` before the fetch, which
+  a policy can deny, and so does each `ssh://` or `file://` submodule, at any depth, before its
+  level is fetched.
 - **The project's own lifecycle scripts do not run.** npm runs the root's `preinstall`,
   `install`, `postinstall`, `prepublish`, `preprepare`, `prepare` and `postprepare` on install,
   and every workspace member's or linked directory's `preinstall`, `prepare`, `install` and
@@ -499,10 +503,64 @@ Selection covers every patch of each maintained CPython minor that python-build-
 - **Cargo resolves in the sandbox, through TLS interception** (`add`/`remove`/`update`, a
   missing `Cargo.lock`, `attest`, and an sdist's missing lock). Cargo has no network of its
   own: Greyward's proxy answers the crates.io index and download hosts and pinned git fetches,
-  and records each request. Known edges: a project `.cargo/config.toml` that sets
-  `registry.global-credential-providers` or a `credential-provider` as an array stops cargo
-  with a config merge error, because Greyward forces string forms so no project provider can run
-  (set them as strings or drop them). Authenticated alternative registries fail, as the
+  and records each request. Known edges: a project cargo configuration is refused by name
+  before cargo starts, in resolution, `ward`, `ward build` and `ward run`, when it (or a file
+  it includes) sets any of these, since no setting Greyward can force undoes them:
+  - `paths`, which builds a local directory in place of a locked crate with `Cargo.lock`
+    unchanged (use a `[patch]` table in Cargo.toml, which the lock records);
+  - `registry.global-credential-providers`, any `credential-provider`, or
+    `[credential-alias]`: cargo runs the global provider list for a replacement source after
+    Greyward's own `cargo:token` finds no token (keep providers in your own
+    `~/.cargo/config.toml`);
+  - `[source.greyward-vendor]` or a `replace-with` naming it, a `directory` or
+    `local-registry` source, or a `replace-with` chain that ends at one. Cargo trusts the
+    checksums a directory source writes about itself, so it can serve any code under a
+    locked name. A project vendored with `cargo vendor` must drop that config: Greyward
+    vendors the lock itself. A network mirror (`[source.<name>] registry`, a chain of them)
+    stays allowed, since cargo checks each downloaded crate against the lock's checksum;
+  - a registry, index or source URL that is not `https://` or `sparse+https://`, or a git
+    index over `ssh://` or `git://`: a `file://` or path index (and the archives its
+    `config.json` points at) is read without Greyward's proxy, so its index and git checks never
+    run. `http://` mirrors are refused too. An index or mirror over `ssh://` or `git://`
+    records `host-git-transport`, as an ssh git dependency does, and the record `ward attest`
+    signs carries it, even for a mirror replacing crates.io;
+  - an `[alias]` whose expansion holds `--config` or `-Z`, which `ward run`'s wrapper would
+    not see (it refuses `--config` on the command line);
+  - an `[env]` entry for a dynamic-loader variable (`LD_*`, `DYLD_*`), a git variable
+    (`GIT_*`, since git reads `GIT_CONFIG_PARAMETERS` after the settings Greyward forces),
+    `RUSTC_BOOTSTRAP` (or `RUSTC_BOOTSTRAP_*`), or a variable Greyward forces for cargo (`CARGO_HOME`, `PATH`,
+    `RUSTC_WRAPPER`, ...): cargo sets `[env]` for every program it starts, the compiler probe
+    in resolution included;
+  - compiler flags (`build.rustflags`, `build.rustdocflags`, `host.rustflags`,
+    `target.<triple or cfg>.rustflags` or `rustdocflags`, and `RUSTFLAGS`, `RUSTDOCFLAGS` or
+    `CARGO_ENCODED_*` in `[env]`) holding a `-Z` flag, a `codegen-backend` or an `@file`
+    argument file: cargo passes them to the compiler probe, and rustc loads a codegen backend
+    library, running its code, before checking it.
+
+  The same URL rule holds for every package source in the lock cargo leaves: after each
+  cargo run (lock generation, an update, `ward attest`), before anything is published or a
+  resolution record is written, Greyward refuses a lock that resolves a package from a
+  `file://` or path registry, `http://`, or any source that is not a network registry or a
+  git repository. Every lock the run may leave is checked: the root's, the one beside a
+  `--manifest-path` manifest (a Python sdist's `native/Cargo.toml`), and a cached generated
+  lock before it is reused. A git dependency read from a path on this machine or over ssh,
+  and an ssh registry index, record `host-git-transport` from that lock, so a policy that
+  denies it refuses the run before anything is published. That is the guarantee. A dependency's `registry-index` can sit in any
+  manifest, including a git dependency's own, which cargo fetches mid-run. As an earlier,
+  clearer refusal, Greyward also checks `registry-index` before cargo starts in the
+  manifests it can see: the root, the workspace members cargo finds (hidden directories
+  included), path dependencies, and every dependency table including `target.*`, build
+  and dev ones and each `[patch]` entry.
+
+  `ward attest` also refuses a lock when `cargo metadata` shows a crate the lock pins to a
+  registry or a commit read from anywhere but cargo's own download of it. Metadata prints no
+  checksum and keeps the registry's source id for a directory replacement, so where cargo
+  read the crate is the check. It also refuses a lock whose registry is not a network one,
+  since a manifest's `registry-index = "file://..."` reaches a file index with no config.
+  Each locked package is matched by name, version and source, so a crates.io download does
+  not stand for a same-named package from another registry. `ward run` checks from the directory it starts in up to the
+  workspace root, and the project's `.greyward/cargo-home` config, which is cargo's home
+  there, not the directories above the workspace. Authenticated alternative registries fail, as the
   sandbox gets no token. Path dependencies outside the workspace root are found from the
   manifests (dependency tables, `[patch]`, `[replace]`, `target.*`, `[workspace]`) and
   snapshotted read-only; one named only through a `[lib] path`, a build script or a
@@ -590,7 +648,9 @@ Selection covers every patch of each maintained CPython minor that python-build-
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
   contract, and its builds trail ruby-lang: the newest 3.4 build (3.4.6, the default) lacks
   the 3.4.10 security fixes in bundled gems, and Ruby 4.0 has no build at all. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
-  drifts**; new bundler formats need code updates.
+  drifts**; new bundler formats need code updates. A lock without a CHECKSUMS section is
+  verified against rubygems.org's API digests on first use and records `unpinned-digest` per
+  gem, so `--strict`, or a policy that denies the kind, needs `bundle lock --add-checksums`.
 
 ## Elixir
 

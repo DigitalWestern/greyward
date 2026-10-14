@@ -589,6 +589,20 @@ fn ruby_sync_native_ext_and_run() {
         .unwrap()
     };
     let before = closure(&project);
+    // No CHECKSUMS section: each gem's digest is rubygems.org's, and the
+    // closure says so, gem by gem, where a policy can refuse it.
+    let unpinned: Vec<String> = before["body"]["exceptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|exception| exception["kind"] == "unpinned-digest")
+        .filter_map(|exception| exception["subject"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        unpinned.iter().any(|subject| subject.starts_with("rake-")),
+        "no unpinned-digest for the gems: {unpinned:?}"
+    );
     assert_ok(
         ward_offline(&project, &temp.0, &["sync"]),
         "offline re-sync of the unchanged project",

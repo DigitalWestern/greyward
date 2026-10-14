@@ -696,19 +696,22 @@ fn mixed_cargo_pnpm_edit_keeps_cargo_exception_with_cargo() {
             .into_iter()
             .partition(|exception| exception["kind"] == "unrecorded-resolution");
     assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
+    // The fixture repository is a `file://` path, so the git dependency
+    // also records its transport.
     assert_eq!(
         cargo_exceptions.len(),
-        1,
+        2,
         "cargo exceptions: {cargo_exceptions:?}"
     );
     assert_eq!(cargo_exceptions[0]["kind"], "git-dependency");
     assert_eq!(cargo_exceptions[0]["subject"], "gitdep@1.0.0");
+    assert_eq!(cargo_exceptions[1]["kind"], "host-git-transport");
 
     let pnpm_exceptions = closure_exceptions(&project.join(".greyward/closures/node.json"));
     assert!(
-        pnpm_exceptions
-            .iter()
-            .all(|exception| exception["kind"] != "git-dependency"),
+        pnpm_exceptions.iter().all(|exception| {
+            exception["kind"] != "git-dependency" && exception["kind"] != "host-git-transport"
+        }),
         "pnpm closure inherited Cargo's exception: {pnpm_exceptions:?}"
     );
 

@@ -216,7 +216,11 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
         .iter()
         .partition(|exception| exception["kind"] == "unrecorded-resolution");
     assert_eq!(unrecorded.len(), 1, "cargo exceptions: {unrecorded:?}");
-    assert_eq!(exceptions.len(), 1, "cargo exceptions: {exceptions:?}");
+    // The fixture repository is a `file://` path, so the git dependency
+    // also records its transport, under the URL.
+    assert_eq!(exceptions.len(), 2, "cargo exceptions: {exceptions:?}");
+    assert_eq!(exceptions[1]["kind"], "host-git-transport");
+    assert_eq!(exceptions[1]["subject"].as_str(), Some(url.as_str()));
     assert_eq!(exceptions[0]["kind"], "git-dependency");
     assert_eq!(exceptions[0]["subject"], "gitdep@1.0.0");
     assert!(
@@ -868,4 +872,27 @@ fn an_external_workspace_member_is_read_like_an_external_path_dependency() {
     // And the lock it wrote syncs again.
     let (ok, stderr) = run(&["sync"]);
     assert!(ok, "sync from the generated lock: {stderr}");
+}
+
+/// A project with no `Cargo.lock` whose manifest names a file registry
+/// index: generating the lock is refused, and the refusal keeps its class
+/// through the sync, so `ward sync` exits 3 and no lock is written.
+#[test]
+#[ignore]
+fn a_refused_lock_generation_exits_as_a_refusal() {
+    let temp = TempDir::new("cargo-e2e-refused-generation");
+    let store = temp.0.join("store");
+    let project = temp.0.join("project");
+    copy_tree(&fixture("cargo-hello"), &project);
+    std::fs::remove_file(project.join("Cargo.lock")).unwrap();
+    let manifest = project.join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("bad = { version = \"1\", registry-index = \"file:///srv/index\" }\n");
+    std::fs::write(&manifest, text).unwrap();
+    let out = ward_with_tmp(&project, &store, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("could not generate Cargo.lock"), "{stderr}");
+    assert!(stderr.contains("file:///srv/index"), "{stderr}");
+    assert!(!project.join("Cargo.lock").exists());
 }

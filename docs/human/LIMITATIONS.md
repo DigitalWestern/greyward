@@ -415,6 +415,11 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   by the latest upload time among them. A compiled requirements file names only versions, so
   a version is judged by its earliest file, and a wheel added to an old version yesterday is
   not caught there.
+- **A lock `young-package` cannot read refuses the run.** Its reader must account for every
+  line, so a package it skipped is never passed unjudged. That includes a `Gemfile.lock` from
+  an old multi-source Gemfile, whose one `GEM` section lists several `remote:` lines and does
+  not say which gem came from which: with the check on, such a lock is refused until the
+  Gemfile gives each source its own `source` block and the lock is written again.
 - **`lookalike-name` is a name heuristic.** It compares against a fixed list of each registry's
   2,000 most popular names, checked in with the binary (`tools/popular.py` regenerates it), so a
   package that became popular since is not on it, and a legitimate package one edit from a

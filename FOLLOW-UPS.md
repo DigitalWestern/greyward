@@ -95,12 +95,13 @@ None open.
   (2026-10-14: §2 "PR 0 evidence", fixtures in `tests/fixtures/catalog/`).
   The owner approved the §2 proposal on snapshot expiry, rollback
   rejection and offline policy freshness on 2026-10-14, with a recovery
-  rule for damaged rollback state (§2 "Decided"). Next is PR 1, with Rust
-  as the first provider once the owner approves it and its trust root
-  (the Rust release key, §2 "Recommended first provider"). It starts
-  after the first #405 PR merges,
-  because both build the shared endpoint, trust and credential
-  configuration, and #405 builds it first.
+  design for damaged rollback state written to meet the owner's
+  requirement (§2 "Decided"). The owner also put private registries
+  first: the first #405 PR is the foundation PR (§2 "Order") and builds
+  the shared endpoint, trust and credential configuration. WP3 PR 1
+  starts after it merges, with Rust as the first provider once the owner
+  approves it and its trust root (the Rust release key, §2 "Recommended
+  first provider").
 - **macOS arm64 gate. Last, by the owner's choice.** The suites
   below and the two-machine lock diff passed on the Mac on 2026-09-25
   (after #305); `tests/supervise_signals.rs` (#57) and the Mach allow-list

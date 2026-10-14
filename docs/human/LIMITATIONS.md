@@ -398,7 +398,9 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   fetched from `<registry><name>/-/<name>-<version>.tgz` under its scope's registry,
   which a registry with another tarball layout (GitHub Packages) does not serve.
   The SBOM's purl `repository_url` still comes from the file's host, not the
-  recorded registry.
+  recorded registry. The machine policy that declares registries and credentials is
+  whatever `GREYWARD_POLICY` or `$HOME` selects, the same gap as `[signing]`: whoever
+  controls the environment can replace it (#757).
 
 ## Python
 

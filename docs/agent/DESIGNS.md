@@ -213,8 +213,8 @@ provider.
 (`src/policy.rs`), which tightens through ancestors and never loosens silently:
 
 - The trusted-publisher set is **configuration**, expressed through shared
-  project/home/protected-machine policy loading. **The foundation PR owns
-  the protected loading prerequisite** (see "Order" below); later WP5 PRs
+  project/home/protected-machine policy loading. **Protected loading is
+  #757**, which lands before WP3 PR 1 (see "Order" below); later WP5 PRs
   extend it. It is not a constant in `src/*.rs`. The shipped upstream publishers are the *default
   contents* of that list, not a privileged category.
 - **Adding a publisher is an explicit, recorded configuration change at an
@@ -226,8 +226,8 @@ provider.
   verification exceptions.
 - **A project can never widen the set beyond what home or machine policy
   allows.** A company can pin the set to its own internal publisher and a
-  checked-out repo cannot add to it. The foundation PR owns unconditional
-  protected machine-policy loading; environment overrides cannot suppress it.
+  checked-out repo cannot add to it. #757 builds unconditional protected
+  machine-policy loading; environment overrides cannot suppress it.
 - **An invalid signature is a hard failure under every configuration.** Making
   the publisher list configurable must not create a spelling of "trust
   anything"; an empty or unparseable list fails closed.
@@ -445,8 +445,12 @@ signatures.
   foundation" is the foundation PR, and "WP3 owns the shared
   implementation" now reads "the foundation PR builds the shared
   implementation". WP5 still owns the ecosystem credential adapters and
-  enforcement coverage. §4 is left as written until the foundation PR
-  updates it.
+  enforcement coverage. The foundation PR built the typed endpoint and
+  credential configuration (`src/kernel/registries/`) with the
+  machine-declares, project-narrows rule. Unconditional protected loading
+  moved to its own issue, #757, which lands before WP3 PR 1; until then
+  the machine scope is still whatever `GREYWARD_POLICY` or `HOME`
+  selects. §4 now says the same.
 
 #### Key and credential policy (owner decision, 2026-10-03, #72)
 
@@ -868,7 +872,7 @@ run because the binaries are per-platform artifacts.
 `.greyward/policy.toml` and the machine-wide policy. Permissive stays the
 default; nothing is ever loosened silently.
 
-**Prerequisites.** WP1, WP2, the authenticated WP3 foundation, GC safety,
+**Prerequisites.** WP1, WP2, the foundation PR (§2 "Order"), GC safety,
 and the selected daily-driver WP4 milestones. Open-ended WP4 breadth (for
 example Yarn classic kept as a refusal) is not an impossible completion gate.
 WP3 has already delivered mandatory source-policy loading. Remaining company
@@ -880,9 +884,9 @@ must be a daily driver first.
   `src/policy.rs:42`) and strict rejects even `built_from_source`. Add
   name/version allow and deny lists, with a defined story for what the user
   sees when each fires.
-- **Protected machine-wide policy — foundation delivered by WP3 PR 1.**
+- **Protected machine-wide policy (#757).**
   The current `GREYWARD_POLICY` override can replace home-policy selection
-  (`policy::load`); WP3 must correct the source/trust path before activation.
+  (`policy::load`); #757 corrects the source/trust path before WP3 PR 1.
   WP5 extends the same unconditional loader to package/category rules and
   adds tests proving neither project nor environment can weaken them.
 - **Enforcement must cover every door:** delegated planners (uv/npm/cargo/go/
@@ -1029,7 +1033,7 @@ fix: move the table to ~/.greyward/policy.toml (or the file GREYWARD_POLICY name
   adds wiring, not grammar.
 
 A protected system-wide policy file that the environment cannot replace
-is WP3 PR 1's prerequisite. Until it lands, `GREYWARD_POLICY` can still
+is #757, which lands before WP3 PR 1. Until it lands, `GREYWARD_POLICY` can still
 replace the machine scope, as it can for `[signing]`; the LIMITATIONS row
 for that gap covers registries too.
 
@@ -1538,7 +1542,15 @@ registry.
   client certificates, a separately authenticated download host, Hex
   organizations and other Hex repositories, several NuGet feeds with
   `packageSourceMapping`, several Python indexes per #495, and the
-  protected system policy file (WP3 PR 1).
+  protected system policy file (#757).
+- **Where PR A differs from the above.** A pnpm lock entry with no
+  tarball URL is fetched from `<registry><name>/-/<name>-<version>.tgz`
+  under its scope's registry (or the default one), built from the lock
+  alone instead of read from the packument; registries with another
+  tarball layout (GitHub Packages) need the packument read, which PR B
+  adds with that lane. Poetry's dependency-level `source = "..."` is not
+  matched to a listed registry and stays `unattested-index`; the
+  pyproject and lock `[[tool.poetry.source]]` URLs are matched.
 
 #### Review round 1
 
@@ -3120,9 +3132,10 @@ Cargo takes `static.crates.io` from `config.json`, with no `crates.io`
 redirect. Hex's update check redirects `repo.hex.pm/installs/hex-1.x.csv`
 to `builds.hex.pm`, which stays outside the set. The door refuses it
 visibly and Hex continues. Git hosts are not endpoints: any public https host is
-allowed for git, and every git fetch is `git-dependency`. WP3 PR 1 turns
-the set into the typed endpoint configuration (machine policy may add,
-project policy may only intersect). The proxy is where WP5 credential
+allowed for git, and every git fetch is `git-dependency`. The foundation
+PR (§2 "Order") adds each listed registry's origin and `files` origins
+to the set from the typed registry configuration (machine policy may
+add, project policy may only intersect). The proxy is where WP5 credential
 references are used: attached upstream per endpoint, never forwarded
 across a redirect to another origin, never visible to the tool. The
 proxy strips `Authorization`, `Proxy-Authorization` (after checking the

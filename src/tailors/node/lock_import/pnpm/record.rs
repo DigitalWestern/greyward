@@ -18,12 +18,20 @@ pub(crate) use workspace::*;
 /// tarball resolution is known and left out, and anything else (an entry
 /// without a resolution, a registry entry whose key names no version) is
 /// an `InvalidData` error, so no package is passed unjudged. A lock with
-/// no `packages` locks nothing.
+/// no `packages` locks nothing; a `packages` that is not a map is
+/// `InvalidData` too.
 pub(crate) fn pnpm_registry_packages(lock_yaml: &str) -> io::Result<Vec<(String, String)>> {
     let parsed = parse_yaml(lock_yaml)?;
     let root = yaml_map(&parsed, "pnpm-lock.yaml")?;
-    let Some(YamlValue::Map(packages)) = root.get("packages") else {
-        return Ok(Vec::new());
+    let packages = match root.get("packages") {
+        None => return Ok(Vec::new()),
+        Some(YamlValue::Map(packages)) => packages,
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pnpm-lock.yaml: packages is not a map",
+            ))
+        }
     };
     let unread = |key: &str, why: &str| {
         io::Error::new(

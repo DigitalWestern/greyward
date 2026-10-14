@@ -380,12 +380,30 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   resolution time are fixed in the resolution record then. A `min_age_days` raised later does
   not judge an already-locked version again; resolving again (`ward update`, or deleting the
   lock and syncing) does. A package the resolution tool fetched no metadata for is looked up
-  by ward itself, one request per package through the same proxy, so a first lock of a large
-  project makes up to one extra request per locked package. A lookup the registry refuses
-  (rate limit, server error, timeout) leaves the publish time unknown: with the kind denied
-  that refuses the resolution, otherwise it is recorded as unknown. Hex's API allows 100
-  unauthenticated requests a minute, so a mix project with more locked packages than that, and
-  no metadata already fetched for them, can hit it; resolve again a minute later.
+  by ward itself through the same proxy, one request per registry document (a package's
+  page, or a NuGet or Go version's own document), so a first lock of a large project makes
+  up to one extra request per locked package. A cached copy that already holds the time of
+  every version asked about is used without asking the registry again. A rate-limited lookup
+  is asked once more after the registry's `Retry-After` (at most 10 seconds). A lookup that
+  still fails (rate limit, server error, timeout, offline with nothing cached) leaves the
+  publish time unknown, and the detail says which: with the kind denied that refuses the
+  resolution, otherwise it is recorded as unknown. Hex's API allows 100 unauthenticated
+  requests a minute, so a mix project with more locked packages than that, and no metadata
+  already fetched for them, can hit it. Resolve again a minute later: the answers the first
+  run got are cached, so the second asks only for the rest.
+- **Go has no upload time, so `young-package` protects Go less.** Go's module proxy records
+  when it first saw a version but does not serve that time per version. The time it does serve
+  (`.info`'s `Time`) is the commit's own time, which whoever made the commit writes, so an
+  attacker can backdate a fresh tag past the minimum. A tagged version is judged by that time,
+  and its detail says the time is author-set. A pseudo-version
+  (`v0.0.0-20240123185404-0123456789ab`) is not judged by it at all: its age is unknown,
+  recorded as such, and refused under a policy that denies the kind, so such a policy refuses
+  every Go project that locks a pseudo-version.
+- **A requirements file is judged by each version's first file.** PyPI lets a file be added to
+  an existing version later. A `uv.lock` names the files it locked, and each version is judged
+  by the latest upload time among them. A compiled requirements file names only versions, so
+  a version is judged by its earliest file, and a wheel added to an old version yesterday is
+  not caught there.
 - **`lookalike-name` is a name heuristic.** It compares against a fixed list of each registry's
   2,000 most popular names, checked in with the binary (`tools/popular.py` regenerates it), so a
   package that became popular since is not on it, and a legitimate package one edit from a

@@ -229,6 +229,10 @@ mod tests {
                 ("is-odd".to_string(), "3.0.1".to_string()),
             ]
         );
+        // A lock without packages locks nothing.
+        let empty = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
+        assert!(pnpm_registry_packages(empty).unwrap().is_empty());
+        assert!(pnpm_registry_packages("packages: {}\n").unwrap().is_empty());
         // A registry tarball URL is still the registry's.
         let tarball = "packages:\n\
             \x20 is-odd@3.0.1:\n\
@@ -243,6 +247,9 @@ mod tests {
             "packages:\n  is-odd@3.0.1:\n    resolution: {tarball: 'not a url'}\n",
             "packages:\n  is-odd@latest:\n    resolution: {integrity: sha512-CCCC}\n",
             "packages:\n  is-odd@3.0.1:\n    resolution: {}\n",
+            "packages:\n",
+            "packages: is-odd@3.0.1\n",
+            "packages:\n  - is-odd@3.0.1\n",
         ] {
             let error = pnpm_registry_packages(unread).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{unread}");

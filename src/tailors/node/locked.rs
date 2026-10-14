@@ -58,6 +58,23 @@ pub(crate) fn npm_registry_packages(text: &str) -> io::Result<Vec<LockedPackage>
         .collect())
 }
 
+/// The URL a package's tarball was fetched from, when that is not the
+/// public registry: a tarball-URL dependency. `None` for a registry, git
+/// or `file:` package.
+pub(crate) fn off_registry_tarball(package: &super::NpmPackage) -> Option<&str> {
+    if package.git.is_some()
+        || package.url.is_empty()
+        || super::local_package::source_dir(package).is_some()
+    {
+        return None;
+    }
+    let host = Url::parse(&package.url)
+        .ok()?
+        .host_str()
+        .map(str::to_string);
+    (host.as_deref() != Some(REGISTRY_HOST)).then_some(package.url.as_str())
+}
+
 /// `(name, version)` of a registry tarball URL:
 /// `/<name>/-/<name>-<version>.tgz` or `/@<scope>/<name>/-/<name>-<version>.tgz`.
 fn tarball_identity(resolved: &str) -> Option<LockedPackage> {
@@ -165,5 +182,40 @@ mod tests {
                 ("is-odd".to_string(), "3.0.1".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn only_a_tarball_off_the_registry_is_named_as_such() {
+        let package = |url: &str| super::super::NpmPackage {
+            path: "node_modules/x".into(),
+            name: "x".into(),
+            version: "1.0.0".into(),
+            url: url.into(),
+            integrity: String::new(),
+            bin: Vec::new(),
+            patch: None,
+            git: None,
+            foreign_platform: false,
+            needs_workspace: false,
+        };
+        let elsewhere = package("https://example.com/x-1.0.0.tgz");
+        assert_eq!(
+            off_registry_tarball(&elsewhere),
+            Some("https://example.com/x-1.0.0.tgz")
+        );
+        for url in [
+            "https://registry.npmjs.org/x/-/x-1.0.0.tgz",
+            "file:vendor/x",
+            "",
+        ] {
+            assert_eq!(off_registry_tarball(&package(url)), None, "{url}");
+        }
+        let mut git = package("https://example.com/x.git");
+        git.git = Some(crate::kernel::gitsrc::GitSource {
+            url: "https://example.com/x.git".into(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            subdirectory: None,
+        });
+        assert_eq!(off_registry_tarball(&git), None);
     }
 }

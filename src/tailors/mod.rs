@@ -734,6 +734,11 @@ fn lookalikes(
         else {
             continue;
         };
+        // A package from somewhere other than the registry is not the
+        // registry's package of its name: a git source (`vcs_url`: Cargo,
+        // npm, Python), another index (`repository_url`: Python), or a
+        // tarball URL (`download_url`: npm). A component without a purl (an
+        // npm `file:` package) is skipped above.
         let elsewhere = purl.split_once('?').is_some_and(|(_, qualifiers)| {
             qualifiers.split('&').any(|q| {
                 ["vcs_url=", "repository_url=", "download_url="]
@@ -1918,6 +1923,11 @@ mod tests {
                 row("express", false),
                 row("exprss", true),
                 row("chak", false),
+                {
+                    let mut tarball = row("axois", false);
+                    tarball["tarball"] = json!("https://example.com/axois-1.0.0.tgz");
+                    tarball
+                },
             ]),
         )
         .unwrap();

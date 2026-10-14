@@ -2370,7 +2370,7 @@ mod tests {
             path: path.into(),
             name: "c".into(),
             version: version.into(),
-            url: "https://example.invalid/c.tgz".into(),
+            url: "https://registry.npmjs.org/c/-/c-1.0.0.tgz".into(),
             integrity: TEST_SRI.into(),
             bin: Vec::new(),
             patch: None,

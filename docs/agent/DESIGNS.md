@@ -457,9 +457,65 @@ signatures.
   authenticated policy is activated, so WP3 PR 1 (#404) proposes them for
   the owner. The proposal follows.
 
-**Proposal, awaiting owner approval (written in PR 0, 2026-10-14).** Not
-decided. PR 1 builds to these unless the owner changes them. Each has one
-recommended option and the condition that would change it.
+**Decided (owner, 2026-10-14).** The three proposals below, written in
+PR 0, are approved as recommended, with the owner's clarifications and
+the recovery rule that follows them. PR 1 builds to them.
+
+- **The rule over all three: metadata freshness is separate from package
+  usability.** Stale metadata must never influence a *new* choice (picking
+  a version, moving a default, answering "what is newest"). It must never
+  stop an *existing* project working: a committed lock, an installed
+  environment, a realized store object or a cached artifact keeps working
+  however old the metadata is. The only things that may refuse an existing
+  lock are a trust change the owner of the policy made on purpose (a
+  revoked key, a removed endpoint) and an explicit policy `not_after`
+  (proposal 3).
+- **1, expiry:** limits discovery only, as written.
+- **2, rollback:** the high-water mark is persisted in the store and
+  survives restarts, so older metadata cannot be replayed. Recovery from
+  corrupted state is part of the design (below).
+- **3, local policy freshness:** none by default. An explicit `not_after`
+  is supported, as written.
+
+**Recovery from corrupted rollback state (owner requirement, 2026-10-14).**
+Anti-replay protection must not make a damaged store hard to recover.
+
+- **The mark is derived data.** Each provider's mark is the newest signed
+  position among the snapshots and retained rows the store holds, and each
+  of those carries its own proof. The mark file is a cache of that value,
+  written atomically (temporary file, fsync, rename) with a checksum.
+- **The mark only gates refresh and discovery.** Locked replay, cache hits
+  and installed environments never read it, so a damaged mark cannot stop
+  an existing project (the rule above).
+- **A damaged mark rebuilds itself.** A mark file that is missing,
+  unreadable or fails its checksum is rebuilt from the retained snapshots
+  whose signatures still verify under current policy, never lower than the
+  shipped seed, with a `ward: warning:` line saying it was rebuilt and from
+  what. This gives an attacker nothing new: the threat model already says
+  whoever can write the store can reset the mark, and a network attacker
+  cannot damage a local file. A damaged *snapshot* is dropped from that
+  calculation and reported. It is not trusted.
+- **A damaged mark is a different error from a rollback.** A rollback
+  error says the metadata is older than what this machine has accepted. A
+  damaged-state message says what was rebuilt. Neither tells the user to
+  delete files by hand.
+- **A wrong but valid mark has an explicit reset.** If the mark is
+  readable but wrong (an upstream re-signed older metadata by mistake, or
+  a bad clock accepted a date within the one-day allowance), one explicit
+  command resets a provider's mark to the shipped seed, or to the newest
+  verifying snapshot older than the bad one. It needs machine or home
+  authority (a project cannot do it), machine policy can forbid it, and it
+  is recorded like any trust change. PR 1 names the command. `ward gc
+  --reset` already empties the store, marks included, which returns every
+  provider to its shipped seed.
+- **The same applies to the local high-water clock** (proposal 3, "Clock
+  rollback"). A damaged clock file is rebuilt from the newest signed time
+  the store has accepted, with a warning. A clock that was set far ahead
+  and then corrected is cleared by the same explicit reset. Neither case
+  touches locked replay unless a policy `not_after` is set.
+
+The proposals as written in PR 0 follow. Each has one recommended option
+and the condition that would change it.
 
 Two terms first. A **snapshot** is the signed metadata one refresh
 accepted from one provider, the documents and their signatures as served
@@ -605,8 +661,11 @@ changes or deletes one, which is what keeps an old lock realizable.
      clock, so setting it back defeats them. PR 1 narrows that: the store
      records the newest local time any command has seen in it (a
      high-water clock that only moves forward) and refuses to run a
-     trust check when the clock reads earlier than that, or earlier than
-     the newest signed time it has accepted. That catches a clock set
+     clock-dependent check (a discovery under `max_age`, or a `not_after`
+     check) when the clock reads earlier than that, or earlier than
+     the newest signed time it has accepted. Locked replay and cache hits
+     under a policy with no `not_after` read no clock, so a bad clock
+     never stops them (the owner's rule above). That catches a clock set
      back on a store already in use, but not a clock that is held still
      or set back before the store's first use, and not a fresh store
      (a CI job's throwaway store included), which has no history to

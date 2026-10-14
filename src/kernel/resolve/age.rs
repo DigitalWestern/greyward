@@ -11,18 +11,20 @@
 //! The publish time comes from the metadata the tool's own traffic carried
 //! when its protocol records one ([`RegistryProtocol::published`]: npm's
 //! packument `time`, PyPI's `upload-time`, a crates.io index line's
-//! `pubtime`, a Go `.info`, a RubyGems compact index line). A version the
+//! `pubtime`, a RubyGems compact index line). A version the
 //! traffic did not describe (pnpm reads abbreviated packuments, Hex's signed
 //! registry and NuGet's flat container carry no time, and a tool skips the
 //! documents of packages its lock already pins) is looked up by ward itself
 //! in a second proxy session ([`RegistryProtocol::lookup`]), through the
 //! same cache, resolver, permitted set and ledger. A version whose time is
 //! still unknown is a fact too: under a policy that denies the kind it is
-//! refused like a young one (fail closed); otherwise it is recorded. So is
-//! a version whose protocol says no time it has can be trusted
-//! ([`RegistryProtocol::untimed`]: a Go pseudo-version's only time is its
-//! commit's). A protocol whose time is not an upload time says what it is
-//! ([`RegistryProtocol::time_note`]), and the detail carries that.
+//! refused like a young one (fail closed); otherwise it is recorded.
+//!
+//! A registry that records no upload time ward can trust (Go's module
+//! proxy gives only the commit's time, which the module's author sets) is
+//! judged by an append-only log instead ([`RegistryProtocol::log`]): the
+//! version's record number in it, against a checkpoint of the log ward
+//! observed at least the minimum age before the resolution ([`tlog`]).
 //!
 //! The fact's detail carries the publish time, the resolution time and the
 //! minimum in force, so the signed record says what was judged, and
@@ -30,12 +32,12 @@
 //!
 //! [`RegistryProtocol::published`]: super::routes::RegistryProtocol::published
 //! [`RegistryProtocol::lookup`]: super::routes::RegistryProtocol::lookup
-//! [`RegistryProtocol::untimed`]: super::routes::RegistryProtocol::untimed
-//! [`RegistryProtocol::time_note`]: super::routes::RegistryProtocol::time_note
+//! [`RegistryProtocol::log`]: super::routes::RegistryProtocol::log
 
 use super::proxy::{LookupAnswer, Proxy};
 use super::routes::{file_key, Lookup};
 use super::session::{Fact, PublishTimes, SessionConfig, SessionReport};
+use super::tlog::{self, Checkpoint, Log};
 use crate::kernel::policy::{self, Policy, SourceOrigin, YOUNG_PACKAGE};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -122,14 +124,6 @@ pub(super) fn judge(
     let mut wanted: BTreeMap<(String, String), Wanted> = BTreeMap::new();
     let mut asks: BTreeMap<&LockedPackage, (String, String)> = BTreeMap::new();
     for package in &packages {
-        let untimed = config
-            .routes
-            .iter()
-            .find_map(|route| route.protocol.untimed(&package.name, &package.version));
-        if let Some(why) = untimed {
-            causes.insert(package, why);
-            continue;
-        }
         if published_at(&config, observed, package).is_some() {
             continue;
         }
@@ -188,8 +182,6 @@ pub(super) fn judge(
                 .or_insert(*at);
         }
     }
-    let now = unix_seconds(now);
-    let minimum = days as i64 * SECONDS_PER_DAY;
     let source = match policy.min_age_origin {
         Some(SourceOrigin::Machine) => "set by the machine policy",
         Some(SourceOrigin::Project) => "set by a project policy",
@@ -197,54 +189,161 @@ pub(super) fn judge(
         Some(SourceOrigin::Env) => "set by the environment",
         None => "the default",
     };
-    let young = packages
-        .into_iter()
-        .filter_map(|package| {
-            let subject = format!("{}@{}", package.name, package.version);
-            let rule = format!("the minimum age is {days} days ({source})");
-            let timed = if causes.contains_key(package) {
-                None
-            } else {
-                published_at(&config, &times, package)
-            };
-            match timed {
-                Some((at, _)) if now - at >= minimum => None,
-                Some((at, note)) => Some(Young {
-                    fact: Fact {
-                        kind: YOUNG_PACKAGE,
-                        subject,
-                        detail: format!(
-                            "published {}{}, {} this resolution at {}; {rule}",
-                            format_utc(at),
-                            note.map(|note| format!(" ({note})")).unwrap_or_default(),
-                            describe_age(now - at),
-                            format_utc(now)
-                        ),
-                    },
-                    ready: Some(at + minimum),
-                }),
-                None => {
-                    let cause = causes.get(package).cloned().unwrap_or_else(|| {
-                        let answer = asks.get(package).and_then(|key| answers.get(key));
-                        unknown_cause(answer.copied())
-                    });
-                    Some(Young {
-                        fact: Fact {
-                            kind: YOUNG_PACKAGE,
-                            subject,
-                            detail: format!(
-                                "its publish time is unknown at this resolution at {}: \
-                                 {cause}; {rule}",
-                                format_utc(now)
-                            ),
-                        },
-                        ready: None,
-                    })
-                }
+    let mut judging = Judging {
+        config: &config,
+        times: &times,
+        now: unix_seconds(now),
+        days,
+        rule: format!("the minimum age is {days} days ({source})"),
+        checkpoints: BTreeMap::new(),
+    };
+    let mut young = Vec::new();
+    for package in packages {
+        let cause = causes.get(package).cloned().or_else(|| {
+            let answer = asks.get(package).and_then(|key| answers.get(key));
+            Some(unknown_cause(answer.copied()))
+        });
+        young.extend(judging.verdict(package, causes.contains_key(package), cause)?);
+    }
+    Ok(Judged { young, lookups })
+}
+
+/// What one judgment reads: the times known after the lookups, the
+/// resolution time, the minimum, and each log's checkpoints once loaded.
+struct Judging<'a> {
+    config: &'a SessionConfig,
+    times: &'a PublishTimes,
+    now: i64,
+    days: u32,
+    rule: String,
+    checkpoints: BTreeMap<&'static str, Vec<Checkpoint>>,
+}
+
+impl Judging<'_> {
+    /// The fact `package` gets, if any. `unlooked` says no time was looked
+    /// for; `cause` is why the time would be unknown, from its lookup.
+    fn verdict(
+        &mut self,
+        package: &LockedPackage,
+        unlooked: bool,
+        cause: Option<String>,
+    ) -> io::Result<Option<Young>> {
+        let minimum = i64::from(self.days) * SECONDS_PER_DAY;
+        let subject = format!("{}@{}", package.name, package.version);
+        let (now, rule) = (self.now, self.rule.clone());
+        let seen = if unlooked {
+            None
+        } else {
+            published_at(self.config, self.times, package)
+        };
+        let unknown = |cause: String| Young {
+            fact: Fact {
+                kind: YOUNG_PACKAGE,
+                subject: subject.clone(),
+                detail: format!(
+                    "its publish time is unknown at this resolution at {}: {cause}; {rule}",
+                    format_utc(now)
+                ),
+            },
+            ready: None,
+        };
+        let at = match seen {
+            Some(Seen::At(at)) => at,
+            Some(Seen::Logged(log, record)) => {
+                return Ok(self.logged_after(log, record)?.map(unknown));
+            }
+            None => {
+                let cause = untimed_files(self.config, self.times, package)
+                    .or(cause)
+                    .unwrap_or_else(|| unknown_cause(None));
+                return Ok(Some(unknown(cause)));
+            }
+        };
+        if now - at >= minimum {
+            return Ok(None);
+        }
+        Ok(Some(Young {
+            fact: Fact {
+                kind: YOUNG_PACKAGE,
+                subject: subject.clone(),
+                detail: format!(
+                    "published {}, {} this resolution at {}; {rule}",
+                    format_utc(at),
+                    describe_age(now - at),
+                    format_utc(now)
+                ),
+            },
+            ready: Some(at + minimum),
+        }))
+    }
+
+    /// Why a version at `record` in `log` is not known to be old enough,
+    /// or `None` when it is: its record is below the size of the newest
+    /// checkpoint observed at least the minimum age before the resolution.
+    fn logged_after(&mut self, log: Log, record: u64) -> io::Result<Option<String>> {
+        if !self.checkpoints.contains_key(log.name) {
+            let loaded = tlog::load(&self.config.store, &log)?;
+            self.checkpoints.insert(log.name, loaded);
+        }
+        let checkpoints = &self.checkpoints[log.name];
+        let before = self.now - i64::from(self.days) * SECONDS_PER_DAY;
+        let days = self.days;
+        Ok(match tlog::eligible(checkpoints, before) {
+            Some(checkpoint) if record < checkpoint.size => None,
+            Some(checkpoint) => Some(format!(
+                "{} logged it as record {record}, after the newest checkpoint older than \
+                 {days} days (a tree of {} records, observed {})",
+                log.name,
+                checkpoint.size,
+                format_utc(checkpoint.observed)
+            )),
+            None => {
+                let oldest = checkpoints
+                    .iter()
+                    .map(|checkpoint| checkpoint.observed)
+                    .min()
+                    .map(|at| format!("; the oldest it has was observed {}", format_utc(at)))
+                    .unwrap_or_default();
+                Some(format!(
+                    "{} logged it as record {record}, and ward has no checkpoint of that log \
+                     older than {days} days to judge it by{oldest}",
+                    log.name
+                ))
             }
         })
+    }
+}
+
+/// The files the lock names for `package` that no route's metadata gives
+/// an upload time, when its version has one: one untimed file makes the
+/// package's age unknown, since that file may be the one added late.
+fn untimed_files(
+    config: &SessionConfig,
+    times: &PublishTimes,
+    package: &LockedPackage,
+) -> Option<String> {
+    let timed = |version: &str| {
+        config.routes.iter().any(|route| {
+            let route_id = route.protocol.route_id().to_string();
+            let (name, version) = route.protocol.package_key(&package.name, version);
+            times.contains_key(&(route_id, name, version))
+        })
+    };
+    if package.files.is_empty() || !timed(&package.version) {
+        return None;
+    }
+    let untimed: Vec<&str> = package
+        .files
+        .iter()
+        .filter(|file| !timed(&file_key(&package.version, file)))
+        .map(String::as_str)
         .collect();
-    Ok(Judged { young, lookups })
+    (!untimed.is_empty()).then(|| {
+        format!(
+            "the registry names no upload time for {}, which the lock names",
+            untimed.join(", ")
+        )
+    })
 }
 
 /// One document ward fetches itself, the versions it is fetched for, and
@@ -319,15 +418,25 @@ pub(super) fn record(policy: &Policy, young: &[Young]) -> io::Result<Vec<Fact>> 
     Ok(young.iter().map(|young| young.fact.clone()).collect())
 }
 
-/// The publish time `times` holds for `package` under any route's key,
-/// and that route's note on what the time is. When the lock names the
-/// version's files and every one has a time, the latest of those is the
-/// package's time; otherwise the version's.
+/// What the known times say of one package.
+enum Seen {
+    /// Its publish time, unix seconds.
+    At(i64),
+    /// Its record number in an append-only log ([`RegistryProtocol::log`]).
+    ///
+    /// [`RegistryProtocol::log`]: super::routes::RegistryProtocol::log
+    Logged(Log, u64),
+}
+
+/// The publish time (or log record) `times` holds for `package` under any
+/// route's key. When the lock names the version's files, the latest of
+/// their times, and nothing when one of them has none: a registry may add
+/// a file to an old version, so the version's own time does not stand in.
 fn published_at(
     config: &SessionConfig,
     times: &PublishTimes,
     package: &LockedPackage,
-) -> Option<(i64, Option<&'static str>)> {
+) -> Option<Seen> {
     config.routes.iter().find_map(|route| {
         let protocol = route.protocol;
         let route_id = protocol.route_id().to_string();
@@ -335,16 +444,21 @@ fn published_at(
             let (name, version) = protocol.package_key(&package.name, version);
             times.get(&(route_id.clone(), name, version)).copied()
         };
-        let files: Option<Vec<i64>> = package
-            .files
-            .iter()
-            .map(|file| time(&file_key(&package.version, file)))
-            .collect();
-        let at = match files {
-            Some(files) if !files.is_empty() => files.into_iter().max(),
-            _ => time(&package.version),
-        }?;
-        Some((at, protocol.time_note()))
+        let at = if package.files.is_empty() {
+            time(&package.version)?
+        } else {
+            package
+                .files
+                .iter()
+                .map(|file| time(&file_key(&package.version, file)))
+                .collect::<Option<Vec<i64>>>()?
+                .into_iter()
+                .max()?
+        };
+        Some(match protocol.log() {
+            Some(log) => Seen::Logged(log, u64::try_from(at).ok()?),
+            None => Seen::At(at),
+        })
     })
 }
 
@@ -936,6 +1050,167 @@ mod tests {
         for package in [old_files, without] {
             let judged = judge_unobserved(&harness, &policy, Mode::Online, &[package]);
             assert!(judged.young.is_empty(), "{:?}", judged.young);
+        }
+        // One named file the registry gives no time: the age is unknown,
+        // never the version's own (old) time.
+        let untimed = LockedPackage::new("pkg", "1.0")
+            .with_files(vec!["pkg-1.0.tar.gz".into(), "pkg-1.0-late.whl".into()]);
+        let judged = judge_unobserved(&harness, &policy, Mode::Online, &[untimed]);
+        assert_eq!(judged.young.len(), 1, "{:?}", judged.young);
+        assert_eq!(judged.young[0].ready, None);
+        let detail = &judged.young[0].fact.detail;
+        assert!(
+            detail.contains("unknown")
+                && detail.contains("names no upload time for pkg-1.0-late.whl"),
+            "{detail}"
+        );
+    }
+
+    mod go {
+        use super::*;
+        use crate::kernel::resolve::routes::{Endpoint, Permitted, RegistryProtocol, Route};
+        use crate::kernel::resolve::testing::Reach;
+        use crate::tailors::go::registry::{GO_PROXY, PROXY_HOST, SUMDB_HOST, SUMDB_NAME};
+
+        const LOOKUP: &str = "/lookup/github.com/google/uuid@v1.6.0";
+        /// The recorded answer's record number, and its tree's size.
+        const RECORD: u64 = 22_152_757;
+
+        fn harness(label: &str) -> Harness {
+            Harness::serving(label, Reach::loopback(), &[PROXY_HOST, SUMDB_HOST], "go")
+        }
+
+        fn config(harness: &Harness, policy: &Policy) -> SessionConfig {
+            let port = harness.upstream.port();
+            let mut config = harness.config(policy.clone(), Mode::Online);
+            config.routes = vec![Route::new(
+                &GO_PROXY,
+                vec![
+                    Endpoint::for_test(PROXY_HOST, port),
+                    Endpoint::for_test(SUMDB_HOST, port),
+                ],
+            )
+            .unwrap()];
+            config.permitted = Permitted::compiled()
+                .with_origin(PROXY_HOST, port)
+                .with_origin(SUMDB_HOST, port);
+            config
+        }
+
+        fn checkpoint(harness: &Harness, size: u64, observed: i64) {
+            tlog::record(&harness.store, SUMDB_NAME, Checkpoint { size, observed }).unwrap();
+        }
+
+        fn judge_uuid(harness: &Harness, now: i64) -> Judged {
+            let packages = [LockedPackage::new("github.com/google/uuid", "v1.6.0")];
+            let judged = judge(
+                &harness.proxy,
+                config(harness, &deny()),
+                &PublishTimes::new(),
+                &packages,
+                at(now),
+                &deny(),
+            )
+            .unwrap();
+            assert_eq!(harness.upstream.hits(LOOKUP), 1);
+            judged
+        }
+
+        #[test]
+        fn a_version_logged_before_an_old_enough_checkpoint_passes() {
+            let harness = harness("age-go-pass");
+            checkpoint(&harness, RECORD + 1, NOW - 10 * SECONDS_PER_DAY);
+            let judged = judge_uuid(&harness, NOW);
+            assert!(judged.young.is_empty(), "{:?}", judged.young);
+            let report = judged.lookups.unwrap();
+            assert!(report.facts.hard_failures.is_empty());
+            assert_eq!(
+                report.published.values().copied().collect::<Vec<_>>(),
+                [RECORD as i64]
+            );
+            // The lookup's own verified head became a checkpoint.
+            let kept = tlog::load(&harness.store, &GO_PROXY.log().unwrap()).unwrap();
+            assert!(kept.iter().any(|kept| kept.size == 64_828_441), "{kept:?}");
+        }
+
+        /// A tag whose commit time says 2024 but which the log took in
+        /// only after the newest checkpoint older than the minimum: its age
+        /// is unknown, and a policy that denies the kind refuses it.
+        #[test]
+        fn a_version_logged_recently_is_refused_whatever_its_commit_time() {
+            let harness = harness("age-go-late");
+            checkpoint(&harness, RECORD - 1, NOW - 10 * SECONDS_PER_DAY);
+            checkpoint(&harness, RECORD + 1, NOW - SECONDS_PER_DAY);
+            let judged = judge_uuid(&harness, NOW);
+            assert_eq!(judged.young.len(), 1, "{:?}", judged.young);
+            let young = &judged.young[0];
+            assert_eq!(young.ready, None);
+            assert_eq!(
+                young.fact.detail,
+                format!(
+                    "its publish time is unknown at this resolution at 2026-10-12T00:00:00Z: \
+                     sum.golang.org logged it as record {RECORD}, after the newest checkpoint \
+                     older than 7 days (a tree of {} records, observed \
+                     2026-10-02T00:00:00Z); the minimum age is 7 days (the default)",
+                    RECORD - 1
+                )
+            );
+            let _serial = policy::attribution_test_lock();
+            let attribution = policy::Attribution::open("go").unwrap();
+            let error = record(&deny(), &judged.young).unwrap_err().to_string();
+            assert!(error.contains("github.com/google/uuid@v1.6.0"), "{error}");
+            assert!(attribution.recorded().is_empty());
+            attribution.discard();
+        }
+
+        #[test]
+        fn a_lookup_whose_tree_head_does_not_verify_is_a_hard_failure() {
+            let harness = harness("age-go-forged");
+            checkpoint(&harness, RECORD + 1, NOW - 10 * SECONDS_PER_DAY);
+            let recorded =
+                std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "tests/fixtures/proxy/registry/go/sum.golang.org/lookup/github.com/google/\
+                     uuid@v1.6.0.body",
+                ))
+                .unwrap();
+            let forged = recorded.replace("64828441", "94828441");
+            harness
+                .upstream
+                .set(LOOKUP, Behavior::Reply(Reply::new(200, forged.as_bytes())));
+            let judged = judge_uuid(&harness, NOW);
+            let report = judged.lookups.unwrap();
+            let failure = report.facts.hard_failures.join("; ");
+            assert!(
+                failure.contains(LOOKUP) && failure.contains("does not verify"),
+                "{failure}"
+            );
+            // No record number came of it, and no checkpoint.
+            assert!(report.published.is_empty());
+            let kept = tlog::load(&harness.store, &GO_PROXY.log().unwrap()).unwrap();
+            assert!(kept.iter().all(|kept| kept.size != 94_828_441), "{kept:?}");
+        }
+
+        /// A fresh store holds only the seed the binary carries: a version
+        /// logged before it passes once the seed is old enough, and until
+        /// then every version's age is unknown.
+        #[test]
+        fn a_fresh_store_judges_by_the_seed_once_it_is_old_enough() {
+            let seed = GO_PROXY.log().unwrap().seed.unwrap();
+            assert!(RECORD < seed.size);
+            let old = harness("age-go-seed");
+            let judged = judge_uuid(&old, seed.observed + 10 * SECONDS_PER_DAY);
+            assert!(judged.young.is_empty(), "{:?}", judged.young);
+            let young = harness("age-go-seed-young");
+            let judged = judge_uuid(&young, seed.observed + SECONDS_PER_DAY);
+            assert_eq!(judged.young.len(), 1, "{:?}", judged.young);
+            let detail = &judged.young[0].fact.detail;
+            assert!(
+                detail.contains(
+                    "and ward has no checkpoint of that log older than 7 days to judge it by; \
+                     the oldest it has was observed"
+                ),
+                "{detail}"
+            );
         }
     }
 

@@ -98,6 +98,11 @@ deny = [
     # maintainer account, a typosquat) are reported and pulled within
     # days, so waiting a week keeps a project off most of them. Denied: pin
     # an older version, or resolve again once the version is old enough.
+    # Go has no upload time: a Go version is judged by its place in the
+    # sum.golang.org checksum database's log, against the signed tree heads
+    # the machine's store has seen. A new store has only the one built into
+    # ward, so for the first week after a ward release every Go resolution
+    # on a new machine is refused (LIMITATIONS.md, Go).
     "young-package",
 ]
 

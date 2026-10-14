@@ -432,17 +432,20 @@ pub trait RegistryProtocol: Sync {
         (name.to_string(), version.to_string())
     }
 
-    /// Why `name` at `version` has no publish time this protocol can
-    /// trust, whatever its metadata says, so it is neither read nor looked
-    /// up and its age is unknown (Go's pseudo-versions). `None`: judge it.
-    fn untimed(&self, _name: &str, _version: &str) -> Option<String> {
+    /// The append-only log this protocol's ages are judged by, when its
+    /// registry records no upload time ward can trust (Go's checksum
+    /// database). The values [`Self::published`] returns are then record
+    /// numbers in that log, not times, and a version passes when its
+    /// record is below a checkpoint old enough ([`super::tlog`]).
+    fn log(&self) -> Option<super::tlog::Log> {
         None
     }
 
-    /// What this protocol's publish time is, when it is not the registry's
-    /// own upload time: written into each `young-package` detail beside
-    /// the time (Go's commit times).
-    fn time_note(&self) -> Option<&'static str> {
+    /// The tree size the signed head in `body`, fetched from `url`,
+    /// carries, once its signature verifies against the log's key. `None`:
+    /// the body carries no head. An error (a bad signature, a malformed
+    /// head) refuses the body. Each verified size is a checkpoint.
+    fn tree_size(&self, _url: &Url, _body: &[u8]) -> Option<Result<u64, String>> {
         None
     }
 }

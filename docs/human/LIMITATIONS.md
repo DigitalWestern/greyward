@@ -392,24 +392,39 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   not judge an already-locked version again; resolving again (`ward update`, or deleting the
   lock and syncing) does. A package the resolution tool fetched no metadata for is looked up
   by ward itself through the same proxy, one request per registry document (a package's
-  page, or a NuGet or Go version's own document), so a first lock of a large project makes
-  up to one extra request per locked package. A cached copy that already holds the time of
-  every version asked about is used without asking the registry again. A rate-limited lookup
-  is asked once more after the registry's `Retry-After` (at most 10 seconds). A lookup that
-  still fails (rate limit, server error, timeout, offline with nothing cached) leaves the
+  page, a NuGet version's own document, or a Go version's checksum-database record), so a
+  first lock of a large project makes up to one extra request per locked package. A cached
+  copy that already holds the time of every version asked about is used without asking the
+  registry again. A rate-limited lookup is asked once more after the registry's
+  `Retry-After` (at most 10 seconds). A lookup that still fails (rate limit, server error, timeout, offline with nothing cached) leaves the
   publish time unknown, and the detail says which: with the kind denied that refuses the
   resolution, otherwise it is recorded as unknown. Hex's API allows 100 unauthenticated
   requests a minute, so a mix project with more locked packages than that, and no metadata
   already fetched for them, can hit it. Resolve again a minute later: the answers the first
   run got are cached, so the second asks only for the rest.
-- **Go has no upload time, so `young-package` protects Go less.** Go's module proxy records
-  when it first saw a version but does not serve that time per version. The time it does serve
-  (`.info`'s `Time`) is the commit's own time, which whoever made the commit writes, so an
-  attacker can backdate a fresh tag past the minimum. A tagged version is judged by that time,
-  and its detail says the time is author-set. A pseudo-version
-  (`v0.0.0-20240123185404-0123456789ab`) is not judged by it at all: its age is unknown,
-  recorded as such, and refused under a policy that denies the kind, so such a policy refuses
-  every Go project that locks a pseudo-version.
+- **Go is judged by its place in the checksum database, not by a time.** Go's module proxy
+  serves no upload time: `.info`'s `Time` is the commit's own, which whoever made the commit
+  sets, so a fresh tag can claim any date. ward never reads it. Every Go version, tagged or a
+  pseudo-version, is judged by its record number in `sum.golang.org`'s append-only log. Each
+  signed tree head ward sees (go's own checksum-database traffic and ward's lookups) is checked
+  against sum.golang.org's key and kept in the store with the local time it was seen. A version
+  passes when its record is below the newest head seen at least `min_age_days` before the
+  resolution. Otherwise its age is unknown ("logged after the newest checkpoint older than 7
+  days"): recorded, or refused under a policy that denies the kind. What follows:
+  - A fresh store has only the head this ward carries, taken when it was built
+    (`tools/sumdb_seed.py`). Until that head is `min_age_days` old, every Go version's age is
+    unknown, so a policy that denies the kind refuses every Go resolution on a new machine
+    for the first week after a release. After that, a version logged after the built-in head
+    stays unknown until the store has seen a newer head that is old enough. A store that
+    resolves Go regularly keeps its own.
+  - The heads are dated by the local clock. A clock set back when a head was seen dates it too
+    early, and a version logged after it can then pass too soon.
+  - The history (`<store>/resolve/tlog/sum.golang.org`) is trusted only as far as the store's
+    permissions: whoever can write the store can add a head to it.
+  - The record number comes from the lookup answer over TLS. ward checks the answer's signed
+    head and that the record lies inside it, but fetches no proof that the record is in the
+    log at that place.
+  - A module the checksum database does not log has no record number, so its age is unknown.
 - **A requirements file is judged by each version's first file.** PyPI lets a file be added to
   an existing version later. A `uv.lock` names the files it locked, and each version is judged
   by the latest upload time among them. A compiled requirements file names only versions, so

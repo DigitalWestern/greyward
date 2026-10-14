@@ -32,11 +32,75 @@ pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
 
 /// `Tailor::registry_exists`: `Some(latest version)` when npm knows
 /// `name`.
+/// In an enforced node list the question goes to the registry that serves
+/// `name`: its scope's, else the default.
 pub(crate) fn registry_exists(name: &str) -> io::Result<Option<String>> {
+    let policy = crate::kernel::policy::effective();
+    if let Some(registry) = serving_registry(&policy, name)? {
+        crate::kernel::ui::trace(&format!(
+            "asking registry {} about '{name}': {}",
+            registry.name, registry.url
+        ));
+        let url = format!("{}{}", registry.url, name.replace('/', "%2f"));
+        let page = crate::kernel::fetch::registry::fetch_page(
+            &policy.registries,
+            registry,
+            &url,
+            "application/json",
+            64 << 20,
+        )
+        .map_err(|error| {
+            other(format!(
+                "could not ask registry {} whether '{name}' exists ({error}); say which ecosystem: {}:{name}",
+                registry.name, REGISTRY.prefix
+            ))
+        })?;
+        return Ok(page.map(|(body, _)| {
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["dist-tags"]["latest"].as_str().map(str::to_string))
+                .unwrap_or_else(|| "?".into())
+        }));
+    }
     let url = format!("https://registry.npmjs.org/{name}");
     registry_latest(REGISTRY, name, &url, |v| {
         v["dist-tags"]["latest"].as_str().map(str::to_string)
     })
+}
+
+/// The configured registry that serves `name` under the effective node
+/// list: the one whose `scopes` hold its scope, else the default. `None`
+/// is the public registry.
+fn serving_registry<'p>(
+    policy: &'p crate::kernel::policy::Policy,
+    name: &str,
+) -> io::Result<Option<&'p crate::kernel::registries::config::Registry>> {
+    use crate::kernel::registries::config::Ecosystem;
+    let list = policy.registries.ecosystem(Ecosystem::Node);
+    list.require_nonempty()
+        .map_err(|error| crate::kernel::error::refused(io::ErrorKind::PermissionDenied, error))?;
+    let scope = name
+        .starts_with('@')
+        .then(|| name.split_once('/').map(|(scope, _)| scope))
+        .flatten();
+    let scoped = scope.and_then(|scope| {
+        list.registries()
+            .find(|registry| registry.scopes.iter().any(|s| s == scope))
+    });
+    if scoped.is_some() {
+        return Ok(scoped);
+    }
+    if list.default_source().is_none() {
+        return Err(crate::kernel::error::refused(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "no registry serves '{name}': every node registry in [{}] has scopes ({})\nfix: list public or a node registry without scopes in the machine policy's [sources].node",
+                list.names(),
+                list.provenance()
+            ),
+        ));
+    }
+    Ok(list.default_registry())
 }
 
 /// npm's `@scope/name` is npm's alone.
@@ -707,6 +771,68 @@ fn member_dir(workspace: &ProjectRoot, project: &Path, tool: &str) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node_sources(list: &str) -> crate::kernel::policy::Policy {
+        use crate::kernel::policy;
+        let text = format!(
+            r#"
+[[registry]]
+name = "corp-npm"
+ecosystem = "node"
+url = "https://nexus.corp.example/repository/npm/"
+
+[[registry]]
+name = "corp-scoped"
+ecosystem = "node"
+url = "https://npm.pkg.github.com/"
+scopes = ["@corp"]
+
+[sources]
+node = {list}
+"#
+        );
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, &text).unwrap();
+        let mut merged = policy::Policy::default();
+        policy::merge_file(&mut merged, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+        merged
+    }
+
+    /// `ward add` asks the scope's registry, else the default, and never
+    /// falls back to npmjs when the list does not hold it.
+    #[test]
+    fn ward_add_asks_the_registry_that_serves_the_name() {
+        let named = |policy: &crate::kernel::policy::Policy, name: &str| {
+            serving_registry(policy, name).map(|r| r.map(|r| r.name.clone()))
+        };
+        let corp = node_sources(r#"["corp-scoped", "corp-npm"]"#);
+        assert_eq!(
+            named(&corp, "@corp/widget").unwrap().as_deref(),
+            Some("corp-scoped")
+        );
+        assert_eq!(
+            named(&corp, "left-pad").unwrap().as_deref(),
+            Some("corp-npm")
+        );
+        assert_eq!(
+            named(&corp, "@other/x").unwrap().as_deref(),
+            Some("corp-npm")
+        );
+        let public = node_sources(r#"["corp-scoped", "public"]"#);
+        assert_eq!(named(&public, "left-pad").unwrap(), None);
+        let scoped_only = node_sources(r#"["corp-scoped"]"#);
+        assert_eq!(
+            named(&scoped_only, "@corp/widget").unwrap().as_deref(),
+            Some("corp-scoped")
+        );
+        let error = named(&scoped_only, "left-pad").unwrap_err().to_string();
+        assert!(error.contains("fix:"), "{error}");
+        assert!(named(&node_sources("[]"), "left-pad").is_err());
+        assert_eq!(
+            named(&crate::kernel::policy::Policy::default(), "left-pad").unwrap(),
+            None
+        );
+    }
     use crate::kernel::testutil::TempDir;
 
     /// An npm workspace root in a search-only (0111) directory still owns

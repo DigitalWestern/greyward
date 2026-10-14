@@ -20,9 +20,10 @@
 //!
 //! Anything else on the host is refused, which covers npm's audit `POST`
 //! and update-notifier fetch should a flag ever fail to turn them off. A
-//! scoped registry in `.npmrc`, a direct-URL dependency, and a git
-//! dependency are not this route's: they reach the proxy as unattested
-//! hosts or git fetches (see `kernel::resolve::intercept`).
+//! registry the machine policy configures is a `ConfiguredNpm` route of its
+//! own. A direct-URL dependency and a git dependency are not this route's:
+//! they reach the proxy as unattested hosts or git fetches (see
+//! `kernel::resolve::intercept`).
 
 use crate::kernel::digest::{sri_candidates, strongest_sri};
 use crate::kernel::fetch::Digest;
@@ -460,6 +461,56 @@ mod tests {
         assert_eq!(claims[0].1.algo(), "sha512");
         assert_eq!(claims[0].1.digests().len(), 2);
         assert_eq!(claims[0].1.describe().matches('|').count(), 1);
+    }
+
+    /// A configured registry's packuments are the names under its URL; any
+    /// other URL it owns is a tarball, claimed by its own packuments only.
+    #[test]
+    fn a_configured_registry_reads_packuments_under_its_url() {
+        let registry = Registry {
+            name: "gh".into(),
+            ecosystem: crate::kernel::registries::config::Ecosystem::Node,
+            url: "https://npm.pkg.github.com/corp/".into(),
+            root: "https://npm.pkg.github.com/corp/".into(),
+            files: Vec::new(),
+            credential: None,
+            network: Default::default(),
+            ca: None,
+            scopes: vec!["@corp".into()],
+            mirror_of_public: false,
+        };
+        let route = ConfiguredNpm::new(&registry);
+        assert_eq!(route.route_id(), "npm-gh");
+        let class = |url: &str| route.classify(&Url::parse(url).unwrap());
+        for packument in [
+            "https://npm.pkg.github.com/corp/@corp%2fwidget",
+            "https://npm.pkg.github.com/corp/@corp%2Fwidget",
+            "https://npm.pkg.github.com/corp/@corp/widget",
+            "https://npm.pkg.github.com/corp/left-pad",
+        ] {
+            assert_eq!(class(packument), RequestClass::Metadata, "{packument}");
+        }
+        for tarball in [
+            "https://npm.pkg.github.com/corp/left-pad?write=true",
+            "https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc",
+            "https://npm.pkg.github.com/other/left-pad",
+            "https://blobs.example/abc",
+        ] {
+            assert_eq!(class(tarball), RequestClass::Artifact, "{tarball}");
+        }
+        let sri = format!("sha512-{}", crate::kernel::base64::encode(&[7; 64]));
+        let body = serde_json::json!({"versions": {"1.0.0": {"dist": {
+            "tarball": "https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc",
+            "integrity": sri}}}})
+        .to_string();
+        let packument = Url::parse("https://npm.pkg.github.com/corp/@corp%2fwidget").unwrap();
+        let claims = route.claims(&packument, body.as_bytes());
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].1.algo(), "sha512");
+        let tarball = Url::parse("https://npm.pkg.github.com/download/x").unwrap();
+        assert!(route.claims(&tarball, body.as_bytes()).is_empty());
+        assert!(route.expects_claim(&tarball));
+        assert!(route.upstream(&[], "/left-pad").is_err());
     }
 
     #[test]

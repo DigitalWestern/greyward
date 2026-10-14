@@ -33,6 +33,7 @@
 //! programs they name are the host git and shell the sandbox's read-only
 //! system roots carry: ward provisions no git or shell of its own.
 
+use super::locked::{locked_list, NodeLock};
 use super::registry;
 use crate::kernel::resolve::confine;
 use crate::kernel::resolve::door::{self, ConfinedSpec, Publish, Wire, Wiring};
@@ -250,10 +251,11 @@ pub(crate) fn node_confined<'a>(
     confined.routes = vec![registry::route()?];
     confined.intercept = Intercept::Tls;
     confined.cwd = run.cwd.clone();
-    let kind = match &run.tool {
-        NodeTool::Npm { .. } => Kind::Npm,
-        NodeTool::Pnpm { .. } => Kind::Pnpm,
+    let (kind, lock) = match &run.tool {
+        NodeTool::Npm { .. } => (Kind::Npm, NodeLock::Npm),
+        NodeTool::Pnpm { .. } => (Kind::Pnpm, NodeLock::Pnpm),
     };
+    confined.locked = Some(locked_list(lock));
     let project = match &run.cwd {
         Some(cwd) => run.lock_root.join(cwd),
         None => run.lock_root.to_path_buf(),

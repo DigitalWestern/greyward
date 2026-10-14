@@ -900,10 +900,21 @@ pub fn denied(policy: &Policy, kind: &str) -> bool {
 /// refused it, and the literal edit that would allow it; a reader who has
 /// never opened a policy file can act on it without reading one.
 pub fn refusal(policy: &Policy, kind: &str, subject: &str, detail: &str) -> String {
+    let fix = refusal_fix(policy, kind);
+    format!(
+        "policy denies {}: {subject}: {detail}; {fix}",
+        canonical_kind(kind)
+    )
+}
+
+/// The end of [`refusal`]: the knob that refuses `kind` and the edit that
+/// would allow it, for a refusal that leads with its own remedy
+/// ([`record_with_fix`]).
+pub fn refusal_fix(policy: &Policy, kind: &str) -> String {
     let kind = canonical_kind(kind);
     // Strictness is reported first when both apply: removing the kind from
     // a deny list changes nothing while strict is on.
-    let fix = match (policy.strict, policy.deny_sources.get(kind)) {
+    match (policy.strict, policy.deny_sources.get(kind)) {
         (true, _) => match &policy.strict_source {
             Some(source) => source.fix(),
             None => "this policy refuses every exception kind".to_string(),
@@ -915,8 +926,7 @@ pub fn refusal(policy: &Policy, kind: &str, subject: &str, detail: &str) -> Stri
         (false, None) => {
             format!("'{kind}' is in a policy deny list; remove that line to allow it")
         }
-    };
-    format!("policy denies {kind}: {subject}: {detail}; {fix}")
+    }
 }
 
 pub fn record_with(policy: &Policy, kind: &str, subject: &str, detail: &str) -> io::Result<()> {

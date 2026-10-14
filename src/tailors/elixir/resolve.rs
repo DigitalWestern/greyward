@@ -311,7 +311,7 @@ mod tests {
     use crate::kernel::resolve::testing::{relay, stored_rows, Harness, Reach, TEST_ORIGIN_PUBLIC};
     use crate::kernel::resolve::DoorKind;
     use crate::kernel::testutil::TempDir;
-    use crate::tailors::elixir::registry::REPO_HOST;
+    use crate::tailors::elixir::registry::{self, REPO_HOST};
     use std::fs;
 
     #[test]
@@ -396,7 +396,7 @@ mod tests {
         let harness: &'static Harness = Box::leak(Box::new(Harness::serving(
             label,
             reach,
-            &[REPO_HOST],
+            &[REPO_HOST, registry::API_HOST],
             &rows.0.to_string_lossy(),
         )));
         std::mem::forget(rows);

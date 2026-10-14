@@ -13,6 +13,8 @@
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::platform::Platform;
+use crate::kernel::resolve::age::LockedPackage;
+use crate::kernel::resolve::door::{LockedList, Staged};
 use crate::kernel::store::Store;
 use crate::kernel::types::Identity;
 use serde::{Deserialize, Serialize};
@@ -96,6 +98,39 @@ struct LockPackage {
 
 const REGISTRY_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const SPARSE_SOURCE: &str = "sparse+https://index.crates.io/";
+
+/// The crates.io packages of the Cargo.locks among `locks` the run
+/// leaves, for the door's `young-package` check: every `[[package]]` whose
+/// source is crates.io (git, path and other-registry packages are left
+/// out).
+pub fn locked_list<'a>(locks: Vec<PathBuf>) -> LockedList<'a> {
+    Box::new(move |staged: &Staged<'_>| {
+        let mut locked = Vec::new();
+        for lock in &locks {
+            if let Some(bytes) = staged.read(lock)? {
+                locked.extend(crates_io_packages(&String::from_utf8_lossy(&bytes))?);
+            }
+        }
+        Ok(locked)
+    })
+}
+
+/// `name@version` of every crates.io package in a Cargo.lock.
+pub fn crates_io_packages(lock_toml: &str) -> io::Result<Vec<LockedPackage>> {
+    let lock = toml::from_str::<CargoLock>(lock_toml)
+        .map_err(|e| super::cargo_door::toml_refusal("Cargo.lock", lock_toml, &e))?;
+    Ok(lock
+        .package
+        .into_iter()
+        .filter(|package| {
+            matches!(
+                package.source.as_deref(),
+                Some(REGISTRY_SOURCE) | Some(SPARSE_SOURCE)
+            )
+        })
+        .filter_map(|package| Some(LockedPackage::new(package.name?, package.version?)))
+        .collect())
+}
 
 /// Parse the complete Cargo.lock closure into a registry-only vendor plan.
 pub fn plan_cargo(lock_toml: &str, rust_version: &str) -> io::Result<CargoPlan> {
@@ -848,6 +883,29 @@ mod tests {
     use super::*;
     use crate::kernel::provider::rust::RUST_VERSION;
     use crate::kernel::testutil::TempDir;
+
+    #[test]
+    fn young_package_judges_crates_io_packages_only() {
+        let lock = "version = 4\n\n\
+            [[package]]\nname = \"demo\"\nversion = \"0.1.0\"\n\n\
+            [[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\n\
+            source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+            checksum = \"aa\"\n\n\
+            [[package]]\nname = \"ryu\"\nversion = \"1.0.20\"\n\
+            source = \"sparse+https://index.crates.io/\"\nchecksum = \"bb\"\n\n\
+            [[package]]\nname = \"forked\"\nversion = \"0.1.0\"\n\
+            source = \"git+https://github.com/o/r#0123456789012345678901234567890123456789\"\n\n\
+            [[package]]\nname = \"private\"\nversion = \"1.0.0\"\n\
+            source = \"registry+https://example.com/index\"\nchecksum = \"cc\"\n";
+        assert_eq!(
+            crates_io_packages(lock).unwrap(),
+            [
+                LockedPackage::new("itoa", "1.0.18"),
+                LockedPackage::new("ryu", "1.0.20")
+            ]
+        );
+        assert!(crates_io_packages("[[package]\n").is_err());
+    }
 
     #[test]
     fn cargo_git_sources_parse_only_when_pinned() {

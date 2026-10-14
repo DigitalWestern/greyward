@@ -23,8 +23,9 @@
 //! go checks every module it fetches against go.sum and the checksum
 //! database, so the protocol publishes no claims.
 
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, LocalAnswer, ProxyAddress, RegistryProtocol, RequestClass, Upstream,
+    Claim, Endpoint, LocalAnswer, Lookup, ProxyAddress, RegistryProtocol, RequestClass, Upstream,
 };
 use std::io;
 use url::Url;
@@ -94,6 +95,57 @@ impl RegistryProtocol for GoProxy {
     fn claims(&self, _url: &Url, _body: &[u8]) -> Vec<(Url, Claim)> {
         Vec::new()
     }
+
+    /// A `.info` or `@latest` answer: `{"Version": .., "Time": ..}`, keyed
+    /// by the escaped module path and version, as [`Self::package_key`]
+    /// spells a go.sum entry.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        let path = url.path();
+        if url.host_str() != Some(PROXY_HOST) {
+            return Vec::new();
+        }
+        let module = match path.strip_suffix("/@latest") {
+            Some(module) => module,
+            None if path.ends_with(".info") => match path.rsplit_once("/@v/") {
+                Some((module, _)) => module,
+                None => return Vec::new(),
+            },
+            None => return Vec::new(),
+        };
+        info_time(body)
+            .and_then(|(version, at)| {
+                let version = crate::tailors::go::escape_go_path(&version).ok()?;
+                Some((module.trim_start_matches('/').to_string(), version, at))
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, version: &str) -> Option<Lookup> {
+        let (module, version) = self.package_key(name, version);
+        let path = format!("/{module}/@v/{version}.info");
+        check_module_path(&path).ok()?;
+        Some(Lookup {
+            url: endpoint(endpoints, PROXY_HOST).ok()?.url(&path).ok()?,
+            accept: "*/*",
+        })
+    }
+
+    /// The proxy's escaped spelling (`!azure`), which the URLs carry.
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        let escape = |word: &str| {
+            crate::tailors::go::escape_go_path(word).unwrap_or_else(|_| word.to_string())
+        };
+        (escape(name), escape(version))
+    }
+}
+
+/// The version and publish time of a module proxy `.info` body.
+fn info_time(body: &[u8]) -> Option<(String, i64)> {
+    let info = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let version = info.get("Version")?.as_str()?.to_string();
+    let at = parse_rfc3339(info.get("Time")?.as_str()?)?;
+    Some((version, at))
 }
 
 /// The route endpoint on `host`, which a Go route always has.
@@ -292,6 +344,52 @@ mod tests {
             .upstream(&endpoints(), path)
             .unwrap_err()
             .to_string()
+    }
+
+    #[test]
+    fn publish_times_come_from_info_answers_in_escaped_spelling() {
+        let body = include_bytes!(
+            "../../../tests/fixtures/proxy/registry/go/proxy.golang.org/github.com/google/uuid/@v/v1.6.0.info.body"
+        );
+        let url = |path: &str| Url::parse(&format!("https://{PROXY_HOST}{path}")).unwrap();
+        let uuid = vec![(
+            "github.com/google/uuid".to_string(),
+            "v1.6.0".to_string(),
+            1_706_036_044,
+        )];
+        let info = url("/github.com/google/uuid/@v/v1.6.0.info");
+        assert_eq!(GO_PROXY.published(&info, body), uuid);
+        let latest = url("/github.com/google/uuid/@latest");
+        assert_eq!(GO_PROXY.published(&latest, body), uuid);
+        let module = url("/github.com/google/uuid/@v/v1.6.0.mod");
+        assert!(GO_PROXY.published(&module, body).is_empty());
+        let azure = br#"{"Version":"v1.2.0","Time":"2024-01-23T18:54:04Z"}"#;
+        let escaped = url("/github.com/!azure/sdk/@v/v1.2.0.info");
+        assert_eq!(
+            GO_PROXY.published(&escaped, azure)[0].0,
+            "github.com/!azure/sdk"
+        );
+        assert_eq!(
+            GO_PROXY.package_key("github.com/Azure/sdk", "v1.2.0"),
+            ("github.com/!azure/sdk".to_string(), "v1.2.0".to_string())
+        );
+        let lookup = GO_PROXY
+            .lookup(&endpoints(), "github.com/Azure/sdk", "v1.2.0")
+            .unwrap();
+        assert_eq!(
+            lookup.url.as_str(),
+            "https://proxy.golang.org/github.com/!azure/sdk/@v/v1.2.0.info"
+        );
+        let sum = "github.com/google/uuid v1.6.0 h1:abc=\n\
+                   github.com/google/uuid v1.6.0/go.mod h1:def=\n\
+                   golang.org/x/sync v0.9.0/go.mod h1:ghi=\n";
+        assert_eq!(
+            crate::tailors::go::tool::go_sum_modules(sum),
+            [crate::kernel::resolve::age::LockedPackage::new(
+                "github.com/google/uuid",
+                "v1.6.0"
+            )]
+        );
     }
 
     #[test]

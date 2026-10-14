@@ -32,6 +32,9 @@ pub const PERMITTED_HOSTS: &[&str] = &[
     "rubygems.org",
     "index.rubygems.org",
     "repo.hex.pm",
+    // Hex's HTTP API: ward reads a release's publish time there, since
+    // the signed registry Hex resolves from carries none.
+    "hex.pm",
     "api.nuget.org",
     "api.github.com",
     "raw.githubusercontent.com",
@@ -405,6 +408,37 @@ pub trait RegistryProtocol: Sync {
     fn encoded_slash(&self) -> bool {
         false
     }
+
+    /// When each package version the metadata `body`, fetched from `url`,
+    /// describes was published: `(name, version, unix seconds)`, as the
+    /// registry spells them ([`Self::package_key`] compares them). A body
+    /// that names no times gives none. Feeds `young-package`.
+    fn published(&self, _url: &Url, _body: &[u8]) -> Vec<(String, String, i64)> {
+        Vec::new()
+    }
+
+    /// Where ward itself reads the publish time of `name` at `version`
+    /// when the tool's own traffic did not carry it: a URL on one of
+    /// `endpoints` whose body [`Self::published`] reads, and the `Accept`
+    /// to send. `None`: this protocol has no such document.
+    fn lookup(&self, _endpoints: &[Endpoint], _name: &str, _version: &str) -> Option<Lookup> {
+        None
+    }
+
+    /// The form under which two spellings of one package version compare
+    /// equal (PyPI's normalized names, NuGet's lowercase ids and
+    /// versions). The lock's spelling and the metadata's meet here.
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        (name.to_string(), version.to_string())
+    }
+}
+
+/// A publish-time document ward fetches itself ([`RegistryProtocol::lookup`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lookup {
+    pub url: Url,
+    /// The `Accept` header the document is asked for with.
+    pub accept: &'static str,
 }
 
 /// A mirror route: a protocol and the endpoints it may reach.
@@ -702,6 +736,32 @@ pub(crate) mod testing {
 
         fn expects_claim(&self, url: &Url) -> bool {
             url.path().starts_with("/art/claimed-")
+        }
+
+        /// A metadata body's `{"published": {"<name>@<version>": "<time>"}}`.
+        fn published(&self, _url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+                return Vec::new();
+            };
+            let Some(times) = value.get("published").and_then(|t| t.as_object()) else {
+                return Vec::new();
+            };
+            times
+                .iter()
+                .filter_map(|(package, at)| {
+                    let (name, version) = package.split_once('@')?;
+                    let at = crate::kernel::resolve::age::parse_rfc3339(at.as_str()?)?;
+                    Some((name.to_string(), version.to_string(), at))
+                })
+                .collect()
+        }
+
+        /// `/meta/<name>.json` on the first endpoint.
+        fn lookup(&self, endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+            Some(Lookup {
+                url: endpoints[0].url(&format!("/meta/{name}.json")).ok()?,
+                accept: "application/json",
+            })
         }
 
         fn content_query_keys(&self) -> &'static [&'static str] {

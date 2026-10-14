@@ -11,6 +11,8 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod locked;
+
 /// Why mix runs isolated, for the missing-capability message.
 const WHY: &str = "evaluates the project's mix.exs and fetches packages from the network";
 
@@ -145,15 +147,20 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
         })
     }));
     let publish = std::mem::replace(&mut run.publish, MixPublish::Detached);
-    confined.publish(match publish {
+    let publish = match publish {
         MixPublish::Detached => Publish::Detached {
             outputs: Vec::new(),
         },
-        MixPublish::Project { receipt } => Publish::Project {
-            outputs: OUTPUTS.iter().map(PathBuf::from).collect(),
-            receipt,
-        },
-    });
+        MixPublish::Project { receipt } => {
+            confined.locked = Some(locked::locked_list());
+            confined.lookup_routes = vec![registry::api_route()?];
+            Publish::Project {
+                outputs: OUTPUTS.iter().map(PathBuf::from).collect(),
+                receipt,
+            }
+        }
+    };
+    confined.publish(publish);
     Ok(confined)
 }
 

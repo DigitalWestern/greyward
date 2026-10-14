@@ -368,6 +368,7 @@ fn confined<'r>(
     let cache = cache.to_path_buf();
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| wiring(wire, &cache)));
     confined.publish(attempt.publish);
+    confined.locked = Some(super::locked::locked_list(confined.outputs.clone()));
     Ok((spec, confined))
 }
 

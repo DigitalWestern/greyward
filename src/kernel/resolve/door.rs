@@ -11,6 +11,7 @@
 //! receipt, publish. Any failure before publication leaves the project as
 //! it was; the ledger this run rooted is taken back.
 
+use super::age::{self, LockedPackage};
 use super::confine::{self, ConfinedOutcome, ConfinedRun, ForcedInputs, SocketScan, Stdout};
 use super::ledger::{self, Diagnostics, LedgerObjects, PortableLedger};
 use super::outputs::{Forbidden, OutputFile, Outputs};
@@ -33,6 +34,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitStatus;
+use std::time::SystemTime;
 
 /// Makes the receipt from what the run established. `Ok(None)` leaves the
 /// held receipt as it was.
@@ -49,6 +51,13 @@ pub type Wirer<'a> = Box<dyn FnOnce(&Wire<'_>) -> io::Result<Wiring> + 'a>;
 /// recorded under the run's policy, so a denied kind refuses the run too,
 /// and are carried in the receipt with the session's.
 pub type ResultCheck<'a> = Box<dyn FnOnce(&Staged<'_>) -> io::Result<Vec<Fact>> + 'a>;
+
+/// Reads the registry packages the run's lock names (direct and
+/// transitive, each at its locked version) from what the tool left, once
+/// its outputs are copied: what `young-package` judges ([`super::age`]).
+/// Packages from git, a path or a URL are not listed. An error refuses the
+/// run, like a [`ResultCheck`]'s.
+pub type LockedList<'a> = Box<dyn FnOnce(&Staged<'_>) -> io::Result<Vec<LockedPackage>> + 'a>;
 
 /// What a [`ResultCheck`] reads: the lock root's files as the run leaves
 /// them, the copied output where the tool changed one, else the staged
@@ -189,6 +198,15 @@ pub struct ConfinedSpec<'a> {
     pub complete_inputs: bool,
     /// The tool's own check of its result ([`ResultCheck`]).
     pub check: Option<ResultCheck<'a>>,
+    /// The registry packages the run's lock names ([`LockedList`]), for
+    /// the `young-package` check. `None` checks nothing.
+    pub locked: Option<LockedList<'a>>,
+    /// Routes only the publish-time lookups use (Hex's hex.pm API), added
+    /// to the lookup session alone: the tool never reaches them.
+    pub lookup_routes: Vec<Route>,
+    /// The resolution time `young-package` judges against; `None` is the
+    /// clock when the check runs.
+    pub now: Option<SystemTime>,
 }
 
 impl<'a> ConfinedSpec<'a> {
@@ -220,6 +238,9 @@ impl<'a> ConfinedSpec<'a> {
             expected_inputs: BTreeMap::new(),
             complete_inputs: false,
             check: None,
+            locked: None,
+            lookup_routes: Vec::new(),
+            now: None,
         }
     }
 
@@ -386,7 +407,7 @@ pub(super) fn run(
     if confined.complete_inputs {
         snapshot.normalize_executable_inputs()?;
     }
-    let ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
+    let mut ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
     if let Some(failure) = ran.session.facts.failure() {
         return Err(io::Error::new(
@@ -417,18 +438,14 @@ pub(super) fn run(
         return Ok(failed);
     }
     let outputs = check_outputs(store, activity, &confined, &snapshot, &ran)?;
-    if let Some(check) = confined.check.take() {
-        let found = check(&Staged {
-            outputs: Some(&outputs),
-            lock_root: &snapshot.lock_root().staged,
-        })?;
-        for fact in found {
-            policy::record_with(&policy, fact.kind, &fact.subject, &fact.detail)?;
-            if !facts.contains(&fact) {
-                facts.push(fact);
-            }
-        }
-    }
+    check_result(
+        door,
+        &mut confined,
+        &policy,
+        (&outputs, &snapshot),
+        &mut ran,
+        &mut facts,
+    )?;
     let diagnostics = diagnostics(
         store,
         door,
@@ -512,6 +529,105 @@ struct Ran {
     advertised: String,
 }
 
+fn session_config(
+    door: &ResolutionDoor<'_>,
+    confined: &ConfinedSpec<'_>,
+    policy: &Policy,
+) -> SessionConfig {
+    SessionConfig {
+        ecosystem: confined.ecosystem.to_string(),
+        door: door.kind.as_str().to_string(),
+        routes: confined.routes.clone(),
+        intercept: confined.intercept,
+        policy: policy.clone(),
+        mode: confined.network,
+        store: door.store.clone(),
+        activity: door.activity.clone(),
+        permitted: confined.permitted.clone(),
+    }
+}
+
+/// The checks of the copied outputs, each recorded fact joining `facts`:
+/// the tool's own [`ResultCheck`], then the `young-package` step
+/// ([`super::age`]), which judges every registry package the lock names,
+/// looking up what the tool's traffic did not say. The lookups' evidence
+/// joins the run's ledger and diagnostics. A planner step locks nothing
+/// new, so its packages are not judged.
+fn check_result(
+    door: &ResolutionDoor<'_>,
+    confined: &mut ConfinedSpec<'_>,
+    policy: &Policy,
+    (outputs, snapshot): (&Outputs, &Snapshot),
+    ran: &mut Ran,
+    facts: &mut Vec<Fact>,
+) -> io::Result<()> {
+    let staged = Staged {
+        outputs: Some(outputs),
+        lock_root: &snapshot.lock_root().staged,
+    };
+    if let Some(check) = confined.check.take() {
+        for fact in check(&staged)? {
+            policy::record_with(policy, fact.kind, &fact.subject, &fact.detail)?;
+            if !facts.contains(&fact) {
+                facts.push(fact);
+            }
+        }
+    }
+    let Some(locked) = confined.locked.take() else {
+        return Ok(());
+    };
+    if door.kind == DoorKind::Planner {
+        return Ok(());
+    }
+    let packages = match locked(&staged) {
+        Ok(packages) => packages,
+        // A lock its reader cannot parse names no package: planning refuses
+        // that lock before anything is fetched from it.
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let proxy = match confined.proxy {
+        Some(proxy) => proxy,
+        None => process_proxy()?,
+    };
+    let mut config = session_config(door, confined, policy);
+    if !config.routes.is_empty() {
+        config.routes.append(&mut confined.lookup_routes);
+    }
+    let judged = age::judge(
+        proxy,
+        config,
+        &ran.session.published,
+        &packages,
+        confined.now.unwrap_or_else(SystemTime::now),
+        policy,
+    )?;
+    if let Some(lookups) = judged.lookups {
+        if let Some(failure) = lookups.facts.hard_failures.first() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{}: a publish-time lookup failed: {failure}; nothing was published",
+                    confined.name
+                ),
+            ));
+        }
+        for entry in lookups.ledger.entries() {
+            ran.session.ledger.insert(entry.clone());
+        }
+        let into = &mut ran.session.diagnostics;
+        into.bytes += lookups.diagnostics.bytes;
+        into.requests.extend(lookups.diagnostics.requests);
+        into.refusals.extend(lookups.diagnostics.refusals);
+    }
+    for fact in age::record(policy, &judged.young)? {
+        if !facts.contains(&fact) {
+            facts.push(fact);
+        }
+    }
+    Ok(())
+}
+
 /// Steps 4 and 5: open the session, wire the tool to it, run it until its
 /// whole tree has stopped, then finish the session.
 fn run_tool(
@@ -526,17 +642,7 @@ fn run_tool(
         Some(proxy) => proxy,
         None => process_proxy()?,
     };
-    let mut session = proxy.open_session(SessionConfig {
-        ecosystem: confined.ecosystem.to_string(),
-        door: door.kind.as_str().to_string(),
-        routes: confined.routes.clone(),
-        intercept: confined.intercept,
-        policy: policy.clone(),
-        mode: confined.network,
-        store: door.store.clone(),
-        activity: door.activity.clone(),
-        permitted: confined.permitted.clone(),
-    })?;
+    let mut session = proxy.open_session(session_config(door, confined, policy))?;
     let dir = SessionDir::create()?;
     let ca_file = match confined.intercept {
         Intercept::Tls => Some(dir.write_ca(proxy.authority().pem())?),
@@ -2960,6 +3066,119 @@ exit 37
     fn sha256_hex(bytes: &[u8]) -> String {
         use sha2::Digest as _;
         hex::encode(sha2::Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn a_young_locked_package_is_refused_when_denied_and_signed_into_the_record_otherwise() {
+        let Some(relay) = relay(
+            "a_young_locked_package_is_refused_when_denied_and_signed_into_the_record_otherwise",
+        ) else {
+            return;
+        };
+        use super::super::record::{producer, RecordSlot};
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        let fx = fixture("door-young");
+        let before = tree(&fx.project);
+        // 2026-10-12T00:00:00Z; the version is a day old.
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_791_763_200);
+        for (name, body) in [
+            (
+                "young",
+                &br#"{"published": {"young@1.0": "2026-10-11T00:00:00Z"}}"#[..],
+            ),
+            (
+                "old",
+                &br#"{"published": {"old@2.0": "2020-01-01T00:00:00Z"}}"#[..],
+            ),
+        ] {
+            fx.harness.upstream.set(
+                &format!("/meta/{name}.json"),
+                Behavior::Reply(Reply::new(200, body).header("Content-Type", "application/json")),
+            );
+        }
+        let lock = |confined: &mut ConfinedSpec<'_>| {
+            confined.locked = Some(Box::new(|_: &Staged<'_>| {
+                Ok(vec![
+                    LockedPackage::new("young", "1.0"),
+                    LockedPackage::new("old", "2.0"),
+                ])
+            }));
+            confined.now = Some(now);
+        };
+
+        // Denied, with nothing in the tool's traffic about the version: ward
+        // looks it up, refuses, and publishes nothing.
+        let denied = run_door(
+            &fx,
+            Some(relay.clone()),
+            "echo new > deps.lock\n",
+            deny(&[policy::YOUNG_PACKAGE]),
+            lock,
+        );
+        let error = denied.result.unwrap_err().to_string();
+        assert!(error.contains("young-package"), "{error}");
+        assert!(error.contains("young@1.0"), "{error}");
+        assert!(
+            error.contains("resolve again after 2026-10-18T00:00:00Z"),
+            "{error}"
+        );
+        assert_eq!(fx.harness.upstream.hits("/meta/young.json"), 1);
+        assert_untouched(&fx, &before);
+
+        // Allowed: `young` from the tool's own fetch, `old` looked up. The
+        // young one is recorded and signed into the record with the times
+        // that were judged; the lookup is in the record's ledger.
+        let slot = RecordSlot::default();
+        let allowed = run_door(
+            &fx,
+            Some(relay),
+            "get meta/young.json > deps.lock\n",
+            Policy::default(),
+            |confined| {
+                lock(confined);
+                confined.target = Target::Project {
+                    receipt: Some(producer(record_spec(false, true), slot.clone())),
+                };
+            },
+        );
+        let report = allowed.result.unwrap();
+        assert!(
+            report.status.success(),
+            "{}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        // The tool's own fetch went through.
+        assert_eq!(
+            fs::read(fx.project.join("deps.lock")).unwrap(),
+            b"HTTP/1.1 200 OK\n"
+        );
+        let detail = "published 2026-10-11T00:00:00Z, 24 hours before this resolution at \
+                      2026-10-12T00:00:00Z; the minimum age is 7 days (the default)";
+        let recorded: Vec<(&str, &str, &str)> = allowed
+            .recorded
+            .iter()
+            .map(|e| (e.kind.as_str(), e.subject.as_str(), e.detail.as_str()))
+            .collect();
+        assert_eq!(recorded, [(policy::YOUNG_PACKAGE, "young@1.0", detail)]);
+        let record = judged(&fx, &receipt(&fx).unwrap());
+        let signed: Vec<(&str, &str, &str)> = record
+            .exceptions
+            .iter()
+            .map(|e| (e.kind.as_str(), e.subject.as_str(), e.detail.as_str()))
+            .collect();
+        assert_eq!(signed, [(policy::YOUNG_PACKAGE, "young@1.0", detail)]);
+        let objects = report.ledger.unwrap();
+        assert_eq!(record.ledger.object, objects.ledger);
+        let portable = PortableLedger::parse(
+            &ledger::read_portable(&fx.harness.store, &objects.ledger).unwrap(),
+        )
+        .unwrap();
+        let looked_up: Vec<&str> = portable
+            .entries()
+            .filter(|entry| entry.class == super::super::mirror::PUBLISH_TIME_CLASS)
+            .map(|entry| entry.url.as_str())
+            .collect();
+        assert_eq!(looked_up, [fx.harness.upstream_url("/meta/old.json")]);
     }
 
     #[test]

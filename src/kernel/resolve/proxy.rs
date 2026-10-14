@@ -37,7 +37,7 @@ use super::ca::Authority;
 use super::http::{self, Headers, ParseError, Request};
 use super::mirror::{self, Exchange, Record};
 use super::redact::{self, REDACTED};
-use super::routes::{ProxyAddress, Upstream};
+use super::routes::{Lookup as PublishLookup, ProxyAddress, Upstream};
 use super::session::{Intercept, SessionConfig, SessionReport, State};
 use super::ssrf::{Lookup, SystemLookup, ValidatingResolver};
 use crate::kernel::fetch::pinned::{self, PinnedClient, PinnedConfig};
@@ -56,6 +56,9 @@ use std::time::{Duration, Instant};
 
 /// The git protocol's port: a `CONNECT` there is a `git://` fetch.
 const GIT_PORT: u16 = 9418;
+
+/// The `User-Agent` of ward's own publish-time lookups ([`Session::lookup`]).
+const LOOKUP_USER_AGENT: &str = "ward (https://github.com/DigitalWestern/greyward)";
 
 /// How the process's proxy is built.
 pub struct ProxyConfig {
@@ -286,6 +289,49 @@ impl Session {
         });
         self.addresses.push(address);
         Ok(())
+    }
+
+    /// Fetch a publish-time document for ward itself, through the route
+    /// `route_id` (see [`Exchange::supplemental`]): the metadata cache,
+    /// last-good and offline mode, the validating resolver, the permitted
+    /// set and the ledger all apply as to the tool's own requests. What the
+    /// body says lands in the session's publish times; the body itself is
+    /// dropped. `Err` only when the lookup names no endpoint of the route.
+    pub fn lookup(&self, route_id: &str, lookup: &PublishLookup) -> io::Result<()> {
+        let state = &*self.state;
+        let route = state
+            .route(route_id)
+            .filter(|route| route.endpoint_for(&lookup.url).is_some())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the publish-time lookup {} is on no endpoint of route {route_id}",
+                        lookup.url.origin().ascii_serialization()
+                    ),
+                )
+            })?;
+        let mut headers = Headers::new();
+        headers.set("Accept", lookup.accept);
+        headers.set("User-Agent", LOOKUP_USER_AGENT);
+        // Only a rewrite reads the address, and a lookup is never rewritten.
+        let address = ProxyAddress::new(SocketAddr::from(([127, 0, 0, 1], 0)), state.token());
+        let exchange = Exchange {
+            state,
+            client: &self.shared.client,
+            budget: &self.shared.budget,
+            route,
+            address: &address,
+            method: "GET",
+            request: &headers,
+            body: None,
+            permitted: &state.config.permitted,
+            hop: None,
+            keep_alive: false,
+            http10: false,
+            supplemental: true,
+        };
+        exchange.lookup(&lookup.url, &mut io::sink())
     }
 
     /// Stop serving and hand back everything the session recorded.
@@ -1041,6 +1087,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         // HTTP/1.0 connection ends after each mirror response.
         keep_alive: request.keep_alive && !request.http10,
         http10: request.http10,
+        supplemental: false,
     };
     match upstream {
         Upstream::Local(answer) => exchange.local(answer, out)?,

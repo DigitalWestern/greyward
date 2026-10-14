@@ -5,7 +5,10 @@
 use super::go_env;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
-use crate::kernel::resolve::door::{ConfinedSpec, ReceiptProducer, Target, Wire, Wiring};
+use crate::kernel::resolve::age::LockedPackage;
+use crate::kernel::resolve::door::{
+    ConfinedSpec, LockedList, ReceiptProducer, Staged, Target, Wire, Wiring,
+};
 use crate::kernel::resolve::ledger;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
@@ -95,11 +98,36 @@ pub(crate) fn go_confined<'a>(
                 .collect::<io::Result<_>>()?;
         }
         GoPublish::Project { receipt } => {
+            confined.locked = Some(locked_list());
             confined.outputs = OUTPUTS.iter().map(PathBuf::from).collect();
             confined.target = Target::Project { receipt };
         }
     }
     Ok(confined)
+}
+
+/// The modules a published go.sum names with a content hash (its
+/// `/go.mod`-only lines are not modules the build uses), for the door's
+/// `young-package` check. Every one came through proxy.golang.org.
+fn locked_list<'a>() -> LockedList<'a> {
+    Box::new(|staged: &Staged<'_>| {
+        Ok(match staged.read(Path::new("go.sum"))? {
+            Some(bytes) => go_sum_modules(&String::from_utf8_lossy(&bytes)),
+            None => Vec::new(),
+        })
+    })
+}
+
+/// `module version h1:...` lines of `go.sum`, without the `/go.mod` ones.
+pub(crate) fn go_sum_modules(text: &str) -> Vec<LockedPackage> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let (module, version) = (words.next()?, words.next()?);
+            words.next()?;
+            (!version.ends_with("/go.mod")).then(|| LockedPackage::new(module, version))
+        })
+        .collect()
 }
 
 /// Run the store go confined through `door`. A Detached run's ledger is

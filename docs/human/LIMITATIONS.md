@@ -463,6 +463,31 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   `unrecorded-resolution` instead of joining it, and its `ward audit` counts either new kind in a
   closure as of unknown kind. Update every machine that syncs or audits the project.
 
+- **Private registries cover Python and npm only.** A `[sources]` entry or a
+  `[[registry]]` for Go, Cargo, Ruby, .NET or Elixir is refused at load; those
+  ecosystems use their public registries. In an enforced Python list uv gets one
+  index, the default registry: a package that lives only on a later registry in the
+  list is not found at resolution, though a lock that names that registry still syncs.
+  Poetry's dependency-level `source = "..."` is not matched to a listed registry, so it
+  stays an `unattested-index` exception. A pnpm lock entry with no tarball URL is
+  fetched from `<registry><name>/-/<name>-<version>.tgz` under its scope's registry,
+  which a registry with another tarball layout (GitHub Packages) does not serve.
+  The SBOM's purl `repository_url` still comes from the file's host, not the
+  recorded registry. The machine policy that declares registries and credentials is
+  whatever `GREYWARD_POLICY` or `$HOME` selects, the same gap as `[signing]`: whoever
+  controls the environment can replace it (#757). Artifacts a project declares for
+  its install scripts (a `greyward` artifact with its own sha256 in `package.json`)
+  are fetched from the URL the project names, not through the registry list: they are
+  not registry packages, and the declared hash pins them. The `.npmrc` check before
+  npm or pnpm starts reads the lock root's and the member's `.npmrc`, not registry
+  settings in `pnpm-workspace.yaml`; a scope pointed elsewhere there still fails, at
+  the proxy, with a less specific error. A wrong password on a configured registry
+  surfaces as the tool's own 401, with no `fix:` line. `young-package` reads a
+  configured registry's publish times where PyPI's and npm's are read: a Python
+  index's JSON project page (PEP 691) and an npm registry's full packument. An index
+  that serves HTML pages only, or a packument with no `time` map, gives none, so each
+  package's age is unknown: recorded, or refused where the policy denies the kind.
+
 ## Python
 
 Selection covers every patch of each maintained CPython minor that python-build-standalone

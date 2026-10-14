@@ -767,7 +767,11 @@ the machine policy trusts (when the policy has a `[signing]` table; see
 has its primary closure, each record is current for the inputs on disk and for the
 committed `greyward-toolchain.toml` (a missing or stale lock, or a record built
 from another bundle than the lock names, is `stale`, the same answer
-`status` gives), and no recorded exception is denied or unknown. It does not prove the signer's
+`status` gives), no recorded exception is denied or unknown, and, for each
+ecosystem the machine policy's `[sources]` table names, every registry
+package's recorded `registry` is one the effective list holds (a package
+served by another is an `unapproved-registry` denial; one that records no
+registry makes the closure `outdated`). It does not prove the signer's
 sync was honest or safe to run (see [LIMITATIONS.md](LIMITATIONS.md)).
 
 **What has to be in the repository for this to work.** `audit` reads

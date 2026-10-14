@@ -20,12 +20,15 @@
 //!
 //! Anything else on the host is refused, which covers npm's audit `POST`
 //! and update-notifier fetch should a flag ever fail to turn them off. A
-//! scoped registry in `.npmrc`, a direct-URL dependency, and a git
-//! dependency are not this route's: they reach the proxy as unattested
-//! hosts or git fetches (see `kernel::resolve::intercept`).
+//! registry the machine policy configures is a `ConfiguredNpm` route of its
+//! own. A direct-URL dependency and a git dependency are not this route's:
+//! they reach the proxy as unattested hosts or git fetches (see
+//! `kernel::resolve::intercept`).
 
 use crate::kernel::digest::{sri_candidates, strongest_sri};
 use crate::kernel::fetch::Digest;
+use crate::kernel::registries::config::Registry;
+use crate::kernel::registries::covers;
 use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
     Claim, Endpoint, Lookup, RegistryProtocol, RequestClass, Route, Upstream,
@@ -87,23 +90,9 @@ impl RegistryProtocol for NpmRegistry {
         if url.host_str() != Some(REGISTRY_HOST) || is_tarball_path(url.path()) {
             return Vec::new();
         }
-        let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
-            return Vec::new();
-        };
-        let Some(versions) = packument.get("versions").and_then(|v| v.as_object()) else {
-            return Vec::new();
-        };
-        versions
-            .values()
-            .filter_map(|version| {
-                let dist = version.get("dist")?;
-                let tarball = Url::parse(dist.get("tarball")?.as_str()?).ok()?;
-                if tarball.host_str() != Some(REGISTRY_HOST) || !is_tarball_path(tarball.path()) {
-                    return None;
-                }
-                Some((tarball, dist_claim(dist)?))
-            })
-            .collect()
+        packument_claims(body, |tarball| {
+            tarball.host_str() == Some(REGISTRY_HOST) && is_tarball_path(tarball.path())
+        })
     }
 
     /// The registry publishes a digest for every tarball.
@@ -122,7 +111,7 @@ impl RegistryProtocol for NpmRegistry {
         if url.host_str() != Some(REGISTRY_HOST) || is_tarball_path(url.path()) {
             return Vec::new();
         }
-        packument_times(body)
+        packument_times(body, url.path().trim_start_matches('/'))
     }
 
     /// The full packument (`Accept: application/json`), which carries
@@ -142,7 +131,10 @@ impl RegistryProtocol for NpmRegistry {
 
 /// `(name, version, published)` for each version a packument's `time` map
 /// names (`created` and `modified` are not versions).
-fn packument_times(body: &[u8]) -> Vec<(String, String, i64)> {
+/// `requested` is the packument's path as asked for (`@scope%2fname`):
+/// a body that names another package times nothing, since publish times,
+/// unlike tarballs, are not checked against a digest.
+fn packument_times(body: &[u8], requested: &str) -> Vec<(String, String, i64)> {
     let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Vec::new();
     };
@@ -152,6 +144,9 @@ fn packument_times(body: &[u8]) -> Vec<(String, String, i64)> {
     ) else {
         return Vec::new();
     };
+    if !crate::kernel::gitsrc::percent_decode(requested).eq_ignore_ascii_case(name) {
+        return Vec::new();
+    }
     times
         .iter()
         .filter(|(version, _)| !matches!(version.as_str(), "created" | "modified"))
@@ -284,6 +279,156 @@ fn check_version(version: &str) -> Result<(), String> {
     } else {
         Err(format!("{version:?} is not a package version"))
     }
+}
+
+/// A configured npm registry, as a route of its own. Its grammar decides
+/// metadata only: a packument under its `url` (`<name>`, `@scope%2fname` in either case, `@scope/name`).
+/// Every other URL the route owns is a tarball wherever the registry put
+/// it (GitHub Packages serves `/download/...` and redirects to a blob
+/// host), fetched only when this registry's own packuments claimed it.
+pub struct ConfiguredNpm {
+    id: String,
+    base: String,
+    /// The registry's own `scopes`; empty: every name outside `elsewhere`.
+    scopes: Vec<String>,
+    /// The scopes other node registries in the list serve.
+    elsewhere: Vec<String>,
+}
+
+/// The route id of a configured npm registry's route.
+pub fn configured_route_id(registry: &Registry) -> String {
+    format!("{ROUTE_ID}-{}", registry.name)
+}
+
+impl ConfiguredNpm {
+    pub fn new(registry: &Registry) -> ConfiguredNpm {
+        ConfiguredNpm {
+            id: configured_route_id(registry),
+            base: registry.url.clone(),
+            scopes: registry.scopes.clone(),
+            elsewhere: Vec::new(),
+        }
+    }
+
+    /// The same route, told which scopes the other registries serve, so a
+    /// publish-time lookup goes to the registry npm asks for that name.
+    pub fn with_scopes_elsewhere(mut self, elsewhere: Vec<String>) -> ConfiguredNpm {
+        self.elsewhere = elsewhere;
+        self
+    }
+
+    /// Whether npm asks this registry for `name`.
+    fn serves(&self, name: &str) -> bool {
+        let scope = name
+            .starts_with('@')
+            .then(|| name.split('/').next())
+            .flatten();
+        let listed = |scopes: &[String]| {
+            scope.is_some_and(|scope| scopes.iter().any(|s| s.eq_ignore_ascii_case(scope)))
+        };
+        if self.scopes.is_empty() {
+            !listed(&self.elsewhere)
+        } else {
+            listed(&self.scopes)
+        }
+    }
+
+    fn is_packument(&self, url: &Url) -> bool {
+        self.packument_path(url).is_some()
+    }
+
+    /// The packument's path under this registry's `url`, as asked for.
+    fn packument_path(&self, url: &Url) -> Option<String> {
+        if url.query().is_some() || !covers::covers(&self.base, url.as_str()) {
+            return None;
+        }
+        let base = Url::parse(&self.base).ok()?;
+        let rest = url.path().strip_prefix(base.path())?;
+        check_packument_path(&format!("/{rest}")).ok()?;
+        Some(rest.to_string())
+    }
+}
+
+impl RegistryProtocol for ConfiguredNpm {
+    fn route_id(&self) -> &str {
+        &self.id
+    }
+
+    /// Reached only through interception, never as a mirror path.
+    fn upstream(&self, _endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+        Err(refused(
+            path,
+            "a configured registry is not served as a mirror",
+        ))
+    }
+
+    fn classify(&self, url: &Url) -> RequestClass {
+        if self.is_packument(url) {
+            RequestClass::Metadata
+        } else {
+            RequestClass::Artifact
+        }
+    }
+
+    fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)> {
+        if !self.is_packument(url) {
+            return Vec::new();
+        }
+        packument_claims(body, |_| true)
+    }
+
+    fn expects_claim(&self, _url: &Url) -> bool {
+        true
+    }
+
+    fn encoded_slash(&self) -> bool {
+        true
+    }
+
+    /// A full packument's `time` map, as on the public registry.
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        let Some(path) = self.packument_path(url) else {
+            return Vec::new();
+        };
+        packument_times(body, &path)
+    }
+
+    /// The full packument under this registry's `url`, for a name npm
+    /// asks this registry for.
+    fn lookup(&self, _endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        if !self.serves(name) {
+            return None;
+        }
+        let url = Url::parse(&self.base)
+            .ok()?
+            .join(&name.replacen('/', "%2f", 1))
+            .ok()?;
+        self.is_packument(&url).then_some(Lookup {
+            url,
+            accept: "application/json",
+        })
+    }
+}
+
+/// Each version's `dist.tarball` that `keep` accepts, with its claim.
+fn packument_claims(body: &[u8], keep: impl Fn(&Url) -> bool) -> Vec<(Url, Claim)> {
+    let Ok(packument) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(versions) = packument.get("versions").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    versions
+        .values()
+        .filter_map(|version| {
+            let dist = version.get("dist")?;
+            let tarball = Url::parse(dist.get("tarball")?.as_str()?).ok()?;
+            if !keep(&tarball) {
+                return None;
+            }
+            Some((tarball, dist_claim(dist)?))
+        })
+        .collect()
 }
 
 /// The npm route: the public registry.
@@ -456,6 +601,85 @@ mod tests {
         assert_eq!(claims[0].1.algo(), "sha512");
         assert_eq!(claims[0].1.digests().len(), 2);
         assert_eq!(claims[0].1.describe().matches('|').count(), 1);
+    }
+
+    /// A configured registry's packuments are the names under its URL; any
+    /// other URL it owns is a tarball, claimed by its own packuments only.
+    #[test]
+    fn a_configured_registry_reads_packuments_under_its_url() {
+        let registry = Registry {
+            name: "gh".into(),
+            ecosystem: crate::kernel::registries::config::Ecosystem::Node,
+            url: "https://npm.pkg.github.com/corp/".into(),
+            root: "https://npm.pkg.github.com/corp/".into(),
+            files: Vec::new(),
+            credential: None,
+            network: Default::default(),
+            ca: None,
+            scopes: vec!["@corp".into()],
+            mirror_of_public: false,
+        };
+        let route = ConfiguredNpm::new(&registry);
+        assert_eq!(route.route_id(), "npm-gh");
+        // Publish times: a packument's `time` map, and a lookup only for
+        // the names this scoped registry serves.
+        let packument = br#"{"name": "@corp/widget", "time": {"created": "2020-01-01T00:00:00Z", "1.0.0": "2020-01-02T03:04:05.000Z"}}"#;
+        let at = parse_rfc3339("2020-01-02T03:04:05Z").unwrap();
+        let packument_url = Url::parse("https://npm.pkg.github.com/corp/@corp%2fwidget").unwrap();
+        assert_eq!(
+            route.published(&packument_url, packument),
+            [("@corp/widget".to_string(), "1.0.0".to_string(), at)]
+        );
+        // A packument that names another package than its URL times nothing.
+        let other = Url::parse("https://npm.pkg.github.com/corp/@corp%2fother").unwrap();
+        assert!(route.published(&other, packument).is_empty());
+        let tarball_url =
+            Url::parse("https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc").unwrap();
+        assert!(route.published(&tarball_url, packument).is_empty());
+        let lookup = route.lookup(&[], "@CORP/widget", "1.0.0").unwrap();
+        assert_eq!(
+            lookup.url.as_str(),
+            "https://npm.pkg.github.com/corp/@CORP%2fwidget"
+        );
+        assert_eq!(lookup.accept, "application/json");
+        assert!(route.lookup(&[], "left-pad", "1.0.0").is_none());
+        // An unscoped registry answers every name but another's scope.
+        let mut default = registry.clone();
+        default.scopes = Vec::new();
+        let default = ConfiguredNpm::new(&default).with_scopes_elsewhere(vec!["@corp".into()]);
+        assert!(default.lookup(&[], "left-pad", "1.0.0").is_some());
+        assert!(default.lookup(&[], "@other/x", "1.0.0").is_some());
+        assert!(default.lookup(&[], "@Corp/widget", "1.0.0").is_none());
+        let class = |url: &str| route.classify(&Url::parse(url).unwrap());
+        for packument in [
+            "https://npm.pkg.github.com/corp/@corp%2fwidget",
+            "https://npm.pkg.github.com/corp/@corp%2Fwidget",
+            "https://npm.pkg.github.com/corp/@corp/widget",
+            "https://npm.pkg.github.com/corp/left-pad",
+        ] {
+            assert_eq!(class(packument), RequestClass::Metadata, "{packument}");
+        }
+        for tarball in [
+            "https://npm.pkg.github.com/corp/left-pad?write=true",
+            "https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc",
+            "https://npm.pkg.github.com/other/left-pad",
+            "https://blobs.example/abc",
+        ] {
+            assert_eq!(class(tarball), RequestClass::Artifact, "{tarball}");
+        }
+        let sri = format!("sha512-{}", crate::kernel::base64::encode(&[7; 64]));
+        let body = serde_json::json!({"versions": {"1.0.0": {"dist": {
+            "tarball": "https://npm.pkg.github.com/download/@corp/widget/1.0.0/abc",
+            "integrity": sri}}}})
+        .to_string();
+        let packument = Url::parse("https://npm.pkg.github.com/corp/@corp%2fwidget").unwrap();
+        let claims = route.claims(&packument, body.as_bytes());
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].1.algo(), "sha512");
+        let tarball = Url::parse("https://npm.pkg.github.com/download/x").unwrap();
+        assert!(route.claims(&tarball, body.as_bytes()).is_empty());
+        assert!(route.expects_claim(&tarball));
+        assert!(route.upstream(&[], "/left-pad").is_err());
     }
 
     #[test]

@@ -357,6 +357,7 @@ pub fn realize_runtime(
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
+    let _t = crate::kernel::ui::phase("toolchain node");
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Node.js")?;
     let spec = node_row(selected, platform)?;

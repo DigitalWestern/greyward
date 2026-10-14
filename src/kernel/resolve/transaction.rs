@@ -185,6 +185,7 @@ impl<'a> Transaction<'a> {
         root: ProjectRoot,
         spec: &HoldSpec<'_>,
     ) -> io::Result<Transaction<'a>> {
+        let _t = crate::kernel::ui::phase("transaction hold");
         let lock = store.project_lock_in(&root)?;
         Self::hold_locked(store, activity, root, lock, spec)
     }

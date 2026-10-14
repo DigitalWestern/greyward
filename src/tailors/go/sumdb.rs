@@ -181,9 +181,17 @@ pub fn split_lookup(body: &[u8]) -> Result<Answer<'_>, String> {
     })
 }
 
-/// A lookup answer's record number, once the tree head it carries
-/// verifies and the record sits below that tree's size, and the size.
-pub fn verify_lookup(body: &[u8]) -> Result<(Answer<'_>, u64), String> {
+/// The answer to a lookup of `module@version` (both in the escaped
+/// spelling the lookup URL carries), once the tree head it carries
+/// verifies, the record sits below that tree's size, and the record is
+/// exactly that version's two go.sum lines; and the tree's size. Anything
+/// else in a validly signed answer is refused like a bad signature: the
+/// record number would otherwise date a version it was never given for.
+pub fn verify_lookup<'a>(
+    body: &'a [u8],
+    module: &str,
+    version: &str,
+) -> Result<(Answer<'a>, u64), String> {
     let answer = split_lookup(body)?;
     let size = verify_tree(answer.tree)?;
     if answer.record >= size {
@@ -192,7 +200,46 @@ pub fn verify_lookup(body: &[u8]) -> Result<(Answer<'_>, u64), String> {
             answer.record
         ));
     }
+    check_record(answer.text, module, version)?;
     Ok((answer, size))
+}
+
+/// A lookup record for `module@version`: exactly the lines
+/// `<module> <version> h1:<hash>` and `<module> <version>/go.mod h1:<hash>`,
+/// in that order, each hash 32 bytes of padded standard base64, the module
+/// and version spelled as Go spells them before escaping.
+fn check_record(text: &str, module: &str, version: &str) -> Result<(), String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let refused = |why: String| format!("the lookup answer for {module}@{version} {why}");
+    let [zip, go_mod] = lines.as_slice() else {
+        return Err(refused(format!(
+            "holds {} record lines, not the version's two",
+            lines.len()
+        )));
+    };
+    for (line, suffix) in [(zip, ""), (go_mod, "/go.mod")] {
+        let words: Vec<&str> = line.split(' ').collect();
+        let [named_module, named_version, hash] = words.as_slice() else {
+            return Err(refused(format!("has the malformed line {line:?}")));
+        };
+        let escape = |word: &str| crate::tailors::go::escape_go_path(word).ok();
+        let named = named_version
+            .strip_suffix(suffix)
+            .filter(|_| !suffix.is_empty() || !named_version.ends_with("/go.mod"));
+        if escape(named_module).as_deref() != Some(module)
+            || named.and_then(escape).as_deref() != Some(version)
+        {
+            return Err(refused(format!("names another version: {line:?}")));
+        }
+        let hash_ok = hash
+            .strip_prefix("h1:")
+            .and_then(crate::kernel::base64::decode_padded)
+            .is_some_and(|hash| hash.len() == 32);
+        if !hash_ok {
+            return Err(refused(format!("has no h1: hash in {line:?}")));
+        }
+    }
+    Ok(())
 }
 
 /// The checksum database as a log, with the seed checkpoint the binary
@@ -215,6 +262,8 @@ fn seed(text: &str) -> Option<Checkpoint> {
 mod tests {
     use super::*;
 
+    const MODULE: &str = "github.com/google/uuid";
+    const VERSION: &str = "v1.6.0";
     const UUID: &[u8] = include_bytes!(
         "../../../tests/fixtures/proxy/registry/go/sum.golang.org/lookup/github.com/google/uuid@v1.6.0.body"
     );
@@ -239,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_recorded_lookup_verifies_and_names_its_record() {
-        let (answer, size) = verify_lookup(UUID).unwrap();
+        let (answer, size) = verify_lookup(UUID, MODULE, VERSION).unwrap();
         assert_eq!(answer.record, 22_152_757);
         assert_eq!(size, 64_828_441);
         assert!(answer.text.starts_with("github.com/google/uuid v1.6.0 h1:"));
@@ -250,22 +299,22 @@ mod tests {
         let text = std::str::from_utf8(UUID).unwrap();
         // The size changed: the signature no longer covers the text.
         let grown = text.replace("64828441", "94828441");
-        let error = verify_lookup(grown.as_bytes()).unwrap_err();
+        let error = verify_lookup(grown.as_bytes(), MODULE, VERSION).unwrap_err();
         assert!(error.contains("does not verify"), "{error}");
         // One signature byte changed.
         let signature = text.rsplit_once(' ').unwrap().1;
         let mut bytes = crate::kernel::base64::decode(signature.trim_end()).unwrap();
         bytes[10] ^= 1;
         let forged = text.replace(signature.trim_end(), &crate::kernel::base64::encode(&bytes));
-        let error = verify_lookup(forged.as_bytes()).unwrap_err();
+        let error = verify_lookup(forged.as_bytes(), MODULE, VERSION).unwrap_err();
         assert!(error.contains("does not verify"), "{error}");
         // Another signer only.
         let other = text.replace("— sum.golang.org ", "— sum.example.org ");
-        let error = verify_lookup(other.as_bytes()).unwrap_err();
+        let error = verify_lookup(other.as_bytes(), MODULE, VERSION).unwrap_err();
         assert!(error.contains("not signed by sum.golang.org"), "{error}");
         // A record past the tree's size.
         let late = text.replacen("22152757", "64828441", 1);
-        let error = verify_lookup(late.as_bytes()).unwrap_err();
+        let error = verify_lookup(late.as_bytes(), MODULE, VERSION).unwrap_err();
         assert!(error.contains("not in the tree"), "{error}");
         for broken in [
             "",
@@ -273,9 +322,56 @@ mod tests {
             "x\nmod v1 h1:a=\n\nnote",
             "022152757\na\n\nb",
         ] {
-            assert!(verify_lookup(broken.as_bytes()).is_err(), "{broken:?}");
+            assert!(
+                verify_lookup(broken.as_bytes(), MODULE, VERSION).is_err(),
+                "{broken:?}"
+            );
         }
         assert!(verify_tree(b"go.sum database tree\n1\nAA==\n\n").is_err());
+    }
+
+    /// The record checks run on what a validly signed answer says, so the
+    /// record text is checked on its own here; the signature covers only
+    /// the tree head.
+    #[test]
+    fn a_lookup_record_must_be_exactly_the_versions_two_lines() {
+        let text = std::str::from_utf8(UUID).unwrap();
+        let (record, _) = text.split_once("\n\n").unwrap();
+        let record = record.split_once('\n').unwrap().1.to_string() + "\n";
+        assert_eq!(check_record(&record, MODULE, VERSION), Ok(()));
+        // The same answer, fetched for another version or module.
+        let error = check_record(&record, MODULE, "v1.5.0").unwrap_err();
+        assert!(error.contains("names another version"), "{error}");
+        let error = check_record(&record, "github.com/google/other", VERSION).unwrap_err();
+        assert!(error.contains("names another version"), "{error}");
+        // The escaped spelling of an uppercase module matches its record.
+        let azure = "github.com/Azure/x v1.0.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=\n\
+                     github.com/Azure/x v1.0.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=\n";
+        assert_eq!(check_record(azure, "github.com/!azure/x", "v1.0.0"), Ok(()));
+        let error = check_record(azure, "github.com/azure/x", "v1.0.0").unwrap_err();
+        assert!(error.contains("names another version"), "{error}");
+        let zip = record.lines().next().unwrap();
+        let go_mod = record.lines().nth(1).unwrap();
+        for (broken, why) in [
+            // A missing h1, a malformed hash, an unknown hash kind.
+            (record.replacen(" h1:", " ", 1), "no h1: hash"),
+            (record.replacen("F0=", "F0", 1), "no h1: hash"),
+            (record.replacen(" h1:", " h2:", 1), "no h1: hash"),
+            // An extra line, of this version or another.
+            (format!("{record}{zip}\n"), "record lines"),
+            (
+                format!("{record}golang.org/x/text v0.1.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=\n"),
+                "record lines",
+            ),
+            // One line missing, or the two in the other order.
+            (format!("{zip}\n"), "record lines"),
+            (format!("{go_mod}\n{zip}\n"), "names another version"),
+            // A trailing word.
+            (record.replacen("F0=", "F0= extra", 1), "malformed line"),
+        ] {
+            let error = check_record(&broken, MODULE, VERSION).unwrap_err();
+            assert!(error.contains(why), "{broken:?}: {error}");
+        }
     }
 
     #[test]

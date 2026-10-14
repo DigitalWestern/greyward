@@ -44,6 +44,11 @@ None open.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:
   - #620 test gaps: the dev-files hook for tailors other than Ruby, to add with the next tailor whose host-header fallback changes.
 - **#464: macOS supervision: deferred notification-pipe initialization and validation.** Deferred by the owner on 2026-10-04.
+- **macOS batch from a MacBook run (#728 to #735).** #742 made the crate compile for macOS, gave macOS refusals their own wording, and made published files follow the umask (#732 closed). Each item below needs a run on a Mac:
+  - #728 compile and `cargo test` on a Mac (the fix was type-checked from Linux only).
+  - #730 `ward doctor --isolation` and refusal wording, read on a Mac.
+  - #733 published-file modes under a Mac umask.
+  - #729, #731, #734, #735: rename swap, `F_GETPATH` after a rename, search-only directories, APFS clone. Not started: each needs Mac runtime behavior to build against.
 - **#495: explicit Python package sources.** Define per-package source and metadata-build trust rules for PyTorch-style indexes. Keep undeclared indexes refused until that design ships.
 - **Action leftovers (#427).** Left: the first tag that carries
   `action.yml` (at that tag, change `@main` in `action.yml`'s header and in

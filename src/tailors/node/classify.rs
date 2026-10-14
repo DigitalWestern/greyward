@@ -308,14 +308,13 @@ pub(super) fn fetch_npm_tarballs<'a>(
     activity: &StoreActivity,
     packages: &'a [NpmPackage],
 ) -> io::Result<Vec<FetchedTarball<'a>>> {
-    packages
-        .iter()
-        .filter(|p| p.git.is_none())
-        .map(|p| {
-            let (tarball, digest) = fetch_tarball(store, activity, p)?;
-            Ok((p, tarball, digest))
-        })
-        .collect()
+    // Independent downloads, so they run on the fetch pool; the results
+    // and the first failure come back in package order.
+    let registry: Vec<&NpmPackage> = packages.iter().filter(|p| p.git.is_none()).collect();
+    crate::kernel::fetch::fetch_all(&registry, |&p| {
+        let (tarball, digest) = fetch_tarball(store, activity, p)?;
+        Ok((p, tarball, digest))
+    })
 }
 
 #[cfg(test)]

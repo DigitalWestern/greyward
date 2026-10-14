@@ -1849,7 +1849,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // of bytes, as cargo, npm and pip with hashes do. A pin the upstream URL
     // would not serve fails on a cold cache and installs the pinned bytes
     // on a warm one.
-    ("src/kernel/provider/crates.rs", "realize_vendor_inner", 1),
+    ("src/kernel/provider/crates.rs", "fetch_registry_crates", 1),
     ("src/tailors/elixir/mod.rs", "realize_deps", 1),
     ("src/tailors/node/classify.rs", "fetch_tarball", 1),
     ("src/tailors/node/realize.rs", "plant_declared_artifacts", 1),
@@ -1864,7 +1864,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
         2,
     ),
     ("src/tailors/python/env.rs", "realize_artifacts", 1),
-    ("src/tailors/python/env.rs", "realize_env_at_depth", 1),
+    ("src/tailors/python/env.rs", "reverify_wheels", 1),
     (
         "src/tailors/python/sdist_view.rs",
         "discard_failed_attempt",

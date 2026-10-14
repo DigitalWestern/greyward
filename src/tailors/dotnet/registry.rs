@@ -119,8 +119,11 @@ impl RegistryProtocol for NuGet {
         })
     }
 
+    /// Lower-cased ids and NuGet's normalized versions, the spelling its
+    /// URLs carry: `1.00` is `1.0.0`, `1.0.0.0` is `1.0.0`, and build
+    /// metadata (`+sha.abc`) is dropped.
     fn package_key(&self, name: &str, version: &str) -> (String, String) {
-        (name.to_ascii_lowercase(), version.to_ascii_lowercase())
+        (name.to_ascii_lowercase(), normalized_version(version))
     }
 
     fn rewrite(&self, url: &Url, body: Vec<u8>, base: &ProxyAddress) -> io::Result<Vec<u8>> {
@@ -130,6 +133,42 @@ impl RegistryProtocol for NuGet {
             "/v3/vulnerabilities/index.json" => rewrite_ids(&body, &route_base),
             _ => Ok(body),
         }
+    }
+}
+
+/// A NuGet version in its normalized form, lower-cased: build metadata
+/// dropped, each release number without leading zeros, at least three of
+/// them, and a fourth only when it is not zero. A release part that is not
+/// a number leaves the version as written (lower-cased, without metadata).
+fn normalized_version(version: &str) -> String {
+    let version = version.trim().to_ascii_lowercase();
+    let version = version.split('+').next().unwrap_or_default();
+    let (release, pre) = match version.split_once('-') {
+        Some((release, pre)) => (release, Some(pre)),
+        None => (version, None),
+    };
+    let Ok(mut parts) = release
+        .split('.')
+        .map(|part| part.parse::<u64>())
+        .collect::<Result<Vec<u64>, _>>()
+    else {
+        return version.to_string();
+    };
+    if parts.is_empty() || parts.len() > 4 {
+        return version.to_string();
+    }
+    parts.resize(parts.len().max(3), 0);
+    if parts.len() == 4 && parts[3] == 0 {
+        parts.pop();
+    }
+    let release = parts
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(".");
+    match pre {
+        Some(pre) => format!("{release}-{pre}"),
+        None => release,
     }
 }
 
@@ -338,6 +377,40 @@ mod tests {
                 format!("https://api.nuget.org{path}")
             );
         }
+    }
+
+    #[test]
+    fn versions_compare_in_nuget_normal_form() {
+        let key = |version: &str| NUGET.package_key("Humanizer.Core", version);
+        for (spelled, normal) in [
+            ("2.14.1", "2.14.1"),
+            ("1.0", "1.0.0"),
+            ("1", "1.0.0"),
+            ("01.002.03", "1.2.3"),
+            ("1.0.0.0", "1.0.0"),
+            ("1.0.0.4", "1.0.0.4"),
+            ("1.0.0-Beta.1", "1.0.0-beta.1"),
+            ("1.0-rc+sha.abc", "1.0.0-rc"),
+            ("2.14.1+build.7", "2.14.1"),
+            ("1.x", "1.x"),
+        ] {
+            assert_eq!(
+                key(spelled),
+                ("humanizer.core".to_string(), normal.to_string()),
+                "{spelled}"
+            );
+        }
+        let lookup = NUGET
+            .lookup(
+                &[Endpoint::https(HOST).unwrap()],
+                "Humanizer.Core",
+                "2.14.1.0",
+            )
+            .unwrap();
+        assert_eq!(
+            lookup.url.path(),
+            "/v3/registration5-gz-semver2/humanizer.core/2.14.1.json"
+        );
     }
 
     #[test]

@@ -188,11 +188,17 @@ impl RegistryProtocol for PypiRegistry {
     }
 }
 
-/// A version's PEP 440 normal form. A wheel file name may spell an epoch's
-/// `!` as `_` (`1_2.0` is `1!2.0`); a version that does not parse either
-/// way is compared as written, without letter case.
+/// A version's PEP 440 normal form, compared as PEP 440 compares it: the
+/// release's trailing zeros dropped (`1.0` is `1.0.0`), here only, so the
+/// shared canonical form stays as written. A wheel file name may spell an
+/// epoch's `!` as `_` (`1_2.0` is `1!2.0`); a version that does not parse
+/// either way is compared as written, without letter case.
 fn version_key(version: &str) -> String {
-    let canonical = |text: &str| Version::parse(text).ok().map(|parsed| parsed.canonical());
+    let canonical = |text: &str| {
+        Version::parse(text)
+            .ok()
+            .map(|parsed| trim_release(&parsed.canonical()))
+    };
     canonical(version)
         .or_else(|| {
             let (epoch, rest) = version.split_once('_')?;
@@ -202,6 +208,29 @@ fn version_key(version: &str) -> String {
             canonical(&format!("{epoch}!{rest}"))
         })
         .unwrap_or_else(|| version.to_ascii_lowercase())
+}
+
+/// `canonical` with its release's trailing `.0` segments dropped (one
+/// segment always stays): `1!2.0.0rc1` is `1!2rc1`.
+fn trim_release(canonical: &str) -> String {
+    let (epoch, rest) = match canonical.split_once('!') {
+        Some((epoch, rest)) => (Some(epoch), rest),
+        None => (None, canonical),
+    };
+    // The release is the leading digits and dots, less the dot that
+    // starts a `.post` or `.dev` segment.
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    let end = rest[..end].trim_end_matches('.').len();
+    let (mut release, tail) = rest.split_at(end);
+    while let Some(head) = release.strip_suffix(".0") {
+        release = head;
+    }
+    match epoch {
+        Some(epoch) => format!("{epoch}!{release}{tail}"),
+        None => format!("{release}{tail}"),
+    }
 }
 
 /// The version in a distribution's file name for project `project`: a
@@ -515,7 +544,7 @@ mod tests {
         assert_eq!(lookup.accept, "application/vnd.pypi.simple.v1+json");
         assert_eq!(
             PYPI_REGISTRY.package_key("Python_Dateutil", "2.9.0.POST0"),
-            ("python-dateutil".to_string(), "2.9.0.post0".to_string())
+            ("python-dateutil".to_string(), "2.9.post0".to_string())
         );
     }
 
@@ -525,14 +554,23 @@ mod tests {
     fn versions_and_files_compare_in_pep_440_normal_form() {
         let key = |version: &str| PYPI_REGISTRY.package_key("Demo", version).1;
         assert_eq!(key("1.0-1"), key("1.0.post1"));
-        assert_eq!(key("1.0.POST1"), "1.0.post1");
-        assert_eq!(key("1.0RC1"), "1.0rc1");
-        assert_eq!(key("v2.0"), "2.0");
-        assert_eq!(key("1!2.0"), "1!2.0");
+        assert_eq!(key("1.0.POST1"), "1.post1");
+        assert_eq!(key("1.0RC1"), "1rc1");
+        assert_eq!(key("v2.0"), "2");
+        assert_eq!(key("1!2.0"), "1!2");
         // A wheel name writes the epoch's `!` as `_`.
-        assert_eq!(key("1_2.0"), "1!2.0");
+        assert_eq!(key("1_2.0"), "1!2");
         assert_ne!(key("1!2.0"), key("2.0"));
         assert_eq!(key("not a version"), "not a version");
+        // PEP 440 pads releases with zeros: 1.0 is 1.0.0 is 1.
+        assert_eq!(key("1.0"), key("1.0.0"));
+        assert_eq!(key("1.0.0"), "1");
+        assert_eq!(key("1!2.0.0rc1.post2+local.0"), "1!2rc1.post2+local.0");
+        assert_eq!(key("0.0"), "0");
+        assert_ne!(key("1.10"), key("1.1"));
+        assert_eq!(key("1.10.0"), "1.10");
+        assert_eq!(key("2.0.1"), "2.0.1");
+        assert_eq!(key("2.0.0.dev3"), "2.dev3");
         assert_eq!(
             key(&file_key("1.0-1", "Demo-1.0-1-py3-none-any.whl")),
             key(&file_key("1.0.post1", "demo-1.0-1-py3-none-any.whl"))
@@ -555,9 +593,9 @@ mod tests {
             [
                 (
                     "demo".to_string(),
-                    file_key("1!2.0", "demo-1_2.0-py3-none-any.whl")
+                    file_key("1!2", "demo-1_2.0-py3-none-any.whl")
                 ),
-                ("demo".to_string(), "1!2.0".to_string()),
+                ("demo".to_string(), "1!2".to_string()),
             ]
         );
     }

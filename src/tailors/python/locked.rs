@@ -22,11 +22,9 @@ pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>) -> LockedList<'a> {
             let text = String::from_utf8_lossy(&bytes);
             let name = output.file_name().and_then(|name| name.to_str());
             if name == Some("uv.lock") {
-                locked.extend(
-                    uv_pypi_packages(&text)?
-                        .into_iter()
-                        .map(|(name, version)| LockedPackage::new(name, version)),
-                );
+                locked.extend(uv_pypi_packages(&text)?.into_iter().map(
+                    |(name, version, files)| LockedPackage::new(name, version).with_files(files),
+                ));
             } else if name.is_some_and(|name| name.ends_with(".txt")) {
                 locked.extend(requirements_packages(&text)?);
             }
@@ -80,6 +78,10 @@ source = { editable = "." }
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/e7/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/ce/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274" },
+]
 
 [[package]]
 name = "private"
@@ -93,7 +95,14 @@ source = { git = "https://github.com/pytest-dev/iniconfig?rev=v2.0.0#93f5930e668
 "#;
         assert_eq!(
             uv_pypi_packages(lock).unwrap(),
-            [("six".to_string(), "1.17.0".to_string())]
+            [(
+                "six".to_string(),
+                "1.17.0".to_string(),
+                vec![
+                    "six-1.17.0.tar.gz".to_string(),
+                    "six-1.17.0-py2.py3-none-any.whl".to_string()
+                ]
+            )]
         );
     }
 

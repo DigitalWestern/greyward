@@ -898,6 +898,41 @@ mod tests {
         attribution.discard();
     }
 
+    /// A file added to an old version is judged by its own upload time
+    /// when the lock names it; without the files, the version's first.
+    #[test]
+    fn the_files_a_lock_names_are_judged_by_the_latest_of_their_times() {
+        let harness = Harness::new("age-files");
+        let body = format!(
+            r#"{{"published": {{"pkg@1.0": "{old}", "pkg@1.0 pkg-1.0.tar.gz": "{old}",
+                "pkg@1.0 pkg-1.0-new.whl": "{new}"}}}}"#,
+            old = format_utc(NOW - 400 * SECONDS_PER_DAY),
+            new = format_utc(NOW - SECONDS_PER_DAY)
+        );
+        harness.upstream.set(
+            "/meta/pkg.json",
+            Behavior::Reply(
+                Reply::new(200, body.as_bytes()).header("Content-Type", "application/json"),
+            ),
+        );
+        let policy = Policy::default();
+        let with_new = LockedPackage::new("pkg", "1.0")
+            .with_files(vec!["pkg-1.0.tar.gz".into(), "pkg-1.0-new.whl".into()]);
+        let judged = judge_unobserved(&harness, &policy, Mode::Online, &[with_new]);
+        assert_eq!(judged.young.len(), 1, "{:?}", judged.young);
+        assert!(
+            judged.young[0].fact.detail.contains("24 hours before"),
+            "{:?}",
+            judged.young
+        );
+        let old_files = LockedPackage::new("pkg", "1.0").with_files(vec!["pkg-1.0.tar.gz".into()]);
+        let without = LockedPackage::new("pkg", "1.0");
+        for package in [old_files, without] {
+            let judged = judge_unobserved(&harness, &policy, Mode::Online, &[package]);
+            assert!(judged.young.is_empty(), "{:?}", judged.young);
+        }
+    }
+
     #[test]
     fn a_rate_limited_lookup_is_asked_once_more_then_refused_when_denied() {
         let harness = Harness::new("age-429");

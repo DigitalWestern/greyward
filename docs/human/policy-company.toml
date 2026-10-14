@@ -204,3 +204,37 @@ deny = [
 #
 # [signing]
 # trusted = ["ed25519:<64 hex>"]
+
+# Private registries. Only the machine policy (GREYWARD_POLICY or
+# ~/.greyward/policy.toml) may declare [credentials], [[registry]] and
+# [sources]; a project or --policy copy of this file may only narrow a
+# [sources] list to entries the machine policy already names. An ecosystem
+# named in [sources] is enforced: its resolver, lock check, downloads and
+# `ward audit` accept only the listed registries, in that order, and
+# "public" names the shipped public registry. Python and npm are wired; an
+# ecosystem left out of [sources] keeps the public registry. A credential is
+# a reference (an environment variable, a file, or ~/.netrc), sent only to
+# URLs under its registry's root, never on a redirect elsewhere, and never
+# written to a lock, a closure or a log. Each closure records which registry
+# served every package, and `ward audit` fails a package whose registry the
+# list does not hold (kind unapproved-registry).
+#
+# [credentials.corp]
+# env = "CORP_REGISTRY_TOKEN"     # exactly one of env, file, netrc = true
+# scheme = "bearer"               # bearer | basic | raw
+#
+# [[registry]]
+# name = "corp-pypi"
+# ecosystem = "python"
+# url = "https://nexus.corp.example/repository/pypi-proxy/simple/"
+# credential = "corp"
+#
+# [[registry]]
+# name = "corp-npm"
+# ecosystem = "node"
+# url = "https://nexus.corp.example/repository/npm-proxy/"
+# credential = "corp"
+#
+# [sources]
+# python = ["corp-pypi"]          # PyPI is not reached at all
+# node = ["corp-npm", "public"]   # corp first, npmjs allowed

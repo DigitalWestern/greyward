@@ -388,6 +388,18 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   script does not see data files placed beside it in `bin/`. Under an ordinary store path
   the script is installed in `bin/` with its `#!` line rewritten, as pip does.
 
+- **Private registries cover Python and npm only.** A `[sources]` entry or a
+  `[[registry]]` for Go, Cargo, Ruby, .NET or Elixir is refused at load; those
+  ecosystems use their public registries. In an enforced Python list uv gets one
+  index, the default registry: a package that lives only on a later registry in the
+  list is not found at resolution, though a lock that names that registry still syncs.
+  Poetry's dependency-level `source = "..."` is not matched to a listed registry, so it
+  stays an `unattested-index` exception. A pnpm lock entry with no tarball URL is
+  fetched from `<registry><name>/-/<name>-<version>.tgz` under its scope's registry,
+  which a registry with another tarball layout (GitHub Packages) does not serve.
+  The SBOM's purl `repository_url` still comes from the file's host, not the
+  recorded registry.
+
 ## Python
 
 Selection covers every patch of each maintained CPython minor that python-build-standalone

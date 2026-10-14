@@ -313,6 +313,34 @@ fn unnamed_failpoint() -> bool {
     false
 }
 
+/// The target bytes of the symlink `name` in the directory `dirfd`, read
+/// without following it. `None` when the name is absent or is not a
+/// symlink.
+pub(super) fn link_target_at(dirfd: RawFd, name: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    let name = std::ffi::CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL"))?;
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize + 1];
+    // SAFETY: dirfd is open, name is NUL-terminated, and the buffer is
+    // writable for its whole length.
+    let length = unsafe {
+        libc::readlinkat(
+            dirfd,
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if length < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) | Some(libc::EINVAL) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    buffer.truncate(length as usize);
+    Ok(Some(buffer))
+}
+
 /// The owner of a temporary link: `<temp>.lock`, created exclusively and
 /// locked before its name exists (`create_locked`), and before the link
 /// exists, held until the link is renamed or removed. A link cannot carry

@@ -134,8 +134,9 @@ shape a refreshed snapshot takes, and the embedded documents are the
 upstream reading WP3's providers need: which listing names the releases,
 which lines are maintained, which checksum is authoritative and which second
 source cross-checks it (Node's `SHASUMS256.txt` is also verified against
-Node's release keys, and Rust's channel manifest against the Rust release
-key; §2 "PR 0 evidence" covers the rest). The generator's rules are the ones a refresh must keep:
+Node's release keys, and each Rust release's versioned channel manifest
+against the Rust release key, while `channel-rust-stable.toml`, which names
+the newest release, is read unchecked; §2 "PR 0 evidence" covers the rest). The generator's rules are the ones a refresh must keep:
 append-only, rows already shipped re-verified byte for byte, the default
 moved only explicitly, and every skipped release reported.
 
@@ -197,8 +198,9 @@ python-build-standalone, among others: its rows carry checksums compared at
 pin time, not a signature; see "PR 0 evidence" below for every provider).
 
 **What this repository contains, and what it does not.** `tools/catalog.py`
-checks two signatures when it generates the catalogs: Rust's channel
-manifest against `tools/keys/rust-release-signing-key.asc`, and Node's
+checks two signatures when it generates the catalogs: each Rust release's
+channel manifest (`channel-rust-<ver>.toml`) against
+`tools/keys/rust-release-signing-key.asc`, and Node's
 `SHASUMS256.txt` against the releasers pinned in
 `tools/keys/node-releasers.txt`. PR 0 captured each provider's checksum
 files, signatures, attestation bundles and keys under
@@ -305,20 +307,22 @@ them; `LIMITATIONS.md` carries one honest row per TOFU source.
 
 Captured on Linux against the default release of each catalog. Every file
 named here is in `tests/fixtures/catalog/<provider>/`, whose README gives
-each file's URL, sha256 and the command that re-verifies it. "Verified"
-means the check was run, not assumed: GnuPG in a throwaway home,
-`gh attestation verify` (gh 2.97.0) and `gh release verify-asset` for
-GitHub attestations, `openssl` for RSA and Ed25519. cosign and minisign are
-not installed; no provider needed them.
+each file's URL and sha256 and, per provider, the commands that re-verify
+it (or, for Ruby, show that nothing is there). "Verified" means the check
+was run, not assumed: GnuPG in a throwaway home, `gh attestation verify`
+(gh 2.97.0) and `gh release verify-asset` for GitHub attestations,
+`openssl` for RSA, Ed25519 and CMS. cosign and minisign are not installed;
+no provider needed them.
 
 Three classes, which decide the PR 1 choice and the `LIMITATIONS.md` rows:
 
 - **Checked at pin time by `tools/catalog.py`:** Rust and Node.
 - **Verifiable material exists for the exact artifact, not checked today:**
   Go, python-build-standalone (from release 20250317 on), uv, erlef OTP
-  for Darwin, Hex and rebar3.
+  for Darwin, Hex and rebar3, the .NET SDK (through its signed release
+  metadata).
 - **Nothing covers the artifact (TOFU):** portable-ruby with its Bundler,
-  greyward-toolchains OTP for Linux, the Elixir zip, the .NET SDK.
+  greyward-toolchains OTP for Linux, the Elixir zip.
 
 At use time all three classes are the same: `ward` compares the download
 with the embedded catalog digest and checks no signature. The digest is
@@ -327,18 +331,18 @@ trustworthy exactly as far as the Greyward release that embeds it.
 | Provider (component) | What Greyward downloads | Material, URL | Format | Trust root | Covers the exact artifact? | Greyward today |
 |---|---|---|---|---|---|---|
 | static.rust-lang.org (rustc, rust-std, cargo, rustfmt, channel manifest) | `dist/<comp>-<ver>-<triple>.tar.xz`, `dist/channel-rust-<ver>.toml` | `dist/channel-rust-<ver>.toml.asc`; also `<archive>.asc` and `.sha256` beside every archive | OpenPGP detached signature over a TOML manifest listing every package's sha256 per target, with a `date` field | Rust release key `108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE` (RSA 4096, 2013, no expiry), published at `static.rust-lang.org/rust-key.gpg.ascii`, pinned in `tools/keys/` | Yes. Manifest and rustc archive signatures verified (1.98.1). The manifest names the dated URL `dist/2026-09-03/...`, the catalog the undated one; the digests are equal, so bind by digest | Signature checked at pin time for every row (`tools/catalog.py`); `.sha256` cross-check |
-| go.dev (go) | `go.dev/dl/go<ver>.<os>-<arch>.tar.gz` (redirects to `dl.google.com/go/`) | `dl.google.com/go/<file>.asc`, `.sha256`; listing `go.dev/dl/?mode=json` | OpenPGP detached signature per archive; the JSON listing is unsigned | Google Linux Packages Signing Authority `EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796` via signing subkey `0E225917...C264648F` (expires 2028-01-07), from `dl.google.com/linux/linux_signing_key.pub`. Not mentioned on go.dev/dl | Yes for the archive (both 1.27.0 archives verified; `.asc` present for all 11 catalog releases). The listing that names releases is not signed. sum.golang.org signs the `golang.org/toolchain` module zip, a different artifact (tree head verified) | TOFU: sha256 from the JSON, cross-checked with `.sha256` |
+| go.dev (go) | `go.dev/dl/go<ver>.<os>-<arch>.tar.gz` (redirects to `dl.google.com/go/`) | `dl.google.com/go/<file>.asc`, `.sha256`; listing `go.dev/dl/?mode=json&include=all` (digest recorded, not kept; the kept `?mode=json` copy lists go1.27.2 and go1.26.9, current at capture) | OpenPGP detached signature per archive; the JSON listing is unsigned | Google Linux Packages Signing Authority `EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796` via signing subkey `0E225917...C264648F` (expires 2028-01-07), from `dl.google.com/linux/linux_signing_key.pub`. Not mentioned on go.dev/dl | Yes for the archive (both 1.27.0 archives verified; `.asc` present for all 11 catalog releases). The listing that names releases is not signed. sum.golang.org signs the `golang.org/toolchain` module zip, a different artifact (tree head verified) | TOFU: sha256 from the JSON, cross-checked with `.sha256` |
 | nodejs.org (node) | `dist/v<ver>/node-v<ver>-<os>-<arch>.tar.gz` | `dist/v<ver>/SHASUMS256.txt` with `.sig` (detached) and `.asc` (clearsigned) | OpenPGP over a sha256 list of the release's files | The releaser keys in `nodejs/release-keys`, accepted only when the primary key is pinned in `tools/keys/node-releasers.txt` (24.20.0: `5BE8A3F6C8A5C01D106C0AD820B1A390B168D356`) | Yes. Both signatures verified; the list names both catalog archives | Signature checked at pin time for every row |
-| bundled npm and node-gyp | inside the Node archive | none of their own | n/a | the Node archive's | Yes, as embedded contents of the signed archive | Not separate catalog rows (§1 "Embedded components") |
-| python-build-standalone (cpython) | GitHub release asset `cpython-<ver>+<tag>-<triple>-install_only.tar.gz` | `SHA256SUMS` asset; GitHub artifact attestations (`api.github.com/repos/astral-sh/python-build-standalone/attestations/sha256:<digest>`) | SLSA provenance v1 Sigstore bundle; GitHub release attestation | Sigstore public-good (Fulcio, Rekor); identity `.../astral-sh/python-build-standalone/.github/workflows/release.yml@refs/heads/main`, issuer `token.actions.githubusercontent.com` | Yes by digest, for releases 20250317 and later (both 3.12.14 rows verified). 33 of the 73 shipped releases come from older PBS releases with no attestation | TOFU: `SHA256SUMS` and GitHub's asset digest, both unsigned |
-| uv | GitHub release asset `uv-<triple>.tar.gz` | `.sha256` asset; artifact attestations, same API | SLSA provenance v1 bundle plus release attestation | Sigstore; identity `.../astral-sh/uv/.github/workflows/release.yml@refs/heads/main` | Yes by digest (0.12.7, both platforms; provenance and release attestation verified) | TOFU: `.sha256` and GitHub digest |
+| bundled npm and node-gyp | inside the Node archive | none of their own | n/a | the Node archive's | Indirectly: the archive's digest is in the signed `SHASUMS256.txt`; the archive itself carries no signature | Not separate catalog rows (§1 "Embedded components") |
+| python-build-standalone (cpython) | GitHub release asset `cpython-<ver>+<tag>-<triple>-install_only.tar.gz` | `SHA256SUMS` asset; GitHub artifact attestations (`api.github.com/repos/astral-sh/python-build-standalone/attestations/sha256:<digest>`) | SLSA provenance v1 Sigstore bundle; GitHub release attestation | Two roots. Provenance: Sigstore public-good (Fulcio, Rekor), certificate identity the project's release workflow `.../astral-sh/python-build-standalone/.github/workflows/release.yml@refs/heads/main`, issuer `token.actions.githubusercontent.com`. Release attestation: GitHub's own Fulcio, certificate `CN=Attester` with SAN `https://dotcom.releases.github.com`, so it vouches that GitHub served the asset, not who built it | Yes by digest, for releases 20250317 and later (both 3.12.14 rows verified). 33 of the 73 shipped releases come from older PBS releases with no attestation | TOFU: `SHA256SUMS` and GitHub's asset digest, both unsigned |
+| uv | GitHub release asset `uv-<triple>.tar.gz` | `.sha256` asset; artifact attestations, same API | SLSA provenance v1 bundle plus release attestation | As for python-build-standalone. Provenance: public-good Sigstore, the project's workflow `.../astral-sh/uv/.github/workflows/release.yml@refs/heads/main`. Release attestation: GitHub's Attester (`dotcom.releases.github.com`) | Yes by digest (0.12.7, both platforms; provenance and release attestation verified) | TOFU: `.sha256` and GitHub digest |
 | Homebrew portable-ruby (ruby) | GitHub release asset `portable-ruby-<tag>.<bottle>.bottle.tar.gz` | none: no checksum file, no signature, attestations API 404 | n/a | none | No. Only GitHub's server-side asset digest, and the Linux digest in a Homebrew/brew commit (`5bc7184d`), later reverted | TOFU: downloaded and hashed at pin time |
 | Bundler | inside the portable-ruby bottle | none of its own | n/a | the bottle's (none) | No | TOFU with the bottle |
 | erlef/otp_builds (otp, Darwin) | GitHub release asset `otp-aarch64-apple-darwin.tar.gz` | `<asset>.sigstore`; artifact attestation, same API | SLSA provenance v1 Sigstore bundle, one subject | Sigstore; identity `.../erlef/otp_builds/.github/workflows/build.yaml@refs/heads/main` | Yes (OTP 29.0.5 verified from the 10 KB bundle) | TOFU: GitHub asset digest |
 | DigitalWestern/greyward-toolchains (otp, Linux) | GitHub release asset `OTP-<ver>-x86_64-unknown-linux-gnu-fedora44.tar.gz` | `.sha256` and `.provenance.txt` assets | plain text | none: built on the owner's machine, unsigned | No | TOFU: `.sha256` and GitHub digest |
 | elixir-lang (elixir) | GitHub release asset `elixir-otp-<major>.zip` | `.sha256sum`, `.sha1sum`; `.sigstore` beside every asset | Sigstore bundle | Sigstore; identity `.../elixir-lang/elixir/.github/workflows/release.yml@refs/tags/v1.20.4` | No. Every `.sigstore` of v1.20.4 is the same SBOM attestation whose subjects are the four `bom.*` files; it verifies against `bom.spdx.json`, not the zip. No artifact attestation for the zip | TOFU: downloaded and hashed, compared with `.sha256sum` and GitHub digest |
-| builds.hex.pm (hex, rebar3) | `installs/<elixir>/hex-<ver>-otp-<otp>.ez`, `installs/<elixir>/rebar3-<ver>-otp-<otp>` | `installs/hex.csv.signed`, `installs/rebar.csv.signed` (also the `-1.x` CSVs) | base64 RSA PKCS#1 v1.5 over SHA-512 of a CSV of `version,sha512,elixir,otp` | Hex installs key (RSA 2048, "Elixir v1.1" on `builds.hex.pm/installs/public_keys.html`, released 2015, never changed). Mix itself stopped checking it in elixir-lang/elixir `d403bb9187` (2025-04) | Yes, in two steps: the signed CSV names the sha512 of the exact file. All four CSV signatures verified. The CSV carries no date or version | TOFU: the unsigned CSV's sha512, checked on download |
-| Microsoft (.NET SDK) | `builds.dotnet.microsoft.com/dotnet/Sdk/<ver>/dotnet-sdk-<ver>-<rid>.tar.gz` | `release-metadata/<channel>/releases.json` (sha512), `<archive>.sha512`; `releases.json.sig` and `releases-index.json.sig` exist | OpenPGP detached signatures on the metadata | Unknown key `FDBF53C24DB4872E`: not among the keys at `packages.microsoft.com/keys/`, not on keyserver.ubuntu.com or keys.openpgp.org | No. The signatures date from 2026-03-25 and the metadata from 2026-10-13, so they cannot cover the current bytes, and the key is unpublished. No signature on the archive | TOFU: metadata sha512, `.sha512` cross-check |
+| builds.hex.pm (hex, rebar3) | `installs/<elixir>/hex-<ver>-otp-<otp>.ez`, `installs/<elixir>/rebar3-<ver>-otp-<otp>` | `installs/hex.csv.signed`, `installs/rebar.csv.signed`, and the `-1.x` CSVs Mix reads, all captured | base64 RSA PKCS#1 v1.5 over SHA-512 of a CSV of `version,sha512,elixir,otp` | Hex installs key (RSA 2048, "Elixir v1.1" on `builds.hex.pm/installs/public_keys.html`, released 2015, never changed). Mix itself stopped checking it in elixir-lang/elixir `d403bb9187` (2025-04) | Yes, in two steps: the signed CSV names the sha512 of the exact file. All four CSV signatures verified. The CSV carries no date or version | TOFU: the unsigned CSV's sha512, checked on download |
+| Microsoft (.NET SDK) | `builds.dotnet.microsoft.com/dotnet/Sdk/<ver>/dotnet-sdk-<ver>-<rid>.tar.gz` | `release-metadata/releases-index.json` and `release-metadata/<channel>/releases.json` (sha512 per file), each with the `.p7s` its own `signature.file` field names (`releases.json.20261013194811.p7s`); `<archive>.sha512` | Detached CMS (PKCS#7) signature with an RFC 3161 timestamp; the signed JSON carries `signature.expiration` (`2027-01-11T19:48:11Z`) | X.509: leaf `CN=Microsoft Corporation, OU=.NET Release` (Code Signing, valid 2026-02-16 to 2027-02-15) under DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1 and DigiCert Trusted Root G4 | Yes, in two steps: the signed `9.0/releases.json` names the sha512 of both catalog archives. Both `.p7s` verified. The leaf certificate lives a year, so checking an old signature needs the timestamp. The `.sig` files beside the JSON are orphans (OpenPGP, 2026-03-25, unpublished key `FDBF53C24DB4872E`). No signature on the archive itself | TOFU: metadata sha512, `.sha512` cross-check |
 
 Not one of the seven providers, and not examined in PR 0: the conda-forge
 packages `src/kernel/provider/nativelibs.rs` pins for Linux native builds
@@ -351,6 +355,10 @@ What the evidence does not show:
   tree head signature), and no Rekor entry was looked up independently of
   the `gh` verifier. GitHub release attestations were checked online with
   `gh release verify-asset`; their bundles are not kept, except uv's.
+- The .NET CMS signatures were verified while the leaf certificate is
+  valid. The embedded RFC 3161 timestamp was read, not verified:
+  `openssl cms` does not evaluate it, and PR 1's verifier needs to before
+  2027-02-15, when the leaf expires.
 - Only the default release of each catalog was verified end to end.
   Coverage across all rows was checked by presence: Go `.asc` for all 11
   releases, the rustc archive `.asc` for all 43 Rust releases, PBS
@@ -375,25 +383,35 @@ with the trust root below). The deciding difference is the discovery
 source. Rust's signed object is the channel manifest itself: one signature
 by one long-lived key binds the version, every component, every target and
 every digest, and carries a `date`, which is the monotonic field rollback
-rejection needs. `channel-rust-stable.toml` is signed the same way, so "what
-is the current release" is authenticated too. `tools/catalog.py` already
-verifies it, the key is pinned, and the per-archive `.asc` gives a second
-check. Go's archives verify, but the listing that names releases and the
-latest version (`go.dev/dl/?mode=json`) is unsigned, the signature binds
-bytes only (no version or platform), and the key is Google's shared
-packaging key with expiring, rotating subkeys that go.dev does not
-document. What would change the pick: the Rust project replacing or
-dropping its OpenPGP release signatures.
+rejection needs. `channel-rust-stable.toml` is signed the same way (its
+signature verified), so "what is the current release" can be
+authenticated. It is not today: `tools/catalog.py` verifies each
+versioned manifest but reads the stable manifest unchecked
+(`rust_stable_versions`), so PR 1 adds that check. The key is pinned, and
+the per-archive `.asc` gives a second check. Go's archives verify, but the
+listing that names releases and the latest version
+(`go.dev/dl/?mode=json`) is unsigned, the signature binds bytes only (no
+version or platform), and the key is Google's shared packaging key with
+expiring, rotating subkeys that go.dev does not document. .NET is the
+other candidate: its signed release metadata names versions, platforms
+and digests, and it is the only provider that signs an expiry. It loses on
+cost: X.509 and CMS instead of one pinned key, a leaf certificate that
+changes every year (so verification needs timestamp handling), a trust
+root that is a public CA's code-signing chain rather than a key the
+project publishes, and two signed documents per release. What would change
+the pick: the Rust project replacing or dropping its OpenPGP release
+signatures.
 
 #### Recommended decision (owner approval required for the trust root)
 
 - **Do PR 0 before choosing the first provider.** Choosing on assumed
   signature availability is exactly the mistake this plan must not make.
 - **First provider: Rust**, recommended by PR 0's evidence (above) over
-  Go. Both have the smallest surface and toolchain-file resolution
-  (`go.mod` `toolchain`, `rust-toolchain.toml`), and both sign the exact
-  archive, but only Rust signs the release listing and binds versions,
-  components and platforms in the signed payload.
+  Go and .NET. Rust and Go have the smallest surface and toolchain-file
+  resolution (`go.mod` `toolchain`, `rust-toolchain.toml`), and both sign
+  the exact archive, but only Rust signs the release listing and binds
+  versions, components and platforms in the signed payload. .NET signs
+  its listing too, through an X.509 chain whose leaf changes yearly.
 - **Trusted key management: decided, see "Key and credential policy"
   below (#72).** The owner's standing direction (2026-09-09) still holds:
   the mechanism accommodates a company's own internal publisher, "one
@@ -442,46 +460,115 @@ dropping its OpenPGP release signatures.
 decided. PR 1 builds to these unless the owner changes them. Each has one
 recommended option and the condition that would change it.
 
-1. **Snapshot expiry.** A snapshot is the catalog state one refresh
-   produced, stored with the time it was fetched and the newest signed
-   timestamp it contains. Recommended: expiry limits *discovery* only.
-   A snapshot older than `max_age` (machine or home policy, default 7
-   days, a project may only shorten it) is not used to pick a new version
-   or move a default: Greyward refreshes, and on a transport failure falls
-   back to a last-good snapshot that is still within `max_age`, else to the
-   shipped catalog, and says which it used. Locked replay and cache hits
-   never expire: they check their stored proof against current policy, so
-   an old lock stays realizable offline. `--offline` skips the refresh and
-   uses the newest snapshot it has, whatever its age, and says how old it
-   is. Change it if an upstream starts publishing signed metadata with its
-   own expiry (TUF-style); then that expiry is the limit for that provider.
-2. **Rollback rejection.** Recommended: the store keeps, per provider and
-   per publisher key, a high-water mark: the newest signed timestamp
-   accepted so far. A refresh is a rollback, and fails hard (no fallback),
-   when its newest signed timestamp is older than the mark, when a release
-   the last-good snapshot lists is missing, or when a listed release's
-   digests changed (the generator's append-only rule). The signed
-   timestamp per provider: Rust, the manifest `date` (signed); Node, the
-   `SHASUMS256.txt` signature time; Go, the signature time, which binds
-   bytes only and so is weaker; attestation providers, the Rekor
-   `integratedTime`; Hex, none (its CSV carries no date), so only the
-   append-only rule applies. The mark lives in the store, so deleting the
-   store resets it: rollback protection is trust on first use per store,
-   a `LIMITATIONS.md` row when PR 1 ships. An old release in a lock is never a rollback;
-   only the snapshot moving backwards is. Change it if a provider publishes
-   versioned, signed metadata (a TUF snapshot version), which is a stronger
-   counter than a timestamp.
+Two terms first. A **snapshot** is the signed metadata one refresh
+accepted from one provider, the documents and their signatures as served
+(for Rust, `channel-rust-stable.toml` and its `.asc`, plus the versioned
+manifests it led to), stored with the time it was fetched and its signed
+time. Each refresh replaces the provider's snapshot. **Retained rows** are
+the catalog rows the store has accepted from every snapshot so far, each
+with its proof. They are append-only: a refresh adds rows and never
+changes or deletes one, which is what keeps an old lock realizable.
+
+1. **Snapshot expiry.** Recommended: expiry limits *discovery* only
+   (picking a version, moving a default, answering "what is newest").
+   - **The clock is the snapshot's signed time,** the newest signed
+     timestamp it contains, never the fetch time: an attacker who replays
+     old signed bytes resets the fetch time, not the signed one. A signed
+     time only moves when the upstream releases, so `max_age` is per
+     provider and longer than its release cadence. Rust ships about every
+     6 weeks, so a 7-day limit would expire in normal use; the Rust
+     default is 12 weeks. Machine or home policy sets `max_age`; a project
+     may only shorten it.
+   - **Past `max_age`, discovery fails** with an error that names the
+     snapshot's age and says to refresh. It does not fall back to anything
+     older than the high-water mark (proposal 2), and the shipped catalog
+     is no exception: once the store has accepted a newer snapshot, falling
+     back to the binary's tables would be the rollback proposal 2
+     rejects. On a transport failure Greyward uses the last-good snapshot
+     if it is within `max_age` and says so.
+   - **"Shipped catalog only"** stays an explicit mode the user picks, not
+     a fallback. It reports when the store has seen a newer snapshot than
+     the binary's tables.
+   - **Locked replay and cache hits never expire.** They check their
+     stored proof against current policy, so an old lock stays realizable
+     offline.
+   - **`--offline`** replays locks at any age, as above. Discovery under
+     `--offline` obeys `max_age` like everything else: a snapshot past it
+     cannot pick a new version offline either.
+   - **A freeze stays possible.** An attacker who keeps serving the last
+     valid manifest hides a new release for up to `max_age`, because
+     without a signed expiry "frozen" and "no release yet" look the same.
+     Only an upstream-signed expiry closes that. .NET signs one
+     (`signature.expiration`, 2027-01-11 for the metadata captured here):
+     for .NET the limit is the earlier of that and `max_age`.
+   - Change it if more upstreams sign an expiry (TUF-style metadata); for
+     them the signed expiry becomes the limit.
+2. **Rollback rejection.** Recommended: the store keeps, per provider, a
+   high-water mark: the newest signed time accepted so far. It is per
+   provider, not per key, and carries across key rotation, so a new or
+   replacement key cannot reset it. A fresh store seeds the mark from the
+   shipped catalog, so it never accepts metadata older than the binary.
+   - **What fails, hard (no fallback):** a refresh whose signed time is
+     older than the mark; a refresh with the same signed time but other
+     content (accepted only if the bytes are identical, or it names the
+     same release with the same digests, a re-sign); a listed release
+     whose digests changed (the generator's append-only rule); and a
+     refresh that drops the newest retained release of any maintained
+     line.
+   - **Yanks and end of life.** An upstream dropping a release from its
+     listing does not delete the retained row. Below the newest release of
+     its line, the row is marked "no longer listed": discovery stops
+     offering it, locks still realize it. Where a provider publishes an
+     explicit yank, the row is marked yanked the same way. Dropping the
+     newest release of a line is the shape of hiding a security fix, so
+     it is a rollback. A whole line reaching end of life drops out of
+     discovery only when the provider's signed metadata says so (for
+     Rust, a newer stable manifest that names another release).
+   - **The signed time per provider.** Rust: the `date` field of
+     `channel-rust-stable.toml`, which is inside the signed bytes. The
+     versioned manifests carry their own, earlier dates (1.98.1's names
+     2026-09-03, the stable one 2026-10-01); they are verified by
+     signature and the append-only rule and are not compared with the
+     mark. The other providers fix theirs in their own PRs. Candidates:
+     .NET, the signed `signature.expiration` and the CMS signing time;
+     Node, the `SHASUMS256.txt` signature time; Go, the signature time,
+     which binds bytes only and so is weaker; attestation providers, the
+     Rekor `integratedTime`; Hex, none (its CSV carries no date), so only
+     the append-only rule applies.
+   - **What it protects against, and what not.** It stops a network
+     attacker or a bad mirror from serving older, validly signed metadata
+     to a machine whose store is intact. It gives nothing to a fresh store
+     beyond the shipped seed, nor to a CI job that starts from an empty
+     store each run. The first snapshot after the seed is trusted for
+     freshness on first use (its signature is still checked). The mark is
+     only as safe as the store, which is trusted from its file permissions
+     (`LIMITATIONS.md`: "Store objects are trusted from permissions + metadata"): whoever can write the store can
+     reset it. PR 1 adds this as a `LIMITATIONS.md` row.
+   - An old release in a lock is never a rollback; only the snapshot
+     moving backwards is.
+   - Change it if a provider publishes versioned, signed metadata (a TUF
+     snapshot version), which is a stronger counter than a timestamp.
 3. **Offline freshness of the local policy.** Recommended: no freshness
-   requirement. The policy files are local and authoritative as they are,
-   offline included: #72 decided there is no remote revocation service,
-   and removing a key takes effect against the local file. PR 1 adds the
-   digest of the policy that judged it to every audit result and closure,
-   so a stale policy is visible after the fact. A company that wants a
-   freshness bound sets an optional `not_after` date in its machine
-   policy; past it,
-   every command that needs authenticated trust fails closed until the file
-   is renewed. Change it if WP5 adds a policy fetched over the network;
-   that fetched policy then needs a `max_age` like snapshots.
+   requirement by default. The policy files are local and authoritative
+   as they are, offline included: #72 decided there is no remote
+   revocation service, and removing a key takes effect against the local
+   file. PR 1 adds the digest of the policy that judged it to every audit
+   result and closure, so a stale policy is visible after the fact.
+   - A company that wants a bound sets an optional `not_after` date. Only
+     machine policy may set it; home, project and `--policy` layers may
+     only make it earlier, never later or absent.
+   - Past `not_after`, every command that needs authenticated trust fails
+     closed until the file is renewed, and that includes locked replay and
+     cache hits: the lock's proof is judged by current policy, and an
+     expired policy is not a current one. Commands that need no
+     authenticated trust keep working.
+   - **Clock rollback.** `not_after` and `max_age` both read the local
+     clock, so setting it back defeats them. PR 1 narrows that: a clock
+     earlier than the newest signed time the store has accepted is an
+     error. Beyond that it is a `LIMITATIONS.md` row: whoever controls the
+     clock and the store controls freshness.
+   - Change it if WP5 adds a policy fetched over the network; that
+     fetched policy then needs a `max_age` like snapshots.
 
 
 ---

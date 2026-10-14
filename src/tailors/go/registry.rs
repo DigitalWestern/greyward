@@ -29,7 +29,7 @@
 use crate::kernel::resolve::routes::{
     Claim, Endpoint, LocalAnswer, Lookup, ProxyAddress, RegistryProtocol, RequestClass, Upstream,
 };
-use crate::kernel::resolve::tlog::Log;
+use crate::kernel::resolve::tlog::{Head, Log};
 use std::io;
 use url::Url;
 
@@ -152,7 +152,7 @@ impl RegistryProtocol for GoProxy {
     /// A `latest` answer is a signed tree head; a lookup answer ends with
     /// one, and must also be the record of the version the URL asks for.
     /// Tiles carry none.
-    fn tree_size(&self, url: &Url, body: &[u8]) -> Option<Result<u64, String>> {
+    fn tree_size(&self, url: &Url, body: &[u8]) -> Option<Result<Head, String>> {
         if url.host_str() != Some(SUMDB_HOST) {
             return None;
         }
@@ -160,7 +160,7 @@ impl RegistryProtocol for GoProxy {
             return Some(super::sumdb::verify_tree(body));
         }
         let (module, version) = lookup_target(url)?;
-        Some(super::sumdb::verify_lookup(body, &module, &version).map(|(_, size)| size))
+        Some(super::sumdb::verify_lookup(body, &module, &version).map(|(_, head)| head))
     }
 }
 
@@ -387,7 +387,12 @@ mod tests {
                 22_152_757,
             )]
         );
-        assert_eq!(GO_PROXY.tree_size(&lookup, body), Some(Ok(64_828_441)));
+        let size =
+            |answer: Option<Result<Head, String>>| answer.map(|head| head.map(|head| head.size));
+        assert_eq!(
+            size(GO_PROXY.tree_size(&lookup, body)),
+            Some(Ok(64_828_441))
+        );
         // The answer must name the version the URL asked for, and is
         // refused outright when it does not.
         let other = url(SUMDB_HOST, "/lookup/github.com/google/uuid@v1.5.0");
@@ -404,7 +409,7 @@ mod tests {
         // and an `.info` time (the commit's, author-set) is never read.
         let head = &body[body.windows(2).position(|pair| pair == b"\n\n").unwrap() + 2..];
         assert_eq!(
-            GO_PROXY.tree_size(&url(SUMDB_HOST, "/latest"), head),
+            size(GO_PROXY.tree_size(&url(SUMDB_HOST, "/latest"), head)),
             Some(Ok(64_828_441))
         );
         assert_eq!(
@@ -610,15 +615,16 @@ mod tests {
         // a month ago holds: both recorded versions sit below it.
         let month_ago =
             crate::kernel::resolve::age::unix_seconds(std::time::SystemTime::now()) - 30 * 86_400;
-        crate::kernel::resolve::tlog::record(
-            store,
-            SUMDB_NAME,
-            crate::kernel::resolve::tlog::Checkpoint {
-                size: 64_828_441,
-                observed: month_ago,
-            },
-        )
-        .unwrap();
+        // The recorded lookup's head, root and all, so no head go fetches
+        // of that size can disagree with it.
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/proxy/registry/go/sum.golang.org/lookup/github.com/google/uuid@v1.6.0.body"
+        );
+        let (_, head) =
+            crate::tailors::go::sumdb::verify_lookup(fixture, "github.com/google/uuid", "v1.6.0")
+                .unwrap();
+        crate::kernel::resolve::tlog::record(store, &GO_PROXY.log().unwrap(), head, month_ago)
+            .unwrap();
         let go_obj = super::super::ensure_go(store, activity, "1.27.0").unwrap();
         let modcache = super::super::gate_cache(store).unwrap();
         let temp = crate::kernel::testutil::TempDir::named("go-mirror-project");

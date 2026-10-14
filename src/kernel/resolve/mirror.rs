@@ -766,9 +766,10 @@ impl Exchange<'_> {
 
     /// Verify the signed tree head `body` carries, when the protocol's log
     /// has one there ([`RegistryProtocol::tree_size`]), and keep a fresh
-    /// one as a checkpoint ([`super::tlog`]). A head that does not verify
-    /// refuses the body. A checkpoint that cannot be written only goes
-    /// into the record's detail: a missing one passes fewer versions.
+    /// one as a checkpoint ([`super::tlog`]). A head that does not verify,
+    /// or that forks the log (a size kept with another root), refuses the
+    /// body. A checkpoint that cannot be written only goes into the
+    /// record's detail: a missing one passes fewer versions.
     ///
     /// [`RegistryProtocol::tree_size`]: super::routes::RegistryProtocol::tree_size
     fn tree_head(
@@ -779,18 +780,18 @@ impl Exchange<'_> {
         record: &mut Record,
     ) -> Result<(), String> {
         let protocol = self.route.protocol;
-        let (Some(log), Some(size)) = (protocol.log(), protocol.tree_size(url, body)) else {
+        let (Some(log), Some(head)) = (protocol.log(), protocol.tree_size(url, body)) else {
             return Ok(());
         };
-        let size = size.map_err(|why| format!("{}: {why}", record.url))?;
+        let head = head.map_err(|why| format!("{}: {why}", record.url))?;
         if freshness == Freshness::Live {
-            let checkpoint = super::tlog::Checkpoint {
-                size,
-                observed: super::age::unix_seconds(std::time::SystemTime::now()),
-            };
-            if let Err(error) = super::tlog::record(&self.state.config.store, log.name, checkpoint)
-            {
-                record.detail = Some(format!("checkpoint not written: {error}"));
+            let observed = super::age::unix_seconds(std::time::SystemTime::now());
+            match super::tlog::record(&self.state.config.store, &log, head, observed) {
+                Ok(_) => {}
+                Err(super::tlog::RecordError::Fork(why)) => {
+                    return Err(format!("{}: {why}", record.url));
+                }
+                Err(error) => record.detail = Some(format!("checkpoint not written: {error}")),
             }
         }
         Ok(())

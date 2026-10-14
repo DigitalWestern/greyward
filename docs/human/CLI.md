@@ -977,7 +977,7 @@ author sets), so every Go version, tagged or a pseudo-version, is judged
 by its record number in the `sum.golang.org` checksum database's log: it
 passes when the log held it before a signed tree head ward saw at least
 the minimum age before the resolution, and otherwise its age is unknown
-(`logged after the newest checkpoint older than 7 days`). A fresh store
+(`logged after the largest checkpoint older than 7 days`). A fresh store
 has only the head built into ward, so until that head is the minimum age
 old every Go version's age is unknown (see LIMITATIONS.md). A policy that
 denies it refuses the

@@ -441,11 +441,11 @@ pub trait RegistryProtocol: Sync {
         None
     }
 
-    /// The tree size the signed head in `body`, fetched from `url`,
-    /// carries, once its signature verifies against the log's key. `None`:
-    /// the body carries no head. An error (a bad signature, a malformed
-    /// head) refuses the body. Each verified size is a checkpoint.
-    fn tree_size(&self, _url: &Url, _body: &[u8]) -> Option<Result<u64, String>> {
+    /// The tree the signed head in `body`, fetched from `url`, names,
+    /// once its signature verifies against the log's key. `None`: the body
+    /// carries no head. An error (a bad signature, a malformed head) refuses
+    /// the body. Each verified head is a checkpoint.
+    fn tree_size(&self, _url: &Url, _body: &[u8]) -> Option<Result<super::tlog::Head, String>> {
         None
     }
 }

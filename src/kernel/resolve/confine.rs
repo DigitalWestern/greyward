@@ -27,6 +27,7 @@ use crate::kernel::resolve::relay::{self, RelayRecord, ToolStatus};
 use crate::kernel::resolve::snapshot::Snapshot;
 use crate::kernel::sandbox;
 use crate::kernel::store::{self, Store};
+use crate::kernel::ui;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -821,10 +822,11 @@ pub fn confined_run(
     run: &ConfinedRun<'_>,
 ) -> io::Result<ConfinedOutcome> {
     store.require_activity(activity, "confined resolution")?;
-    let (offers, missing) = probe_tiers(activity)?;
+    let (offers, missing) = ui::timed("probe tiers", || probe_tiers(activity))?;
     let tier = choose_tier(&offers, &missing, run.unconfined_denied, run.tool, run.why)?;
-    let mounts = Mounts::check(store, activity, run)?;
+    let mounts = ui::timed("mounts", || Mounts::check(store, activity, run))?;
     let execute = || -> io::Result<ConfinedOutcome> {
+        let setup = ui::phase("sandbox setup");
         let (mut command, removal) = match tier.engine {
             Engine::Bubblewrap => {
                 let bwrap = sandbox::bwrap_preflight_with_activity(Some(activity))?;
@@ -876,7 +878,10 @@ pub fn confined_run(
                 }
             }
         });
-        let result = start_confined(&mut command, activity, run.stdout);
+        drop(setup);
+        let result = ui::timed("tool", || {
+            start_confined(&mut command, activity, run.stdout)
+        });
         // The container is gone before anything it wrote is read, whatever
         // became of the podman client.
         let cleanup = removal.map(|removal| removal.finish()).transpose();

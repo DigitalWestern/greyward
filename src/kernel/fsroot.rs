@@ -1491,6 +1491,21 @@ mod tests {
         dir
     }
 
+    /// Publish until `path` is gone, and say whether it went. A sweep skips
+    /// a directory whose lock it cannot take, and a child process another
+    /// test is starting can hold an inherited copy of a lock on it for a
+    /// moment, so one publication's sweep may find nothing to do.
+    fn swept_by(path: &Path, mut publish: impl FnMut()) -> bool {
+        for _ in 0..50 {
+            publish();
+            if fs::symlink_metadata(path).is_err() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
     /// A writer without an unnamed file creates its temporary's name and
     /// only then locks it, holding the directory shared in between. A
     /// cleanup in that moment sweeps nothing, however long the writer is
@@ -1528,9 +1543,10 @@ mod tests {
         );
 
         drop(writer);
-        root.write_file(Path::new("published"), b"newer").unwrap();
         assert!(
-            fs::symlink_metadata(&unlocked).is_err(),
+            swept_by(&unlocked, || root
+                .write_file(Path::new("published"), b"newer")
+                .unwrap()),
             "the sweep after the writer kept a dead temporary"
         );
     }
@@ -1615,9 +1631,10 @@ mod tests {
         age(&users);
 
         let root = ProjectRoot::open(&dir).unwrap();
-        root.write_file(Path::new("published"), b"new").unwrap();
         assert!(
-            fs::symlink_metadata(&stale_file).is_err(),
+            swept_by(&stale_file, || root
+                .write_file(Path::new("published"), b"new")
+                .unwrap()),
             "stale file kept"
         );
         assert!(
@@ -1645,9 +1662,12 @@ mod tests {
         let again = dir.join(ours(5));
         fs::write(&again, b"x").unwrap();
         age(&again);
-        root.replace_symlink(Path::new(".venv"), Path::new("/store/env"), "venv")
-            .unwrap();
-        assert!(fs::symlink_metadata(&again).is_err(), "stale file kept");
+        assert!(
+            swept_by(&again, || root
+                .replace_symlink(Path::new(".venv"), Path::new("/store/env"), "venv")
+                .unwrap()),
+            "stale file kept"
+        );
         assert!(
             fs::symlink_metadata(&paused).is_ok(),
             "paused writer's file taken"

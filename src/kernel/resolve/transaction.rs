@@ -938,7 +938,8 @@ fn remove_journal(journals: &ProjectRoot, ecosystem: &str) -> io::Result<()> {
 
 /// The mode of a file a publication creates: 0644 under this process's
 /// umask, read from `/proc/self/status` (setting the umask to read it
-/// would race other threads). Without it, 0644.
+/// would race other threads). Where there is no `/proc` (macOS), the
+/// umask [`record_startup_umask`] read; without either, 0644.
 pub(crate) fn new_file_mode() -> u32 {
     let umask = fs::read_to_string("/proc/self/status")
         .ok()
@@ -947,9 +948,31 @@ pub(crate) fn new_file_mode() -> u32 {
                 line.strip_prefix("Umask:")
                     .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
             })
-        })
-        .unwrap_or(0o022);
-    0o644 & !umask
+        });
+    mode_under(umask, STARTUP_UMASK.get().copied())
+}
+
+/// 0644 under the first umask known: the live one, then the startup one.
+fn mode_under(live: Option<u32>, startup: Option<u32>) -> u32 {
+    0o644 & !live.or(startup).unwrap_or(0o022)
+}
+
+/// The umask as `main` found it, before any thread started (#733).
+static STARTUP_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Read the umask by setting it and setting it back, for
+/// [`new_file_mode`] on a host with no `/proc`. Setting it races any other
+/// thread that creates a file, so `main` calls this first, while the
+/// process has one thread. Any other embedder must do the same, once, or
+/// get 0644 where there is no `/proc`.
+pub fn record_startup_umask() {
+    // SAFETY: umask has no preconditions. Restored on the next line.
+    let umask = unsafe { libc::umask(0o022) };
+    // SAFETY: as above.
+    unsafe { libc::umask(umask) };
+    // `mode_t` is a u16 on macOS and a u32 on Linux.
+    #[allow(clippy::unnecessary_cast)]
+    let _ = STARTUP_UMASK.set(umask as u32 & 0o777);
 }
 
 fn check_ecosystem(ecosystem: &str) -> io::Result<()> {
@@ -3050,5 +3073,51 @@ mod tests {
             & 0o777;
         assert_eq!(mode, new_file_mode());
         assert_eq!(mode & 0o111, 0);
+    }
+
+    /// The live umask wins; without one (no `/proc`) the startup umask
+    /// does; without either, 0644 (#733).
+    #[test]
+    fn the_new_file_mode_follows_the_first_umask_known() {
+        assert_eq!(mode_under(Some(0o077), Some(0o022)), 0o600);
+        assert_eq!(mode_under(None, Some(0o077)), 0o600);
+        assert_eq!(mode_under(None, Some(0o022)), 0o644);
+        assert_eq!(mode_under(None, None), 0o644);
+    }
+
+    /// Set in the child `the_startup_umask_is_read_and_left_in_place`
+    /// runs: only there does the test set the umask, which is process-wide.
+    const UMASK_CHILD: &str = "GREYWARD_TEST_TRANSACTION_UMASK_CHILD";
+
+    /// Under `umask 077` the startup read finds 077 and leaves it set, so
+    /// a host without `/proc` publishes 0600. Run in a child of this test
+    /// binary, which reports through its exit status.
+    #[test]
+    fn the_startup_umask_is_read_and_left_in_place() {
+        const NAME: &str =
+            "kernel::resolve::transaction::tests::the_startup_umask_is_read_and_left_in_place";
+        if std::env::var_os(UMASK_CHILD).is_some() {
+            // SAFETY: umask has no preconditions; this process is the
+            // child run, which runs this one test and nothing else.
+            unsafe { libc::umask(0o077) };
+            record_startup_umask();
+            assert_eq!(STARTUP_UMASK.get(), Some(&0o077));
+            // SAFETY: as above.
+            assert_eq!(unsafe { libc::umask(0o077) }, 0o077);
+            assert_eq!(mode_under(None, STARTUP_UMASK.get().copied()), 0o600);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(UMASK_CHILD, "1")
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{report}");
+        assert!(report.contains("1 passed"), "{report}");
     }
 }

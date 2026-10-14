@@ -20,6 +20,7 @@
 
 use greyward::kernel::platform::Platform;
 use greyward::kernel::sandbox::{run_build_spec, BuildSpec};
+#[cfg(target_os = "linux")]
 use greyward::kernel::store::Store;
 use greyward::kernel::types::*;
 use greyward::tailors::python;

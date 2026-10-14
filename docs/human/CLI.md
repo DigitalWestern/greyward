@@ -791,9 +791,10 @@ a gate has to sync first, in the checkout it is judging.
 A closure is one file per ecosystem, not one per platform, and it records
 the platform it was synced on. Two people on different platforms therefore
 overwrite each other's record, and the one the gate did not run on is
-`stale` ("synced on <platform>, not this host"). A sync also rewrites
-`projected_at` every time, so a local sync dirties the committed file even
-when the environment is unchanged. Have one protected job, on one platform,
+`stale` ("synced on <platform>, not this host"). A sync preserves the file
+and its `projected_at` when the complete envelope, including its signature,
+is unchanged. A changed envelope gets the current timestamp.
+Have one protected job, on one platform,
 write the closures that are committed.
 
 Signing: `ward keygen <path>` writes an Ed25519 key file (mode 0600,

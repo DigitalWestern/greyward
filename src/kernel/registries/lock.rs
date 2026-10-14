@@ -8,10 +8,10 @@
 //! hold, or a file served by a registry other than the one the lock names
 //! is an error naming the package, the registry and the list.
 
-use super::config::{Ecosystem, Registry};
+use super::config::{Ecosystem, Registry, PUBLIC};
 use super::effective::Sources;
 use crate::kernel::error;
-use crate::kernel::fetch::registry::{source_for, Served};
+use crate::kernel::fetch::registry::{is_public, source_for, Served};
 use crate::kernel::fetch::shown_url;
 use std::io;
 
@@ -114,6 +114,33 @@ pub fn listed_index(sources: &Sources, ecosystem: Ecosystem, url: &str) -> bool 
         .ecosystem(ecosystem)
         .registries()
         .any(|registry| same_url(&registry.url, url))
+}
+
+/// The closure's record of who served `url`: `{"name", "url"}` of the
+/// configured registry, or `public` and the public registry's URL for a
+/// file on the public registry's hosts. `None` for a URL no registry
+/// serves (a direct URL). A registry URL is not a secret.
+pub fn served_by(sources: &Sources, ecosystem: Ecosystem, url: &str) -> Option<serde_json::Value> {
+    let (name, url) = match source_for(sources, ecosystem, url).ok()? {
+        Served::Registry(registry) => (registry.name.as_str(), registry.url.as_str()),
+        Served::Public if is_public(ecosystem, url) => (PUBLIC, ecosystem.public_url()),
+        Served::Public => return None,
+    };
+    Some(serde_json::json!({ "name": name, "url": url }))
+}
+
+/// Whether a closure's `registry` record names a source the effective list
+/// of `ecosystem` allows: the name is listed and the URL is that source's
+/// URL after normalization.
+pub fn approved(sources: &Sources, ecosystem: Ecosystem, name: &str, url: &str) -> bool {
+    let list = sources.ecosystem(ecosystem);
+    if name == PUBLIC {
+        return list.includes_public() && same_url(ecosystem.public_url(), url);
+    }
+    let approved = list
+        .registries()
+        .any(|registry| registry.name == name && same_url(&registry.url, url));
+    approved
 }
 
 /// `@scope` of an npm `@scope/name`.

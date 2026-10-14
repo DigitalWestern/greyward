@@ -167,9 +167,29 @@ fn normalized_version(version: &str) -> String {
         .collect::<Vec<_>>()
         .join(".");
     match pre {
-        Some(pre) => format!("{release}-{pre}"),
+        Some(pre) => format!("{release}-{}", normalized_prerelease(pre)),
         None => release,
     }
+}
+
+/// A prerelease label with each numeric identifier's leading zeros
+/// dropped (`beta.01` is `beta.1`), as NuGet normalizes one.
+fn normalized_prerelease(pre: &str) -> String {
+    pre.split('.')
+        .map(|part| {
+            if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+                let trimmed = part.trim_start_matches('0');
+                if trimmed.is_empty() {
+                    "0"
+                } else {
+                    trimmed
+                }
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// The registration hive whose leaves carry `published`.
@@ -390,6 +410,9 @@ mod tests {
             ("1.0.0.0", "1.0.0"),
             ("1.0.0.4", "1.0.0.4"),
             ("1.0.0-Beta.1", "1.0.0-beta.1"),
+            ("1.0.0-beta.01", "1.0.0-beta.1"),
+            ("1.0.0-rc.000.2", "1.0.0-rc.0.2"),
+            ("1.0.0-01a.1", "1.0.0-01a.1"),
             ("1.0-rc+sha.abc", "1.0.0-rc"),
             ("2.14.1+build.7", "2.14.1"),
             ("1.x", "1.x"),

@@ -121,11 +121,11 @@ pub fn validate_source(source: &GitSource) -> io::Result<()> {
     Ok(())
 }
 
-/// Record `host-git-transport` for a source fetched over ssh or read from
-/// a local path, before anything is fetched: a policy that denies the kind
-/// stops the sync before git contacts the host. `git@host:repo` is already
-/// `ssh://` once normalized. https and `git://` offer no credential of
-/// this machine's and reach no local path, so they record nothing here.
+/// Record `host-git-transport` for a source fetched over ssh or the git
+/// protocol, or read from a local path, before anything is fetched: a
+/// policy that denies the kind stops the sync before git contacts the host.
+/// `git@host:repo` is already `ssh://` once normalized. https, which goes
+/// through the proxy, records nothing.
 /// Called inside the sync's attribution, by [`record_git_dependency`] or a
 /// realizer that records no `git-dependency` of its own.
 pub fn record_transport(source: &GitSource) -> io::Result<()> {
@@ -137,13 +137,27 @@ pub fn record_transport(source: &GitSource) -> io::Result<()> {
     }
 }
 
-/// The `host-git-transport` exception [`record_transport`] records for
-/// `source`, if its transport is one that records.
+/// The `host-git-transport` exception for `source`, if this machine's git
+/// reaches it rather than the proxy: over `ssh://` (with its ssh agent and
+/// configuration), `git://` (dialled directly, unauthenticated and
+/// unencrypted) or `file://` (a path here), the scheme in any case. The one
+/// classifier of the kind: every ecosystem's git dependency, a submodule,
+/// and each cargo path ([`transport_exceptions`](crate::kernel::provider::cargo_settings::transport_exceptions))
+/// take it from here.
 pub(crate) fn transport_exception(source: &GitSource) -> Option<crate::kernel::policy::Exception> {
-    let detail = if source.url.starts_with("ssh://") {
+    let scheme = |prefix: &str| {
+        source
+            .url
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    let detail = if scheme("ssh://") {
         "fetched over ssh from this machine, offering its ssh agent's keys under its ssh \
          configuration"
-    } else if source.url.starts_with("file://") {
+    } else if scheme("git://") {
+        "fetched over the git protocol from this machine, unauthenticated and unencrypted, \
+         outside the proxy"
+    } else if scheme("file://") {
         "read from a repository path on this machine"
     } else {
         return None;
@@ -1026,9 +1040,9 @@ mod tests {
         );
     }
 
-    /// ssh and file sources record `host-git-transport` under their URL,
-    /// https and git:// record nothing, and a policy denying the kind
-    /// refuses before anything is fetched.
+    /// ssh, file and git:// sources record `host-git-transport` under their
+    /// URL, https records nothing, and a policy denying the kind refuses
+    /// before anything is fetched.
     #[test]
     fn ssh_and_file_sources_record_their_transport() {
         use crate::kernel::policy::{self, Attribution, PolicyScope, HOST_GIT_TRANSPORT};
@@ -1058,6 +1072,7 @@ mod tests {
             [
                 (HOST_GIT_TRANSPORT, "ssh://git@github.com/o/r.git"),
                 (HOST_GIT_TRANSPORT, "file:///srv/repo.git"),
+                (HOST_GIT_TRANSPORT, "git://github.com/o/r"),
             ]
             .map(|(kind, subject)| (kind.to_string(), subject.to_string()))
         );

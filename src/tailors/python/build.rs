@@ -2,15 +2,16 @@
 //! without execution and, when needed, realized as a separate Python env.
 
 use super::cargo_lock::{
-    cargo_lock_cache_key, cargo_lock_for, lock_candidates, read_cached_lock,
-    reuse_cached_cargo_lock, write_cached_lock, written_cargo_lock, CachedLock,
+    cargo_lock_cache_key, generate_cargo_lock, locate_workspace_root, lock_exceptions,
+    read_cached_lock, read_cached_root, reuse_cached_cargo_lock, write_cached_lock,
+    write_cached_root, CachedLock,
 };
 use super::sdist_view::{self, SdistWheel};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fetch::{download_verified_held, Digest};
 use crate::kernel::hostfallback::RUNTIME_ONLY_VIEW;
 use crate::kernel::platform::Platform;
-use crate::kernel::resolve::{DoorKind, ResolutionDoor};
+use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::HostView;
 use crate::kernel::sandbox::Sandbox;
 use crate::kernel::store::Store;
@@ -404,6 +405,13 @@ pub(crate) fn local_rust_sdist_for_test(store: &Store, name: &str) -> LockedPack
     );
     fs::write(&archive, &bytes).expect("write local Rust sdist");
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+    // What cargo names as this one-package sdist's workspace root: the
+    // source root. Planning reads it from the cache rather than run cargo.
+    write_cached_root(
+        &store.cache_path("cargo-workspace-root", &sha256),
+        Path::new(""),
+    )
+    .expect("seed the workspace root");
     LockedPackage {
         index: None,
         name: name.into(),
@@ -577,68 +585,6 @@ fn is_compiler_error(line: &str) -> bool {
         || body.contains(": fatal error:")
 }
 
-/// `cargo generate-lockfile` for an sdist that ships no `Cargo.lock`,
-/// confined through the door with the unpacked source as its greyward-owned
-/// lock root (Detached): the lock is written back there, and the run's
-/// ledger is kept on `door` for the sync that opened it to root under its
-/// project. `manifest_rel` is the sdist's `Cargo.toml`, relative to
-/// `source`. Returns where cargo wrote the lock, relative to `source`.
-fn generate_cargo_lock(
-    door: &mut ResolutionDoor<'_>,
-    rust_obj: &Path,
-    manifest_rel: &Path,
-    source: &Path,
-) -> io::Result<PathBuf> {
-    use crate::kernel::provider::cargo_door::{run_cargo, CargoPublish, CargoRun};
-    // A workspace member through a symlinked directory would be missing
-    // from the confined run (the stage copies the link): refused, at the
-    // manifest's directory and each above it, whichever is the workspace.
-    let candidates = lock_candidates(manifest_rel);
-    for lock in &candidates {
-        let dir = source.join(lock.parent().unwrap_or_else(|| Path::new("")));
-        if dir.join("Cargo.toml").is_file() {
-            crate::kernel::provider::cargo_door::refuse_unlisted_members(
-                &crate::kernel::fsroot::ProjectRoot::open(&dir)?,
-            )?;
-        }
-    }
-    let manifest_arg = manifest_rel.to_string_lossy().into_owned();
-    let args = [
-        "generate-lockfile",
-        "--manifest-path",
-        manifest_arg.as_str(),
-    ];
-    // cargo writes the lock beside the workspace root's manifest, the
-    // manifest's own directory or one above it: each may be written, and
-    // the lock check reads them all.
-    let outputs = candidates;
-    // The sdist ships no Cargo.lock: this is its missing-lock door, whatever
-    // the planning door it runs under.
-    let mut missing_lock = door.reopen(DoorKind::MissingLock);
-    let report = run_cargo(
-        &mut missing_lock,
-        CargoRun {
-            rust_obj,
-            lock_root: source,
-            args: &args,
-            publish: CargoPublish::Detached { outputs },
-        },
-    )
-    .map_err(|e| crate::kernel::error::context(e, "generate the sdist's Cargo.lock"))?;
-    if let Some(objects) = report.ledger.clone() {
-        missing_lock.keep_ledger(objects);
-    }
-    if !report.status.success() {
-        return Err(io::Error::other(format!(
-            "store cargo generate-lockfile failed for the sdist: {}",
-            crate::kernel::resolve::confine::scrub_signing_key(
-                String::from_utf8_lossy(&report.stderr).trim()
-            )
-        )));
-    }
-    written_cargo_lock(source, manifest_rel)
-}
-
 /// The Rust an sdist with no toolchain file of its own built with before a
 /// project's lock pinned one: the newest release ward shipped then. A Python
 /// section with no `helpers.rust` pin keeps it, so its wheels keep their ids.
@@ -722,26 +668,63 @@ fn rust_plan_inputs(
         store, activity, platform, &rust, &extras,
     )?;
     let key = cargo_lock_cache_key(sdist_sha256, &rust_id);
-    let generated_path = store.cache_path("cargo-lock", &key);
-    // Where in the sdist the cached lock goes: where cargo wrote it.
-    let generated_at = store.cache_path("cargo-lock-at", &key);
-    let (lock_text, generated_lock) = if let Some(lock) = cargo_lock_for(source, manifest_rel) {
-        (fs::read_to_string(source.join(lock))?, None)
-    } else if let Some(cached) = read_cached_lock(&generated_path, &generated_at, manifest_rel) {
-        reuse_cached_cargo_lock(&cached.text, source, &cached.at)?;
+    // The workspace root cargo named for this sdist (cached under the sdist,
+    // whose files alone decide it), and the lock ward generated for it
+    // (under the sdist and Rust): the cold path invokes Cargo, and persists
+    // both before any later wheel-cache lookup so warm rebuilds stay
+    // offline.
+    let root_path = store.cache_path("cargo-workspace-root", sdist_sha256);
+    let entry_path = store.cache_path("cargo-lock-entry", &key);
+    let mut rust_obj = None;
+    let mut realized = || -> io::Result<PathBuf> {
+        if rust_obj.is_none() {
+            rust_obj = Some(crate::kernel::provider::rust::realize_toolchain(
+                store, activity, platform, &rust, &extras,
+            )?);
+        }
+        Ok(rust_obj.clone().expect("realized"))
+    };
+    let root = match read_cached_root(&root_path, source, manifest_rel) {
+        Some(root) => root,
+        None => {
+            let rust_obj = realized()?;
+            let root = locate_workspace_root(door, &rust_obj, manifest_rel, source)?;
+            write_cached_root(&root_path, &root)?;
+            root
+        }
+    };
+    let at = root.join("Cargo.lock");
+    let (lock_text, generated_lock) = if source.join(&at).is_file() {
+        // The sdist ships its lock: its transports and its configuration's
+        // are recorded as a generated one's are.
+        let text = fs::read_to_string(source.join(&at))?;
+        let sources = crate::kernel::provider::cargo_door::lock_sources(&text).unwrap_or_default();
+        let files = crate::kernel::provider::cargo_door::config_files(
+            source,
+            &crate::kernel::provider::cargo_door::Bound::new(source)?,
+        )?;
+        crate::kernel::provider::cargo_door::record_exceptions(
+            &crate::kernel::provider::cargo_door::transport_exceptions(
+                sources.iter().map(String::as_str),
+                &files,
+            ),
+        )?;
+        (text, None)
+    } else if let Some(cached) = read_cached_lock(&entry_path, &at) {
+        reuse_cached_cargo_lock(&cached, source)?;
         (cached.text, Some(cached.at))
     } else {
-        // This is the one cold path that must invoke Cargo. Persist the lock
-        // before any later wheel-cache lookup so warm rebuilds stay offline.
-        let rust_obj = crate::kernel::provider::rust::realize_toolchain(
-            store, activity, platform, &rust, &extras,
-        )?;
-        let at = generate_cargo_lock(door, &rust_obj, manifest_rel, source)?;
+        let rust_obj = realized()?;
+        generate_cargo_lock(door, &rust_obj, manifest_rel, &root, source)?;
+        let text = fs::read_to_string(source.join(&at))?;
+        // What the door recorded for the run, kept with the lock.
+        let exceptions = lock_exceptions(&text, source)?;
         let cached = CachedLock {
-            text: fs::read_to_string(source.join(&at))?,
+            text,
             at,
+            exceptions,
         };
-        write_cached_lock(&generated_path, &generated_at, &cached)?;
+        write_cached_lock(&entry_path, &cached)?;
         (cached.text, Some(cached.at))
     };
     let cargo_plan = crate::kernel::provider::crates::plan_cargo(&lock_text, &rust_version)?;
@@ -2280,90 +2263,80 @@ mod tests {
         fs::write(source.join("src/lib.rs"), "").unwrap();
 
         let mut scope = crate::kernel::testutil::DoorScope::new();
-        let mut door = scope.door(
-            store,
-            activity,
-            platform,
-            crate::kernel::resolve::DoorKind::Planner,
-        );
-        let lock =
-            super::generate_cargo_lock(&mut door, &rust_obj, Path::new("Cargo.toml"), &source);
-        let kept = door.take_kept_ledgers();
-        drop(door);
+        // Ask cargo for the workspace root, then generate exactly
+        // `<root>/Cargo.lock`, as a cold sdist plan does.
+        let mut lock_for = |dir: &Path, manifest: &str| -> (PathBuf, Vec<_>) {
+            let mut door = scope.door(
+                store,
+                activity,
+                platform,
+                crate::kernel::resolve::DoorKind::Planner,
+            );
+            let manifest = Path::new(manifest);
+            let root = super::locate_workspace_root(&mut door, &rust_obj, manifest, dir)
+                .unwrap_or_else(|e| panic!("locate {}: {e}", manifest.display()));
+            super::generate_cargo_lock(&mut door, &rust_obj, manifest, &root, dir)
+                .unwrap_or_else(|e| panic!("generate {}: {e}", manifest.display()));
+            let kept = door.take_kept_ledgers();
+            (root, kept)
+        };
+        let (root, kept) = lock_for(&source, "Cargo.toml");
+        assert_eq!(root, Path::new(""));
 
-        // `rust/native/Cargo.toml` in a workspace at `rust/`: cargo writes
-        // the lock beside the workspace root, and that is the path taken.
-        let workspace = work.join("workspace");
-        fs::create_dir_all(workspace.join("rust/native/src")).unwrap();
-        fs::write(
-            workspace.join("rust/Cargo.toml"),
-            "[workspace]\nmembers = [\"native\"]\nresolver = \"2\"\n",
-        )
-        .unwrap();
-        fs::write(
-            workspace.join("rust/native/Cargo.toml"),
-            "[package]\nname = \"native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(workspace.join("rust/native/src/lib.rs"), "").unwrap();
-        let mut door = scope.door(
-            store,
-            activity,
-            platform,
-            crate::kernel::resolve::DoorKind::Planner,
-        );
-        let member = super::generate_cargo_lock(
-            &mut door,
-            &rust_obj,
-            Path::new("rust/native/Cargo.toml"),
-            &workspace,
-        );
-        drop(door);
-
-        // A root workspace with a `native/` member, the sdist's manifest:
-        // the lock goes beside the root's manifest.
+        let member = |dir: &Path, manifest: &str| {
+            let at = dir.join(manifest);
+            fs::create_dir_all(at.parent().unwrap().join("src")).unwrap();
+            fs::write(
+                &at,
+                "[package]\nname = \"native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .unwrap();
+            fs::write(at.parent().unwrap().join("src/lib.rs"), "").unwrap();
+        };
+        let workspace = "[workspace]\nmembers = [\"native\"]\nresolver = \"2\"\n";
+        // `rust/native/Cargo.toml` in a workspace at `rust/`.
+        let in_rust = work.join("in-rust");
+        member(&in_rust, "rust/native/Cargo.toml");
+        fs::write(in_rust.join("rust/Cargo.toml"), workspace).unwrap();
+        // A root workspace with a `native/` member.
         let rooted = work.join("rooted");
-        fs::create_dir_all(rooted.join("native/src")).unwrap();
-        fs::write(
-            rooted.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"native\"]\nresolver = \"2\"\n",
-        )
-        .unwrap();
-        fs::write(
-            rooted.join("native/Cargo.toml"),
-            "[package]\nname = \"native\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(rooted.join("native/src/lib.rs"), "").unwrap();
-        let mut door = scope.door(
-            store,
-            activity,
-            platform,
-            crate::kernel::resolve::DoorKind::Planner,
+        member(&rooted, "native/Cargo.toml");
+        fs::write(rooted.join("Cargo.toml"), workspace).unwrap();
+        // `rust/native/Cargo.toml` with its own `[workspace]`, beside an
+        // unrelated `rust/Cargo.lock`: cargo's root is `rust/native`, and
+        // the lock above it is neither taken nor touched.
+        let own = work.join("own");
+        member(&own, "rust/native/Cargo.toml");
+        let mut text = fs::read_to_string(own.join("rust/native/Cargo.toml")).unwrap();
+        text.push_str("\n[workspace]\n");
+        fs::write(own.join("rust/native/Cargo.toml"), text).unwrap();
+        let unrelated = "version = 4\n[[package]]\nname = \"other\"\nversion = \"9.0.0\"\n";
+        fs::write(own.join("rust/Cargo.lock"), unrelated).unwrap();
+        for (dir, manifest, expected, not_written) in [
+            (
+                &in_rust,
+                "rust/native/Cargo.toml",
+                "rust",
+                "rust/native/Cargo.lock",
+            ),
+            (&rooted, "native/Cargo.toml", "", "native/Cargo.lock"),
+            (&own, "rust/native/Cargo.toml", "rust/native", "Cargo.lock"),
+        ] {
+            let (root, _) = lock_for(dir, manifest);
+            assert_eq!(root, Path::new(expected), "{manifest} in {}", dir.display());
+            assert!(fs::read_to_string(dir.join(&root).join("Cargo.lock"))
+                .unwrap()
+                .contains("name = \"native\""));
+            assert!(!dir.join(not_written).exists(), "{not_written}");
+        }
+        assert_eq!(
+            fs::read_to_string(own.join("rust/Cargo.lock")).unwrap(),
+            unrelated
         );
-        let root_member = super::generate_cargo_lock(
-            &mut door,
-            &rust_obj,
-            Path::new("native/Cargo.toml"),
-            &rooted,
-        );
-        drop(door);
         PROXY_FOR_TEST.with(|slot| slot.set(None));
         RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
-        assert_eq!(root_member.unwrap(), Path::new("Cargo.lock"));
-        assert!(!rooted.join("native/Cargo.lock").exists());
-        assert!(fs::read_to_string(rooted.join("Cargo.lock"))
-            .unwrap()
-            .contains("name = \"native\""));
-        assert_eq!(member.unwrap(), Path::new("rust/Cargo.lock"));
-        assert!(!workspace.join("rust/native/Cargo.lock").exists());
-        assert!(fs::read_to_string(workspace.join("rust/Cargo.lock"))
-            .unwrap()
-            .contains("name = \"native\""));
 
-        let lock = lock.unwrap();
-        assert_eq!(lock, Path::new("Cargo.lock"));
-        let text = fs::read_to_string(source.join(&lock)).unwrap();
+        let text = fs::read_to_string(source.join("Cargo.lock")).unwrap();
         assert!(
             text.contains(
                 "name = \"itoa\"\nversion = \"1.0.18\"\n\
@@ -2372,17 +2345,25 @@ mod tests {
             ),
             "{text}"
         );
-        assert_eq!(kept.len(), 1, "one ledger, kept for the sync to root");
-        let portable =
-            ledger::PortableLedger::parse(&ledger::read_portable(store, &kept[0].ledger).unwrap())
-                .unwrap();
-        assert!(
-            portable
+        // Two ledgers, the locate run's and the generation's, kept for the
+        // sync to root; the generation's records the index read.
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        let entries: Vec<_> = kept
+            .iter()
+            .flat_map(|objects| {
+                ledger::PortableLedger::parse(
+                    &ledger::read_portable(store, &objects.ledger).unwrap(),
+                )
+                .unwrap()
                 .entries()
-                .any(|entry| entry.url == "https://index.crates.io/it/oa/itoa"
-                    && entry.class == "index"),
-            "{:?}",
-            portable.entries().collect::<Vec<_>>()
+                .map(|entry| (entry.url.clone(), entry.class.clone()))
+                .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            entries.iter().any(|(url, class)| url == "https://index.crates.io/it/oa/itoa"
+                && class == "index"),
+            "{entries:?}"
         );
         let _ = fs::remove_dir_all(&store.root);
     }

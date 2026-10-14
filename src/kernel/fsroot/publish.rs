@@ -1,7 +1,8 @@
 //! Streamed atomic publication through a held project directory.
 
 use super::{
-    read_dir_names_at, refusal, split_relative, ProjectRoot, DIRECTORY_FLAGS, TEMP_ATTEMPTS,
+    fsync_held, read_dir_names_at, refusal, split_relative, ProjectRoot, DIRECTORY_FLAGS,
+    TEMP_ATTEMPTS,
 };
 use crate::kernel::store::{
     fd_stat, fsync_directory, open_file_at, rename_at, same_inode, stat_at, unlink_if_same,
@@ -14,6 +15,66 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 impl ProjectRoot {
+    /// Recheck an unchanged file at the publication boundary and make its
+    /// contents and name durable. The reader and directory sync use the
+    /// same held parent. A missing or changed file is a comparison miss,
+    /// while a symlink or special file is refused as it is by the writer.
+    pub(crate) fn sync_file_if_matches(
+        &self,
+        relative: &Path,
+        expected: &[u8],
+    ) -> io::Result<bool> {
+        use std::io::Read as _;
+
+        let mut display = self.path.clone();
+        let Some((held, name)) = self.open_parent(relative, "compare", &mut display)? else {
+            return Ok(false);
+        };
+        let parent_fd = held
+            .as_ref()
+            .map_or(self.dir.as_raw_fd(), AsRawFd::as_raw_fd);
+        let mut file = match open_file_at(
+            parent_fd,
+            name.as_bytes(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(refusal(format!(
+                    "{} is a symlink; refusing to compare through it",
+                    display.display()
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        let opened = fd_stat(file.as_raw_fd())?;
+        if opened.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(refusal(format!(
+                "{} is not a regular file; refusing to compare it",
+                display.display()
+            )));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        if bytes != expected {
+            return Ok(false);
+        }
+        file.sync_all()?;
+        let current = match stat_at(parent_fd, name.as_bytes()) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !same_inode(&opened, &current) {
+            return Ok(false);
+        }
+        fsync_held(parent_fd)?;
+        remove_stale_temps(parent_fd);
+        Ok(true)
+    }
+
     /// `replace_link` lets the rename replace a symlink at the destination
     /// (the link itself, never what it names), as `rename_in` does. The
     /// contents are streamed from `source` into the temporary, so a large

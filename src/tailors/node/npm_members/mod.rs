@@ -108,6 +108,23 @@ pub(crate) fn npm_members(root: &ProjectRoot, workspaces: &Value) -> io::Result<
     }
 }
 
+/// The fixed refusal for a project manifest ward cannot read inside the
+/// project ([`crate::tailors::node::inputs::read_manifest`]): the same
+/// bytes as [`undetermined`], with the patterns the root `package.json`
+/// declares (none when it is the one refused), so a manifest swapped for a
+/// symlink to a host file reads the same whatever that file holds.
+pub(crate) fn manifest_refused(root: &ProjectRoot, why: &str) -> io::Error {
+    let declared = match root.read_member_manifest(Path::new(".")) {
+        Ok(MemberManifest::Read(bytes)) => serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|package| package.get("workspaces").cloned())
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    let debug = std::env::var_os(DEBUG_ENV).is_some_and(|value| !value.is_empty());
+    undetermined(root, &declared, why, debug)
+}
+
 /// The one refusal for every answer of npm's ward cannot accept. It names
 /// the project and the `workspaces` patterns it declares, nothing npm
 /// found or read, so two failures that differ in what a host file holds

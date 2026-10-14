@@ -190,8 +190,27 @@ impl ProjectRoot {
     /// refuses it, and the manifest is opened beneath that directory the
     /// same way, so a manifest that is a symlink out of the member is
     /// refused too. Without `openat2` (and on macOS), the descriptor walk
-    /// of [`ProjectRoot::input_containment`] judges both.
+    /// of [`ProjectRoot::input_containment`] judges both. `dir` is `.` for
+    /// the project's own `package.json`. What is read is observed as
+    /// [`ProjectRoot::read_input`] observes it, under the same name
+    /// (`package.json`, `<dir>/package.json`), so a manifest that changes
+    /// between two reads of one operation is refused.
     pub(crate) fn read_member_manifest(&self, dir: &Path) -> io::Result<MemberManifest> {
+        let read = self.member_manifest_unobserved(dir)?;
+        let name = if dir == Path::new(".") {
+            PathBuf::from("package.json")
+        } else {
+            dir.join("package.json")
+        };
+        match &read {
+            MemberManifest::Read(bytes) => self.observe_input(&name, Some(bytes))?,
+            MemberManifest::Missing => self.observe_input(&name, None)?,
+            MemberManifest::Refused => {}
+        }
+        Ok(read)
+    }
+
+    fn member_manifest_unobserved(&self, dir: &Path) -> io::Result<MemberManifest> {
         let flags = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
         let member = match open_beneath(self.dir.as_raw_fd(), dir, flags) {
             Ok(member) => member,

@@ -118,7 +118,7 @@ fn read_manifests(project: &ProjectRoot, workspaces: &[String]) -> io::Result<Ve
         .map(|dir| {
             Ok(Manifest {
                 dir: dir.to_string(),
-                text: project.read_input_string(Path::new(&manifest_path(dir)))?,
+                text: inputs::read_manifest(project, Path::new(dir))?,
             })
         })
         .collect()
@@ -843,6 +843,52 @@ dependencies:
             &npm_plan("package-lock.json", &["packages/a", "packages/b"]),
         )
         .unwrap();
+    }
+
+    /// A member manifest npm's members check read as a regular file, then
+    /// swapped for a symlink to a host file before freshness reads it, is
+    /// never read: the outcome is the one fixed refusal whatever the host
+    /// file holds (dependency maps matching the lock, different ones, or
+    /// not JSON), never a stale-lock or parse message (#694, Sol round 7).
+    #[test]
+    fn a_member_manifest_swapped_for_a_host_file_is_the_fixed_refusal() {
+        let scratch = crate::kernel::testutil::TempDir::named("npm-fresh-swapped");
+        let root = scratch.0.join("project");
+        let lock = r#"{"lockfileVersion":3,"packages":{"":{"name":"p","workspaces":["packages/*"]},"node_modules/lib":{"resolved":"packages/lib","link":true},"packages/lib":{"name":"lib"}}}"#;
+        let project = npm_workspace(
+            &root,
+            r#"["packages/*"]"#,
+            &["packages/lib"],
+            "package-lock.json",
+            lock,
+        );
+        let plan = npm_plan("package-lock.json", &["packages/lib"]);
+        let _npm = node::npm_members::tests::fake_npm(&root, |_| vec!["packages/lib".to_string()]);
+        node::resolve::npm_manifest_named(&project).unwrap();
+        let manifest = root.join("packages/lib/package.json");
+        std::fs::remove_file(&manifest).unwrap();
+        std::os::unix::fs::symlink(scratch.0.join("host.json"), &manifest).unwrap();
+        let expected = format!(
+            "workspace members of {}/package.json could not be determined inside the project \
+             (workspaces [\"packages/*\"]); set {}=1 to see why, which can print host files",
+            root.display(),
+            node::npm_members::DEBUG_ENV
+        );
+        for host in [
+            r#"{"name":"lib"}"#,
+            r#"{"name":"lib","dependencies":{"secret":"1"}}"#,
+            "SECRET not json",
+        ] {
+            std::fs::write(scratch.0.join("host.json"), host).unwrap();
+            let held = ProjectRoot::open(&root).unwrap();
+            let read = read_manifests(&held, &plan.workspaces).map(|_| ());
+            assert_eq!(message(read), expected, "{host}");
+            assert_eq!(
+                message(check_lock_freshness(&held, &plan)),
+                expected,
+                "{host}"
+            );
+        }
     }
 
     /// A member renamed since the lock was written (its directory the same,

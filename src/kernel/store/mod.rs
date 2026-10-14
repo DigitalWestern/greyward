@@ -1977,6 +1977,66 @@ mod tests {
         assert_eq!(store.roots().unwrap().len(), 1);
     }
 
+    /// A registration that adds nothing leaves the record file as it is
+    /// (#746): same inode, same bytes, same `updated`. One that adds an
+    /// object replaces it with a new file holding the union.
+    #[test]
+    fn a_registration_that_adds_nothing_does_not_rewrite_the_record() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = temp_store();
+        let store = store_in(&temp);
+        let project = temp.0.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let held = crate::kernel::fsroot::ProjectRoot::open(&project).unwrap();
+        let first = format!("{}-first", "a".repeat(40));
+        let second = format!("{}-second", "b".repeat(40));
+        let forest = ProjectionRef::new(ProjectionBase::Forests, vec!["one".into()]).unwrap();
+        let file = store
+            .root
+            .join("roots")
+            .join(Store::root_key(&project).unwrap());
+
+        let written = store
+            .register_root_parts_locked(
+                &held,
+                BTreeSet::from([first.clone()]),
+                BTreeSet::from([forest.clone()]),
+            )
+            .unwrap();
+        let bytes = fs::read(&file).unwrap();
+        let inode = fs::metadata(&file).unwrap().ino();
+
+        let again = store
+            .register_root_parts_locked(
+                &held,
+                BTreeSet::from([first.clone()]),
+                BTreeSet::from([forest.clone()]),
+            )
+            .unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().ino(), inode);
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        assert_eq!(again.record, written.record);
+        assert_eq!(again.identity, written.identity);
+
+        let grown = store
+            .register_root_parts_locked(&held, BTreeSet::from([second.clone()]), BTreeSet::new())
+            .unwrap();
+        assert_ne!(fs::metadata(&file).unwrap().ino(), inode);
+        assert_eq!(
+            grown.record.unwrap().objects,
+            BTreeSet::from([first, second])
+        );
+        assert_eq!(
+            store
+                .read_root_entry_strict(&grown.key)
+                .unwrap()
+                .unwrap()
+                .identity,
+            grown.identity
+        );
+    }
+
     fn publish_bare(store: &Store, identity: &Identity) -> String {
         store.publish_bare_with(identity, |_| {})
     }

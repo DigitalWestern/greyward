@@ -315,6 +315,25 @@ impl Tailor for Go {
         checks
     }
 
+    /// A module path is compared whole and case-sensitively, without its
+    /// major version suffix (`/v2`, gopkg.in's `.v3`): one module's major
+    /// versions are one name.
+    fn popular(&self) -> Option<&'static crate::kernel::lookalike::Popular> {
+        static POPULAR: std::sync::OnceLock<crate::kernel::lookalike::Popular> =
+            std::sync::OnceLock::new();
+        Some(POPULAR.get_or_init(|| {
+            crate::kernel::lookalike::Popular::parse(include_str!("popular.txt"), |path| {
+                let major = path.rfind(['/', '.']).filter(|&at| {
+                    let tail = &path[at + 1..];
+                    tail.len() > 1
+                        && tail.starts_with('v')
+                        && tail[1..].bytes().all(|b| b.is_ascii_digit())
+                });
+                major.map_or(path, |at| &path[..at]).to_string()
+            })
+        }))
+    }
+
     fn sbom_components(&self, eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<()> {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "modules")? {

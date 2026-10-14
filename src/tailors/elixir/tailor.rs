@@ -365,6 +365,15 @@ impl Tailor for Elixir {
         )
     }
 
+    /// Hex names are lowercase already and compared as they are.
+    fn popular(&self) -> Option<&'static crate::kernel::lookalike::Popular> {
+        static POPULAR: std::sync::OnceLock<crate::kernel::lookalike::Popular> =
+            std::sync::OnceLock::new();
+        Some(POPULAR.get_or_init(|| {
+            crate::kernel::lookalike::Popular::parse(include_str!("popular.txt"), str::to_string)
+        }))
+    }
+
     fn sbom_components(&self, eco: &str, body: &Value, out: &mut Vec<Value>) -> io::Result<()> {
         let plan = body.get("plan").unwrap_or(body);
         for p in list(eco, plan, "deps")? {

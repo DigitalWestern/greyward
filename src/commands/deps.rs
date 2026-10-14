@@ -411,6 +411,9 @@ pub fn edit(
         let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
         let texts: Vec<String> = specs.iter().map(|spec| spec.text.clone()).collect();
         validate_delegate_specs(&texts)?;
+        if request.verb == Verb::Add {
+            warn_lookalikes(eco, &names);
+        }
         let specs: Vec<DepSpec> = specs
             .into_iter()
             .map(|spec| DepSpec {
@@ -445,6 +448,33 @@ pub fn edit(
         project: outcome_project,
         lines,
     })
+}
+
+/// `ward add` of a name one edit from a popular package's: say so before
+/// the manifest changes. The add goes ahead, and every sync of the lock
+/// records `lookalike-name` for it.
+fn warn_lookalikes(eco: Eco, names: &[String]) {
+    for (name, popular) in lookalike_warnings(eco.tailor, names) {
+        ui::warning(
+            &format!(
+                "{name} is one edit from popular package {popular}; check the name is the one you meant"
+            ),
+            &format!("ward remove {name}"),
+        );
+    }
+}
+
+fn lookalike_warnings(
+    tailor: &dyn crate::tailors::Tailor,
+    names: &[String],
+) -> Vec<(String, String)> {
+    let Some(popular) = tailor.popular() else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .filter_map(|name| Some((name.clone(), popular.lookalike(name)?.to_string())))
+        .collect()
 }
 
 fn reject_mixed_sync_roots(
@@ -727,5 +757,22 @@ mod tests {
         );
         let next = policy::Attribution::open("python").unwrap();
         drop(next);
+    }
+
+    /// `ward add` names the popular package a lookalike spec is one edit
+    /// from, by the registry's own normalization, and only those.
+    #[test]
+    fn an_added_lookalike_name_is_warned_about_by_its_popular_neighbour() {
+        let python = crate::tailors::by_id("python").unwrap();
+        let names = ["reqeusts", "Requests", "python_dateutil", "numpyy", "six"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            lookalike_warnings(python, &names),
+            [
+                ("reqeusts".to_string(), "requests".to_string()),
+                ("numpyy".to_string(), "numpy".to_string()),
+            ]
+        );
     }
 }

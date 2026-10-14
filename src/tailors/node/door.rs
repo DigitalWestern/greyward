@@ -334,6 +334,13 @@ pub(crate) fn node_confined<'a>(
     confined.exclude = vec![PathGlob::new("**/node_modules")?];
     let policy = run.policy.clone().unwrap_or_else(policy::effective);
     let sources = node_sources(&policy)?;
+    let project = match &run.cwd {
+        Some(cwd) => run.lock_root.join(cwd),
+        None => run.lock_root.to_path_buf(),
+    };
+    for dir in [run.lock_root, project.as_path()] {
+        check_npmrc_scopes(&policy, &sources.registry, &dir.join(".npmrc"))?;
+    }
     confined.routes = sources.routes;
     confined.permitted = sources.permitted;
     confined.intercept = Intercept::Tls;
@@ -341,10 +348,6 @@ pub(crate) fn node_confined<'a>(
     let kind = match &run.tool {
         NodeTool::Npm { .. } => Kind::Npm,
         NodeTool::Pnpm { .. } => Kind::Pnpm,
-    };
-    let project = match &run.cwd {
-        Some(cwd) => run.lock_root.join(cwd),
-        None => run.lock_root.to_path_buf(),
     };
     let lock_root = run.lock_root.to_path_buf();
     let flags = sources.registry;
@@ -354,6 +357,56 @@ pub(crate) fn node_confined<'a>(
     confined.policy = Some(policy);
     confined.publish(publish);
     Ok(confined)
+}
+
+/// In an enforced node list, refuse a `.npmrc` that points a scope ward's
+/// flags leave alone at a registry the list does not hold: the tool would
+/// ask that host, which the proxy refuses with less to go on. A listed
+/// scope's flag overrides the file, so its line is not read.
+fn check_npmrc_scopes(policy: &Policy, flags: &RegistryFlags, npmrc: &Path) -> io::Result<()> {
+    let sources = policy.registries.ecosystem(Ecosystem::Node);
+    if !sources.enforced {
+        return Ok(());
+    }
+    let text = match std::fs::read_to_string(npmrc) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(scope) = key.trim().strip_suffix(":registry") else {
+            continue;
+        };
+        if !scope.starts_with('@') || flags.scoped.iter().any(|(listed, _)| listed == scope) {
+            continue;
+        }
+        let url = value.trim().trim_matches('"');
+        let listed = sources
+            .registries()
+            .any(|registry| registries::lock::same_url(&registry.url, url))
+            || (sources.includes_public()
+                && registries::lock::same_url(registry::REGISTRY_URL, url));
+        if !listed {
+            return Err(crate::kernel::error::refused(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{}: {scope}:registry names {}, which is not a listed node registry; node allows [{}] ({})\nfix: remove the line, or have the machine policy list that registry with scopes = [\"{scope}\"]",
+                    npmrc.display(),
+                    crate::kernel::fetch::shown_url(url),
+                    sources.names(),
+                    sources.provenance()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -1985,6 +2038,41 @@ node = {sources}
         let mut merged = Policy::default();
         policy::merge_file(&mut merged, &other, policy::SourceOrigin::Machine, path).unwrap();
         merged
+    }
+
+    /// In an enforced list a `.npmrc` scope line must name a listed
+    /// registry, unless ward's own flag for that scope overrides it.
+    #[test]
+    fn npmrc_scope_lines_must_name_a_listed_registry() {
+        let dir = crate::kernel::testutil::TempDir::new();
+        let npmrc = dir.0.join(".npmrc");
+        let check = |policy: &Policy, text: &str| {
+            fs::write(&npmrc, text).unwrap();
+            let sources = node_sources(policy).unwrap();
+            check_npmrc_scopes(policy, &sources.registry, &npmrc)
+        };
+        let corp = with_sources(r#"["corp-scoped", "corp-npm"]"#);
+        let error = check(&corp, "@other:registry=https://evil.example/npm/\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("@other:registry"), "{error}");
+        assert!(error.contains("fix:"), "{error}");
+        for text in [
+            "@corp:registry=https://elsewhere.example/\n",
+            "@other:registry=https://NEXUS.corp.example/repository/npm\n",
+            "# @other:registry=https://evil.example/\nfund=false\n",
+        ] {
+            check(&corp, text).unwrap();
+        }
+        let error = check(&corp, "@other:registry=https://registry.npmjs.org/\n").unwrap_err();
+        assert!(error.to_string().contains("not a listed node registry"));
+        let public = with_sources(r#"["corp-npm", "public"]"#);
+        check(&public, "@other:registry=https://registry.npmjs.org/\n").unwrap();
+        check(
+            &Policy::default(),
+            "@other:registry=https://evil.example/npm/\n",
+        )
+        .unwrap();
     }
 
     /// The default registry is the first unscoped entry, each scope gets

@@ -231,9 +231,7 @@ fn build_toolchain_plan(python_version: &str) -> io::Result<Plan> {
     for (name, version, filename, url, sha) in BUILD_TOOLCHAIN {
         let url = match mirror {
             None => url.to_string(),
-            Some(registry) => {
-                bootstrap_url(&policy.registries, registry, name, filename, sha)?
-            }
+            Some(registry) => bootstrap_url(&policy.registries, registry, name, filename, sha)?,
         };
         packages.push(LockedPackage {
             index: None,

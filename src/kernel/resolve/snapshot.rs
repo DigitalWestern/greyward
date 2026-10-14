@@ -216,6 +216,7 @@ impl Snapshot {
         activity: &StoreActivity,
         spec: &SnapshotSpec<'_>,
     ) -> io::Result<Snapshot> {
+        let _t = crate::kernel::ui::phase("snapshot");
         store.require_activity(activity, "resolution snapshot")?;
         let (reals, lock_root) = normalize_roots(spec.lock_root.path(), spec.extra_roots)?;
         let stage = create_private_dir(&store.root.join("tmp"), "resolve")?;

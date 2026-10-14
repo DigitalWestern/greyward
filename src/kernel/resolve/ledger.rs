@@ -348,6 +348,7 @@ pub fn commit(
     ledger: &PortableLedger,
     diagnostics: &Diagnostics,
 ) -> io::Result<LedgerObjects> {
+    let _t = crate::kernel::ui::phase("ledger commit");
     let ledger_id = commit_file(
         store,
         activity,

@@ -71,6 +71,7 @@ pub fn realize_runtime(
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
+    let _t = crate::kernel::ui::phase("toolchain python");
     crate::tailors::install_kinds();
     crate::kernel::provider::cpython::realize_runtime(store, activity, platform, selected)
 }
@@ -82,6 +83,7 @@ pub fn realize_uv(
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
+    let _t = crate::kernel::ui::phase("toolchain uv");
     crate::tailors::install_kinds();
     crate::kernel::provider::cpython::realize_uv(store, activity, platform, selected)
 }

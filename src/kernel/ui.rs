@@ -564,7 +564,7 @@ fn shell_word(word: &str) -> String {
 /// adds it to the row of that name. A phase opened while another is open
 /// on the same thread is nested under it, and the table shows it indented
 /// under its parent, already counted there. A thread of a pool starts its
-/// phases under the caller's with [`current_phase`]. Without `--verbose`
+/// phases under the caller's with `current_phase`. Without `--verbose`
 /// the guard is inert: no clock is read and nothing is recorded.
 static PHASES: PhaseLog = PhaseLog::new();
 /// When `init` turned `--verbose` on: the table's "total" row runs from
@@ -699,11 +699,14 @@ pub fn timed<T>(name: &str, job: impl FnOnce() -> T) -> T {
 
 /// The phase open on this thread, to open phases under from another
 /// thread: a pool worker's `parent.phase("artifact fetch")` is a child of
-/// the phase that started the pool, not a second top-level row.
+/// the phase that started the pool, not a second top-level row. Test-only
+/// until the parallel download pool (#745) is its first caller.
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct PhaseParent(Option<Vec<String>>);
 
 /// The phase open on this thread, for [`PhaseParent::phase`].
+#[cfg(test)]
 pub fn current_phase() -> PhaseParent {
     if !verbose() {
         return PhaseParent(None);
@@ -711,6 +714,7 @@ pub fn current_phase() -> PhaseParent {
     PhaseParent(Some(OPEN_PHASE.with(|open| open.borrow().clone())))
 }
 
+#[cfg(test)]
 impl PhaseParent {
     /// Time the rest of the caller's scope as `name`, nested under the
     /// phase this was taken from, on whatever thread calls it.

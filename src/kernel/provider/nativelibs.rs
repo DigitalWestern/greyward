@@ -9,7 +9,7 @@
 
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::archive::{ZipReader, MAX_ARCHIVE_BYTES};
-use crate::kernel::fetch::{download_verified_held, Digest as FetchDigest};
+use crate::kernel::fetch::{download_toolchain_artifact_held, Digest as FetchDigest};
 use crate::kernel::platform::{no_pin, Platform};
 use crate::kernel::store::Store;
 use crate::kernel::types::Identity;
@@ -22,6 +22,8 @@ use std::process::Command;
 
 pub const NATIVE_LIBS_VERSION: &str = "3";
 const CONDA_BASE: &str = "https://conda.anaconda.org/conda-forge";
+/// The `SourcePolicy` publisher every package below is fetched under.
+const CONDA_PUBLISHER: &str = "conda-forge";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativePackage {
@@ -623,13 +625,22 @@ fn realize_staged(
 ) -> io::Result<()> {
     let mut placeholders = Vec::new();
     for (index, package) in packages.iter().enumerate() {
-        let archive = download_verified_held(store, activity, &package.url(), package.sha256)
-            .map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("fetch native package {}: {e}", package.filename),
-                )
-            })?;
+        // A toolchain download: the source policy authorizes the URL (and
+        // every redirect) for the conda-forge publisher before the cache or
+        // the network is touched, as it does for every catalog row.
+        let archive = download_toolchain_artifact_held(
+            store,
+            activity,
+            CONDA_PUBLISHER,
+            &package.url(),
+            &FetchDigest::sha256(package.sha256)?,
+        )
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("fetch native package {}: {e}", package.filename),
+            )
+        })?;
         let package_root = package_work.join(format!("{index}-payload"));
         let info_root = package_work.join(format!("{index}-info"));
         fs::create_dir_all(&package_root)?;
@@ -1497,6 +1508,29 @@ mod tests {
 
     fn temp_dir(label: &str) -> TempDir {
         TempDir::named(&format!("native-{label}"))
+    }
+
+    /// Issue #699. The native-library archives are toolchain downloads: the
+    /// shipped source policy authorizes every pinned URL for the conda-forge
+    /// publisher, and an operator policy without that publisher refuses
+    /// them before the cache or the network is touched.
+    #[test]
+    fn every_pinned_package_is_fetched_under_the_conda_forge_publisher() {
+        use crate::kernel::toolchain::SourcePolicy;
+        let shipped = SourcePolicy::shipped();
+        for package in LINUX_NATIVE_PACKAGES {
+            let authorized = shipped
+                .authorize(CONDA_PUBLISHER, &package.url())
+                .unwrap_or_else(|error| panic!("{}: {error}", package.filename));
+            assert_eq!(authorized.publisher, "conda-forge");
+        }
+        let url = LINUX_NATIVE_PACKAGES[0].url();
+        let refused = SourcePolicy::empty()
+            .authorize(CONDA_PUBLISHER, &url)
+            .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        // Another publisher's endpoints do not cover conda-forge's files.
+        assert!(shipped.authorize("nodejs.org", &url).is_err());
     }
 
     /// A `.conda` member and the tar zstd writes from it each stop at the

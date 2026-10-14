@@ -128,32 +128,27 @@ fn sdk_fingerprint_of(spec: &SdkSpec) -> String {
     hex::encode(&Sha256::digest(spec.sha512.as_bytes())[..8])
 }
 
-fn nuget_identity(
-    plan: &DotnetPlan,
-    sdk_id: &str,
-    raw_hashes: &BTreeMap<String, String>,
-) -> io::Result<Identity> {
+/// The global-packages object's identity: the restoring SDK and each
+/// package's lock contentHash, all known before any download, so a stored
+/// object syncs offline and a nuget.org re-sign (new raw sha256, same
+/// contentHash) keeps it. Raw sha256s are evidence only (cache_digest).
+/// `nuget-packages/1` keyed on them and checked the store only after every
+/// download; its objects are not reused (one restore each, then GC).
+fn nuget_identity(plan: &DotnetPlan, sdk_id: &str) -> Identity {
     let mut inputs = BTreeMap::from([
-        ("schema".to_string(), "nuget-packages/1".to_string()),
+        ("schema".to_string(), "nuget-packages/2".to_string()),
         ("extractor".to_string(), sdk_id.to_string()),
     ]);
     for p in &plan.packages {
         let key = format!("{}@{}", p.id.to_ascii_lowercase(), p.version);
         inputs.insert(format!("pkg:{key}"), p.content_hash.clone());
-        inputs.insert(
-            format!("raw:{key}"),
-            raw_hashes
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| err(format!("missing raw hash for {key}")))?,
-        );
     }
-    Ok(Identity {
+    Identity {
         kind: "nuget-packages".into(),
         name: "packages".into(),
         version: plan.packages.len().to_string(),
         inputs,
-    })
+    }
 }
 
 /// A spec straight from the compiled pin table: the catalog's own rows, and
@@ -193,11 +188,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         packages: vec![package],
         ..empty_plan.clone()
     };
-    let raw_hashes = BTreeMap::from([(String::from("newtonsoft.json@13.0.3"), "a".repeat(64))]);
-    let nuget_empty = nuget_identity(&empty_plan, &sdk.object_id(), &BTreeMap::new())
-        .expect("empty NuGet identity");
-    let nuget_package = nuget_identity(&package_plan, &sdk.object_id(), &raw_hashes)
-        .expect("NuGet package identity");
+    let nuget_empty = nuget_identity(&empty_plan, &sdk.object_id());
+    let nuget_package = nuget_identity(&package_plan, &sdk.object_id());
     vec![sdk, nuget_empty, nuget_package]
 }
 
@@ -496,12 +488,10 @@ fn validate_plan(plan: &DotnetPlan, sdk_version: &str) -> io::Result<()> {
         if !valid_id(&p.id) || !valid_id(&p.version) {
             return Err(err(format!("invalid package coordinates: {p:?}")));
         }
-        // contentHash: base64 sha512 (88 chars with padding).
-        if p.content_hash.len() > 100
-            || !p
-                .content_hash
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b))
+        // contentHash: base64 sha512, 88 characters with padding. It is
+        // the packages object's identity input, so nothing else will do.
+        if p.content_hash.len() != 88
+            || crate::kernel::base64::decode(&p.content_hash).map(|bytes| bytes.len()) != Some(64)
         {
             return Err(err(format!("{}: invalid contentHash", p.id)));
         }
@@ -1020,37 +1010,46 @@ pub fn realize_packages(
     let spec = sdk_spec(platform, selected)?;
     validate_plan(plan, &spec.version)?;
     let sdk_obj = sdk_obj.canonicalize()?;
+    let sdk_id = sdk_obj
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| err("pinned SDK object has no UTF-8 store id"))?
+        .to_string();
+    // The store check comes before any download: the identity is the
+    // lock's contentHashes and the SDK, so a project whose packages are
+    // already restored syncs and builds with the network cut.
+    let identity = nuget_identity(plan, &sdk_id);
+    let id = identity.object_id();
+    if store.has_with_activity(activity, &id)? {
+        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
+        return Ok(store.object_path(&id));
+    }
     // Fetch every nupkg (nuget.org flatcontainer only in v0). No upfront
     // per-file hash exists (contentHash is semantic): download to tmp,
     // record raw sha256 via cache_insert, verify semantically below.
     let scratch = store.stage_with_activity(activity)?;
     let feed = scratch.join("feed");
     fs::create_dir_all(&feed)?;
-    let mut raw_hashes = BTreeMap::new();
+    let mut raw_hashes = Vec::new();
     for p in &plan.packages {
         let idl = p.id.to_ascii_lowercase();
         let verl = p.version.to_ascii_lowercase();
         let url = format!("https://api.nuget.org/v3-flatcontainer/{idl}/{verl}/{idl}.{verl}.nupkg");
         let tmp = scratch.join(format!("{idl}.{verl}.nupkg"));
-        crate::kernel::fetch::download_unpinned(&url, &tmp, 1 << 30)
-            .map_err(|e| err(format!("{}: {e}", p.id)))?;
-        let (raw_sha256, _) = cache_insert(store, activity, &tmp)?;
-        raw_hashes.insert(format!("{}@{}", idl, p.version), raw_sha256);
-        fs::rename(&tmp, feed.join(format!("{idl}.{verl}.nupkg")))?;
-    }
-
-    let sdk_id = sdk_obj
-        .canonicalize()?
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| err("pinned SDK object has no UTF-8 store id"))?
-        .to_string();
-    let identity = nuget_identity(plan, &sdk_id, &raw_hashes)?;
-    let id = identity.object_id();
-    if store.has_with_activity(activity, &id)? {
-        crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        return Ok(store.object_path(&id));
+        let fetched = crate::kernel::fetch::download_unpinned(&url, &tmp, 1 << 30)
+            .map_err(|e| err(format!("{}: {e}", p.id)))
+            .and_then(|_| cache_insert(store, activity, &tmp))
+            .and_then(|(raw_sha256, _)| {
+                fs::rename(&tmp, feed.join(format!("{idl}.{verl}.nupkg")))?;
+                Ok(raw_sha256)
+            });
+        match fetched {
+            Ok(raw_sha256) => raw_hashes.push(raw_sha256),
+            Err(e) => {
+                let _ = crate::kernel::store::remove_tree(&scratch);
+                return Err(e);
+            }
+        }
     }
 
     // Locked-mode restore from a synthetic project into the staged folder:
@@ -1131,7 +1130,7 @@ pub fn realize_packages(
     let _ = crate::kernel::store::remove_tree(&scratch);
     let mut deps = crate::kernel::store::ObjectDeps::new();
     deps.object_id(&crate::kernel::store::object_id_from_path(&sdk_obj)?)?;
-    for raw_sha256 in raw_hashes.values() {
+    for raw_sha256 in &raw_hashes {
         deps.cache_digest(Digest::sha256(raw_sha256)?);
     }
     store
@@ -2107,7 +2106,7 @@ mod tests {
         let base = NugetPackage {
             id: "Newtonsoft.Json".into(),
             version: "13.0.4".into(),
-            content_hash: "A".repeat(88),
+            content_hash: CONTENT_HASH.into(),
         };
         let ok = DotnetPlan {
             sdk_version: SDK_VERSION.into(),
@@ -2148,16 +2147,89 @@ mod tests {
             SDK_VERSION
         )
         .is_err());
-        let mut bad = base.clone();
-        bad.content_hash = "not/base64\n".into();
-        assert!(validate_plan(
-            &DotnetPlan {
-                packages: vec![bad],
-                ..ok.clone()
-            },
-            SDK_VERSION
-        )
-        .is_err());
+        // contentHash is the packages object's identity input, so only a
+        // base64 sha512 passes: 88 characters that decode to 64 bytes. An
+        // empty value, a truncated one, 88 characters of something longer,
+        // and anything not base64 are refused.
+        for content_hash in [
+            String::new(),
+            "not/base64\n".to_string(),
+            CONTENT_HASH[..87].to_string(),
+            "A".repeat(88),
+            format!("{}A=", &CONTENT_HASH[..86]),
+            CONTENT_HASH.replace('/', "_"),
+        ] {
+            let mut bad = base.clone();
+            bad.content_hash = content_hash.clone();
+            let error = validate_plan(
+                &DotnetPlan {
+                    packages: vec![bad],
+                    ..ok.clone()
+                },
+                SDK_VERSION,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("invalid contentHash"),
+                "{content_hash:?}: {error}"
+            );
+        }
+    }
+
+    /// The real contentHash of Newtonsoft.Json 13.0.3 (the dotnet-hello
+    /// fixture's lock).
+    const CONTENT_HASH: &str =
+        "pdgNNMai3zv51W5aq268sujXUyx7SNdE2bj1wZcWjAQrKMFZV260lbqYop1d2GM67JI1huLRwxo9ZqnfF/lC6A==";
+
+    /// Issue #696. The packages object's identity is known before any
+    /// download: the SDK object and each package's lock contentHash, and
+    /// nothing a download produces. So the store check can run first, and a
+    /// re-signed nupkg (new raw bytes, same contentHash) keeps its object.
+    /// The golden pins `nuget-packages/2`; a change to it orphans every
+    /// restored packages object.
+    #[test]
+    fn the_packages_identity_is_the_lock_and_the_sdk() {
+        crate::tailors::install_kinds();
+        let plan = |content_hash: &str| DotnetPlan {
+            sdk_version: SDK_VERSION.into(),
+            project: "app.csproj".into(),
+            targets: vec!["net9.0".into()],
+            packages: vec![NugetPackage {
+                id: "Newtonsoft.Json".into(),
+                version: "13.0.3".into(),
+                content_hash: content_hash.into(),
+            }],
+        };
+        let sdk = sdk_identity(&pin_spec(Platform::X86_64UnknownLinuxGnu)).object_id();
+        let identity = nuget_identity(&plan(CONTENT_HASH), &sdk);
+        assert_eq!(
+            identity.inputs.keys().collect::<Vec<_>>(),
+            ["extractor", "pkg:newtonsoft.json@13.0.3", "schema"]
+        );
+        assert_eq!(identity.inputs["schema"], "nuget-packages/2");
+        assert_eq!(identity.inputs["extractor"], sdk);
+        assert_eq!(identity.inputs["pkg:newtonsoft.json@13.0.3"], CONTENT_HASH);
+        assert_eq!(identity.version, "1");
+        assert_eq!(
+            crate::kernel::objmeta::check_identity_grammar(&identity),
+            Ok(())
+        );
+        assert_eq!(
+            identity.object_id(),
+            "e21a9a1f5cc45a98c9030a867aba71d317ecfb3e-packages-1"
+        );
+        // Another contentHash or another SDK is another object.
+        let other = format!("{}Q==", &CONTENT_HASH[..85]);
+        assert_ne!(other, CONTENT_HASH);
+        assert_ne!(
+            nuget_identity(&plan(&other), &sdk).object_id(),
+            identity.object_id()
+        );
+        assert_ne!(
+            nuget_identity(&plan(CONTENT_HASH), "other-sdk").object_id(),
+            identity.object_id()
+        );
     }
 
     #[test]

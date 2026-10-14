@@ -74,7 +74,8 @@ Releases are built by
 [.github/workflows/release.yml](.github/workflows/release.yml) on a `v*`
 tag, for Linux x86_64 only (macOS arm64 waits on the macOS gate in FOLLOW-UPS.md). On Linux x86_64
 this is one line. It downloads the release binary for your machine, checks
-its sha256, puts it in `~/.local/bin`, adds that directory to PATH if it is
+its sha256 and its signature by Greyward's release key (with `openssl`, 3.0 or
+newer), runs it once, puts it in `~/.local/bin`, adds that directory to PATH if it is
 not already there, and installs bash, zsh, and fish completions:
 
 ```sh
@@ -85,7 +86,13 @@ Every new terminal has `ward` from then on. A script cannot change the
 PATH of the terminal that ran it, so it ends by printing the one command
 that finishes the job there (`source ~/.greyward/env`). It also prints where the
 store is and roughly how big it gets, and names the version it replaced when
-one was already there. Options: `--dir=<path>`, `--version=<tag>`,
+one was already there. The latest release is the tag named in its
+`LATEST` asset, which carries the release key's signature like the
+archive does. The new binary must run and report the release's
+own version before it replaces the old one, and a `ward` newer than the
+latest release, or one whose `--version` is not the one line
+`ward <version>`, is left alone unless `--version` names a release (an
+older one is reported as a downgrade). Options: `--dir=<path>`, `--version=<tag>`,
 `--no-modify-path`, `--no-completions`; the header of
 [install.sh](install.sh) lists every file it touches.
 
@@ -107,7 +114,8 @@ ward update --self
 
 It reads the newest release from GitHub, stops when this build already is
 that version, and otherwise downloads the binary for your machine, checks
-the sha256 the release publishes, and renames it over the running one. It
+the sha256 the release publishes and the release key's signature (whose
+public half is compiled in), runs it once, and renames it over the running one. It
 refuses, naming the directory, when that directory is not writable. `ward
 doctor` says when a newer release exists (one request; "not checked" when
 offline, or while no release can be read; an `ok` row naming this machine

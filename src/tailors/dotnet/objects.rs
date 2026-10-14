@@ -15,48 +15,34 @@ pub static KINDS: &[ObjectKind] = &[
     },
     ObjectKind {
         kind: "nuget-packages",
-        schema: Some("nuget-packages/1"),
+        schema: Some("nuget-packages/2"),
         live_required: &["schema", "extractor"],
-        live_optional: &["pkg:", "raw:"],
+        live_optional: &["pkg:"],
         live_contract: Some(nuget_package_contract),
     },
 ];
 
+/// `nuget-packages/2` keys each package on its lock contentHash alone (the
+/// raw download sha256 `/1` also keyed on is a cache dependency now, not an
+/// input), so the one relation left is the count: `identity.version` is the
+/// number of `pkg:` inputs. Empty restore plans are legitimate and record
+/// zero.
 fn nuget_package_contract(identity: &Identity) -> Result<(), String> {
-    let inputs = &identity.inputs;
-    // Empty restore plans are legitimate. The producer records zero in
-    // identity.version, and every package contributes one pkg:/raw: pair.
     let pkg = identity
         .inputs
         .keys()
         .filter(|key| key.starts_with("pkg:"))
         .count();
-    let raw = identity
-        .inputs
-        .keys()
-        .filter(|key| key.starts_with("raw:"))
-        .count();
     let version = identity.version.parse::<usize>().map_err(|_| {
         format!(
-            "NuGet package count/version relation; NuGet pkg/raw relation: version {:?} is not a count for {pkg} pkg:/raw: pairs",
+            "NuGet package count/version relation: version {:?} is not a count for {pkg} pkg: inputs",
             identity.version
         )
     })?;
-    if pkg != raw || version != pkg {
+    if version != pkg {
         return Err(format!(
-            "NuGet package count/version relation; NuGet pkg/raw relation: version {version}, pkg: count {pkg}, raw: count {raw}"
+            "NuGet package count/version relation: version {version}, pkg: count {pkg}"
         ));
-    }
-    for (prefix, sibling) in [("pkg:", "raw:"), ("raw:", "pkg:")] {
-        for key in inputs.keys().filter(|key| key.starts_with(prefix)) {
-            let suffix = &key[prefix.len()..];
-            let sibling_key = format!("{sibling}{suffix}");
-            if !inputs.contains_key(&sibling_key) {
-                return Err(format!(
-                    "NuGet pkg/raw relation: {key} requires {sibling_key}"
-                ));
-            }
-        }
     }
     Ok(())
 }

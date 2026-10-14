@@ -153,7 +153,7 @@ def without_github_digest(net, repo, name):
 
 def run_quietly(eco, check):
     """`catalog.run` on the catalog under `catalog.REPO`: (ok, what it printed)."""
-    args = type("Args", (), {"check": check, "set_default": None})()
+    args = type("Args", (), {"check": check, "set_default": None, "against": None})()
     with contextlib.redirect_stdout(io.StringIO()) as out:
         ok = catalog.run(eco, args)
     return ok, out.getvalue()
@@ -421,7 +421,7 @@ class Ruby(Base):
         text = catalog.render("ruby", "ruby-3.4.6", list(first.values()))
         with open(path, "w") as f:
             f.write(text)
-        args = type("Args", (), {"check": True, "set_default": None})()
+        args = type("Args", (), {"check": True, "set_default": None, "against": None})()
         self.assertTrue(catalog.run("ruby", args))
         self.publish("3.4.6_1")
         self.assertFalse(catalog.run("ruby", args))
@@ -786,6 +786,144 @@ class Go(Base):
         self.assertIn('default = "go-1.26.3"', now)
         self.assertIn('key = "go-1.26.4"', now)
         self.assertIn(text[text.index('\n[[release]]'):], now)
+
+
+class Against(Base):
+    """`--against REF`, heavy.yml's check of a pull request's catalogs:
+    append-only against REF, every checked-in row verified upstream. Go's
+    fake upstream stands in for every ecosystem's."""
+
+    ALL, SUPPORTED = Go.ALL, Go.SUPPORTED
+    publish = Go.publish
+    expected = Go.expected
+    archive = staticmethod(Go.archive)
+
+    def setUp(self):
+        super().setUp()
+        self.all, self.supported = [], []
+        self.root = self.scratch.name
+        catalog.REPO = self.root
+        self.git("init", "-q")
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", self.root, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
+
+    def ship(self, releases, default=None):
+        path = os.path.join(self.root, catalog.FILES["go"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(catalog.render("go", default or releases[0]["key"], releases))
+
+    def base(self, *versions):
+        """A base revision shipping `versions`; its id."""
+        self.ship([self.expected(v) for v in versions])
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+        return subprocess.run(["git", "-C", self.root, "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def against(self, ref, eco="go"):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ok = catalog.run_against(eco, ref)
+        return ok, out.getvalue()
+
+    def test_an_added_release_that_upstream_publishes_passes(self):
+        self.publish("1.26.3")
+        self.publish("1.26.4")
+        ref = self.base("1.26.3")
+        self.ship([self.expected("1.26.4"), self.expected("1.26.3")])
+        ok, out = self.against(ref)
+        self.assertTrue(ok, out)
+        self.assertIn("1 added since", out)
+        self.assertIn("+ go-1.26.4", out)
+
+    def test_an_upstream_release_the_catalog_does_not_ship_yet_does_not_fail_it(self):
+        self.publish("1.26.3")
+        self.publish("1.26.4")
+        self.publish("1.26.5")
+        ref = self.base("1.26.3")
+        self.ship([self.expected("1.26.4"), self.expected("1.26.3")])
+        ok, out = self.against(ref)
+        self.assertTrue(ok, out)
+        self.assertIn("upstream also publishes go-1.26.5", out)
+        # --check, the weekly drift check, does fail on it.
+        self.assertFalse(run_quietly("go", check=True)[0])
+
+    def test_a_removed_release_fails(self):
+        self.publish("1.26.3")
+        self.publish("1.26.4")
+        ref = self.base("1.26.4", "1.26.3")
+        self.ship([self.expected("1.26.4")])
+        with self.assertRaisesRegex(catalog.Failure, r"go-1\.26\.3: removed"):
+            self.against(ref)
+
+    def test_a_changed_release_fails_even_when_upstream_agrees(self):
+        self.publish("1.26.3")
+        ref = self.base("1.26.3")
+        # Upstream re-published the archive; the shipped row still may not move.
+        name = self.archive("1.26.3", LINUX)
+        moved = self.expected("1.26.3")
+        moved["artifacts"][1]["digest"] = "sha256:" + sha256(b"re-published")
+        for entry in self.all:
+            for f in entry["files"]:
+                if f["filename"] == name:
+                    f["sha256"] = sha256(b"re-published")
+        self.net.json(self.ALL, self.all)
+        self.net.bodies[f"https://dl.google.com/go/{name}.sha256"] = sha256(b"re-published")
+        self.ship([moved])
+        with self.assertRaisesRegex(catalog.Failure, r"go-1\.26\.3: changed"):
+            self.against(ref)
+
+    def test_an_added_row_upstream_does_not_publish_fails(self):
+        self.publish("1.26.3")
+        self.publish("1.26.4")
+        ref = self.base("1.26.3")
+        forged = self.expected("1.26.4")
+        forged["artifacts"][1]["digest"] = "sha256:" + sha256(b"someone else's build")
+        self.ship([forged, self.expected("1.26.3")])
+        with self.assertRaisesRegex(catalog.Failure, r"go-1\.26\.4: the checked-in row no longer matches"):
+            self.against(ref)
+
+    def test_a_hand_edited_spelling_fails(self):
+        self.publish("1.26.3")
+        self.publish("1.26.4")
+        ref = self.base("1.26.3")
+        self.ship([self.expected("1.26.4"), self.expected("1.26.3")])
+        path = os.path.join(self.root, catalog.FILES["go"])
+        with open(path, "a") as f:
+            f.write("# a note\n")
+        ok, out = self.against(ref)
+        self.assertFalse(ok)
+        self.assertIn("regenerate it", out)
+
+    def test_a_repeated_key_fails(self):
+        self.publish("1.26.3")
+        ref = self.base("1.26.3")
+        self.ship([self.expected("1.26.3"), self.expected("1.26.3")])
+        with self.assertRaisesRegex(catalog.Failure, r"go-1\.26\.3: listed twice"):
+            self.against(ref)
+
+    def test_an_unchanged_catalog_asks_upstream_nothing(self):
+        ref = self.base("1.26.3")
+        ok, out = self.against(ref)
+        self.assertTrue(ok)
+        self.assertIn("unchanged", out)
+        self.assertEqual(self.net.requests, [])
+
+    def test_a_new_catalog_is_all_added_and_a_deleted_one_fails(self):
+        self.publish("1.26.3")
+        ref = self.base("1.26.3")
+        ok, out = self.against(ref, eco="dotnet")
+        self.assertTrue(ok, out)  # neither revision has one
+        os.remove(os.path.join(self.root, catalog.FILES["go"]))
+        with self.assertRaisesRegex(catalog.Failure, "is gone"):
+            self.against(ref)
+
+    def test_an_unknown_revision_fails(self):
+        self.base("1.26.3")
+        with self.assertRaisesRegex(catalog.Failure, "no git revision"):
+            self.against("no-such-branch")
 
 
 class Node(Base):

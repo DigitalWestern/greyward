@@ -33,10 +33,17 @@ pub struct CredentialRef {
 /// One authorized URL prefix: an `https://` origin plus an optional path
 /// prefix, so a policy can admit `https://github.com/astral-sh/uv/` without
 /// admitting every repository on that host.
+///
+/// A `redirect_only` endpoint is reached only by a redirect from one of the
+/// same publisher's other endpoints, never named as the first hop: GitHub's
+/// asset CDN serves every repository's release files under URLs that do not
+/// say which repository they belong to, so a lock or catalog row naming one
+/// directly could not be reviewed for its publisher (#699).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
     pub base: String,
     pub credential: Option<CredentialRef>,
+    pub redirect_only: bool,
 }
 
 impl Endpoint {
@@ -46,6 +53,15 @@ impl Endpoint {
         Ok(Endpoint {
             base: base.into(),
             credential: None,
+            redirect_only: false,
+        })
+    }
+
+    /// An anonymous endpoint only a redirect may reach (see [`Endpoint`]).
+    pub fn redirect_target(base: &str) -> io::Result<Endpoint> {
+        Ok(Endpoint {
+            redirect_only: true,
+            ..Endpoint::new(base)?
         })
     }
 
@@ -185,17 +201,23 @@ impl SourcePolicy {
     /// Defaults an operator may replace; not a validity rule for locks.
     pub fn shipped() -> SourcePolicy {
         let mut policy = SourcePolicy::empty();
-        // A GitHub release download redirects to the asset CDN; both hops
-        // are the same publisher's endpoints.
+        // A GitHub release download redirects to the asset CDN. The CDN is
+        // the same publisher's endpoint only as that redirect's target: a
+        // row or lock must name the repository's own release URL.
         let github_publisher = |policy: &mut SourcePolicy, id: &str, repo: &str| {
-            let bases = [
-                format!("https://github.com/{repo}/releases/download/"),
-                "https://objects.githubusercontent.com/".to_string(),
-                "https://release-assets.githubusercontent.com/".to_string(),
-            ];
-            for base in bases {
+            let release = format!("https://github.com/{repo}/releases/download/");
+            policy
+                .allow(id, Endpoint::new(&release).expect("shipped endpoint"))
+                .expect("shipped publisher");
+            for cdn in [
+                "https://objects.githubusercontent.com/",
+                "https://release-assets.githubusercontent.com/",
+            ] {
                 policy
-                    .allow(id, Endpoint::new(&base).expect("shipped endpoint"))
+                    .allow(
+                        id,
+                        Endpoint::redirect_target(cdn).expect("shipped endpoint"),
+                    )
                     .expect("shipped publisher");
             }
         };
@@ -227,6 +249,9 @@ impl SourcePolicy {
                 "builds.dotnet.microsoft.com",
                 "https://builds.dotnet.microsoft.com/dotnet/",
             ),
+            // The native-library closure Python wheels link against
+            // (`kernel::provider::nativelibs`).
+            ("conda-forge", "https://conda.anaconda.org/conda-forge/"),
         ] {
             policy
                 .allow(id, Endpoint::new(base).expect("shipped endpoint"))
@@ -291,11 +316,33 @@ impl SourcePolicy {
         Ok(())
     }
 
-    /// May `url` be fetched on behalf of `publisher`? Only `https://` URLs
-    /// under one of that publisher's endpoints; `file://`, `http://` and
-    /// any other publisher's endpoint refuse before any network activity.
-    /// Call it again for every redirect `Location`.
+    /// May `url` be fetched on behalf of `publisher` as the first hop: the
+    /// URL a catalog row or lock names? Only `https://` URLs under one of
+    /// that publisher's endpoints that is not redirect-only; `file://`,
+    /// `http://` and any other publisher's endpoint refuse before any
+    /// network activity. Every redirect `Location` after it goes through
+    /// [`SourcePolicy::authorize_redirect`].
     pub fn authorize<'a>(&'a self, publisher: &str, url: &str) -> io::Result<Authorized<'a>> {
+        self.authorize_hop(publisher, url, false)
+    }
+
+    /// May a redirect from one of `publisher`'s endpoints lead to `url`? The
+    /// same rule as [`SourcePolicy::authorize`], with the publisher's
+    /// redirect-only endpoints (GitHub's asset CDN) admitted too.
+    pub fn authorize_redirect<'a>(
+        &'a self,
+        publisher: &str,
+        url: &str,
+    ) -> io::Result<Authorized<'a>> {
+        self.authorize_hop(publisher, url, true)
+    }
+
+    fn authorize_hop<'a>(
+        &'a self,
+        publisher: &str,
+        url: &str,
+        redirected: bool,
+    ) -> io::Result<Authorized<'a>> {
         let refuse = |why: &str| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -313,15 +360,27 @@ impl SourcePolicy {
         let Some(found) = self.publisher(publisher) else {
             return Err(refuse("no such publisher in the effective policy"));
         };
-        found
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.covers(url))
-            .map(|endpoint| Authorized {
+        let covering = || {
+            found
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.covers(url))
+        };
+        if let Some(endpoint) = covering().find(|endpoint| redirected || !endpoint.redirect_only) {
+            return Ok(Authorized {
                 publisher: &found.id,
                 endpoint,
-            })
-            .ok_or_else(|| refuse("not under any endpoint authorized for this publisher"))
+            });
+        }
+        if covering().next().is_some() {
+            return Err(refuse(
+                "that endpoint is only a redirect target for this publisher (its URLs do not \
+                 name the repository they belong to); name the publisher's own release URL",
+            ));
+        }
+        Err(refuse(
+            "not under any endpoint authorized for this publisher",
+        ))
     }
 }
 
@@ -457,17 +516,43 @@ mod tests {
         assert!(Endpoint::with_credential("https://x.example/", "").is_err());
     }
 
+    /// Issue #699. GitHub release downloads redirect to the asset CDN; the
+    /// shipped publisher admits that hop under the same publisher, but only
+    /// as a redirect. A row or lock naming a CDN URL directly is refused:
+    /// the URL does not say which repository the asset belongs to.
     #[test]
-    fn shipped_github_publishers_admit_the_asset_cdn_hop() {
+    fn shipped_github_publishers_admit_the_asset_cdn_only_as_a_redirect() {
         let policy = SourcePolicy::shipped();
-        // GitHub release downloads redirect to the asset CDN; the shipped
-        // publisher admits that hop under the same publisher.
-        let hop = policy
-            .authorize(
-                "uv",
-                "https://objects.githubusercontent.com/github-production-release-asset/1",
+        for cdn in [
+            "https://objects.githubusercontent.com/github-production-release-asset/1",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/2",
+        ] {
+            let hop = policy.authorize_redirect("uv", cdn).unwrap();
+            assert_eq!(hop.publisher, "uv");
+            let first = policy.authorize("uv", cdn).unwrap_err();
+            assert_eq!(first.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                first.to_string().contains("only a redirect target"),
+                "{first}"
+            );
+        }
+        // The repository's own release URL is a first hop, and a redirect.
+        let release = "https://github.com/astral-sh/uv/releases/download/0.1.0/uv.tar.gz";
+        assert_eq!(policy.authorize("uv", release).unwrap().publisher, "uv");
+        assert_eq!(
+            policy.authorize_redirect("uv", release).unwrap().publisher,
+            "uv"
+        );
+        // A publisher with no redirect-only endpoint answers the same both
+        // ways, and the CDN is not one of its endpoints.
+        let node = "https://nodejs.org/dist/v1/node.tar.gz";
+        assert!(policy.authorize("nodejs.org", node).is_ok());
+        assert!(policy.authorize_redirect("nodejs.org", node).is_ok());
+        assert!(policy
+            .authorize_redirect(
+                "nodejs.org",
+                "https://objects.githubusercontent.com/github-production-release-asset/1"
             )
-            .unwrap();
-        assert_eq!(hop.publisher, "uv");
+            .is_err());
     }
 }

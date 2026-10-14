@@ -295,7 +295,9 @@ on a cache hit and locked replay, missing offline proof, unauthorized redirect,
 credential non-forwarding, expired snapshot, and rollback rejection. And for
 the 2026-10-14 recovery design: a damaged log entry, an
 unreadable log (seed floor), a revoked key that does not lower the mark,
-a damaged newest entry (the warning says the mark may be lower), a missing
+a damaged newest entry (the warning says the mark may be lower), a torn
+tail cut before the next append, a damaged reset entry (the mark comes back
+higher and re-running the reset recovers it), a missing
 log in an initialized store, a reset that survives a restart and a rebuild,
 the reset with and without authority and when machine policy forbids it, a
 damaged clock file, a far-ahead clock cleared by the reset, a crash between
@@ -435,7 +437,8 @@ signatures.
   and one typed configuration for endpoints, publisher trust and
   credentials, with distinct authentication and authorization checks.
   WP3 PR 1 starts after it merges and builds on it, so neither waits for
-  the other. Where §4 or §6 says "WP3 PR 1" delivers protected loading,
+  the other. Where §4 or §6 says "WP3" or "WP3 PR 1" delivers or
+  corrects protected loading,
   the shared configuration, the permitted-endpoint set or company TLS
   roots (§6, "company roots"), read "the foundation PR". Two §4 passages
   are superseded the same way: its prerequisite "the authenticated WP3
@@ -506,8 +509,9 @@ anti-replay protection must not make a damaged store hard to recover.
 The design that meets it, for PR 1:
 
 - **Scope.** This applies to providers with an authenticated signed
-  position (proposal 2, "The signed position per provider"): Rust in PR 1,
-  each later provider in its own PR. A provider with no signed position
+  position (proposal 2, "The signed position per provider"): the first
+  provider in PR 1 (Rust, once the owner approves it), each later provider
+  in its own PR. A provider with no signed position
   (Hex, any TOFU source) has no mark, so there is nothing to recover.
 - **The floor.** Each provider has a floor the mark never goes below. For
   a shipped provider it is the seed: the full signed position (for Rust
@@ -519,9 +523,11 @@ The design that meets it, for PR 1:
   `LIMITATIONS.md` row for that.
 - **The position log is the only record.** Each provider has an
   append-only log at `trust/<provider>.log` in the store. There is no
-  separate mark file, so no cached value can go stale. Each entry is
-  one framed record (its length and its own checksum), so a damaged entry
-  is detected and parsing continues at the next one. An *accept* entry
+  separate mark file, so no cached value can go stale. Each entry is one
+  line of text ending in its own checksum, so a damaged entry is detected
+  and parsing resumes at the next newline. Before an append, under the
+  lock below, a torn tail (bytes after the last newline, left by a crash)
+  is cut off, so a new entry never follows partial bytes. An *accept* entry
   holds the full signed position, the digest of the signed bytes, the
   signing key's fingerprint and the local time. A *reset* entry holds the
   target position, the scope that authorized it, and the time. Entries
@@ -534,10 +540,11 @@ The design that meets it, for PR 1:
   the floor. An accept entry raises the mark to its position if higher. A
   reset entry sets the mark to its target, never below the floor. Entries
   before the last reset count only through what the reset left. A refresh
-  that accepts the position already held appends nothing, so the log grows
-  by one small entry per new upstream release. That growth is accepted.
-  PR 1 may compact a log to its last reset entry plus the highest accept
-  entry after it, by an atomic rewrite.
+  that accepts the position already held appends nothing (it still
+  replaces the snapshot), so the log grows by one small line per new
+  upstream release, about nine a year for Rust. That growth is accepted
+  and logs are never compacted, so every earlier position stays available
+  as a reset target.
 - **Refresh order.** A refresh verifies everything before it writes
   anything. Then it appends the accept entry, then it replaces the current
   snapshot atomically (temporary file, fsync, rename), keeping the
@@ -555,10 +562,14 @@ The design that meets it, for PR 1:
   damaged entries, is replayed from what can be read (from the floor if
   nothing can). The command continues against that mark with
   `ward: warning: <provider> rollback log damaged; mark rebuilt to
-  <position>`, saying when skipped or lost entries may have held a higher
-  position (rollback detection is then weaker back to the rebuilt mark),
-  followed by `ward:     fix: <refresh command>`, because a successful
-  refresh appends a new entry and restores the protection. A damaged
+  <position>`, saying that skipped or lost entries may have held a
+  higher position (rollback detection is then weaker back to the rebuilt
+  mark) or a reset (the mark is then higher than the reset left it, which
+  is stricter, never weaker). It is followed by
+  `ward:     fix: <refresh command>`, because a successful refresh appends
+  a new entry and restores the protection. If that refresh then fails as
+  a rollback, a damaged reset entry is the cause, and re-running the reset
+  recovers it; the rollback error says so when the log had damage. A damaged
   snapshot is dropped and reported the same way. It is never trusted.
 - **A rollback is an error.** The metadata is older than this machine
   accepted. Neither message tells the user to delete files by hand.
@@ -589,7 +600,10 @@ The design that meets it, for PR 1:
   starts fresh, like a new store. A clock that was set far ahead and then
   corrected is cleared by the same reset command, with a store-wide clock
   option: it sets the clock file to the current local time and is
-  recorded like any trust change. Locked replay and cache hits may move
+  recorded like any trust change. A later rebuild of a damaged clock file
+  reads the provider logs again and can bring the far-ahead time back.
+  That is stricter, never weaker, the warning names the rebuilt time, and
+  re-running the clock reset recovers it. Locked replay and cache hits may move
   the clock forward but are never refused by it unless a `not_after` is
   set.
 

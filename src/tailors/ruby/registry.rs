@@ -21,8 +21,9 @@
 //! route's claim for that `.gem`.
 
 use crate::kernel::fetch::Digest;
+use crate::kernel::resolve::age::parse_rfc3339;
 use crate::kernel::resolve::routes::{
-    Claim, Endpoint, ProxyAddress, RegistryProtocol, RequestClass, Route, Upstream,
+    Claim, Endpoint, Lookup, ProxyAddress, RegistryProtocol, RequestClass, Route, Upstream,
 };
 use std::io;
 use url::Url;
@@ -110,6 +111,54 @@ impl RegistryProtocol for RubyGems {
             })
             .collect()
     }
+
+    /// Each `/info/<gem>` line's `created_at`, by its version (and
+    /// platform, as a Gemfile.lock spells it: `1.15.0-x86_64-linux`).
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        let Some(name) = url.path().strip_prefix("/info/") else {
+            return Vec::new();
+        };
+        if url.host_str() != Some(INDEX_HOST) || check_word(name).is_err() {
+            return Vec::new();
+        }
+        let Ok(text) = std::str::from_utf8(body) else {
+            return Vec::new();
+        };
+        info_lines(text)
+            .filter_map(|(version, requirements)| {
+                let at = requirements
+                    .split(',')
+                    .find_map(|part| part.strip_prefix("created_at:"))?;
+                Some((name.to_string(), version.to_string(), parse_rfc3339(at)?))
+            })
+            .collect()
+    }
+
+    /// The gem's `/info/<gem>` file, which Bundler skips for gems its
+    /// lock already pins.
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, _version: &str) -> Option<Lookup> {
+        check_word(name).ok()?;
+        let url = endpoint(endpoints, INDEX_HOST)
+            .ok()?
+            .url(&format!("/info/{name}"))
+            .ok()?;
+        Some(Lookup { url, accept: "*/*" })
+    }
+}
+
+/// `(version[-platform], requirements)` for every line of an `/info/<gem>`
+/// body. A line is `<version> <deps>|<requirements>`, the requirements a
+/// comma list (`checksum:<hex>`, `created_at:<time>`); the lines before
+/// `---` are a header.
+fn info_lines(text: &str) -> impl Iterator<Item = (&str, &str)> {
+    text.lines()
+        .skip_while(|line| *line != "---")
+        .skip(1)
+        .filter_map(|line| {
+            let (version, rest) = line.split_once(' ')?;
+            let (_, requirements) = rest.split_once('|')?;
+            Some((version, requirements))
+        })
 }
 
 /// `(version[-platform], sha256)` for every line of an `/info/<gem>` body
@@ -117,17 +166,12 @@ impl RegistryProtocol for RubyGems {
 /// the requirements a comma list holding `checksum:<hex>`; the lines
 /// before `---` are a header.
 fn info_checksums(text: &str) -> impl Iterator<Item = (&str, &str)> {
-    text.lines()
-        .skip_while(|line| *line != "---")
-        .skip(1)
-        .filter_map(|line| {
-            let (version, rest) = line.split_once(' ')?;
-            let (_, requirements) = rest.split_once('|')?;
-            let sha256 = requirements
-                .split(',')
-                .find_map(|part| part.strip_prefix("checksum:"))?;
-            Some((version, sha256))
-        })
+    info_lines(text).filter_map(|(version, requirements)| {
+        let sha256 = requirements
+            .split(',')
+            .find_map(|part| part.strip_prefix("checksum:"))?;
+        Some((version, sha256))
+    })
 }
 
 /// A gem name, or a gem's file stem: RubyGems' own character set, no
@@ -200,6 +244,35 @@ pub fn route() -> io::Result<Route> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every compact index line past the header carries `created_at`.
+    #[test]
+    fn publish_times_come_from_compact_index_lines() {
+        let body = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/proxy/registry/ruby/index.rubygems.org/info/rake.body"),
+        )
+        .unwrap();
+        let url = Url::parse("https://index.rubygems.org/info/rake").unwrap();
+        let times = RUBYGEMS.published(&url, &body);
+        assert_eq!(times.len(), 96);
+        assert!(times.contains(&("rake".into(), "13.4.2".into(), 1_776_314_866)));
+        let platformed = b"---\n1.15.0-x86_64-linux |checksum:ab,created_at:2023-05-15T00:00:00Z\n";
+        let nokogiri = Url::parse("https://index.rubygems.org/info/nokogiri").unwrap();
+        assert_eq!(
+            RUBYGEMS.published(&nokogiri, platformed),
+            [(
+                "nokogiri".to_string(),
+                "1.15.0-x86_64-linux".to_string(),
+                1_684_108_800
+            )]
+        );
+        let versions = Url::parse("https://index.rubygems.org/versions").unwrap();
+        assert!(RUBYGEMS.published(&versions, &body).is_empty());
+        let lookup = RUBYGEMS.lookup(&endpoints(), "rake", "13.4.2").unwrap();
+        assert_eq!(lookup.url.as_str(), "https://index.rubygems.org/info/rake");
+        assert!(RUBYGEMS.lookup(&endpoints(), "../x", "1").is_none());
+    }
 
     fn endpoints() -> Vec<Endpoint> {
         vec![

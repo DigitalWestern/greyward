@@ -22,6 +22,7 @@
 //! connects only to addresses it validated, verifies what registries
 //! promise, and records every request in a ledger.
 
+pub mod age;
 pub mod ca;
 pub mod cache;
 pub mod confine;
@@ -46,6 +47,7 @@ pub mod snapshot;
 pub mod ssrf;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod tlog;
 pub mod transaction;
 pub(crate) mod tripwire;
 

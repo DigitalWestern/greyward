@@ -57,6 +57,7 @@ const SERVED_RESPONSE_HEADERS: &[&str] = &[
     "content-disposition",
     "expires",
     "vary",
+    "retry-after",
 ];
 
 const MAX_REDIRECTS: usize = 10;
@@ -303,7 +304,25 @@ pub(crate) struct Exchange<'a> {
     /// The tool spoke HTTP/1.0: a body of unknown length ends with the
     /// connection, and the connection closes after every response.
     pub http10: bool,
+    /// Ward's own publish-time lookup (`young-package`), not the tool's
+    /// request. Its entries are class `publish-time`, its body is never
+    /// rewritten, and what it cannot fetch is not the run's failure: an
+    /// offline miss or an unreachable registry leaves the time unknown,
+    /// which the door judges. A last-good copy is served whatever
+    /// `stale-resolution` says, and counts as no stale resolution: a
+    /// version's publish time does not change, so an old copy of it is as
+    /// good as a fresh one, and nothing the tool resolved came from it. An
+    /// address the SSRF rule refuses still fails the door.
+    pub supplemental: bool,
+    /// The (name, version) pairs a publish-time lookup asks about: a cached
+    /// copy that already names a time for each is served without asking
+    /// the registry again, since a published version's time never changes.
+    /// Empty for every tool request.
+    pub wanted: &'a [(String, String)],
 }
+
+/// The ledger class of a publish-time lookup ([`Exchange::supplemental`]).
+pub const PUBLISH_TIME_CLASS: &str = "publish-time";
 
 /// [`Exchange::hop`]: `Err(why)` refuses the redirect.
 pub(crate) type HopCheck<'a> = dyn Fn(&Url, &str) -> Result<(), String> + 'a;
@@ -560,8 +579,19 @@ impl Exchange<'_> {
         }
     }
 
+    /// Serve a publish-time lookup ([`Exchange::supplemental`]) of `url`,
+    /// which the protocol built on one of the route's endpoints.
+    pub(crate) fn lookup(&self, url: &Url, out: &mut dyn Write) -> io::Result<()> {
+        self.metadata(url, RequestClass::Metadata, out)
+    }
+
     fn metadata(&self, url: &Url, class: RequestClass, out: &mut dyn Write) -> io::Result<()> {
-        let mut record = Record::new(class.as_str(), self.method, self.redacted(url))
+        let class = if self.supplemental {
+            PUBLISH_TIME_CLASS
+        } else {
+            class.as_str()
+        };
+        let mut record = Record::new(class, self.method, self.redacted(url))
             .keeping(self.keys())
             .resolved();
         let forwarded: Vec<(&str, &str)> = self
@@ -585,7 +615,7 @@ impl Exchange<'_> {
         // Every body this request holds (the cached copy, a fetched one,
         // the rewritten one served) is reserved here first.
         let mut held = self.budget.reservation();
-        let cached = if cacheable {
+        let mut cached = if cacheable {
             match self.state.meta.load(&key, &mut held) {
                 Ok(cached) => cached,
                 Err(error) if http::OverBudget::is(&error) => {
@@ -599,6 +629,9 @@ impl Exchange<'_> {
         } else {
             None
         };
+        if let Some(cached) = cached.take_if(|cached| self.answers_wanted(url, cached)) {
+            return self.serve_answer(out, url, cached, record, &mut held);
+        }
         if self.state.config.mode == Mode::Offline {
             return self.last_good(url, cached, record, "offline".into(), &mut held, out);
         }
@@ -670,7 +703,11 @@ impl Exchange<'_> {
                 return self.last_good(url, cached, record, error.to_string(), &mut held, out)
             }
         };
-        let fresh = Cached::new(url.as_str(), &response.headers, body);
+        let mut fresh = Cached::new(url.as_str(), &response.headers, body);
+        // A rate limit's wait is passed on (never cached: only a 200 is).
+        if let Some(wait) = response.header("retry-after").filter(|_| status == 429) {
+            fresh.headers.push(("Retry-After".into(), wait.to_string()));
+        }
         let vary = response
             .headers
             .iter()
@@ -695,6 +732,71 @@ impl Exchange<'_> {
         )
     }
 
+    /// Serve a publish-time lookup its cached copy, without asking the
+    /// registry ([`Self::answers_wanted`]): a cache hit, not fetched now.
+    fn serve_answer(
+        &self,
+        out: &mut dyn Write,
+        url: &Url,
+        cached: Cached,
+        mut record: Record,
+        held: &mut http::Reservation<'_>,
+    ) -> io::Result<()> {
+        record.served = Some(200);
+        let freshness = Freshness::LastGood;
+        self.serve_metadata(out, url, 200, cached, freshness, "hit", record, held)
+    }
+
+    /// A publish-time lookup whose cached copy names a time for every
+    /// version it asks about ([`Exchange::wanted`]).
+    fn answers_wanted(&self, url: &Url, cached: &Cached) -> bool {
+        if !self.supplemental || self.wanted.is_empty() || self.head_only() {
+            return false;
+        }
+        let protocol = self.route.protocol;
+        let known: std::collections::HashSet<(String, String)> = protocol
+            .published(url, &cached.body)
+            .into_iter()
+            .map(|(name, version, _)| protocol.package_key(&name, &version))
+            .collect();
+        self.wanted
+            .iter()
+            .all(|(name, version)| known.contains(&protocol.package_key(name, version)))
+    }
+
+    /// Verify the signed tree head `body` carries, when the protocol's log
+    /// has one there ([`RegistryProtocol::tree_size`]), and keep a fresh
+    /// one as a checkpoint ([`super::tlog`]). A head that does not verify,
+    /// or that forks the log (a size kept with another root), refuses the
+    /// body. A checkpoint that cannot be written only goes into the
+    /// record's detail: a missing one passes fewer versions.
+    ///
+    /// [`RegistryProtocol::tree_size`]: super::routes::RegistryProtocol::tree_size
+    fn tree_head(
+        &self,
+        url: &Url,
+        body: &[u8],
+        freshness: Freshness,
+        record: &mut Record,
+    ) -> Result<(), String> {
+        let protocol = self.route.protocol;
+        let (Some(log), Some(head)) = (protocol.log(), protocol.tree_size(url, body)) else {
+            return Ok(());
+        };
+        let head = head.map_err(|why| format!("{}: {why}", record.url))?;
+        if freshness == Freshness::Live {
+            let observed = super::age::unix_seconds(std::time::SystemTime::now());
+            match super::tlog::record(&self.state.config.store, &log, head, observed) {
+                Ok(_) => {}
+                Err(super::tlog::RecordError::Fork(why)) => {
+                    return Err(format!("{}: {why}", record.url));
+                }
+                Err(error) => record.detail = Some(format!("checkpoint not written: {error}")),
+            }
+        }
+        Ok(())
+    }
+
     /// The upstream is unreachable: serve last-good if policy allows and a
     /// copy exists, else 504.
     fn last_good(
@@ -710,11 +812,13 @@ impl Exchange<'_> {
         let endpoint = url.origin().ascii_serialization();
         match cached {
             Some(cached) => {
-                if let Err(refusal) = self.state.stale_allowed(&endpoint, &record.url, &why) {
-                    record.served = Some(504);
-                    return self.refuse(out, record, 504, &refusal);
+                if !self.supplemental {
+                    if let Err(refusal) = self.state.stale_allowed(&endpoint, &record.url, &why) {
+                        record.served = Some(504);
+                        return self.refuse(out, record, 504, &refusal);
+                    }
+                    self.state.stale_served(&endpoint);
                 }
-                self.state.stale_served(&endpoint);
                 record.detail = Some(why);
                 self.serve_metadata(
                     out,
@@ -739,9 +843,13 @@ impl Exchange<'_> {
     }
 
     fn offline_miss(&self, out: &mut dyn Write, mut record: Record) -> io::Result<()> {
-        self.state.offline_miss(&record.url);
+        if !self.supplemental {
+            self.state.offline_miss(&record.url);
+        }
         let reason = format!("offline, and {} is not cached", record.url);
-        record.class = "offline-miss".into();
+        if !self.supplemental {
+            record.class = "offline-miss".into();
+        }
         record.status = 504;
         record.disposition = "offline-miss";
         record.detail = Some(reason.clone());
@@ -777,7 +885,15 @@ impl Exchange<'_> {
             body: upstream,
             ..
         } = cached;
-        let body = if success && !self.head_only() {
+        if success && !self.head_only() {
+            if let Err(reason) = self.tree_head(url, &upstream, freshness, &mut record) {
+                self.state.hard_failure(reason.clone());
+                return self.fail(out, record, 502, reason);
+            }
+            self.state
+                .add_published(self.route, protocol.published(url, &upstream));
+        }
+        let body = if success && !self.head_only() && !self.supplemental {
             self.state.add_claims(protocol.claims(url, &upstream));
             let before = upstream.len();
             match protocol.rewrite(url, upstream, self.address) {

@@ -19,6 +19,7 @@ pub mod home;
 pub mod hostfallback;
 pub mod hostview;
 pub(crate) mod ldcache;
+pub mod lookalike;
 pub mod objmeta;
 pub mod pep440;
 pub mod platform;

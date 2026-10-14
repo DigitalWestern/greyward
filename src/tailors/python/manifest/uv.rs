@@ -137,6 +137,30 @@ pub(super) struct UvDependency {
     pub(super) extras: BTreeSet<String>,
 }
 
+/// `(name, version, file names)` of every uv.lock package locked from the
+/// public PyPI index (no `source`, or a registry source on PyPI's hosts):
+/// what the `young-package` check judges. Local, git, URL and other-index
+/// packages are left out.
+pub fn uv_pypi_packages(text: &str) -> io::Result<Vec<(String, String, Vec<String>)>> {
+    Ok(parse_uv_lock(text)?
+        .into_iter()
+        .filter(|package| match uv_source(&package.source) {
+            Some(UvSource::Registry(url)) => {
+                package.source == "registry" || (!url.is_empty() && is_public_pypi_url(&url))
+            }
+            _ => false,
+        })
+        .map(|package| {
+            let files = package
+                .files
+                .into_iter()
+                .map(|file| file.filename)
+                .collect();
+            (package.name, package.version, files)
+        })
+        .collect())
+}
+
 pub fn parse_uv_lock(text: &str) -> io::Result<Vec<UvPackage>> {
     let value: toml::Value = toml::from_str(text).map_err(|e| {
         io::Error::new(

@@ -37,7 +37,7 @@ use super::ca::Authority;
 use super::http::{self, Headers, ParseError, Request};
 use super::mirror::{self, Exchange, Record};
 use super::redact::{self, REDACTED};
-use super::routes::{ProxyAddress, Upstream};
+use super::routes::{Lookup as PublishLookup, ProxyAddress, Upstream};
 use super::session::{Intercept, SessionConfig, SessionReport, State};
 use super::ssrf::{Lookup, SystemLookup, ValidatingResolver};
 use crate::kernel::fetch::pinned::{self, PinnedClient, PinnedConfig};
@@ -52,10 +52,122 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The git protocol's port: a `CONNECT` there is a `git://` fetch.
 const GIT_PORT: u16 = 9418;
+
+/// The `User-Agent` of ward's own publish-time lookups ([`Session::lookup`]).
+const LOOKUP_USER_AGENT: &str = "ward (https://github.com/DigitalWestern/greyward)";
+
+/// How a publish-time lookup ([`Session::lookup`]) was answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupAnswer {
+    /// The status served: the registry's, or the proxy's own (504 for an
+    /// unreachable registry or an offline miss).
+    pub status: u16,
+    /// The proxy's own reason, when it answered instead of the registry.
+    pub reason: Option<String>,
+    /// The registry's `Retry-After`, in seconds, when it gave one.
+    pub retry_after: Option<u64>,
+}
+
+/// The first bytes of a served response: enough for its status line, its
+/// headers and the proxy's one-line reason. The rest is dropped.
+#[derive(Default)]
+struct Capture(Vec<u8>);
+
+impl Capture {
+    const KEEP: usize = 16 << 10;
+
+    fn parse(self) -> LookupAnswer {
+        let text = String::from_utf8_lossy(&self.0);
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse().ok())
+            .unwrap_or(0);
+        let retry_after = lines
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("retry-after"))
+            .and_then(|(_, value)| retry_after_seconds(value.trim(), SystemTime::now()));
+        let reason = body
+            .strip_prefix("ward: ")
+            .and_then(|reason| reason.lines().next())
+            .filter(|_| !(200..300).contains(&status))
+            .map(str::to_string);
+        LookupAnswer {
+            status,
+            reason,
+            retry_after,
+        }
+    }
+}
+
+/// A `Retry-After` value as seconds to wait from `now`: delay-seconds, or
+/// an HTTP-date in any of the three forms RFC 9110 has recipients accept
+/// (IMF-fixdate `Sun, 06 Nov 1994 08:49:37 GMT`, RFC 850
+/// `Sunday, 06-Nov-94 08:49:37 GMT`, asctime `Sun Nov  6 08:49:37 1994`), a
+/// date already past being no wait. Anything else is `None`.
+fn retry_after_seconds(value: &str, now: SystemTime) -> Option<u64> {
+    if let Ok(seconds) = value.parse() {
+        return Some(seconds);
+    }
+    let now = super::age::unix_seconds(now);
+    let at = http_date(value, now)?;
+    Some(at.saturating_sub(now).max(0) as u64)
+}
+
+/// An HTTP-date (RFC 9110 section 5.6.7) as unix seconds.
+fn http_date(value: &str, now: i64) -> Option<i64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let (day, month, year, time) = match words.as_slice() {
+        [weekday, day, month, year, time, "GMT"] if weekday.ends_with(',') => {
+            (*day, *month, year.parse::<i64>().ok()?, *time)
+        }
+        [weekday, date, time, "GMT"] if weekday.ends_with(',') => {
+            let parts: Vec<&str> = date.split('-').collect();
+            let [day, month, year] = parts.as_slice() else {
+                return None;
+            };
+            if year.len() != 2 {
+                return None;
+            }
+            // A two-digit year is the latest one with those digits that is
+            // not more than 50 years ahead.
+            let this_year = 1970 + now.div_euclid(31_556_952);
+            let mut full = this_year - this_year.rem_euclid(100) + year.parse::<i64>().ok()?;
+            if full > this_year + 50 {
+                full -= 100;
+            }
+            (*day, *month, full, *time)
+        }
+        [_weekday, month, day, time, year] => (*day, *month, year.parse::<i64>().ok()?, *time),
+        _ => return None,
+    };
+    let month = MONTHS.iter().position(|name| *name == month)? + 1;
+    if day.is_empty() || day.len() > 2 || !(0..=9999).contains(&year) {
+        return None;
+    }
+    super::age::parse_rfc3339(&format!("{year:04}-{month:02}-{day:0>2}T{time}Z"))
+}
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let room = Self::KEEP.saturating_sub(self.0.len());
+        self.0.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// How the process's proxy is built.
 pub struct ProxyConfig {
@@ -286,6 +398,60 @@ impl Session {
         });
         self.addresses.push(address);
         Ok(())
+    }
+
+    /// Fetch a publish-time document for ward itself, through the route
+    /// `route_id` (see [`Exchange::supplemental`]): the metadata cache,
+    /// last-good and offline mode, the validating resolver, the permitted
+    /// set and the ledger all apply as to the tool's own requests. What the
+    /// body says lands in the session's publish times; the body itself is
+    /// dropped. `wanted` are the versions the document is fetched for: a
+    /// cached copy that already times every one of them is served without
+    /// asking the registry again, since a publish time never changes.
+    /// `Err` only when the lookup names no endpoint of the route.
+    pub fn lookup(
+        &self,
+        route_id: &str,
+        lookup: &PublishLookup,
+        wanted: &[(String, String)],
+    ) -> io::Result<LookupAnswer> {
+        let state = &*self.state;
+        let route = state
+            .route(route_id)
+            .filter(|route| route.endpoint_for(&lookup.url).is_some())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the publish-time lookup {} is on no endpoint of route {route_id}",
+                        lookup.url.origin().ascii_serialization()
+                    ),
+                )
+            })?;
+        let mut headers = Headers::new();
+        headers.set("Accept", lookup.accept);
+        headers.set("User-Agent", LOOKUP_USER_AGENT);
+        // Only a rewrite reads the address, and a lookup is never rewritten.
+        let address = ProxyAddress::new(SocketAddr::from(([127, 0, 0, 1], 0)), state.token());
+        let exchange = Exchange {
+            state,
+            client: &self.shared.client,
+            budget: &self.shared.budget,
+            route,
+            address: &address,
+            method: "GET",
+            request: &headers,
+            body: None,
+            permitted: &state.config.permitted,
+            hop: None,
+            keep_alive: false,
+            http10: false,
+            supplemental: true,
+            wanted,
+        };
+        let mut answer = Capture::default();
+        exchange.lookup(&lookup.url, &mut answer)?;
+        Ok(answer.parse())
     }
 
     /// Stop serving and hand back everything the session recorded.
@@ -1041,6 +1207,8 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
         // HTTP/1.0 connection ends after each mirror response.
         keep_alive: request.keep_alive && !request.http10,
         http10: request.http10,
+        supplemental: false,
+        wanted: &[],
     };
     match upstream {
         Upstream::Local(answer) => exchange.local(answer, out)?,
@@ -1198,6 +1366,53 @@ mod tests {
         get, mirror, proxy_authorization, send, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
     use crate::kernel::testutil::SocketDir;
+
+    #[test]
+    fn retry_after_reads_seconds_and_http_dates() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(784_111_777);
+        assert_eq!(retry_after_seconds("120", now), Some(120));
+        // 1994-11-06T08:49:37Z is 784111777: a minute later is 60 seconds.
+        assert_eq!(
+            retry_after_seconds("Sun, 06 Nov 1994 08:50:37 GMT", now),
+            Some(60)
+        );
+        assert_eq!(
+            retry_after_seconds("Sun, 06 Nov 1994 08:48:37 GMT", now),
+            Some(0)
+        );
+        // The same instant in the two obsolete forms.
+        assert_eq!(
+            retry_after_seconds("Sunday, 06-Nov-94 08:50:37 GMT", now),
+            Some(60)
+        );
+        assert_eq!(
+            retry_after_seconds("Sun Nov  6 08:50:37 1994", now),
+            Some(60)
+        );
+        // 2026: "26" is this century, "90" the last one.
+        let later = SystemTime::UNIX_EPOCH + Duration::from_secs(1_791_969_946);
+        assert_eq!(
+            http_date("Sunday, 06-Nov-26 08:49:37 GMT", 1_791_969_946),
+            Some(1_793_954_977)
+        );
+        assert_eq!(
+            retry_after_seconds("Tuesday, 06-Nov-90 08:49:37 GMT", later),
+            Some(0)
+        );
+        assert_eq!(
+            http_date("Tuesday, 06-Nov-90 08:49:37 GMT", 1_791_969_946),
+            Some(657_881_377)
+        );
+        for unread in [
+            "",
+            "soon",
+            "-5",
+            "Sun, 06 Nov 1994 08:49:37 PST",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+        ] {
+            assert_eq!(retry_after_seconds(unread, now), None, "{unread}");
+        }
+    }
 
     fn deny(kinds: &[&str]) -> Policy {
         Policy {

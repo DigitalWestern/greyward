@@ -193,13 +193,26 @@ impl Store {
         record.project_path = project_dir.to_path_buf();
         record.objects.extend(objects);
         record.projections.extend(projections);
-        record.updated = unix_secs();
         if record.objects.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "root/2 record has no object references",
             ));
         }
+        // A record that already protects exactly this is left as it is: no
+        // temporary, fsync or rename for a sync that changed nothing (#746).
+        // `updated` is when the protection last changed, which nothing reads
+        // as a freshness signal. The record on disk was itself fsynced by
+        // the sync that wrote it before that sync reported success, and every
+        // writer of this key holds the project lock the caller holds (gc
+        // removal needs the exclusive lease, which a sync's shared one keeps
+        // out), so it cannot change between this read and the return.
+        if let Some(previous) = previous {
+            if previous.record.as_ref() == Some(&record) {
+                return Ok(previous);
+            }
+        }
+        record.updated = unix_secs();
         self.register_root_record_locked(record)
     }
 

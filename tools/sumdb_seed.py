@@ -19,8 +19,15 @@ Usage, from the repository root:
 
     python3 tools/sumdb_seed.py
 
-Regenerate before a release, so a fresh store's seed is recent. Standard
-library only.
+Regenerate before a release, so a fresh store's seed is recent, and commit
+the file. The `observed` line is not covered by the note's signature: it is
+as trustworthy as the source it is checked into. The release workflow runs
+
+    python3 tools/sumdb_seed.py --check
+
+which refuses a seed whose `observed` time is later than the commit that
+last changed the file (plus a day), or more than 60 days before the commit
+being released. Standard library only.
 """
 import os
 import re
@@ -38,6 +45,44 @@ NOTE = re.compile(
     rb"(\xe2\x80\x94 [!-~]+ [A-Za-z0-9+/]+=*\n)+\Z"
 )
 TEST = "tailors::go::sumdb::tests::the_seed_verifies"
+MAX_AGE_DAYS = 60
+DAY = 86_400
+
+
+def commit_time(*paths):
+    """The committer time of the latest commit (touching `paths`, if any)."""
+    out = subprocess.run(
+        ["git", "log", "-1", "--format=%ct", "HEAD", "--", *paths],
+        cwd=REPO, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return int(out) if out else None
+
+
+def stale(observed, seed_commit, release_commit):
+    """Why the seed may not ship, or None."""
+    if seed_commit is None:
+        return "the seed is not committed"
+    if observed > seed_commit + DAY:
+        return f"the seed claims it was taken at {observed}, after its commit at {seed_commit}"
+    if release_commit - observed > MAX_AGE_DAYS * DAY:
+        days = (release_commit - observed) // DAY
+        return (f"the seed was taken {days} days before the release commit (at most "
+                f"{MAX_AGE_DAYS}); run python3 tools/sumdb_seed.py and commit it")
+    return None
+
+
+def check():
+    with open(SEED, "rb") as handle:
+        first = handle.readline()
+    match = re.fullmatch(rb"observed ([0-9]{1,19})\n", first)
+    if not match:
+        raise SystemExit("sumdb_seed.py: the seed has no observed line")
+    observed = int(match.group(1))
+    why = stale(observed, commit_time(os.path.relpath(SEED, REPO)), commit_time())
+    if why:
+        raise SystemExit(f"sumdb_seed.py: {why}")
+    print(f"sumdb_seed.py: the seed, taken at {observed}, is recent enough")
+    return 0
 
 
 def main():
@@ -68,4 +113,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--check"]:
+        sys.exit(check())
+    if sys.argv[1:]:
+        raise SystemExit("usage: tools/sumdb_seed.py [--check]")
     sys.exit(main())

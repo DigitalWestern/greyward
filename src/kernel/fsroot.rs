@@ -293,12 +293,14 @@ impl ProjectRoot {
             ))
         })?;
         // A link that already names `target` is the end state: leave it, so
-        // a sync that changed nothing makes no temporary, rename or fsync
-        // (#746). The link was published and its parent fsynced by the sync
-        // that made it.
+        // a sync that changed nothing makes no temporary or rename (#746).
+        // A prior writer may have died after rename but before syncing the
+        // parent, so make the existing name durable before returning.
         if !absent
             && link_target_at(parent_fd, name.as_bytes())?.as_deref() == Some(target.to_bytes())
         {
+            fsync_directory(parent_fd)?;
+            remove_stale_temps(parent_fd);
             return Ok(());
         }
         let mut made = None;
@@ -2917,6 +2919,15 @@ mod tests {
             .unwrap();
         assert_eq!(inode(), first, "an unchanged link was replaced");
         assert_eq!(fs::read_link(dir.join(".venv")).unwrap(), env);
+
+        // A prior writer could have died after rename but before syncing
+        // the parent. Visibility alone must not bypass durability errors.
+        let error = crate::kernel::store::with_directory_sync_failure(|| {
+            root.replace_symlink(Path::new(".venv"), &env, ".venv")
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(inode(), first);
 
         root.replace_symlink(Path::new(".venv"), &other, ".venv")
             .unwrap();

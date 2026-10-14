@@ -2019,6 +2019,19 @@ mod tests {
         assert_eq!(again.record, written.record);
         assert_eq!(again.identity, written.identity);
 
+        // A record visible after an interrupted rename is not necessarily
+        // durable. The no-op must still report a directory sync failure.
+        let error = with_directory_sync_failure(|| {
+            store.register_root_parts_locked(
+                &held,
+                BTreeSet::from([first.clone()]),
+                BTreeSet::from([forest.clone()]),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(fs::metadata(&file).unwrap().ino(), inode);
+
         let grown = store
             .register_root_parts_locked(&held, BTreeSet::from([second.clone()]), BTreeSet::new())
             .unwrap();

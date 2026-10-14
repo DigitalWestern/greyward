@@ -1170,6 +1170,44 @@ mod tests {
         }
     }
 
+    /// The same redirect in a session whose ecosystem has a `[sources]`
+    /// list is refused outright: no policy can let an unlisted host through
+    /// after a redirect, as on a first request.
+    #[test]
+    fn a_redirect_out_of_a_git_fetch_is_refused_when_sources_are_enforced() {
+        let harness = Harness::new("intercept-git-enforced");
+        let path = std::path::Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, "[sources]\nnode = [\"public\"]\n").unwrap();
+        let mut enforced = Policy::default();
+        policy::merge_file(&mut enforced, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+        let mut config = harness.config(enforced, Mode::Online);
+        config.intercept = Intercept::Tls;
+        config.ecosystem = "node".into();
+        let (session, address) = harness.open(config);
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let from = "/a/repo.git/info/refs?service=git-upload-pack";
+        harness.upstream.set(
+            from,
+            Behavior::Reply(Reply::new(302, b"").header("location", "/meta/pkg.json")),
+        );
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, "third.test", roots, &[]).unwrap();
+        let answer = tunnel_request(&mut tunnel, &get(&authority, from), b"");
+        drop(tunnel);
+        let report = session.finish();
+        assert_eq!(answer.status, 403, "{}", answer.text());
+        assert_eq!(harness.upstream.hits("/meta/pkg.json"), 0);
+        assert!(
+            !report
+                .facts
+                .exceptions
+                .iter()
+                .any(|fact| fact.kind == policy::UNATTESTED_INDEX),
+            "{:?}",
+            report.facts
+        );
+    }
+
     /// A git-shaped request to a host no lock names, under a policy that
     /// denies `unattested-index` only: it is served, and the record carries
     /// a `git-dependency` fact naming the host (never the path), so a policy

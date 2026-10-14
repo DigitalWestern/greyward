@@ -549,7 +549,12 @@ pub fn route_for<'a>(routes: &'a [Route], raw: &str) -> Option<&'a Route> {
                 .under_root(raw)
                 .then(|| (covers::root_len(&scope.root), route))
         })
-        .max_by_key(|(len, _)| *len)
+        // The longest root wins; on a tie the earlier route does, as in
+        // ward's own fetches.
+        .fold(None::<(usize, &Route)>, |best, (len, route)| match best {
+            Some((best_len, _)) if best_len >= len => best,
+            _ => Some((len, route)),
+        })
         .map(|(_, route)| route);
     if configured.is_some() {
         return configured;

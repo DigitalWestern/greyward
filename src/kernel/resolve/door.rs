@@ -26,6 +26,7 @@ use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::policy::{self, Policy};
 use crate::kernel::store::Store;
+use crate::kernel::ui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
@@ -573,6 +574,7 @@ fn check_result(
     ran: &mut Ran,
     facts: &mut Vec<Fact>,
 ) -> io::Result<()> {
+    let _t = ui::phase("check result");
     let staged = Staged {
         outputs: Some(outputs),
         lock_root: &snapshot.lock_root().staged,
@@ -658,11 +660,14 @@ fn run_tool(
     snapshot: &Snapshot,
     forced_args: &[OsString],
 ) -> io::Result<Ran> {
+    let _t = ui::phase("confined run");
     let proxy = match confined.proxy {
         Some(proxy) => proxy,
-        None => process_proxy()?,
+        None => ui::timed("proxy startup", process_proxy)?,
     };
-    let mut session = proxy.open_session(session_config(door, confined, policy))?;
+    let mut session = ui::timed("session open", || {
+        proxy.open_session(session_config(door, confined, policy))
+    })?;
     let dir = SessionDir::create()?;
     let ca_file = match confined.intercept {
         Intercept::Tls => Some(dir.write_ca(proxy.authority().pem())?),
@@ -894,6 +899,7 @@ fn check_outputs(
     snapshot: &Snapshot,
     ran: &Ran,
 ) -> io::Result<Outputs> {
+    let _t = ui::phase("check outputs");
     let changes = snapshot.diff()?;
     let classified = snapshot.classify(&changes, &confined.outputs, &confined.scratch_outputs)?;
     Outputs::copy(
@@ -981,6 +987,7 @@ fn publish_project(
     facts: &PublishFacts<'_>,
     receipt: Option<ReceiptProducer<'_>>,
 ) -> io::Result<()> {
+    let _t = ui::phase("publish");
     let ids = BTreeSet::from([
         facts.ledger.ledger.clone(),
         facts.ledger.diagnostics.clone(),
@@ -1044,6 +1051,7 @@ fn unroot_after(
 /// A replaced file keeps its pre-run mode; a created one gets the ordinary
 /// file mode, never the bits the tool left.
 fn write_back(root: &ProjectRoot, snapshot: &Snapshot, outputs: &Outputs) -> io::Result<()> {
+    let _t = ui::phase("publish");
     for file in outputs.files() {
         let real = snapshot.lock_root().real.join(&file.relative);
         let mode = match snapshot.baseline(&real) {

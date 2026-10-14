@@ -11,6 +11,7 @@ use crate::kernel::policy;
 use crate::kernel::resolve;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::store;
+use crate::kernel::ui;
 use crate::tailors::{self, SyncRequest, Tailor};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -172,7 +173,10 @@ pub(crate) fn run_in_mode(
     // publication, before any work is done for it.
     let ctx = match early {
         Some(ctx) => ctx,
-        None => Context::open(platform)?,
+        None => {
+            let _t = ui::phase("store open");
+            Context::open(platform)?
+        }
     };
     project.check_still_named()?;
     if stop_after_lock {
@@ -383,6 +387,9 @@ fn preflight(
     mode: Mode,
     scope: Scope<'_>,
 ) -> io::Result<(Vec<&'static dyn Tailor>, ProjectToolchain, Settings)> {
+    // The input scan: the policy, the signing key, every detected
+    // ecosystem's inputs and the toolchain lock they resolve to.
+    let _t = ui::phase("preflight");
     let policy = policy::init_in(project)?;
     // A configured signing key that cannot be loaded fails here, before the
     // store is opened or any closure is written.
@@ -419,7 +426,10 @@ pub(crate) fn sync_preflighted(
     // The toolchain-input lock is taken after the store lease and before any
     // tailor runs, and held for the whole sync, so `update --toolchain`
     // cannot install a new lock while this sync plans from the old one.
-    let _input_lock = project_toolchain::commit(project, toolchain, mode)?;
+    let _input_lock = {
+        let _t = ui::phase("toolchain lock");
+        project_toolchain::commit(project, toolchain, mode)?
+    };
     let frozen = *mode == Mode::Frozen;
     let mut any = false;
     for tailor in present {
@@ -432,6 +442,7 @@ pub(crate) fn sync_preflighted(
         // all; a project with no dependency lock fails inside the tailor,
         // which is the one place that knows which file is missing.
         if !frozen {
+            let _t = ui::phase(&format!("prepare {}", tailor.id()));
             let mut door = ResolutionDoor::open(
                 &ctx.store,
                 &ctx.activity,
@@ -446,7 +457,10 @@ pub(crate) fn sync_preflighted(
             toolchain: selected,
             selections: &toolchain.entries,
         };
-        let changed = tailor.sync(ctx, project, &request, &mut attribution)?;
+        let changed = {
+            let _t = ui::phase(&format!("sync {}", tailor.id()));
+            tailor.sync(ctx, project, &request, &mut attribution)?
+        };
         attribution.finish(changed)?;
         if changed {
             any = true;
@@ -455,6 +469,7 @@ pub(crate) fn sync_preflighted(
     if !any {
         return Err(no_inputs());
     }
+    let _t = ui::phase("notices");
     print_exception_summary(project)?;
     print_habits_notice(&ctx.store);
     print_signing_notice(&ctx.store);

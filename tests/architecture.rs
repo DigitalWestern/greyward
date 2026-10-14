@@ -1864,7 +1864,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
         2,
     ),
     ("src/tailors/python/env.rs", "realize_artifacts", 1),
-    ("src/tailors/python/env.rs", "realize_env_at_depth", 1),
+    ("src/tailors/python/env.rs", "hold_wheels", 1),
     (
         "src/tailors/python/sdist_view.rs",
         "discard_failed_attempt",

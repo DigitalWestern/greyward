@@ -630,17 +630,7 @@ impl Exchange<'_> {
             None
         };
         if let Some(cached) = cached.take_if(|cached| self.answers_wanted(url, cached)) {
-            record.served = Some(200);
-            return self.serve_metadata(
-                out,
-                url,
-                200,
-                cached,
-                Freshness::LastGood,
-                "hit",
-                record,
-                &mut held,
-            );
+            return self.serve_answer(out, url, cached, record, &mut held);
         }
         if self.state.config.mode == Mode::Offline {
             return self.last_good(url, cached, record, "offline".into(), &mut held, out);
@@ -740,6 +730,21 @@ impl Exchange<'_> {
             record,
             &mut held,
         )
+    }
+
+    /// Serve a publish-time lookup its cached copy, without asking the
+    /// registry ([`Self::answers_wanted`]): a cache hit, not fetched now.
+    fn serve_answer(
+        &self,
+        out: &mut dyn Write,
+        url: &Url,
+        cached: Cached,
+        mut record: Record,
+        held: &mut http::Reservation<'_>,
+    ) -> io::Result<()> {
+        record.served = Some(200);
+        let freshness = Freshness::LastGood;
+        self.serve_metadata(out, url, 200, cached, freshness, "hit", record, held)
     }
 
     /// A publish-time lookup whose cached copy names a time for every

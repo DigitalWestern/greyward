@@ -176,10 +176,14 @@ fn is_pseudo_version(version: &str) -> bool {
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    let Some(split) = before.len().checked_sub(14) else {
+    // A byte offset: `split_at_checked` refuses one inside a character.
+    let Some((head, stamp)) = before
+        .len()
+        .checked_sub(14)
+        .and_then(|split| before.split_at_checked(split))
+    else {
         return false;
     };
-    let (head, stamp) = before.split_at(split);
     hex && stamp.bytes().all(|b| b.is_ascii_digit())
         && (head.ends_with('-') || head.ends_with('.'))
         && head.starts_with('v')
@@ -419,6 +423,8 @@ mod tests {
             "v1.0.0-20240123185404",
             "v1.0.0-20240123185404-0123456789AB",
             "v1.0.0-x20240123185404-0123456789ab",
+            "v1.0.0-é0240123185404-0123456789ab",
+            "é024012318540-0123456789ab",
         ] {
             assert!(!is_pseudo_version(tagged), "{tagged}");
             assert_eq!(GO_PROXY.untimed("example.com/m", tagged), None);

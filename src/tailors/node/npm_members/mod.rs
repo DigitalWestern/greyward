@@ -872,14 +872,22 @@ pub(crate) mod tests {
         let held = ProjectRoot::open(&root).unwrap();
         std::fs::rename(&root, scratch.0.join("moved")).unwrap();
         std::os::unix::fs::symlink("decoy", &root).unwrap();
-        let error = npm_members(&held, &serde_json::json!(["packages/*"]))
-            .expect_err("npm read the tree the old path now leads to");
-        assert!(error.to_string().contains("symlink"), "{error}");
+        // bwrap 0.10 and later refuse to mount over the symlink. bwrap 0.9
+        // (Ubuntu 24.04) follows it and mounts the held directory over the
+        // decoy, so npm still reads only the held tree.
+        match npm_members(&held, &serde_json::json!(["packages/*"])) {
+            Err(error) => assert!(error.to_string().contains("symlink"), "{error}"),
+            Ok(Found { members, .. }) => {
+                assert_eq!(members, ["packages/a"], "npm read the decoy tree")
+            }
+        }
     }
 
     /// `npm_members` with this process's stdout and stderr pointed at a
     /// file, and what was written there. A probe written through the same
-    /// descriptors shows the capture worked.
+    /// descriptors shows the capture worked. The descriptors are the whole
+    /// process's, so the test harness's own `test ... ok` lines for other
+    /// tests running alongside are dropped.
     fn captured(held: &ProjectRoot, list: &Value, file: &Path) -> (io::Result<Found>, String) {
         use std::os::fd::AsRawFd;
         let capture = std::fs::File::create(file).unwrap();
@@ -900,7 +908,13 @@ pub(crate) mod tests {
         }
         let printed = std::fs::read_to_string(file).unwrap();
         assert!(printed.contains("capture-probe"), "nothing was captured");
-        (result, printed.replace("capture-probe\n", ""))
+        let printed = printed
+            .replace("capture-probe\n", "")
+            .lines()
+            .filter(|line| !line.starts_with("test "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        (result, printed)
     }
 
     /// A member's package.json symlinked to a host file is never quoted, and

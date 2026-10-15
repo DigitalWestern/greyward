@@ -114,6 +114,69 @@ fn first_change(before: &Manifest, after: &Manifest) -> Option<PathBuf> {
         .cloned()
 }
 
+/// Refuse when a path component of `relative` under `root` that exists is
+/// a symlink. The staged GEM_HOME is written by sandboxed builds, and ward
+/// writes and deletes there from the host: a build that turned a directory
+/// into a symlink would otherwise lead those host operations outside it.
+/// A missing component ends the check: nothing below it exists.
+pub(super) fn refuse_symlinks(root: &Path, relative: &Path) -> io::Result<()> {
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::other(format!(
+                    "{} is a symlink in the staged gem home; ward does not follow it",
+                    path.display()
+                )))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Refuse when the git checkout `checkout` in `gem_home` holds git data
+/// (`.git`, as a directory, file or symlink), or is reached through a
+/// symlink. The helper indexes a checkout in a throwaway repository and
+/// removes it; the gems object must hold none.
+pub(super) fn refuse_git_data(gem_home: &Path, checkout: &str) -> io::Result<()> {
+    let git = Path::new(super::GIT_CHECKOUTS).join(checkout).join(".git");
+    let parent = git.parent().expect("has a parent");
+    refuse_symlinks(gem_home, parent)?;
+    if fs::symlink_metadata(gem_home.join(&git)).is_ok() {
+        return Err(io::Error::other(format!(
+            "{checkout}: git data was left in the checkout after its install"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `relative` under `gem_home` is a directory reached through no
+/// symlink (`refuse_symlinks`).
+fn real_dir(gem_home: &Path, relative: &Path) -> io::Result<bool> {
+    refuse_symlinks(gem_home, relative)?;
+    Ok(fs::symlink_metadata(gem_home.join(relative)).is_ok_and(|m| m.is_dir()))
+}
+
+/// The directories one level under `relative` in `gem_home`, as paths
+/// relative to `gem_home`; none when it is not a real directory.
+fn subdirectories(gem_home: &Path, relative: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !real_dir(gem_home, relative)? {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(gem_home.join(relative))? {
+        let child = relative.join(entry?.file_name());
+        if real_dir(gem_home, &child)? {
+            out.push(child);
+        }
+    }
+    Ok(out)
+}
+
 /// Remove what a failed install of `full_name` leaves in `gem_home` (see
 /// the module comment), then refuse if anything else differs from
 /// `before`, the manifest taken before the attempt.
@@ -124,37 +187,91 @@ pub(super) fn discard_failed_attempt(
 ) -> io::Result<()> {
     let known = |relative: &Path| before.0.contains_key(relative);
     remove_if_new(gem_home, &Path::new("gems").join(full_name), &known)?;
-    let extensions = Path::new("extensions");
     let mut new_parents = Vec::new();
-    if gem_home.join(extensions).is_dir() {
-        for platform in fs::read_dir(gem_home.join(extensions))? {
-            let platform = extensions.join(platform?.file_name());
-            if !gem_home.join(&platform).is_dir() {
-                continue;
-            }
-            for abi in fs::read_dir(gem_home.join(&platform))? {
-                let abi = platform.join(abi?.file_name());
-                remove_if_new(gem_home, &abi.join(full_name), &known)?;
-                new_parents.push(abi);
-            }
-            new_parents.push(platform);
+    for platform in subdirectories(gem_home, Path::new("extensions"))? {
+        for abi in subdirectories(gem_home, &platform)? {
+            remove_if_new(gem_home, &abi.join(full_name), &known)?;
+            new_parents.push(abi);
         }
+        new_parents.push(platform);
     }
     new_parents.extend(STANDARD_SUBDIRECTORIES.iter().map(PathBuf::from));
-    for directory in new_parents {
+    remove_new_empty(gem_home, new_parents, &known)?;
+    compare(gem_home, before, "the gem's own directories")
+}
+
+/// Remove what a failed install of the git checkout `checkout` leaves in
+/// `gem_home`: the checkout's copy under `bundler/gems/`, its extension
+/// directories under `bundler/gems/extensions/<platform>/<abi>/` (Bundler
+/// names each `<checkout>` or `<checkout>-<gem directory>`), the
+/// executables' wrappers it wrote in `bin/` for the checkout's gems that
+/// installed before one failed, and the directories above them the attempt
+/// created. Then refuse if anything else differs from `before`, as
+/// [`discard_failed_attempt`] does.
+pub(super) fn discard_failed_git_attempt(
+    gem_home: &Path,
+    checkout: &str,
+    before: &Manifest,
+) -> io::Result<()> {
+    let known = |relative: &Path| before.0.contains_key(relative);
+    let checkouts = Path::new(super::GIT_CHECKOUTS);
+    remove_if_new(gem_home, &checkouts.join(checkout), &known)?;
+    let extensions = checkouts.join("extensions");
+    let mut new_parents = Vec::new();
+    for platform in subdirectories(gem_home, &extensions)? {
+        for abi in subdirectories(gem_home, &platform)? {
+            for entry in fs::read_dir(gem_home.join(&abi))? {
+                let entry = entry?.file_name();
+                let name = entry.to_string_lossy();
+                if name == checkout || name.starts_with(&format!("{checkout}-")) {
+                    remove_if_new(gem_home, &abi.join(&entry), &known)?;
+                }
+            }
+            new_parents.push(abi);
+        }
+        new_parents.push(platform);
+    }
+    // Every wrapper new since the attempt began is this attempt's: one
+    // install runs at a time.
+    let bin = Path::new("bin");
+    if real_dir(gem_home, bin)? {
+        for entry in fs::read_dir(gem_home.join(bin))? {
+            remove_if_new(gem_home, &bin.join(entry?.file_name()), &known)?;
+        }
+    }
+    new_parents.push(extensions);
+    new_parents.push(checkouts.to_path_buf());
+    new_parents.push(PathBuf::from("bundler"));
+    new_parents.push(bin.to_path_buf());
+    remove_new_empty(gem_home, new_parents, &known)?;
+    compare(gem_home, before, "the checkout's own directories")
+}
+
+/// Remove each of `directories` the attempt created, if empty: `remove_dir`
+/// fails on anything else, which the comparison then reports.
+fn remove_new_empty(
+    gem_home: &Path,
+    directories: Vec<PathBuf>,
+    known: &dyn Fn(&Path) -> bool,
+) -> io::Result<()> {
+    for directory in directories {
         if known(&directory) {
             continue;
         }
-        // Only an empty directory the attempt created: `remove_dir` fails
-        // on anything else, which the comparison below then reports.
+        refuse_symlinks(gem_home, &directory)?;
         let _ = fs::remove_dir(gem_home.join(directory));
     }
+    Ok(())
+}
+
+/// Refuse the retry when `gem_home` differs from `before` anywhere.
+fn compare(gem_home: &Path, before: &Manifest, own: &str) -> io::Result<()> {
     let after = manifest(gem_home)?;
     match first_change(before, &after) {
         None => Ok(()),
         Some(path) => Err(io::Error::other(format!(
-            "the failed build changed {} in the gem home, outside the gem's own \
-             directories; it was not retried against the whole host",
+            "the failed build changed {} in the gem home, outside {own}; it was not \
+             retried against the whole host",
             gem_home.join(path).display()
         ))),
     }
@@ -162,17 +279,28 @@ pub(super) fn discard_failed_attempt(
 
 /// Remove `relative` under `gem_home` if the attempt created it. A path
 /// that was there before is the comparison's to report, not ours to
-/// delete.
+/// delete. A new symlink is removed as a link, never followed, and no
+/// directory above it may be one.
 fn remove_if_new(
     gem_home: &Path,
     relative: &Path,
     known: &dyn Fn(&Path) -> bool,
 ) -> io::Result<()> {
+    if let Some(parent) = relative.parent() {
+        refuse_symlinks(gem_home, parent)?;
+    }
     let path = gem_home.join(relative);
-    if known(relative) || fs::symlink_metadata(&path).is_err() {
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return Ok(());
+    };
+    if known(relative) {
         return Ok(());
     }
-    crate::kernel::store::remove_tree(&path)
+    if metadata.is_dir() {
+        crate::kernel::store::remove_tree(&path)
+    } else {
+        fs::remove_file(&path)
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +438,112 @@ mod tests {
         assert!(message.contains("not retried"), "{message}");
         // RubyGems' own leftovers went regardless.
         assert!(!home.0.join("gems/failext-1.0").exists());
+    }
+
+    /// What a failed build of a git checkout leaves: the copied checkout,
+    /// with the build's own files in it, and Bundler's extension directory
+    /// for it. Those go, and so do the directories above them the attempt
+    /// made; a write anywhere else refuses the retry.
+    #[test]
+    fn a_failed_git_checkout_build_is_discarded() {
+        let home = gem_home("git");
+        let before = manifest(&home.0).unwrap();
+        let checkout = "gitgem-repo-0123456789ab";
+        let copy = home.0.join("bundler/gems").join(checkout);
+        fs::create_dir_all(copy.join("ext/gitnative")).unwrap();
+        fs::write(copy.join("ext/gitnative/Makefile"), "all:\n").unwrap();
+        let extensions = home
+            .0
+            .join("bundler/gems/extensions/x86_64-linux/3.4.0-static");
+        fs::create_dir_all(extensions.join(checkout)).unwrap();
+        fs::create_dir_all(extensions.join(format!("{checkout}-sub"))).unwrap();
+        fs::write(extensions.join(checkout).join("gem_make.out"), "abort\n").unwrap();
+        discard_failed_git_attempt(&home.0, checkout, &before).unwrap();
+        assert_eq!(manifest(&home.0).unwrap(), before);
+
+        fs::create_dir_all(&copy).unwrap();
+        fs::create_dir_all(extensions.join("other-checkout")).unwrap();
+        let error = discard_failed_git_attempt(&home.0, checkout, &before).unwrap_err();
+        assert!(error.to_string().contains("not retried"), "{error}");
+        assert!(!copy.exists());
+        assert!(extensions.join("other-checkout").exists());
+    }
+
+    /// A checkout with two gems whose second fails to build: the first
+    /// gem's wrapper in `bin/` goes with the attempt, so the retry against
+    /// the whole host runs. A wrapper that was there before and the attempt
+    /// rewrote is still reported.
+    #[test]
+    fn a_failed_git_attempt_takes_its_wrappers_with_it() {
+        let home = gem_home("git-bin");
+        fs::write(home.0.join("bin/rake"), "#!/bin/sh\n").unwrap();
+        let before = manifest(&home.0).unwrap();
+        let checkout = "pair-repo-0123456789ab";
+        fs::create_dir_all(home.0.join("bundler/gems").join(checkout)).unwrap();
+        fs::write(home.0.join("bin/first-tool"), "#!/usr/bin/env ruby\n").unwrap();
+        discard_failed_git_attempt(&home.0, checkout, &before).unwrap();
+        assert_eq!(manifest(&home.0).unwrap(), before);
+
+        fs::remove_file(home.0.join("bin/rake")).unwrap();
+        fs::write(home.0.join("bin/rake"), "#!/bin/sh\nrewritten\n").unwrap();
+        let error = discard_failed_git_attempt(&home.0, checkout, &before).unwrap_err();
+        assert!(error.to_string().contains("bin/rake"), "{error}");
+    }
+
+    /// A sandboxed build that turned a directory of the gem home into a
+    /// symlink cannot lead the host-side discard outside the gem home.
+    #[test]
+    fn a_discard_never_follows_a_symlink_out_of_the_gem_home() {
+        let outside = TempDir::named("ruby-gem-home-outside");
+        let checkout = "gitgem-repo-0123456789ab";
+        fs::create_dir_all(outside.0.join(checkout)).unwrap();
+        fs::create_dir_all(outside.0.join("x86_64-linux/3.4.0/failext-1.0")).unwrap();
+
+        let home = gem_home("git-link");
+        let before = manifest(&home.0).unwrap();
+        fs::create_dir_all(home.0.join("bundler")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, home.0.join("bundler/gems")).unwrap();
+        let error = discard_failed_git_attempt(&home.0, checkout, &before).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+        assert!(outside.0.join(checkout).is_dir(), "followed the symlink");
+
+        let home = gem_home("ext-link");
+        fs::remove_dir(home.0.join("extensions")).unwrap();
+        let before = manifest(&home.0).unwrap();
+        std::os::unix::fs::symlink(&outside.0, home.0.join("extensions")).unwrap();
+        let error = discard_failed_attempt(&home.0, "failext-1.0", &before).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+        assert!(outside.0.join("x86_64-linux/3.4.0/failext-1.0").is_dir());
+    }
+
+    /// Git data in any checkout, in any form, stops the commit: a later
+    /// checkout's install could have planted it in an earlier one.
+    #[test]
+    fn git_data_left_in_a_checkout_is_refused() {
+        let home = gem_home("git-data");
+        let checkout = "gitgem-repo-0123456789ab";
+        let copy = home.0.join("bundler/gems").join(checkout);
+        fs::create_dir_all(&copy).unwrap();
+        refuse_git_data(&home.0, checkout).unwrap();
+        fs::create_dir(copy.join(".git")).unwrap();
+        assert!(refuse_git_data(&home.0, checkout).is_err());
+        fs::remove_dir(copy.join(".git")).unwrap();
+        fs::write(copy.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(refuse_git_data(&home.0, checkout).is_err());
+        fs::remove_file(copy.join(".git")).unwrap();
+        std::os::unix::fs::symlink("/", copy.join(".git")).unwrap();
+        assert!(refuse_git_data(&home.0, checkout).is_err());
+    }
+
+    #[test]
+    fn refuse_symlinks_checks_every_existing_component() {
+        let home = gem_home("refuse");
+        refuse_symlinks(&home.0, Path::new("bundler/gems/x")).unwrap();
+        fs::create_dir_all(home.0.join("bundler/gems/x")).unwrap();
+        refuse_symlinks(&home.0, Path::new("bundler/gems/x")).unwrap();
+        std::os::unix::fs::symlink("/", home.0.join("bundler/gems/x/.git")).unwrap();
+        assert!(refuse_symlinks(&home.0, Path::new("bundler/gems/x/.git")).is_err());
+        assert!(refuse_symlinks(&home.0, Path::new("bundler/gems/x/.git/y")).is_err());
+        refuse_symlinks(&home.0, Path::new("bundler/gems/x")).unwrap();
     }
 }

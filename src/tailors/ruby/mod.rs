@@ -12,14 +12,19 @@
 mod door;
 pub mod edit;
 mod gem_home;
+mod helper;
 mod locked;
 mod native;
 mod native_libs;
 pub mod objects;
 pub(crate) mod registry;
 mod resolve;
+mod sources;
 pub mod tailor;
 mod unpack;
+pub use sources::{RubyGitGem, RubyPathGem};
+
+use helper::HELPER;
 
 pub(crate) use door::ruby_tool;
 pub use resolve::{attest_project, generate_lock};
@@ -181,6 +186,13 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan, native_libs_id: Option<&
     for g in &plan.gems {
         inputs.insert(format!("gem:{}", g.full_name), g.sha256.clone());
     }
+    // A git gem's tree is installed into the object, so its source and
+    // commit are inputs. A plan with none keeps the id it always had.
+    // Keyed by checkout directory, the name a host fallback records it
+    // under; the value names every lock source read from that directory.
+    for checkout in sources::checkouts(&plan.git_gems) {
+        inputs.insert(format!("git:{}", checkout.name), checkout.identity_input());
+    }
     Identity {
         kind: "ruby-gems".into(),
         name: "gems".into(),
@@ -337,6 +349,9 @@ const ENV_REMOVE: &[&str] = crate::kernel::resolve::tripwire::RUBY_ENV_REMOVE;
 const GEMFILE: &str = "Gemfile";
 const GEMFILE_LOCK: &str = "Gemfile.lock";
 
+/// Where Bundler reads git checkouts from, under GEM_HOME.
+const GIT_CHECKOUTS: &str = "bundler/gems";
+
 /// The gem environment every store Ruby run shares: `gem_home` is the one
 /// gem path, so neither the host's `~/.gem` nor its `GEM_PATH` is searched.
 fn gem_env(gem_home: &Path) -> Vec<(String, String)> {
@@ -443,168 +458,6 @@ fn ruby_tool_spec(
     spec
 }
 
-/// Helper executed BY the pinned Ruby: parses the lock with Bundler's own
-/// classes, validates the Gemfile/ruby directive, selects the local
-/// platform's closure, and emits it dependency-first as JSON.
-/// Extra modes install gems, check manifests, and read a downloaded .gem's
-/// spec for post-download checks.
-const HELPER: &str = r##"
-require "json"
-mode = ARGV.shift
-if mode == "install"
-  # Direct Gem::Installer: the `gem install` CLI requires remote_fetcher at
-  # LOAD time, which trips EPERM under the network-denied sandbox. This
-  # path is offline-only code. wrappers: real wrapper scripts, NEVER
-  # symlinks — symlink binstubs point into the staging dir and dangle
-  # after the store commit rename (Sol review, reproduced).
-  require "rubygems/installer"
-  gemfile, install_dir, native_libs = ARGV
-  # ward's native library set, when given: mkmf takes the flags its
-  # Makefile uses from extconf's arguments, never from the environment, and
-  # each one replaces Ruby's own default, so the default leads.
-  build_args = []
-  if native_libs
-    require "rbconfig"
-    require "shellwords"
-    include = Shellwords.escape(File.join(native_libs, "include"))
-    lib = Shellwords.escape(File.join(native_libs, "lib"))
-    build_args << "--with-cppflags=#{RbConfig::CONFIG["CPPFLAGS"]} -I#{include}"
-    build_args << "--with-ldflags=#{RbConfig::CONFIG["LDFLAGS"]} -L#{lib} -Wl,-rpath,#{lib}"
-  end
-  installer = Gem::Installer.at(
-    gemfile,
-    install_dir: install_dir,
-    bin_dir: File.join(install_dir, "bin"),
-    ignore_dependencies: true,
-    document: [],
-    wrappers: true,
-    env_shebang: true,
-    build_args: build_args
-  )
-  installer.install
-  puts "installed #{File.basename(gemfile)}"
-  exit 0
-end
-if mode == "check"
-  # Gemfile/lock equivalence + ruby-version gate. This mode EVALS THE
-  # GEMFILE (arbitrary ruby, delegated resolver trust): its stdout is
-  # never parsed by ward — only the exit status counts, so a hostile
-  # Gemfile cannot forge plan data through this process.
-  require "bundler"
-  gemfile, lockfile = ARGV
-  definition = Bundler::Definition.build(Pathname.new(gemfile), Pathname.new(lockfile), false)
-  begin
-    definition.send(:ensure_equivalent_gemfile_and_lockfile)
-  rescue NoMethodError
-    abort "store bundler cannot validate gemfile/lock equivalence"
-  end
-  begin
-    definition.validate_runtime!
-  rescue Bundler::GemNotFound, Bundler::SolveFailure
-  rescue NotImplementedError, NoMethodError
-  end
-  exit 0
-end
-if mode == "spec"
-  require "rubygems/package"
-  spec = Gem::Package.new(ARGV[0]).spec
-  puts({ "name" => spec.name, "version" => spec.version.to_s,
-         "platform" => spec.platform.to_s,
-         "executables" => spec.executables,
-         "extensions" => spec.extensions }.to_json)
-  exit 0
-end
-abort "usage: helper plan <lockfile>" unless mode == "plan"
-# LOCK-ONLY: this mode never evaluates the Gemfile (arbitrary ruby must
-# not be able to forge artifact coordinates); the lockfile is the sole
-# artifact authority (Sol review, forged-JSON repro).
-require "bundler"
-lockfile = ARGV[0]
-lock = Bundler::LockfileParser.new(File.read(lockfile))
-unless (lock.bundler_version rescue nil).nil?
-  if Gem::Version.new(lock.bundler_version.to_s) > Gem::Version.new(Bundler::VERSION)
-    abort "lockfile BUNDLED WITH #{lock.bundler_version} is newer than the store bundler #{Bundler::VERSION}"
-  end
-end
-require "uri"
-lock.specs.each do |s|
-  src = s.source
-  ok = src.is_a?(Bundler::Source::Rubygems) && src.remotes.all? do |r|
-    u = URI.parse(r.to_s)
-    u.scheme == "https" && u.host == "rubygems.org" && u.userinfo.nil? &&
-      (u.port == 443) && ["", "/"].include?(u.path)
-  end
-  abort "unsupported source for #{s.name} (#{src.class}); only https://rubygems.org is supported" unless ok
-end
-local = Gem::Platform.local
-selected = lock.specs.group_by(&:name).map do |name, specs|
-  # Bundler's OWN best-platform scoring (arm64-darwin vs arm64-darwin-20
-  # etc.); hand-rolled specificity picks the wrong artifact.
-  best = Bundler::GemHelpers.select_best_platform_match(specs, local)
-  best = Array(best)
-  abort "#{name}: no variant for #{local} (have: #{specs.map { |s| s.platform.to_s }.uniq.join(", ")}); run: bundle lock --add-platform #{local}" if best.empty?
-  best.first
-end
-# Bundler's parsed checksum registry (handles every format it writes).
-# If a CHECKSUMS section exists but yields no usable sha256 for a
-# selected gem, fail CLOSED rather than falling back to the live API.
-has_checksums_section = File.read(lockfile).lines.any? { |l| l.chomp == "CHECKSUMS" }
-checksums = {}
-if has_checksums_section
-  reg = (lock.respond_to?(:checksums) ? lock.checksums : nil)
-  selected.each do |s|
-    entry = nil
-    if reg
-      key = begin
-        Bundler::LazySpecification.new(s.name, s.version, s.platform)
-      rescue StandardError
-        s
-      end
-      cs = (reg[key] rescue nil) || (reg[s] rescue nil)
-      entry = Array(cs).flatten.find { |c| c.respond_to?(:algo) && c.algo == "sha256" } rescue nil
-    end
-    hexval = nil
-    if entry
-      begin
-        raw = entry.respond_to?(:digest) ? entry.digest : nil
-        hexval = raw.unpack1("H*") if raw
-        hexval ||= entry.to_s[/sha256[-=]([A-Za-z0-9+\/=]+)/, 1]&.unpack1("m0")&.unpack1("H*") rescue nil
-      rescue StandardError
-      end
-    end
-    abort "#{s.name}: CHECKSUMS section present but no usable sha256 for #{s.name}-#{s.version}; refusing API fallback" if hexval.nil?
-    plat = s.platform.to_s
-    checksums["#{s.name}-#{s.version}#{plat == "ruby" ? "" : "-#{plat}"}"] = hexval
-  end
-end
-by_name = selected.to_h { |s| [s.name, s] }
-ordered = []
-state = {}
-visit = lambda do |s|
-  case state[s.name]
-  when :done then next
-  when :visiting then next # cycle: break arbitrarily, install order best-effort
-  end
-  state[s.name] = :visiting
-  s.dependencies.each do |d|
-    dep = by_name[d.name]
-    visit.call(dep) if dep
-  end
-  state[s.name] = :done
-  ordered << s
-end
-selected.each { |s| visit.call(s) }
-out = ordered.map do |s|
-  plat = s.platform.to_s
-  full = plat == "ruby" ? "#{s.name}-#{s.version}" : "#{s.name}-#{s.version}-#{plat}"
-  { "name" => s.name, "version" => s.version.to_s, "platform" => plat,
-    "full_name" => full,
-    "checksum" => checksums["#{s.name}-#{s.version}#{plat == "ruby" ? "" : "-#{plat}"}"] }
-end
-puts({ "ruby_platform" => local.to_s, "bundler" => Bundler::VERSION,
-       "gems" => out }.to_json)
-"##;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubyGem {
     pub name: String,
@@ -643,6 +496,13 @@ pub(crate) fn record_unpinned_digests(
         )?;
     }
     Ok(())
+}
+
+/// Record `git-dependency` for each git gem in `plan`, and
+/// `host-git-transport` for one fetched over ssh, git:// or a local path,
+/// into the sync's attribution, before anything is fetched.
+pub(crate) fn record_git_dependencies(plan: &RubyPlan) -> io::Result<()> {
+    sources::record_git_dependencies(&plan.git_gems)
 }
 
 /// The store record kind holding rubygems.org's sha256 for one gem
@@ -710,6 +570,14 @@ pub struct RubyPlan {
     pub ruby_platform: String,
     pub bundler_version: String,
     pub gems: Vec<RubyGem>,
+    /// Gems the lock takes from a `PATH` source inside the project. Bundler
+    /// loads them from the project at run time, so they add nothing to the
+    /// gems object and are not part of its identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_gems: Vec<RubyPathGem>,
+    /// Gems the lock takes from a `GIT` source at a locked commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_gems: Vec<RubyGitGem>,
 }
 
 fn valid_component(s: &str) -> bool {
@@ -741,7 +609,25 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
             return Err(err(format!("duplicate gem {} in plan", g.name)));
         }
     }
-    Ok(())
+    let others = plan
+        .path_gems
+        .iter()
+        .map(|g| (&g.name, &g.version))
+        .chain(plan.git_gems.iter().map(|g| (&g.name, &g.version)));
+    for (name, version) in others {
+        if !valid_component(name) || !valid_component(version) {
+            return Err(err(format!(
+                "invalid gem coordinates in plan: {name} {version}"
+            )));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(err(format!("duplicate gem {name} in plan")));
+        }
+    }
+    for g in &plan.git_gems {
+        sources::check_git_gem(g)?;
+    }
+    sources::check_checkouts(&plan.git_gems)
 }
 
 /// The project's Gemfile.lock text, read through the held descriptor so a
@@ -831,9 +717,16 @@ pub fn plan_ruby(
         ruby_platform: String,
         bundler: String,
         gems: Vec<HelperGem>,
+        #[serde(default)]
+        path_gems: Vec<RubyPathGem>,
+        #[serde(default)]
+        git_gems: Vec<RubyGitGem>,
     }
     let parsed: HelperOut =
         serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
+    for gem in &parsed.path_gems {
+        sources::check_path_gem(project, gem)?;
+    }
 
     let store = door.store();
     let mut gems = Vec::new();
@@ -887,6 +780,8 @@ pub fn plan_ruby(
         ruby_platform: parsed.ruby_platform,
         bundler_version: parsed.bundler,
         gems,
+        path_gems: parsed.path_gems,
+        git_gems: parsed.git_gems,
     };
     validate_plan(&plan)?;
     // Snapshot guard: the lock this plan derives from is the lock whose
@@ -1083,7 +978,11 @@ pub fn realize_gems(
                 has_native
             }
         };
-        let mut native_libs_id = native_libs::identity_id(store, platform, has_native)?;
+        // A git checkout is built as a native gem is (`GemInstall::install_git`),
+        // so a plan with one mounts the native library set too.
+        let builds_native = |has_native: bool| has_native || !plan.git_gems.is_empty();
+        let mut native_libs_id =
+            native_libs::identity_id(store, platform, builds_native(has_native))?;
         let mut identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
         let cached = |identity: &Identity| -> io::Result<Option<PathBuf>> {
             let lookup_inputs = crate::kernel::hostview::host_build_inputs;
@@ -1115,7 +1014,8 @@ pub fn realize_gems(
                         if has_native { "has" } else { "has no" },
                         if fresh { "has" } else { "has not" },
                     ));
-                    native_libs_id = native_libs::identity_id(store, platform, fresh)?;
+                    native_libs_id =
+                        native_libs::identity_id(store, platform, builds_native(fresh))?;
                     identity = ruby_gems_identity(&spec, plan, native_libs_id.as_deref());
                     // `verify_plan` recorded this plan's API digests already.
                     if let Some(path) = cached(&identity)? {
@@ -1155,6 +1055,27 @@ pub fn realize_gems(
 struct VerifiedGems<'p> {
     artifacts: Vec<(&'p RubyGem, PathBuf, bool)>,
     _leases: Vec<CacheLease>,
+    /// Each executable the gems provide, and the gem providing it: a git
+    /// gem's executables are checked against these once it is installed.
+    executables: BTreeMap<String, String>,
+}
+
+/// Claim the executables `gem` provides, refusing one another gem of the
+/// plan already provides: two would write one wrapper in the bin dir.
+fn claim_executables(
+    claimed: &mut BTreeMap<String, String>,
+    gem: &str,
+    executables: impl IntoIterator<Item = String>,
+) -> io::Result<()> {
+    for e in executables {
+        if let Some(prev) = claimed.insert(e.clone(), gem.to_string()) {
+            return Err(err(format!(
+                "executable {e:?} provided by both {prev} and {gem}; refusing \
+                 ambiguous bin dir"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether `verified`'s gemspecs say the plan has a native gem, when that
@@ -1193,20 +1114,13 @@ fn verify_plan<'p>(
             record_gem_digest(store, activity, g);
         }
         native_libs::record_classification(store, activity, &g.sha256, native);
-        for e in exes {
-            if let Some(prev) = executables.insert(e.clone(), g.name.clone()) {
-                return Err(err(format!(
-                    "executable {e:?} provided by both {prev} and {}; refusing \
-                     ambiguous bin dir",
-                    g.name
-                )));
-            }
-        }
+        claim_executables(&mut executables, &g.name, exes)?;
         artifacts.push((g, file_path, native));
     }
     Ok(VerifiedGems {
         artifacts,
         _leases: leases,
+        executables,
     })
 }
 
@@ -1270,6 +1184,39 @@ fn install_gems(
             same_host_state(&mut host_inputs, &g.full_name, built_against)?;
             fell_back.push(g.full_name.clone());
         }
+    }
+    // Git checkouts last: their gemspecs and extension builds may require
+    // the rubygems.org gems above. `git-dependency` was recorded before
+    // the sync fetched anything (`sources::record_git_dependencies`).
+    // A git gem's executables are known once Bundler has evaluated its
+    // gemspec, so they are checked against the others here.
+    let mut executables = work.verified.executables.clone();
+    for checkout in sources::checkouts(&plan.git_gems) {
+        let source = checkout.first.source();
+        let tree =
+            crate::kernel::gitsrc::ensure_git_source(store, activity, &source).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{} from {}: {e}", checkout.first.name, source.url),
+                )
+            })?;
+        let installed = sandboxed.install_git(&checkout, &tree)?;
+        // The report names exactly this checkout's gems
+        // (`read_git_install_report`).
+        for gem in checkout.gems() {
+            let exes = installed.executables.get(&gem.name).into_iter().flatten();
+            claim_executables(&mut executables, &gem.name, exes.cloned())?;
+        }
+        if let Some(built_against) = installed.built_against {
+            same_host_state(&mut host_inputs, checkout.name, built_against)?;
+            fell_back.push(checkout.name.to_string());
+        }
+    }
+    // Each install checked its own checkout, but a later checkout's
+    // sandboxed install can write to an earlier one: every checkout is
+    // checked again once all have installed, before the commit.
+    for checkout in sources::checkouts(&plan.git_gems) {
+        gem_home::refuse_git_data(&staged, checkout.name)?;
     }
     let mut deps = crate::kernel::store::ObjectDeps::new();
     deps.object_id(&crate::kernel::store::object_id_from_path(ruby_obj)?)?;
@@ -1408,6 +1355,8 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
             "x86_64-linux".into()
         },
         bundler_version: "2.6.9".into(),
+        path_gems: Vec::new(),
+        git_gems: Vec::new(),
         gems: Vec::new(),
     };
     let gem_plan = RubyPlan {
@@ -1428,16 +1377,48 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         ruby_gems_identity(&spec, &empty_plan, None),
         gems.clone(),
     ];
+    // Path and git gems: only a git checkout is an input, and a plan with
+    // one builds as a native plan does on Linux.
+    let git_plan = sources_test_plan(&empty_plan);
+    let native_libs_id = format!("{}-libset-3", "c".repeat(40));
+    let linux_libs = (!platform.is_macos()).then_some(native_libs_id.as_str());
+    let git = ruby_gems_identity(&spec, &git_plan, linux_libs);
+    cases.push(git.clone());
     if !platform.is_macos() {
-        let native_libs_id = format!("{}-libset-3", "c".repeat(40));
         cases.push(ruby_gems_identity(&spec, &gem_plan, Some(&native_libs_id)));
         cases.push(ruby_gems_fallback_identity(
             &gems,
             &["rake-13.2.1".into()],
             &"f".repeat(64),
         ));
+        cases.push(ruby_gems_fallback_identity(
+            &git,
+            &["gitgem-repo-0123456789ab".into()],
+            &"f".repeat(64),
+        ));
     }
     cases
+}
+
+/// `base` with one path gem and one git gem, and no rubygems.org gem.
+#[cfg(test)]
+fn sources_test_plan(base: &RubyPlan) -> RubyPlan {
+    RubyPlan {
+        path_gems: vec![RubyPathGem {
+            name: "app".into(),
+            version: "1.0.0".into(),
+            path: ".".into(),
+        }],
+        git_gems: vec![RubyGitGem {
+            name: "gitgem".into(),
+            version: "0.1.0".into(),
+            url: "https://example.invalid/gitgem-repo.git".into(),
+            revision: "0123456789abcdef0123456789abcdef01234567".into(),
+            checkout: "gitgem-repo-0123456789ab".into(),
+            glob: String::new(),
+        }],
+        ..base.clone()
+    }
 }
 
 #[cfg(test)]
@@ -1591,6 +1572,8 @@ mod tests {
             ruby_version: RUBY_VERSION.into(),
             ruby_platform: "x86_64-linux".into(),
             bundler_version: "2.6.9".into(),
+            path_gems: Vec::new(),
+            git_gems: Vec::new(),
             gems: vec![RubyGem {
                 name: "rake".into(),
                 version: "13.2.1".into(),
@@ -1613,6 +1596,7 @@ mod tests {
         let verified = |native: bool| VerifiedGems {
             artifacts: vec![(&plan.gems[0], PathBuf::from("/cache/rake.gem"), native)],
             _leases: Vec::new(),
+            executables: BTreeMap::new(),
         };
         assert_eq!(stale_native_classification(false, &verified(false)), None);
         assert_eq!(stale_native_classification(true, &verified(true)), None);
@@ -1822,6 +1806,8 @@ mod tests {
             ruby_version: RUBY_VERSION.into(),
             ruby_platform: "arm64-darwin20".into(),
             bundler_version: "2.6.9".into(),
+            path_gems: Vec::new(),
+            git_gems: Vec::new(),
             gems: vec![RubyGem {
                 name: "rake".into(),
                 version: "13.2.1".into(),
@@ -1854,6 +1840,8 @@ mod tests {
             ruby_version: RUBY_VERSION.into(),
             ruby_platform: "arm64-darwin20".into(),
             bundler_version: "2.6.9".into(),
+            path_gems: Vec::new(),
+            git_gems: Vec::new(),
             gems: vec![base.clone()],
         };
         assert!(validate_plan(&ok).is_ok());
@@ -1884,6 +1872,8 @@ mod tests {
             ruby_version: RUBY_VERSION.into(),
             ruby_platform: "x86_64-linux".into(),
             bundler_version: "2.6.9".into(),
+            path_gems: Vec::new(),
+            git_gems: Vec::new(),
             gems: vec![
                 RubyGem {
                     name: "mini_portile2".into(),
@@ -2153,6 +2143,8 @@ mod tests {
             ruby_version: "3.4.6".into(),
             ruby_platform: "x86_64-linux".into(),
             bundler_version: "2.6.9".into(),
+            path_gems: Vec::new(),
+            git_gems: Vec::new(),
             gems: vec![
                 gem("pinned", true, false),
                 gem("asked", false, true),
@@ -2233,6 +2225,179 @@ mod tests {
         keys.sort_unstable();
         checked.sort_unstable();
         assert_eq!(keys, checked);
+    }
+
+    /// A plan with no path or git gem serializes as it always did, so
+    /// closures written before #771 and after it read the same; one with
+    /// them round-trips.
+    #[test]
+    fn path_and_git_gems_are_absent_from_a_plan_without_them() {
+        let plan = linux_test_plan();
+        let value = serde_json::to_value(&plan).unwrap();
+        assert!(value.get("path_gems").is_none(), "{value}");
+        assert!(value.get("git_gems").is_none(), "{value}");
+        let back: RubyPlan = serde_json::from_value(value).unwrap();
+        assert!(back.path_gems.is_empty() && back.git_gems.is_empty());
+        let with = sources_test_plan(&plan);
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["path_gems"][0]["path"], ".");
+        assert_eq!(value["git_gems"][0]["checkout"], "gitgem-repo-0123456789ab");
+        // An empty glob is Bundler's default and is not written.
+        assert!(value["git_gems"][0].get("glob").is_none(), "{value}");
+        let back: RubyPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(back.path_gems, with.path_gems);
+        assert_eq!(back.git_gems, with.git_gems);
+    }
+
+    /// A path gem adds nothing to the gems object, so it leaves the id
+    /// alone; a git checkout is installed into it, so its source and commit
+    /// move the id.
+    #[test]
+    fn only_a_git_gem_moves_the_gems_identity() {
+        let spec = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let plan = linux_test_plan();
+        let base = ruby_gems_identity(&spec, &plan, None).object_id();
+        let mut with_path = sources_test_plan(&plan);
+        with_path.git_gems.clear();
+        assert_eq!(
+            ruby_gems_identity(&spec, &with_path, None).object_id(),
+            base
+        );
+        let with_git = sources_test_plan(&plan);
+        let git = ruby_gems_identity(&spec, &with_git, None);
+        assert_ne!(git.object_id(), base);
+        assert!(git.inputs.contains_key("git:gitgem-repo-0123456789ab"));
+        let mut moved = with_git.clone();
+        moved.git_gems[0].revision = "f".repeat(40);
+        moved.git_gems[0].checkout = format!("gitgem-repo-{}", "f".repeat(12));
+        assert_ne!(
+            ruby_gems_identity(&spec, &moved, None).object_id(),
+            git.object_id()
+        );
+    }
+
+    /// Every lock source Bundler reads from one checkout directory is part
+    /// of that checkout's one identity input, a JSON array; the URL in it
+    /// carries no credentials.
+    #[test]
+    fn a_checkout_identity_names_every_source_it_serves() {
+        let spec = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let mut plan = sources_test_plan(&linux_test_plan());
+        let mut second = plan.git_gems[0].clone();
+        second.name = "subgem".into();
+        second.glob = "sub/*.gemspec".into();
+        plan.git_gems.push(second);
+        validate_plan(&plan).unwrap();
+        let identity = ruby_gems_identity(&spec, &plan, None);
+        let git_inputs: Vec<&String> = identity
+            .inputs
+            .keys()
+            .filter(|k| k.starts_with("git:"))
+            .collect();
+        assert_eq!(git_inputs, ["git:gitgem-repo-0123456789ab"]);
+        let input: serde_json::Value =
+            serde_json::from_str(&identity.inputs["git:gitgem-repo-0123456789ab"]).unwrap();
+        assert_eq!(
+            input,
+            serde_json::json!([
+                "0123456789abcdef0123456789abcdef01234567",
+                [
+                    [
+                        "https://example.invalid/gitgem-repo.git",
+                        "",
+                        ["gitgem:0.1.0"]
+                    ],
+                    [
+                        "https://example.invalid/gitgem-repo.git",
+                        "sub/*.gemspec",
+                        ["subgem:0.1.0"]
+                    ],
+                ]
+            ])
+        );
+        // The second source's glob is in the id, not only the first's.
+        let mut reglobbed = plan.clone();
+        reglobbed.git_gems[1].glob = "other/*.gemspec".into();
+        assert_ne!(
+            ruby_gems_identity(&spec, &reglobbed, None).object_id(),
+            identity.object_id()
+        );
+        // Credentials in the lock's remote never reach the identity.
+        let mut credentialed = plan.clone();
+        for gem in &mut credentialed.git_gems {
+            gem.url = "https://user:secret@example.invalid/gitgem-repo.git".into();
+        }
+        let with_credentials = ruby_gems_identity(&spec, &credentialed, None);
+        assert!(!format!("{:?}", with_credentials.inputs).contains("secret"));
+        assert_eq!(with_credentials.object_id(), identity.object_id());
+    }
+
+    /// A git gem's executables are claimed as a rubygems.org gem's are:
+    /// two gems providing one name are refused.
+    #[test]
+    fn two_gems_providing_one_executable_are_refused() {
+        let mut claimed = BTreeMap::new();
+        claim_executables(&mut claimed, "rake", ["rake".to_string()]).unwrap();
+        claim_executables(&mut claimed, "gitgem", ["gitgem".to_string()]).unwrap();
+        let error = claim_executables(&mut claimed, "fakerake", ["rake".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("executable \"rake\" provided by both rake and fakerake"),
+            "{error}"
+        );
+    }
+
+    /// One name from two sources, or a git gem ward cannot place, is
+    /// refused before anything is fetched.
+    #[test]
+    fn validate_plan_judges_path_and_git_gems() {
+        let plan = sources_test_plan(&linux_test_plan());
+        validate_plan(&plan).unwrap();
+        let mut twice = plan.clone();
+        twice.path_gems[0].name = "rake".into();
+        assert!(validate_plan(&twice).is_err());
+        let mut twice = plan.clone();
+        twice.git_gems[0].name = "app".into();
+        assert!(validate_plan(&twice).is_err());
+        let mut bad = plan.clone();
+        bad.path_gems[0].version = "../1".into();
+        assert!(validate_plan(&bad).is_err());
+        let mut bad = plan.clone();
+        bad.git_gems[0].revision = "main".into();
+        assert!(validate_plan(&bad).is_err());
+        let mut bad = plan.clone();
+        bad.git_gems[0].checkout = "elsewhere".into();
+        assert!(validate_plan(&bad).is_err());
+    }
+
+    /// A path gem must be a directory inside the project: not absent, not
+    /// above it, and not a symlink that leads out of it.
+    #[test]
+    fn a_path_gem_outside_the_project_is_refused() {
+        let temp = TempDir::named("ruby-path-gem");
+        let project = temp.0.join("project");
+        fs::create_dir_all(project.join("gems/inside")).unwrap();
+        fs::create_dir_all(temp.0.join("outside")).unwrap();
+        symlink(temp.0.join("outside"), project.join("escape")).unwrap();
+        let root = ProjectRoot::open(&project).unwrap();
+        let gem = |path: &str| RubyPathGem {
+            name: "x".into(),
+            version: "1.0.0".into(),
+            path: path.into(),
+        };
+        sources::check_path_gem(&root, &gem(".")).unwrap();
+        sources::check_path_gem(&root, &gem("gems/inside")).unwrap();
+        sources::check_path_gem(&root, &gem("gems/../gems/inside")).unwrap();
+        for (path, why) in [
+            ("../outside", "outside the project"),
+            ("/etc", "is absolute"),
+            ("gems/missing", "not a directory in the project"),
+            ("escape", "symlink that leads outside the project"),
+        ] {
+            let error = sources::check_path_gem(&root, &gem(path)).unwrap_err();
+            assert!(error.to_string().contains(why), "{path}: {error}");
+        }
     }
 }
 

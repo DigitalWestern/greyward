@@ -93,6 +93,9 @@ fn elixir_sync_sandboxed_build_and_run() {
     // Realize the composite BEAM object; everything below uses only its
     // committed path (read from the closure ward wrote).
     assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
+    // Keep this runtime case under the Fedora-routed test: Ubuntu cannot
+    // run the shipped OTP build. The mixed project reuses this warm store.
+    assert_mixed_dotnet_links(&temp);
     // The child's HOME is the project's private run home, and every
     // directory the forced environment names exists before it starts.
     let run_home =
@@ -282,4 +285,69 @@ fn elixir_sync_sandboxed_build_and_run() {
         .cloned()
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
+}
+
+fn assert_mixed_dotnet_links(temp: &TempDir) {
+    let project = temp.0.join("mixed-dotnet-links");
+    std::fs::create_dir_all(&project).unwrap();
+    // Restore must run, so the receipt records the omitted link.
+    for file in ["proj.csproj", "Program.cs"] {
+        std::fs::copy(
+            common::fixture("dotnet-hello").join(file),
+            project.join(file),
+        )
+        .unwrap();
+    }
+    std::fs::write(project.join("mix.exs"), "defmodule Mixed.MixProject do\n  use Mix.Project\n  def project, do: [app: :mixed, version: \"0.1.0\", deps: []]\nend\n").unwrap();
+    std::fs::write(project.join("mix.lock"), "%{}\n").unwrap();
+    std::fs::create_dir_all(project.join("data")).unwrap();
+    std::fs::write(project.join("data/value.txt"), "included").unwrap();
+    std::os::unix::fs::symlink("data", project.join("node_modules")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/env", project.join("CLAUDE.md")).unwrap();
+    assert_ok(
+        ward(&project, &temp.0, &["sync"]),
+        "Elixir and .NET sync with symlinks",
+    );
+    assert_ok(
+        ward(&project, &temp.0, &["sync"]),
+        "Elixir and .NET unchanged sync",
+    );
+    for ecosystem in ["elixir", "dotnet"] {
+        let closure: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(project.join(format!(".greyward/closures/{ecosystem}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            closure["body"]["resolution_basis"]["node_modules"]
+                .as_str()
+                .unwrap()
+                .starts_with("symlink:"),
+            "{closure}"
+        );
+        assert!(
+            closure["body"]["resolution_basis"]
+                .get("data/value.txt")
+                .is_some(),
+            "{closure}"
+        );
+        // .NET can plan an existing lock without executing MSBuild.
+        // Its missing-lock restore's receipt is where omission was recorded.
+        let evidence = if ecosystem == "dotnet" {
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(project.join(".greyward/resolution/dotnet.json")).unwrap(),
+            )
+            .unwrap()
+        } else {
+            closure["body"].clone()
+        };
+        assert!(
+            evidence["exceptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|exception| exception["kind"] == "outward-symlink"
+                    && exception["subject"] == "CLAUDE.md"),
+            "{closure}"
+        );
+    }
 }

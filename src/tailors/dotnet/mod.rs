@@ -2339,9 +2339,7 @@ mod tests {
         .unwrap();
         let error = preflight(&ProjectRoot::open(&symlinked).unwrap(), SDK_VERSION).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("csproj must be a regular file, not a symlink"),
+            error.to_string().contains("project.csproj is a symlink to"),
             "{error}"
         );
 

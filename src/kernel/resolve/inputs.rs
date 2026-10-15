@@ -183,6 +183,7 @@ pub(crate) fn walk(project: &ProjectRoot, spec: &WalkSpec<'_>) -> io::Result<Wal
                     let bytes = dir
                         .read_file(Path::new(&name))?
                         .ok_or_else(|| vanished(&path))?;
+                    project.observe_input(&path, Some(&bytes))?;
                     walk.digests.insert(key, sha256_hex(&bytes));
                     if !output {
                         walk.inputs.push(path);

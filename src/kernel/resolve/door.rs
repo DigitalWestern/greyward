@@ -1347,6 +1347,11 @@ mod tests {
         .project_file_digests()
         .unwrap();
         std::os::unix::fs::symlink("deps.lock", fx.project.join("late-link")).unwrap();
+        fs::create_dir_all(fx.project.join("config/deep")).unwrap();
+        fs::write(fx.project.join("config/settings"), "config generation").unwrap();
+        std::os::unix::fs::symlink("config/deep", fx.project.join("directory-link")).unwrap();
+        std::os::unix::fs::symlink("directory-link/../settings", fx.project.join(".npmrc"))
+            .unwrap();
         let with_link = Snapshot::build(
             &fx.harness.store,
             &fx.harness.activity,
@@ -1387,6 +1392,14 @@ mod tests {
         );
         assert!(check_planning_inputs(&with_link, &read, false).is_ok());
         assert!(check_planning_inputs(&with_link, &named, false).is_err());
+        let config = super::super::record::file_digests(&held, &[PathBuf::from(".npmrc")]).unwrap();
+        assert!(check_planning_inputs(&with_link, &config, false).is_ok());
+        fs::write(fx.project.join("config/settings"), "changed later").unwrap();
+        // Snapshot facts still identify the captured bytes after live edits.
+        assert_eq!(
+            snapshot_digest(&with_link, Path::new(".npmrc"), false).as_ref(),
+            config.get(".npmrc")
+        );
     }
 
     /// The finished copy is judged link by link before the tool runs. An
@@ -1402,7 +1415,9 @@ mod tests {
         fs::create_dir_all(store_root.join("forest")).unwrap();
         fs::create_dir_all(fx.project.join("data")).unwrap();
         fs::create_dir_all(fx.project.join("fixtures/node_modules")).unwrap();
-        fs::create_dir_all(fx.project.join(".git")).unwrap();
+        fs::create_dir_all(fx.project.join("deep/nested")).unwrap();
+        fs::write(fx.project.join("deep/nested/input"), "x").unwrap();
+        std::os::unix::fs::symlink("deep/nested", fx.project.join(".git")).unwrap();
         fs::write(fx.project.join("data/a.yml"), "a").unwrap();
         fs::write(fx.project.join("fixtures/node_modules/config.rb"), "c").unwrap();
         let link = |target: &Path, name: &str| {
@@ -1413,7 +1428,7 @@ mod tests {
         link(Path::new("../x"), "climb");
         link(&store_root.join("forest"), "node_modules");
         link(Path::new("node_modules/../../data"), "fixture");
-        link(Path::new(".git/config"), "git-config");
+        link(Path::new(".git/../../data"), "git-config");
         let held = ProjectRoot::open(&fx.project).unwrap();
         let rules = LinkRules::new(&["**/node_modules"], &["Gemfile"], vec![store_root]).unwrap();
         // The walk of the live project makes the same decisions.

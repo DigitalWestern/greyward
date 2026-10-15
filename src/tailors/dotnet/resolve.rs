@@ -361,15 +361,16 @@ mod tests {
         fs::write(temp.0.join("config/nested/version.txt"), "2.0.0").unwrap();
         assert_ne!(resolution_basis(&project).unwrap(), before);
         // An in-project link is an input of its own, recorded by its target
-        // text; another ecosystem's projection is not an input at all; a
-        // link out of the project is refused.
+        // text. A foreign link at a projection name stays an input and is
+        // withheld when it points out, with an explicit exception.
         std::os::unix::fs::symlink("config", temp.0.join("linked")).unwrap();
         std::os::unix::fs::symlink("/elsewhere", temp.0.join("node_modules")).unwrap();
         assert_eq!(
             resolution_inputs(&project).unwrap(),
             vec![
                 PathBuf::from("config/nested/version.txt"),
-                PathBuf::from("linked")
+                PathBuf::from("linked"),
+                PathBuf::from("node_modules"),
             ]
         );
         assert_eq!(
@@ -377,7 +378,13 @@ mod tests {
             Some(&record::symlink_digest(b"config"))
         );
         std::os::unix::fs::symlink("../outside", temp.0.join("escape")).unwrap();
-        assert!(resolution_inputs(&project).is_err());
+        assert!(resolution_inputs(&project)
+            .unwrap()
+            .contains(&PathBuf::from("escape")));
+        assert_eq!(
+            resolution_basis(&project).unwrap()["escape"],
+            record::symlink_digest(b"../outside")
+        );
     }
 
     #[test]

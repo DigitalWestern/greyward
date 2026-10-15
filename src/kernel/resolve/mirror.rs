@@ -593,7 +593,7 @@ impl Exchange<'_> {
                 );
                 return Err((Failure::Redirect(why), hops));
             }
-            let storage = !self.permitted.allows(&next) && self.storage_hop(&url, &next);
+            let storage = !self.permitted.allows(&next) && self.storage_hop(start, &url, &next);
             if !self.permitted.allows(&next) && !storage {
                 let why = format!(
                     "redirect to {} is not a permitted endpoint",
@@ -619,18 +619,19 @@ impl Exchange<'_> {
         Err((Failure::Redirect(why), hops))
     }
 
-    /// Whether the hop from `from` to `next`, which the permitted set does
+    /// Whether the hop from `from` to `next` of the request for `requested`
+    /// (the URL the route resolved), which the permitted set does
     /// not name, is a registry's handoff to its own storage host
     /// ([`super::routes::RegistryProtocol::follows_redirect`]): straight
     /// off one of the route's endpoints, to https without userinfo. It is
     /// the last hop: [`Self::fetch`] refuses any redirect after it, to a
     /// permitted host too.
-    fn storage_hop(&self, from: &Url, next: &Url) -> bool {
+    fn storage_hop(&self, requested: &Url, from: &Url, next: &Url) -> bool {
         next.scheme() == "https"
             && next.username().is_empty()
             && next.password().is_none()
             && self.route.endpoint_for(from).is_some()
-            && self.route.protocol.follows_redirect(from, next)
+            && self.route.protocol.follows_redirect(requested, from, next)
     }
 
     /// An upstream refusal (an address or a redirect). A refused address is
@@ -1588,7 +1589,7 @@ mod tests {
         ) -> Vec<(url::Url, crate::kernel::resolve::routes::Claim)> {
             TEST_PROTOCOL.claims(url, body)
         }
-        fn follows_redirect(&self, _from: &url::Url, to: &url::Url) -> bool {
+        fn follows_redirect(&self, _requested: &url::Url, _from: &url::Url, to: &url::Url) -> bool {
             to.host_str() == Some("third.test") && to.path().starts_with("/meta/")
         }
     }

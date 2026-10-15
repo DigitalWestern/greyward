@@ -59,8 +59,7 @@ npm	anuraghazra/github-readme-stats	54a7985aeefda00d5eadb55b80c17c7f976c37d2
 npm	coder/code-server	2b2f8b3d5c64e2f0bda876e4b1a95a79067ca01a
 npm	typicode/json-server	89a34a44b7a6a5311dc84f3b8a1b8b45c0905aea
 npm	Eugeny/tabby	14e2d60b9b6dee84a53c37f05eefeb803787de04
-# cargo, go, ruby, elixir, dotnet: default-branch HEAD on 2026-10-14, picked by `tools/hitrate.py --emit-lock` (elixir with --min-stars 1000)
-cargo	clash-verge-rev/clash-verge-rev	c6b51171a1db9b75a4270d78944e132293dbdd83
+# cargo, go, ruby, elixir, dotnet: default-branch HEAD on 2026-10-14, picked by `tools/hitrate.py --emit-lock` (elixir with --min-stars 1000); rustlings, elixir-koans, engineering-blogs, lewagon/setup and a second clash-verge-rev row (it is the npm sample's) replaced by the next picks after review
 cargo	rustdesk/rustdesk	e614de83fc616d7a093c9e24acb016963cef1e1c
 cargo	tauri-apps/tauri	152d293ddf5680b968dc4853e52d87c12a2deaeb
 cargo	denoland/deno	a18ce33715e30cd2b0d99c7e322ef11a65490e4d
@@ -69,7 +68,6 @@ cargo	rtk-ai/rtk	5eb0509690a6f0110bb9bdd453fcf75c480e0d05
 cargo	BurntSushi/ripgrep	3fce3b5bb0236da2df6d99672afb8a719642eca7
 cargo	dani-garcia/vaultwarden	64895524e481492130061b95aa4433118f6b1c59
 cargo	alacritty/alacritty	29dc55375da817d53540f4caefbe708703c57b07
-cargo	rust-lang/rustlings	bc8e51115c9304fbd036f5d6fca683e71363468f
 cargo	FuelLabs/sway	102ab6cb0378c4e89b2c0679158ffbec41a0b26e
 cargo	storytold/photocraft	fd28da56dae573df141edc25059e62788eef8304
 cargo	sharkdp/bat	62b439dae330a8c4d053ff7d8526a6e3697000b9
@@ -90,6 +88,8 @@ cargo	ajeetdsouza/zoxide	86b443cffcd74d8dce0570792f1647491ffe5974
 cargo	pola-rs/polars	769413ba3fc959af9bc3c0329048eb9a8c569723
 cargo	DioxusLabs/dioxus	f732bf293aa54befe54da6e524ab1d3f7cb66aba
 cargo	spacedriveapp/spacedrive	4d41a379f612e23ac43a66ffd67df52ca77f57d4
+cargo	lapce/lapce	f66ffaa95387794205c35864517de70958b9ea8d
+cargo	firecracker-microvm/firecracker	8ea68a2bedee0e1f5d5af537e4e78b200d88ce64
 go	ollama/ollama	8e4dad49f9f527762610fd419ee2ae39207f67a4
 go	JuliusBrussee/caveman	d262ab3882952a59312ff3537cd86d894523c5ab
 go	fatedier/frp	41ed2aecf884930b33a77ddbe014c46a42811197
@@ -124,10 +124,8 @@ ruby	rails/rails	ba3572c874040cfd6d4883f5ca574121968cdf6f
 ruby	jekyll/jekyll	97c3bdc822df9d5bea4c269b29a28de5a5e29d70
 ruby	huginn/huginn	efaba04566eeac4d17fdde7e9258e6c047a02cf8
 ruby	fastlane/fastlane	2d27e3746ffd7446abe3e764bd980edd726738a2
-ruby	kilimchoi/engineering-blogs	50eab27eb2833dbf910ed4c79651bc1213c8a743
 ruby	hashicorp/vagrant	dc55920a284544919340b975098b4ac9005b08b0
 ruby	heartcombo/devise	05811fb8366edd08874111d0f6fb44543e1c91ef
-ruby	lewagon/setup	d4b4fbafd93f0f571473f431e36c8325f6497d50
 ruby	docusealco/docuseal	3c65b0e4ba872fe71d5566c0d09c3ace59a7fb8a
 ruby	postalserver/postal	d96eddbadeda600595d6247486f9ceb8e99cbc15
 ruby	CocoaPods/CocoaPods	b80e113e28a7e23cd6dbc169f0c923f6b48bf7a2
@@ -150,6 +148,8 @@ ruby	we-promise/sure	a3bb5d991f9b96e335e9212b1a6324289577f143
 ruby	teamcapybara/capybara	265d2d175f4be3ddf785d7597bdfd19b231f844a
 ruby	ruby-grape/grape	19e15d2ee4ba9784c6bd3b2243412feb830e4de9
 ruby	wpscanteam/wpscan	5d672f66ee512301b654a2d79c9ddf6f8509eeb4
+ruby	activeadmin/activeadmin	cae41ce24fe3bf77ac2f2734c038921acc701dee
+ruby	resque/resque	76c210312d0c23449cb2c18317b7ff7b4b9c1e88
 dotnet	shadowsocks/shadowsocks-windows	891d971682eefcaa2e640258d3b352a3ad3b2233
 dotnet	jellyfin/jellyfin	aec42b345e1a7da25ee5492183f12209338df688
 dotnet	PowerShell/PowerShell	db1d0a56cbe41adf05d0bad90be5190a6655404f
@@ -202,7 +202,6 @@ elixir	ash-project/ash	bc4f2bbd99ca4a2077908a49f036a65dc42b5828
 elixir	nerves-project/nerves	7985f38bf3372e03c907192a91f1f24d0ab35fcd
 elixir	asciinema/asciinema-server	86adf567b7c6596c8df411123a7dc0476bdda3f7
 elixir	quantum-elixir/quantum-core	d6be4c881a81e43b4302032a2f9db16102e7b920
-elixir	elixirkoans/elixir-koans	395eeb3e1c3760f53a7d02f92ae0587f7bf4a9eb
 elixir	edgurgel/httpoison	18be3fe9c75de8f0de4e1d43d11cc98ff04f988c
 elixir	supabase/supavisor	5df5caf10694bb68ddd3eca14ac005832de40427
 elixir	pentacent/keila	2308bebd2b54edc8ac8d484be5c9b4e972aed7cc
@@ -210,3 +209,4 @@ elixir	sequinstream/sequin	46ce4e1048437575ce3c40ebb3eb589a4b9e4f27
 elixir	phoenixframework/phoenix_live_dashboard	83a0bd137ed3e4c66b8037b140a2744803a48e13
 elixir	bitwalker/libcluster	6d8c11f57b9bde9a047e2ea9276f19b58c371466
 elixir	philss/floki	22fa6f4ed93e00fe67dc824ebcc70646c2a14317
+elixir	surface-ui/surface	b378f199a265e86afdf6efbc66dd174b6e002d89

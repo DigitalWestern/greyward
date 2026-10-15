@@ -20,6 +20,34 @@ pub(crate) fn tar_create() -> Command {
     command
 }
 
+/// A `file://` URL whose bytes arrive only after `delay`: a FIFO at `path`
+/// that a thread fills then closes. A download from it is slow by
+/// construction, so a test can order another download against it without
+/// relying on timing. Join the handle once the read is done.
+pub(crate) fn slow_file_url(
+    path: &std::path::Path,
+    bytes: Vec<u8>,
+    delay: std::time::Duration,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `name` is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let fifo = path.to_path_buf();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        use std::io::Write as _;
+        // Blocks until the download opens the FIFO for reading.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fifo)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    });
+    (format!("file://{}", path.display()), writer)
+}
+
 /// `dir` at mode 0111 (search, no read) until dropped, for a test that a
 /// walk reaches names in a directory it cannot list. When this user lists
 /// it anyway (root, or `CAP_DAC_READ_SEARCH`) the test would prove nothing:

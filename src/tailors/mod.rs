@@ -1303,8 +1303,8 @@ mod tests {
     }
 
     /// Each shipped publisher's real redirect chain stays inside its own
-    /// endpoints: one row of the default releases per publisher, on any
-    /// platform, is opened through the policy-checked fetch and its first
+    /// endpoints: one row per publisher, from the default release where it
+    /// has one, on any platform, is opened through the policy-checked fetch and its first
     /// bytes read.
     #[test]
     #[ignore = "network: opens one shipped artifact per publisher"]
@@ -1314,8 +1314,15 @@ mod tests {
         let mut opened = std::collections::BTreeSet::new();
         for tailor in registry() {
             let catalog = tailor.toolchain_catalog().unwrap();
-            let bundle = crate::kernel::toolchain::shipped(&catalog).unwrap().bundle;
-            for row in &bundle.artifacts {
+            let default = crate::kernel::toolchain::shipped(&catalog).unwrap().bundle;
+            // The default first, then any release served by a publisher the
+            // default does not use (Ruby's newer builds come only from
+            // Homebrew's container registry).
+            let rows = default
+                .artifacts
+                .iter()
+                .chain(catalog.bundles().iter().flat_map(|b| b.artifacts.iter()));
+            for row in rows {
                 if !opened.insert(row.provider.clone()) {
                     continue;
                 }

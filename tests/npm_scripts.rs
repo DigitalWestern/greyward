@@ -1075,7 +1075,7 @@ NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
 
     let mut envs = Vec::new();
     for (name, locked_python, expected) in [
-        ("locks-python", Some("3.13"), "3.13.15"),
+        ("locks-python", Some("3.13"), "3.13.16"),
         ("node-only", None, "3.12.14"),
     ] {
         let project = temp.0.join(name);

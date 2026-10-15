@@ -56,7 +56,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
     let first_stderr = String::from_utf8_lossy(&first.stderr);
     assert!(first.status.success(), "first sync failed: {first_stderr}");
     assert!(
-        first_stderr.contains("python 3.11.16 selected"),
+        first_stderr.contains("python 3.11.17 selected"),
         "{first_stderr}"
     );
     assert!(
@@ -129,7 +129,7 @@ fn pyproject_requires_python_selects_311_and_warm_sync_is_cached() {
         String::from_utf8_lossy(&audit.stdout),
         String::from_utf8_lossy(&audit.stderr)
     );
-    assert_eq!(closure["body"]["python"]["version"], "3.11.16");
+    assert_eq!(closure["body"]["python"]["version"], "3.11.17");
     assert_eq!(closure["body"]["python"]["constraint"], ">=3.9,<3.12");
     assert_eq!(
         closure["body"]["python"]["constraint_source"],

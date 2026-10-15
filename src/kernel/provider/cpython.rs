@@ -369,17 +369,23 @@ pub fn prefetch_uv_and_runtime(
         Err(error) => return Ok([Ok(()), Err(error)]),
     };
     let mut fetched = crate::kernel::fetch::fetch_each(&[uv, cpython], |spec| {
-        download_toolchain_artifact_held(
-            store,
-            activity,
-            &spec.provider,
-            &spec.url,
-            &Digest::sha256(artifact_sha256(spec)?)?,
-        )
-        .map(|_| ())
+        fetch_tarball(store, activity, spec)
     })
     .into_iter();
     Ok([fetched.next().unwrap(), fetched.next().unwrap()])
+}
+
+/// Fetch and verify one toolchain row's tarball into the cache, for
+/// [`prefetch_uv_and_runtime`]; its realize reads it from there.
+fn fetch_tarball(store: &Store, activity: &StoreActivity, spec: &ArtifactSpec) -> io::Result<()> {
+    download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(artifact_sha256(spec)?)?,
+    )
+    .map(|_| ())
 }
 
 /// Realize the CPython this selection names. Returns the object path

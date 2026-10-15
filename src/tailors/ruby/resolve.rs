@@ -60,6 +60,7 @@ pub fn generate_lock(
             inputs: Some(&basis),
             frozen: false,
             files: Vec::new(),
+            bundler: None,
             publish: RubyPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
             },
@@ -77,6 +78,7 @@ pub(super) fn helper(
     ruby_obj: &Path,
     mode: &str,
     basis: Option<&crate::comforter::join::Digests>,
+    bundler: Option<&super::bundler::Provisioned>,
 ) -> io::Result<DelegateReport> {
     let helper = format!("{SCRATCH}/{HELPER_FILE}");
     let mut args = vec!["ruby", helper.as_str(), mode];
@@ -95,6 +97,7 @@ pub(super) fn helper(
             frozen: true,
             files: vec![(PathBuf::from(HELPER_FILE), HELPER.as_bytes().to_vec())],
             publish: RubyPublish::Detached,
+            bundler,
         },
     )
 }
@@ -116,6 +119,9 @@ pub fn attest_project(
         return Err(err("Gemfile not found"));
     }
     super::require_lock(project)?;
+    // The Bundler the lock was written with checks it, when the store
+    // Ruby's own is older.
+    let bundler = super::bundler::project_bundler(door, project, ruby_obj, selected)?;
     let basis = resolution_basis(project)?;
     let args = ["bundle", "lock"];
     let mut spec =
@@ -133,6 +139,7 @@ pub fn attest_project(
             inputs: Some(&basis),
             frozen: true,
             files: Vec::new(),
+            bundler: bundler.as_ref(),
             publish: RubyPublish::Project {
                 receipt: Some(record::producer(spec, slot.clone())),
             },
@@ -418,8 +425,8 @@ mod tests {
         );
 
         let ((check, plan), recorded) = through_door(harness, DoorKind::Planner, |door| {
-            let check = helper(door, &held, &ruby_obj, "check", None).unwrap();
-            let plan = helper(door, &held, &ruby_obj, "plan", None).unwrap();
+            let check = helper(door, &held, &ruby_obj, "check", None, None).unwrap();
+            let plan = helper(door, &held, &ruby_obj, "plan", None, None).unwrap();
             assert_eq!(door.take_kept_ledgers().len(), 2);
             (check, plan)
         });
@@ -457,6 +464,7 @@ mod tests {
                         inputs: None,
                         frozen: false,
                         files: Vec::new(),
+                        bundler: None,
                         publish: RubyPublish::Project {
                             receipt: Some(record::producer(spec, Default::default())),
                         },

@@ -79,6 +79,8 @@ pub(crate) fn edit_manifest(
     let selected = edit.host.toolchain(project, "ruby")?;
     let ruby_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let root = ProjectRoot::open(project)?;
+    // An existing lock written by a newer Bundler is edited with that one.
+    let bundler = super::bundler::project_bundler(door, &root, &ruby_obj, &selected)?;
     // Every run publishes the Gemfile and Gemfile.lock with a record of its
     // own, so no state between two runs sits under an older record.
     for args in bundler_runs(edit.verb, texts, dev) {
@@ -100,6 +102,7 @@ pub(crate) fn edit_manifest(
                 inputs: Some(&basis),
                 frozen: false,
                 files: Vec::new(),
+                bundler: bundler.as_ref(),
                 publish: RubyPublish::Project {
                     receipt: Some(record::producer(spec, Default::default())),
                 },

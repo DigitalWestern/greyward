@@ -10,6 +10,13 @@
 pub(super) const HELPER: &str = r##"
 require "json"
 mode = ARGV.shift
+# The Bundler the lock was written with, when ward provisioned one newer
+# than this Ruby's own: it is on GEM_PATH, and is activated by its exact
+# version before anything requires Bundler, so no other one can load.
+activate_bundler = lambda do
+  pinned = ENV["WARD_BUNDLER_VERSION"].to_s
+  gem "bundler", "= #{pinned}" unless pinned.empty?
+end
 # ward's native library set, when given: mkmf takes the flags its
 # Makefile uses from extconf's arguments, never from the environment, and
 # each one replaces Ruby's own default, so the default leads.
@@ -53,6 +60,7 @@ if mode == "check"
   # GEMFILE (arbitrary ruby, delegated resolver trust): its stdout is
   # never parsed by ward — only the exit status counts, so a hostile
   # Gemfile cannot forge plan data through this process.
+  activate_bundler.call
   require "bundler"
   gemfile, lockfile = ARGV
   definition = Bundler::Definition.build(Pathname.new(gemfile), Pathname.new(lockfile), false)
@@ -87,6 +95,7 @@ if mode == "git-install"
   # evaluates and serializes the gemspecs, compiles native extensions
   # where Bundler looks for them at run time, and writes the executables'
   # wrappers. Offline: nothing here fetches.
+  activate_bundler.call
   require "bundler"
   require "fileutils"
   native_libs, revision, checkout, report, sources = ARGV
@@ -155,6 +164,7 @@ abort "usage: helper plan <lockfile>" unless mode == "plan"
 # LOCK-ONLY: this mode never evaluates the Gemfile (arbitrary ruby must
 # not be able to forge artifact coordinates); the lockfile is the sole
 # artifact authority (Sol review, forged-JSON repro).
+activate_bundler.call
 require "bundler"
 lockfile = ARGV[0]
 lock = Bundler::LockfileParser.new(File.read(lockfile))
@@ -186,10 +196,18 @@ lock.specs.each do |s|
   abort "unsupported source for #{s.name} (#{s.source.class}); only https://rubygems.org, path and git sources are supported"
 end
 local = Gem::Platform.local
+# Bundler 4 moved its platform scoring from GemHelpers to MatchPlatform.
+platform_match =
+  if Bundler.const_defined?(:MatchPlatform) &&
+     Bundler::MatchPlatform.respond_to?(:select_best_platform_match)
+    Bundler::MatchPlatform
+  else
+    Bundler::GemHelpers
+  end
 selected = lock.specs.group_by(&:name).map do |name, specs|
   # Bundler's OWN best-platform scoring (arm64-darwin vs arm64-darwin-20
   # etc.); hand-rolled specificity picks the wrong artifact.
-  best = Bundler::GemHelpers.select_best_platform_match(specs, local)
+  best = platform_match.select_best_platform_match(specs, local)
   best = Array(best)
   abort "#{name}: no variant for #{local} (have: #{specs.map { |s| s.platform.to_s }.uniq.join(", ")}); run: bundle lock --add-platform #{local}" if best.empty?
   best.first

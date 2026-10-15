@@ -1543,3 +1543,141 @@ fn ruby_path_and_git_sources_sync_and_run() {
         "{stderr}"
     );
 }
+
+/// A project with no gems whose lock names `bundled_with`, and the lock's
+/// CHECKSUMS entry for that Bundler when `checksum` is given.
+fn bundled_with_project(project: &Path, bundled_with: &str, checksum: Option<&str>) {
+    std::fs::create_dir_all(project).unwrap();
+    std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+    let checksums = checksum
+        .map(|sha| format!("CHECKSUMS\n  bundler ({bundled_with}) sha256={sha}\n\n"))
+        .unwrap_or_default();
+    std::fs::write(
+        project.join("Gemfile.lock"),
+        format!(
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n\n\
+             PLATFORMS\n  ruby\n\nDEPENDENCIES\n\n{checksums}\
+             BUNDLED WITH\n   {bundled_with}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// Build `bundler-<version>.gem` in `dir` from the store Ruby's own
+/// Bundler with only its version changed: a Bundler release newer than the
+/// one the Ruby ships, made locally so the test needs no live RubyGems.
+fn bumped_bundler_gem(ruby: &Path, dir: &Path, version: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let script = format!(
+        r#"require "fileutils"
+require "rubygems/package"
+shipped = Gem::Specification.find_by_name("bundler")
+lib = RbConfig::CONFIG["rubylibdir"]
+FileUtils.mkdir_p("lib")
+FileUtils.cp(File.join(lib, "bundler.rb"), "lib")
+FileUtils.cp_r(File.join(lib, "bundler"), "lib")
+FileUtils.cp_r(File.join(shipped.full_gem_path, "exe"), ".")
+# The store's files are read-only, and so are their copies.
+FileUtils.chmod_R("u+w", %w[lib exe])
+file = "lib/bundler/version.rb"
+File.write(file, File.read(file).sub(/VERSION = "[^"]+"/, 'VERSION = "{version}"'))
+spec = Gem::Specification.new do |s|
+  s.name = "bundler"
+  s.version = "{version}"
+  s.summary = "Bundler, version-bumped for a test"
+  s.authors = ["ward"]
+  s.license = "MIT"
+  s.files = Dir["lib/**/*", "exe/*"]
+  s.bindir = "exe"
+  s.executables = %w[bundle bundler]
+  s.required_ruby_version = ">= 3.1.0"
+end
+puts Gem::Package.build(spec)
+"#
+    );
+    pinned_ruby(ruby, dir, &script, "build the bumped bundler gem");
+    let gem = dir.join(format!("bundler-{version}.gem"));
+    assert!(gem.is_file(), "{}", gem.display());
+    gem
+}
+
+/// A lock written by a Bundler newer than the store Ruby's is planned and
+/// installed with that exact Bundler: ward provisions the release the lock
+/// names, checked against the lock's CHECKSUMS entry, as its own object,
+/// and `bundle` in the project is that release. A lock no newer than the
+/// shipped Bundler provisions nothing. The newer release is built from the
+/// shipped one and seeded into the verified cache, so the sync that uses
+/// it runs with the network cut.
+#[test]
+#[ignore]
+fn ruby_lock_bundled_with_a_newer_bundler_syncs_with_it() {
+    let temp = TempDir::new("ruby-e2e-bundler");
+    let store = temp.0.join("store");
+
+    // A lock no newer than the Ruby's own Bundler: nothing provisioned.
+    let older = temp.0.join("older");
+    bundled_with_project(&older, "2.6.9", None);
+    assert_ok(
+        ward(&older, &temp.0, &["sync"]),
+        "sync with the shipped bundler",
+    );
+    let closure: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(older.join(".greyward/closures/ruby.json")).unwrap())
+            .unwrap();
+    assert!(
+        closure["body"]["plan"].get("bundler").is_none(),
+        "{closure}"
+    );
+    assert!(find_object(&store, "ruby-bundler").is_none());
+
+    let version = "2.99.0";
+    let (ruby, _) = find_object(&store, "ruby").expect("ruby object published");
+    let gem = bumped_bundler_gem(&ruby, &temp.0.join("bundler-src"), version);
+    let opened = greyward::kernel::store::Store::open_at(&store).unwrap();
+    let activity = opened
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let (sha256, _) = greyward::kernel::fetch::cache_insert(&opened, &activity, &gem).unwrap();
+    drop(activity);
+
+    let newer = temp.0.join("newer");
+    bundled_with_project(&newer, version, Some(&sha256));
+    let out = ward_offline(&newer, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "sync failed: {stderr}");
+    let closure: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(newer.join(".greyward/closures/ruby.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        closure["body"]["plan"]["bundler"],
+        serde_json::json!({"version": version, "sha256": sha256}),
+        "{closure}"
+    );
+    let (bundler_obj, meta) = find_object(&store, "ruby-bundler").expect("bundler object");
+    assert_immutable_tree(&bundler_obj);
+    let inputs = &meta["identity"]["inputs"];
+    assert_eq!(inputs["gem_sha256"], serde_json::json!(sha256), "{meta}");
+    assert_eq!(
+        meta["identity"]["version"],
+        serde_json::json!(version),
+        "{meta}"
+    );
+    // The older project's gems object is in the store too: read this one's.
+    let gems_id = closure["body"]["gems_object"]["id"].as_str().unwrap();
+    let gems_meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store.join("meta").join(format!("{gems_id}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        gems_meta["identity"]["inputs"]["bundler"]
+            .as_str()
+            .is_some_and(|input| input.contains(&sha256)),
+        "{gems_meta}"
+    );
+
+    let shown = assert_ok(
+        ward_offline(&newer, &temp.0, &["run", "bundle", "-v"]),
+        "bundle -v in the project",
+    );
+    assert!(shown.contains(version), "{shown}");
+}

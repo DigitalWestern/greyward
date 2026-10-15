@@ -58,6 +58,11 @@ pub(crate) struct RubyRun<'a> {
     /// to it.
     pub files: Vec<(PathBuf, Vec<u8>)>,
     pub publish: RubyPublish<'a>,
+    /// The Bundler the lock was written with, when ward provisioned one
+    /// newer than the store Ruby's (`super::bundler`): its object is bound
+    /// read-only and put on `GEM_PATH`, where RubyGems activates it for the
+    /// lock, and the helper activates it by version.
+    pub bundler: Option<&'a super::bundler::Provisioned>,
 }
 
 /// The ruby a resolution record names: the selected release, whose
@@ -121,6 +126,12 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
+    let bundler = run
+        .bundler
+        .map(|bundler| (bundler.object.clone(), bundler.pin.version.clone()));
+    if let Some((object, _)) = &bundler {
+        confined.store_reads.push(object.clone());
+    }
     confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
@@ -134,10 +145,21 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     let files = std::mem::take(&mut run.files);
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         let gems = wire.scratch.join("gems");
-        let mut env: Vec<(OsString, OsString)> = vec![
-            ("GEM_HOME".into(), gems.clone().into()),
-            ("GEM_PATH".into(), gems.into()),
-        ];
+        // The run's own gem home first; a provisioned Bundler's object
+        // after it, read-only (a store path holds no ':').
+        let mut path = gems.clone().into_os_string();
+        if let Some((object, _)) = &bundler {
+            path.push(":");
+            path.push(object);
+        }
+        let mut env: Vec<(OsString, OsString)> =
+            vec![("GEM_HOME".into(), gems.into()), ("GEM_PATH".into(), path)];
+        if let Some((_, version)) = &bundler {
+            env.push((
+                super::bundler::VERSION_VARIABLE.into(),
+                version.clone().into(),
+            ));
+        }
         // A run with no route gets no proxy at all: a connection it tried
         // would fail in the sandbox rather than reach the session as a
         // refused CONNECT.
@@ -256,6 +278,7 @@ mod tests {
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Detached,
+            bundler: None,
         };
         let command = format!("{:?}", spec(&run).command());
         let spec = spec(&run);

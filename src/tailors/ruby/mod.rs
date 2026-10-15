@@ -188,24 +188,10 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan, native_libs_id: Option<&
     }
     // A git gem's tree is installed into the object, so its source and
     // commit are inputs. A plan with none keeps the id it always had.
-    // Keyed by checkout, the name a host fallback records it under.
+    // Keyed by checkout directory, the name a host fallback records it
+    // under; the value names every lock source read from that directory.
     for checkout in sources::checkouts(&plan.git_gems) {
-        let first = checkout.first;
-        let gems: Vec<String> = checkout
-            .gems
-            .iter()
-            .map(|g| format!("{}:{}", g.name, g.version))
-            .collect();
-        inputs.insert(
-            format!("git:{}", first.checkout),
-            format!(
-                "{} {} glob={} {}",
-                first.url,
-                first.revision,
-                first.glob,
-                gems.join(",")
-            ),
-        );
+        inputs.insert(format!("git:{}", checkout.name), checkout.identity_input());
     }
     Identity {
         kind: "ruby-gems".into(),
@@ -641,7 +627,7 @@ fn validate_plan(plan: &RubyPlan) -> io::Result<()> {
     for g in &plan.git_gems {
         sources::check_git_gem(g)?;
     }
-    Ok(())
+    sources::check_checkouts(&plan.git_gems)
 }
 
 /// The project's Gemfile.lock text, read through the held descriptor so a
@@ -1069,6 +1055,27 @@ pub fn realize_gems(
 struct VerifiedGems<'p> {
     artifacts: Vec<(&'p RubyGem, PathBuf, bool)>,
     _leases: Vec<CacheLease>,
+    /// Each executable the gems provide, and the gem providing it: a git
+    /// gem's executables are checked against these once it is installed.
+    executables: BTreeMap<String, String>,
+}
+
+/// Claim the executables `gem` provides, refusing one another gem of the
+/// plan already provides: two would write one wrapper in the bin dir.
+fn claim_executables(
+    claimed: &mut BTreeMap<String, String>,
+    gem: &str,
+    executables: impl IntoIterator<Item = String>,
+) -> io::Result<()> {
+    for e in executables {
+        if let Some(prev) = claimed.insert(e.clone(), gem.to_string()) {
+            return Err(err(format!(
+                "executable {e:?} provided by both {prev} and {gem}; refusing \
+                 ambiguous bin dir"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether `verified`'s gemspecs say the plan has a native gem, when that
@@ -1107,20 +1114,13 @@ fn verify_plan<'p>(
             record_gem_digest(store, activity, g);
         }
         native_libs::record_classification(store, activity, &g.sha256, native);
-        for e in exes {
-            if let Some(prev) = executables.insert(e.clone(), g.name.clone()) {
-                return Err(err(format!(
-                    "executable {e:?} provided by both {prev} and {}; refusing \
-                     ambiguous bin dir",
-                    g.name
-                )));
-            }
-        }
+        claim_executables(&mut executables, &g.name, exes)?;
         artifacts.push((g, file_path, native));
     }
     Ok(VerifiedGems {
         artifacts,
         _leases: leases,
+        executables,
     })
 }
 
@@ -1188,19 +1188,27 @@ fn install_gems(
     // Git checkouts last: their gemspecs and extension builds may require
     // the rubygems.org gems above. `git-dependency` was recorded before
     // the sync fetched anything (`sources::record_git_dependencies`).
+    // A git gem's executables are known once Bundler has evaluated its
+    // gemspec, so they are checked against the others here.
+    let mut executables = work.verified.executables.clone();
     for checkout in sources::checkouts(&plan.git_gems) {
+        let source = checkout.first.source();
         let tree =
-            crate::kernel::gitsrc::ensure_git_source(store, activity, &checkout.first.source())
-                .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!("{} from {}: {e}", checkout.first.name, checkout.first.url),
-                    )
-                })?;
-        let name = &checkout.first.checkout;
-        if let Some(built_against) = sandboxed.install_git(&checkout, &tree)? {
-            same_host_state(&mut host_inputs, name, built_against)?;
-            fell_back.push(name.clone());
+            crate::kernel::gitsrc::ensure_git_source(store, activity, &source).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{} from {}: {e}", checkout.first.name, source.url),
+                )
+            })?;
+        let installed = sandboxed.install_git(&checkout, &tree)?;
+        for gem in checkout.gems() {
+            if let Some(exes) = installed.executables.get(&gem.name) {
+                claim_executables(&mut executables, &gem.name, exes.iter().cloned())?;
+            }
+        }
+        if let Some(built_against) = installed.built_against {
+            same_host_state(&mut host_inputs, checkout.name, built_against)?;
+            fell_back.push(checkout.name.to_string());
         }
     }
     let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -1581,6 +1589,7 @@ mod tests {
         let verified = |native: bool| VerifiedGems {
             artifacts: vec![(&plan.gems[0], PathBuf::from("/cache/rake.gem"), native)],
             _leases: Vec::new(),
+            executables: BTreeMap::new(),
         };
         assert_eq!(stale_native_classification(false, &verified(false)), None);
         assert_eq!(stale_native_classification(true, &verified(true)), None);
@@ -2257,6 +2266,78 @@ mod tests {
         assert_ne!(
             ruby_gems_identity(&spec, &moved, None).object_id(),
             git.object_id()
+        );
+    }
+
+    /// Every lock source Bundler reads from one checkout directory is part
+    /// of that checkout's one identity input, a JSON array; the URL in it
+    /// carries no credentials.
+    #[test]
+    fn a_checkout_identity_names_every_source_it_serves() {
+        let spec = pin_spec(Platform::X86_64UnknownLinuxGnu);
+        let mut plan = sources_test_plan(&linux_test_plan());
+        let mut second = plan.git_gems[0].clone();
+        second.name = "subgem".into();
+        second.glob = "sub/*.gemspec".into();
+        plan.git_gems.push(second);
+        validate_plan(&plan).unwrap();
+        let identity = ruby_gems_identity(&spec, &plan, None);
+        let git_inputs: Vec<&String> = identity
+            .inputs
+            .keys()
+            .filter(|k| k.starts_with("git:"))
+            .collect();
+        assert_eq!(git_inputs, ["git:gitgem-repo-0123456789ab"]);
+        let input: serde_json::Value =
+            serde_json::from_str(&identity.inputs["git:gitgem-repo-0123456789ab"]).unwrap();
+        assert_eq!(
+            input,
+            serde_json::json!([
+                "0123456789abcdef0123456789abcdef01234567",
+                [
+                    [
+                        "https://example.invalid/gitgem-repo.git",
+                        "",
+                        ["gitgem:0.1.0"]
+                    ],
+                    [
+                        "https://example.invalid/gitgem-repo.git",
+                        "sub/*.gemspec",
+                        ["subgem:0.1.0"]
+                    ],
+                ]
+            ])
+        );
+        // The second source's glob is in the id, not only the first's.
+        let mut reglobbed = plan.clone();
+        reglobbed.git_gems[1].glob = "other/*.gemspec".into();
+        assert_ne!(
+            ruby_gems_identity(&spec, &reglobbed, None).object_id(),
+            identity.object_id()
+        );
+        // Credentials in the lock's remote never reach the identity.
+        let mut credentialed = plan.clone();
+        for gem in &mut credentialed.git_gems {
+            gem.url = "https://user:secret@example.invalid/gitgem-repo.git".into();
+        }
+        let with_credentials = ruby_gems_identity(&spec, &credentialed, None);
+        assert!(!format!("{:?}", with_credentials.inputs).contains("secret"));
+        assert_eq!(with_credentials.object_id(), identity.object_id());
+    }
+
+    /// A git gem's executables are claimed as a rubygems.org gem's are:
+    /// two gems providing one name are refused.
+    #[test]
+    fn two_gems_providing_one_executable_are_refused() {
+        let mut claimed = BTreeMap::new();
+        claim_executables(&mut claimed, "rake", ["rake".to_string()]).unwrap();
+        claim_executables(&mut claimed, "gitgem", ["gitgem".to_string()]).unwrap();
+        let error = claim_executables(&mut claimed, "fakerake", ["rake".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("executable \"rake\" provided by both rake and fakerake"),
+            "{error}"
         );
     }
 

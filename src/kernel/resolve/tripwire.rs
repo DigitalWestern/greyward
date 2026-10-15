@@ -57,7 +57,7 @@ pub const OTP_RUNTIME_PROBE: &str = "ok = crypto:start(), \
 /// `ruby ... spec` form may run. The tailor's test pins it to the text it
 /// writes, so editing the helper means reviewing this table again.
 pub const RUBY_HELPER_SHA256: &str =
-    "43925533df1b5f4fd77d8c2260d0f1353604ee7b7c7f0fb7a0e6e3bca018b233";
+    "d7bd40612ac5d0ccbdc7f68440a891471067a71e1adb99d61bff6020770942b8";
 
 /// The sha256 of the Elixir tailor's helper script, the only script the
 /// `elixir ... hexmark` form may run. Pinned by the tailor's test, as for

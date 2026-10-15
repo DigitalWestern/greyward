@@ -112,50 +112,65 @@ impl GemInstall<'_> {
     /// Install the gems of one git checkout: copy the fetched tree at
     /// `tree` to `<GEM_HOME>/bundler/gems/<checkout>`, where Bundler reads
     /// it at run time, and run Bundler's own installer over it in the
-    /// sandbox (the helper's `git-install` mode). Each attempt starts from
-    /// a fresh copy. A checkout's gemspecs are only known once evaluated,
-    /// so it is built as a native gem is: hermetic first on Linux.
+    /// sandbox (the helper's `git-install` mode), once for all the lock
+    /// sources that name the directory. Each attempt starts from a fresh
+    /// copy. A checkout's gemspecs are only known once evaluated, so it is
+    /// built as a native gem is: hermetic first on Linux.
     pub(super) fn install_git(
         &self,
         checkout: &super::sources::Checkout<'_>,
         tree: &Path,
-    ) -> io::Result<Option<String>> {
+    ) -> io::Result<GitInstalled> {
         let staged = self.staged;
-        let first = checkout.first;
-        let name = &first.checkout;
-        let dest = staged.join(GIT_CHECKOUTS).join(name);
+        let name = checkout.name;
+        let relative = Path::new(GIT_CHECKOUTS).join(name);
+        let dest = staged.join(&relative);
+        let sources: Vec<serde_json::Value> = checkout
+            .sources
+            .iter()
+            .map(|source| {
+                let gems: Vec<String> = source
+                    .gems
+                    .iter()
+                    .map(|gem| format!("{}:{}", gem.name, gem.version))
+                    .collect();
+                serde_json::json!({"uri": source.url, "glob": source.glob, "gems": gems})
+            })
+            .collect();
+        let sources = serde_json::Value::from(sources).to_string();
         let args = |native_libs: Option<&Path>| {
-            let mut args = vec![
+            vec![
                 "git-install".to_string(),
                 native_libs
                     .map(|set| set.display().to_string())
                     .unwrap_or_default(),
-                first.url.clone(),
-                first.revision.clone(),
-                name.clone(),
-                first.glob.clone(),
-            ];
-            args.extend(
-                checkout
-                    .gems
-                    .iter()
-                    .map(|gem| format!("{}:{}", gem.name, gem.version)),
-            );
-            args
+                checkout.first.revision.clone(),
+                name.to_string(),
+                GIT_INSTALL_REPORT.to_string(),
+                sources.clone(),
+            ]
         };
         let hermetic = !self.platform.is_macos();
         let before = hermetic.then(|| gem_home::manifest(staged)).transpose()?;
+        // The home of the attempt that ran last: the helper writes its
+        // report there.
+        let last_home = std::cell::RefCell::new(None);
         // A fresh copy of the checkout for each attempt, and an empty
         // Gemfile in the attempt's home: Bundler finds its root from one.
+        // An earlier sandboxed install could have made a directory on the
+        // way a symlink, which these host-side writes must not follow.
         let place = |home: &Path| -> io::Result<Vec<(String, String)>> {
+            gem_home::refuse_symlinks(staged, &relative)?;
             if fs::symlink_metadata(&dest).is_ok() {
                 crate::kernel::store::remove_tree(&dest)?;
             }
             fs::create_dir_all(staged.join(GIT_CHECKOUTS))?;
+            gem_home::refuse_symlinks(staged, &relative)?;
             crate::comforter::clone_tree_with_activity(self.activity, tree, &dest, self.platform)
                 .map_err(|e| io::Error::new(e.kind(), format!("copy the checkout: {e}")))?;
             let gemfile = home.join("Gemfile");
             fs::write(&gemfile, "")?;
+            *last_home.borrow_mut() = Some(home.to_path_buf());
             Ok(vec![(
                 "BUNDLE_GEMFILE".to_string(),
                 gemfile.display().to_string(),
@@ -165,7 +180,23 @@ impl GemInstall<'_> {
             Some(before) => gem_home::discard_failed_git_attempt(staged, name, before),
             None => Ok(()),
         };
-        self.attempts(name, true, args, place, discard)
+        let built_against = self.attempts(name, true, args, place, discard)?;
+        // The helper removed the throwaway repository it indexed the tree
+        // with; the object holds none.
+        gem_home::refuse_symlinks(staged, &relative.join(".git"))?;
+        if fs::symlink_metadata(dest.join(".git")).is_ok() {
+            return Err(err(format!(
+                "{name}: git data was left in the checkout after its install"
+            )));
+        }
+        let home = last_home
+            .into_inner()
+            .ok_or_else(|| err(format!("{name}: no install attempt ran")))?;
+        let executables = read_git_install_report(&home.join(GIT_INSTALL_REPORT), checkout)?;
+        Ok(GitInstalled {
+            built_against,
+            executables,
+        })
     }
 
     /// Run the helper with the arguments `args` gives (passed the native
@@ -245,6 +276,44 @@ impl GemInstall<'_> {
         install_gem(platform, native, label, attempt)
             .map_err(|error| gem_install_error(label, error))
     }
+}
+
+/// What installing one git checkout gave: the host build inputs it fell
+/// back to, if it did, and each gem's executables.
+pub(super) struct GitInstalled {
+    pub(super) built_against: Option<String>,
+    pub(super) executables: BTreeMap<String, Vec<String>>,
+}
+
+/// The file, in the attempt's home, where the helper's `git-install` mode
+/// reports what it installed.
+const GIT_INSTALL_REPORT: &str = "git-install.json";
+
+/// The executables of each gem in the helper's report at `path`. The
+/// report comes from the sandbox, so it is read as untrusted data: a
+/// regular file of bounded size, naming only gems of `checkout`.
+fn read_git_install_report(
+    path: &Path,
+    checkout: &super::sources::Checkout<'_>,
+) -> io::Result<BTreeMap<String, Vec<String>>> {
+    const LIMIT: u64 = 1 << 20;
+    let refuse = |why: &str| err(format!("{}: the install report {why}", checkout.name));
+    let metadata = fs::symlink_metadata(path).map_err(|_| refuse("is missing"))?;
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return Err(refuse("is not a regular file of at most 1 MiB"));
+    }
+    #[derive(Deserialize)]
+    struct Report {
+        executables: BTreeMap<String, Vec<String>>,
+    }
+    let report: Report =
+        serde_json::from_slice(&fs::read(path)?).map_err(|_| refuse("is not valid"))?;
+    for gem in report.executables.keys() {
+        if !checkout.gems().any(|g| &g.name == gem) {
+            return Err(refuse(&format!("names {gem:?}, which the lock does not")));
+        }
+    }
+    Ok(report.executables)
 }
 
 fn gem_install_error(gem: &str, error: io::Error) -> io::Error {

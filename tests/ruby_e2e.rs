@@ -1157,8 +1157,11 @@ fn git(args: &[&str], cwd: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// A repository holding one gem with a C extension and an executable,
-/// committed once; returns its `file://` URL and the commit.
+/// A repository holding a gem with a C extension and an executable, a
+/// second gem under `sub/`, and under `dup/` a third whose executable has
+/// the first's name, committed once; returns its `file://` URL and the
+/// commit. Each gemspec lists its files with `git ls-files` and derives
+/// its executables from them, as `bundle gem` writes one.
 fn git_gem_repo(root: &Path) -> (String, String) {
     let repo = root.join("gitgem-repo");
     write_tree(
@@ -1171,14 +1174,52 @@ fn git_gem_repo(root: &Path) -> (String, String) {
   s.version = "0.1.0"
   s.summary = "fixture"
   s.authors = ["t"]
-  s.files = Dir["lib/**/*.rb", "ext/**/*.{rb,c}", "exe/*"]
+  s.files = `git ls-files -z`.split("\x0").reject { |f| f.start_with?("sub/", "dup/") }
   s.bindir = "exe"
-  s.executables = ["gitgem"]
+  s.executables = s.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   s.extensions = ["ext/gitnative/extconf.rb"]
   s.require_paths = ["lib"]
 end
 "#,
             ),
+            (
+                "sub/subgem.gemspec",
+                r#"Gem::Specification.new do |s|
+  s.name = "subgem"
+  s.version = "0.3.0"
+  s.summary = "fixture"
+  s.authors = ["t"]
+  s.files = `git ls-files -z`.split("\x0")
+  s.bindir = "exe"
+  s.executables = s.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
+  s.require_paths = ["lib"]
+end
+"#,
+            ),
+            (
+                "sub/lib/subgem.rb",
+                "module Subgem\n  def self.hello\n    \"from-sub\"\n  end\nend\n",
+            ),
+            (
+                "sub/exe/subgem",
+                "#!/usr/bin/env ruby\nrequire \"subgem\"\nputs Subgem.hello\n",
+            ),
+            (
+                "dup/dupgem.gemspec",
+                r#"Gem::Specification.new do |s|
+  s.name = "dupgem"
+  s.version = "0.4.0"
+  s.summary = "fixture"
+  s.authors = ["t"]
+  s.files = `git ls-files -z`.split("\x0")
+  s.bindir = "exe"
+  s.executables = s.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
+  s.require_paths = ["lib"]
+end
+"#,
+            ),
+            ("dup/lib/dupgem.rb", "module Dupgem; end\n"),
+            ("dup/exe/gitgem", "#!/usr/bin/env ruby\nputs \"impostor\"\n"),
             (
                 "lib/gitgem.rb",
                 "require \"gitnative\"\n\nmodule Gitgem\n  def self.hello\n    \"from-git #{Gitnative.answer}\"\n  end\nend\n",
@@ -1258,16 +1299,19 @@ end
             ),
             (
                 "check.rb",
-                "require \"app\"\nrequire \"localgem\"\nrequire \"gitgem\"\n\
-                 puts [App.hello, Localgem.hello, Gitgem.hello].join(\" \")\n",
+                "require \"app\"\nrequire \"localgem\"\nrequire \"gitgem\"\nrequire \"subgem\"\n\
+                 puts [App.hello, Localgem.hello, Gitgem.hello, Subgem.hello].join(\" \")\n",
             ),
         ],
     );
+    // Two `GIT` sections of one repository at one commit, the second with
+    // a glob: Bundler reads both from one checkout directory.
     std::fs::write(
         project.join("Gemfile"),
         format!(
             "source \"https://rubygems.org\"\n\ngemspec\n\ngem \"localgem\", path: \"localgem\"\n\
-             gem \"gitgem\", git: \"{url}\"\n"
+             gem \"gitgem\", git: \"{url}\"\n\
+             gem \"subgem\", git: \"{url}\", glob: \"sub/*.gemspec\"\n"
         ),
     )
     .unwrap();
@@ -1275,11 +1319,40 @@ end
         project.join("Gemfile.lock"),
         format!(
             "GIT\n  remote: {url}\n  revision: {commit}\n  specs:\n    gitgem (0.1.0)\n\n\
+             GIT\n  remote: {url}\n  revision: {commit}\n  glob: sub/*.gemspec\n  specs:\n    \
+             subgem (0.3.0)\n\n\
              PATH\n  remote: .\n  specs:\n    app (1.0.0)\n\n\
              PATH\n  remote: localgem\n  specs:\n    localgem (0.2.0)\n\n\
              GEM\n  remote: https://rubygems.org/\n  specs:\n\n\
              PLATFORMS\n  ruby\n\n\
-             DEPENDENCIES\n  app!\n  gitgem!\n  localgem!\n\n\
+             DEPENDENCIES\n  app!\n  gitgem!\n  localgem!\n  subgem!\n\n\
+             BUNDLED WITH\n   2.6.9\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A project taking `gitgem` and `dupgem` from one repository: both
+/// provide an executable named `gitgem`.
+fn executable_clash_project(project: &Path, url: &str, commit: &str) {
+    std::fs::create_dir_all(project).unwrap();
+    std::fs::write(
+        project.join("Gemfile"),
+        format!(
+            "source \"https://rubygems.org\"\n\ngem \"gitgem\", git: \"{url}\"\n\
+             gem \"dupgem\", git: \"{url}\", glob: \"dup/*.gemspec\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("Gemfile.lock"),
+        format!(
+            "GIT\n  remote: {url}\n  revision: {commit}\n  specs:\n    gitgem (0.1.0)\n\n\
+             GIT\n  remote: {url}\n  revision: {commit}\n  glob: dup/*.gemspec\n  specs:\n    \
+             dupgem (0.4.0)\n\n\
+             GEM\n  remote: https://rubygems.org/\n  specs:\n\n\
+             PLATFORMS\n  ruby\n\n\
+             DEPENDENCIES\n  dupgem!\n  gitgem!\n\n\
              BUNDLED WITH\n   2.6.9\n"
         ),
     )
@@ -1342,28 +1415,59 @@ fn ruby_path_and_git_sources_sync_and_run() {
         "{plan}"
     );
     let short = &commit[..12];
+    let checkout_name = format!("gitgem-repo-{short}");
     assert_eq!(
         plan["git_gems"],
-        serde_json::json!([{
-            "name": "gitgem", "version": "0.1.0", "url": url, "revision": commit,
-            "checkout": format!("gitgem-repo-{short}"),
-        }]),
+        serde_json::json!([
+            {
+                "name": "gitgem", "version": "0.1.0", "url": url, "revision": commit,
+                "checkout": checkout_name,
+            },
+            {
+                "name": "subgem", "version": "0.3.0", "url": url, "revision": commit,
+                "checkout": checkout_name, "glob": "sub/*.gemspec",
+            },
+        ]),
         "{plan}"
     );
 
     let (gems_obj, gems_meta) = find_object(&store, "ruby-gems").expect("gems object published");
     assert_immutable_tree(&gems_obj);
     let inputs = gems_meta["identity"]["inputs"].as_object().unwrap();
-    assert!(
-        inputs.contains_key(&format!("git:gitgem-repo-{short}")),
-        "{inputs:?}"
+    // One checkout directory, one input, naming both lock sections.
+    let git_input: serde_json::Value = serde_json::from_str(
+        inputs[&format!("git:{checkout_name}")]
+            .as_str()
+            .unwrap_or_else(|| panic!("{inputs:?}")),
+    )
+    .unwrap();
+    assert_eq!(
+        git_input,
+        serde_json::json!([
+            commit,
+            [
+                [url, "", ["gitgem:0.1.0"]],
+                [url, "sub/*.gemspec", ["subgem:0.3.0"]],
+            ]
+        ]),
     );
-    // The checkout is where Bundler reads it, with no git data and no
-    // Bundler git cache: nothing ran git in the sandbox.
-    let checkout = gems_obj.join(format!("bundler/gems/gitgem-repo-{short}"));
+    // The checkout is where Bundler reads it. The repository ward made so
+    // `git ls-files` answers the gemspecs is gone, and Bundler kept no git
+    // cache.
+    let checkout = gems_obj.join(format!("bundler/gems/{checkout_name}"));
     assert!(checkout.join("gitgem.gemspec").is_file());
     assert!(!checkout.join(".git").exists());
     assert!(!gems_obj.join("cache/bundler/git").exists());
+    // Bundler serialized each gemspec as evaluated: the file lists `git
+    // ls-files` gave are in them, and so are the executables derived from
+    // those lists, with their wrappers in the bin dir.
+    let serialized = std::fs::read_to_string(checkout.join("gitgem.gemspec")).unwrap();
+    assert!(serialized.contains("\"exe/gitgem\""), "{serialized}");
+    assert!(serialized.contains("\"lib/gitgem.rb\""), "{serialized}");
+    let serialized = std::fs::read_to_string(checkout.join("sub/subgem.gemspec")).unwrap();
+    assert!(serialized.contains("\"exe/subgem\""), "{serialized}");
+    assert!(gems_obj.join("bin/gitgem").is_file());
+    assert!(gems_obj.join("bin/subgem").is_file());
     let mut extensions = Vec::new();
     collect_files(
         &gems_obj.join("bundler/gems/extensions"),
@@ -1380,12 +1484,20 @@ fn ruby_path_and_git_sources_sync_and_run() {
         ),
         "bundle exec over path and git gems",
     );
-    assert!(run.contains("from-app from-path from-git 42"), "{run}");
+    assert!(
+        run.contains("from-app from-path from-git 42 from-sub"),
+        "{run}"
+    );
     let exe = assert_ok(
         ward(&project, &temp.0, &["run", "bundle", "exec", "gitgem"]),
         "the git gem's executable",
     );
     assert!(exe.contains("from-git 42"), "{exe}");
+    let exe = assert_ok(
+        ward(&project, &temp.0, &["run", "bundle", "exec", "subgem"]),
+        "the globbed git gem's executable",
+    );
+    assert!(exe.contains("from-sub"), "{exe}");
 
     // The next sync answers from the store: same object, no rebuild.
     assert_ok(ward(&project, &temp.0, &["sync"]), "re-sync");
@@ -1415,6 +1527,19 @@ fn ruby_path_and_git_sources_sync_and_run() {
     assert!(!refused.status.success(), "{stderr}");
     assert!(
         stderr.contains("\"../app/localgem\", which is outside the project"),
+        "{stderr}"
+    );
+
+    // Two git gems providing one executable are refused, as two
+    // rubygems.org gems are.
+    let clash = temp.0.join("clash");
+    executable_clash_project(&clash, &url, &commit);
+    let refused = ward(&clash, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("executable \"gitgem\" provided by both gitgem and dupgem")
+            || stderr.contains("executable \"gitgem\" provided by both dupgem and gitgem"),
         "{stderr}"
     );
 }

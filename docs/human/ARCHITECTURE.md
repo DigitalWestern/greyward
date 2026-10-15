@@ -758,7 +758,10 @@ kernel owns, so a new tailor's publisher is added there). A toolchain row's
 URL must fall under one of its `provider`'s endpoints before the cache is
 consulted, and a network fetch follows redirects itself, at most ten and
 `https://` only, authorizing each `Location` before requesting it; a row or
-hop off the policy fails with the URL and publisher named. No credential is
+hop off the policy fails with the URL and publisher named. An endpoint may
+name a public anonymous-pull token (ghcr.io's `Bearer QQ==`, which Homebrew's
+`brew` sends too), sent on a hop that endpoint covers and never on a
+redirect target. No credential is
 sent yet; the policy for them is decided (#72) and builds under #404 and #405. Package-registry downloads do not pass through it. A
 closure written before the lock existed records no `toolchain`, so it
 plays no part in selection: the next sync selects from the catalog as it

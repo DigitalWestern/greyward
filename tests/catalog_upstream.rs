@@ -48,6 +48,33 @@ fn get(url: &str) -> Vec<u8> {
     body
 }
 
+/// Homebrew's portable-ruby blobs on GitHub's container registry.
+const GHCR_BLOBS: &str = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/";
+
+/// A registry blob: the anonymous-pull token on the registry request only,
+/// then the redirect to the blob CDN followed without it.
+fn get_ghcr_blob(url: &str) -> Vec<u8> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .redirects(0)
+        .build();
+    let response = agent
+        .get(url)
+        .set("Authorization", "Bearer QQ==")
+        .call()
+        .unwrap_or_else(|e| panic!("GET {url}: {e}"));
+    let Some(location) = response.header("Location").map(str::to_string) else {
+        let mut body = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut body)
+            .unwrap_or_else(|e| panic!("GET {url}: {e}"));
+        return body;
+    };
+    get(&location)
+}
+
 fn get_text(url: &str) -> String {
     String::from_utf8(get(url)).unwrap_or_else(|e| panic!("GET {url}: {e}"))
 }
@@ -79,7 +106,11 @@ impl Upstream {
         self.hashed
             .entry(row.url.clone())
             .or_insert_with(|| {
-                let body = get(&row.url);
+                let body = if row.url.starts_with(GHCR_BLOBS) {
+                    get_ghcr_blob(&row.url)
+                } else {
+                    get(&row.url)
+                };
                 let hex = match algo {
                     "sha512" => hex::encode(Sha512::digest(&body)),
                     _ => hex::encode(Sha256::digest(&body)),
@@ -168,6 +199,11 @@ impl Upstream {
                 .unwrap()
                 .to_lowercase();
             return (format!("sha512:{hash}"), source);
+        }
+        if url.starts_with(GHCR_BLOBS) {
+            // The blob URL names the bottle's sha256: hashing the download
+            // is the check, as for the GitHub-released bottles.
+            return (self.downloaded(row), url.to_string());
         }
         if url.contains("/Homebrew/homebrew-portable-ruby/releases/download/")
             || url.contains("/erlef/otp_builds/releases/download/")

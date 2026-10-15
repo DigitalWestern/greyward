@@ -1041,9 +1041,15 @@ pub(crate) fn open_authorized(
         .redirects(0)
         .build();
     follow_redirects(url, hop_authorizer(policy, publisher), |hop| {
-        // With redirects off, ureq hands a 3xx back as a response.
-        let resp = agent
-            .get(hop)
+        // With redirects off, ureq hands a 3xx back as a response. A hop
+        // to an endpoint that names a public anonymous-pull token (GitHub's
+        // container registry) carries it; no other hop does, so the CDN a
+        // registry redirects to never sees it.
+        let mut request = agent.get(hop);
+        if let Some(token) = policy.anonymous_token(publisher, hop) {
+            request = request.set("Authorization", token);
+        }
+        let resp = request
             .call()
             .map_err(|e| network_error("download", hop, e))?;
         // Spelled as a path call: the architecture scan reads a bare

@@ -867,8 +867,17 @@ Selection covers every CPython patch, end-of-life minors included, that python-b
 
 - **portable-ruby, and the Bundler inside it, are TOFU.** Homebrew publishes no checksum file,
   signature or attestation for the bottles; the digest is the bottle hashed at pin time,
-  compared with GitHub's own asset digest. Nothing can be checked later. The default
-  (3.4.6) is a release Homebrew marked prerelease and reverted in brew.
+  compared with GitHub's own asset digest (a GitHub release) or with the digest Homebrew's
+  image manifest names (its container registry, ghcr.io, where newer builds are published
+  only). Nothing can be checked later. The default (3.4.6) is a release Homebrew marked
+  prerelease and reverted in brew.
+- **Registry bottles are fetched with a public token.** ghcr.io refuses an anonymous pull
+  without `Authorization: Bearer QQ==`, the token Homebrew's own `brew` sends. It is not a
+  credential. ward sends it to ghcr.io's portable-ruby blob path only, never to the
+  pkg-containers.githubusercontent.com host the registry redirects to.
+- **Only versions Homebrew built are available.** Ruby 3.4.9 has no portable build in either
+  place Homebrew publishes one, so a project pinning it is refused. So are 2.3.3, 2.3.7 and
+  2.6.3, which have no arm64 macOS build.
 - **git and path gems fail closed; non-rubygems.org sources fail closed.** So do gems whose
   installers need network or absent host libraries (mysql2/rmagick-class) — no
   declared-artifacts mechanism for gems yet. **Default/bundled-gem preactivation edge**: a
@@ -879,8 +888,8 @@ Selection covers every CPython patch, end-of-life minors included, that python-b
   Rails-class app.
 - **System /etc/gemrc is still read** (GEMRC=/dev/null blocks only the user file).
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
-  contract, and its builds trail ruby-lang: the newest 3.4 build (3.4.6, the default) lacks
-  the 3.4.10 security fixes in bundled gems, and Ruby 4.0 has no build at all. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
+  contract, and its builds trail ruby-lang: the newest 3.4 build is 3.4.8 and the default is
+  3.4.6, so both lack the 3.4.10 security fixes in bundled gems. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
   drifts**; new bundler formats need code updates. A lock without a CHECKSUMS section is
   verified against rubygems.org's API digests on first use and records `unpinned-digest` per
   gem, so `--strict`, or a policy that denies the kind, needs `bundle lock --add-checksums`.

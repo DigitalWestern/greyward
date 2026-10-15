@@ -98,6 +98,11 @@ class Failure(Exception):
 
 CACHE = os.path.join(os.environ.get("TMPDIR", "/tmp"), "greyward-catalog-cache")
 _token = None
+# GitHub's container registry (Homebrew's portable-ruby): anonymous pulls
+# send this fixed token, and listings ask for the OCI index and manifest.
+GHCR_ORIGIN = "https://ghcr.io"
+GHCR_ANONYMOUS = "Bearer QQ=="
+OCI_ACCEPT = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
 
 
 def github_token():
@@ -118,14 +123,23 @@ def http_get(url):
     """One GET: the body, or None for a 404. The single network seam (the
     offline tests replace it)."""
     headers = {"User-Agent": "greyward-catalog-generator"}
+    unredirected = {}
     if url.startswith("https://api.github.com/"):
         headers["Accept"] = "application/vnd.github+json"
         if github_token():
             headers["Authorization"] = f"Bearer {github_token()}"
+    if url.startswith(GHCR_ORIGIN + "/"):
+        headers["Accept"] = OCI_ACCEPT
+        # The registry's anonymous pull token, the public constant Homebrew
+        # sends too. Never forwarded to the blob CDN a pull redirects to.
+        unredirected["Authorization"] = GHCR_ANONYMOUS
     last = None
     for _ in range(4):
+        request = urllib.request.Request(url, headers=headers)
+        for name, value in unredirected.items():
+            request.add_unredirected_header(name, value)
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as r:
+            with urllib.request.urlopen(request, timeout=120) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -712,26 +726,30 @@ def generate_python(existing, report, default_key):
 
 # --------------------------------------------------------------------------
 # Ruby: Homebrew's portable-ruby bottles (the artifact the Ruby tailor
-# realizes). Each bottle is downloaded, hashed, compared with GitHub's
-# digest, and its layout checked against the `ruby-toolchain/1` recipe.
-# Supported lines are ruby-lang's branches still in normal or security
-# maintenance. A version enters with Homebrew's newest rebuild of it
-# (`3.3.4_1`); a later rebuild of a shipped version is a new release,
-# `ruby-3.3.4_2` with `revision = 2`, beside the old one.
+# realizes), from both places Homebrew has published them:
+#
+# - GitHub releases of Homebrew/homebrew-portable-ruby, up to 3.4.6. That
+#   channel stopped moving in 2025 (#754). Each bottle is downloaded,
+#   hashed and compared with GitHub's asset digest.
+# - GitHub's container registry, ghcr.io/homebrew/core/portable-ruby, where
+#   Homebrew publishes every build since (3.4.6 to 4.0.x). A tag's OCI image
+#   index names one manifest per bottle; the manifest's single layer is the
+#   bottle, addressed by its sha256, and the index annotates the same
+#   sha256 as `sh.brew.bottle.digest`. The bottle is downloaded from the
+#   registry's blob URL and hashed: all three must agree.
+#
+# Every bottle's layout is checked against the `ruby-toolchain/1` recipe
+# and the Linux one is run relocated. Every line Homebrew built is shipped,
+# end-of-life ones included. A version enters with Homebrew's newest
+# rebuild of it (`3.3.4_1`); a later rebuild of a shipped version is a new
+# release, `ruby-3.3.4_2` with `revision = 2`, beside the old one. A bottle
+# that fails the recipe's checks as a new release is named and left out.
 
 PORTABLE = "Homebrew/homebrew-portable-ruby"
 BOTTLE_TAGS = {DARWIN: "arm64_big_sur", LINUX: "x86_64_linux"}
-
-
-def ruby_lines():
-    text = fetch_text("https://raw.githubusercontent.com/ruby/www.ruby-lang.org/master/_data/branches.yml")
-    lines = set()
-    for block in re.split(r"^- ", text, flags=re.M)[1:]:
-        name = re.search(r"name:\s*['\"]?([\d.]+)", block)
-        status = re.search(r"status:\s*(.+)", block)
-        if name and status and status.group(1).strip() in ("normal maintenance", "security maintenance"):
-            lines.add(name.group(1))
-    return lines
+GHCR_RUBY = f"{GHCR_ORIGIN}/v2/homebrew/core/portable-ruby"
+GHCR_PROVIDER = "ghcr-homebrew-portable-ruby"
+RUBY_TAG = re.compile(r"(\d+\.\d+\.\d+)(?:_(\d+))?")
 
 
 def check_bottle_layout(path, tag):
@@ -764,8 +782,13 @@ def check_bottle_layout(path, tag):
             raise Failure(f"ruby {tag}: bottle lacks {what}")
     # The recipe realizes the bottle unrepaired, which is only sound when
     # the extensions that need host libraries are compiled into bin/ruby.
+    # Ruby 4.0 made fiddle a bundled gem, so its bottles carry it as a gem
+    # extension under lib/ruby/gems/, built against Homebrew's static
+    # libffi: that one is admitted, and the Linux bottle's run below loads
+    # it relocated.
     for name in names:
-        if re.search(r"/(openssl|psych|zlib|fiddle)\.(so|bundle)$", name):
+        if re.search(r"/(openssl|psych|zlib)\.(so|bundle)$", name) or (
+                re.search(r"/fiddle\.(so|bundle)$", name) and not name.startswith("lib/ruby/gems/")):
             raise Failure(f"ruby {tag}: {name} is a dynamic extension; the recipe expects static ones")
 
 
@@ -779,7 +802,7 @@ def run_linux_bottle(path, tag, version):
     with tempfile.TemporaryDirectory(prefix="greyward-catalog-ruby-") as scratch:
         subprocess.run(["tar", "-xzf", path, "-C", scratch, "--strip-components", "2"], check=True)
         result = subprocess.run(
-            [os.path.join(scratch, "bin/ruby"), "-ropenssl", "-rpsych", "-rzlib", "-e", "print RUBY_VERSION"],
+            [os.path.join(scratch, "bin/ruby"), "-ropenssl", "-rpsych", "-rzlib", "-rfiddle", "-e", "print RUBY_VERSION"],
             capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
         )
         if result.returncode != 0 or result.stdout != version:
@@ -787,7 +810,15 @@ def run_linux_bottle(path, tag, version):
     return True
 
 
+def checked_bottle(url, tag):
+    """The recipe's checks on the bottle at `url`, and its sha256."""
+    digest = "sha256:" + download_digest(url, "sha256")
+    check_bottle_layout(archive_path(url), tag)
+    return digest
+
+
 def ruby_release(report, tag, release_json, key=None, revision=None):
+    """A GitHub-released bottle pair, or (None, the platform lacking one)."""
     version = tag.split("_")[0]
     digests = asset_digests(release_json)
     rows = []
@@ -796,61 +827,120 @@ def ruby_release(report, tag, release_json, key=None, revision=None):
         if name not in digests:
             return None, platform
         url = f"https://github.com/{PORTABLE}/releases/download/{tag}/{name}"
-        digest = "sha256:" + download_digest(url, "sha256")
+        digest = checked_bottle(url, tag)
         check_github_digest(report, f"ruby {name}", digests[name], digest, None)
-        check_bottle_layout(archive_path(url), tag)
         if platform == LINUX:
             run_linux_bottle(archive_path(url), tag, version)
         rows.append(row(platform, "ruby", "homebrew-portable-ruby", tag, "ruby-toolchain/1", url, digest))
     return release(key or f"ruby-{version}", [component("ruby", version)], rows, revision), None
 
 
+def ghcr_bottles(tag):
+    """The registry's bottle digest per platform for `tag`: the layer each
+    platform's manifest names, which must be the digest the image index
+    annotates for that bottle. A platform the index has no bottle for is
+    absent."""
+    index = fetch_json(f"{GHCR_RUBY}/manifests/{tag}")
+    out = {}
+    for platform, slug in BOTTLE_TAGS.items():
+        entries = [m for m in index.get("manifests", [])
+                   if m.get("annotations", {}).get("org.opencontainers.image.ref.name") == f"{tag}.{slug}"]
+        if not entries:
+            continue
+        if len(entries) > 1:
+            raise Failure(f"ruby: ghcr portable-ruby {tag} lists {len(entries)} {slug} bottles")
+        annotated = "sha256:" + entries[0]["annotations"].get("sh.brew.bottle.digest", "")
+        manifest = fetch_json(f"{GHCR_RUBY}/manifests/{entries[0]['digest']}")
+        layers = manifest.get("layers", [])
+        if len(layers) != 1:
+            raise Failure(f"ruby: ghcr portable-ruby {tag} {slug} manifest has {len(layers)} layers, not one")
+        expect_equal(f"ruby ghcr {tag} {slug} layer digest and sh.brew.bottle.digest",
+                     layers[0]["digest"], annotated)
+        out[platform] = annotated
+    return out
+
+
+def ruby_ghcr_release(tag, bottles, key=None, revision=None):
+    """A registry bottle pair, or (None, the platform lacking one)."""
+    version = tag.split("_")[0]
+    rows = []
+    for platform in PLATFORMS:
+        if platform not in bottles:
+            return None, platform
+        url = f"{GHCR_RUBY}/blobs/{bottles[platform]}"
+        expect_equal(f"ruby ghcr {tag} {BOTTLE_TAGS[platform]} downloaded sha256",
+                     checked_bottle(url, tag), bottles[platform])
+        if platform == LINUX:
+            run_linux_bottle(archive_path(url), tag, version)
+        rows.append(row(platform, "ruby", GHCR_PROVIDER, tag, "ruby-toolchain/1", url, bottles[platform]))
+    return release(key or f"ruby-{version}", [component("ruby", version)], rows, revision), None
+
+
 def generate_ruby(existing, report):
-    lines = ruby_lines()
-    releases = {r["tag_name"]: r for r in github_releases(PORTABLE) if not r["draft"]}
+    github = {r["tag_name"]: r for r in github_releases(PORTABLE) if not r["draft"]}
+    ghcr_tags = [t for t in fetch_json(f"{GHCR_RUBY}/tags/list").get("tags", []) if RUBY_TAG.fullmatch(t)]
+    ghcr = dict(zip(ghcr_tags, parallel(ghcr_bottles, ghcr_tags)))
+
+    def build(tag, provider, key=None, revision=None):
+        if provider == GHCR_PROVIDER:
+            return ruby_ghcr_release(tag, ghcr[tag], key, revision)
+        return ruby_release(report, tag, github[tag], key, revision)
+
     out = {}
     for rel in existing:
-        tag = rel["artifacts"][0]["build"]
-        if tag not in releases:
-            raise Failure(f"ruby: {rel['key']}: portable-ruby no longer publishes {tag}")
-        fresh, _ = ruby_release(report, tag, releases[tag], rel["key"], rel.get("revision"))
+        tag, provider = rel["artifacts"][0]["build"], rel["artifacts"][0]["provider"]
+        if tag not in (ghcr if provider == GHCR_PROVIDER else github):
+            raise Failure(f"ruby: {rel['key']}: {provider} no longer publishes portable-ruby {tag}")
+        fresh, _ = build(tag, provider, rel["key"], rel.get("revision"))
         check_row("ruby", rel["key"], rel, fresh)
         out[rel["key"]] = rel
+
+    # The newest rebuild of each version, the registry's when both have it.
     newest = {}
-    for tag, r in releases.items():
-        m = re.fullmatch(r"(\d+\.\d+\.\d+)(?:_(\d+))?", tag)
+    candidates = [(t, "homebrew-portable-ruby") for t in github] + [(t, GHCR_PROVIDER) for t in ghcr]
+    for tag, provider in candidates:
+        m = RUBY_TAG.fullmatch(tag)
         if not m:
             continue
-        version, revision = m.group(1), int(m.group(2) or 0)
-        if ".".join(version.split(".")[:2]) not in lines:
-            continue
-        if r["prerelease"]:
-            if f"ruby-{version}" not in out:
+        if provider != GHCR_PROVIDER and github[tag]["prerelease"]:
+            if tag not in ghcr:
                 report.skip(f"portable-ruby {tag}", "marked prerelease by Homebrew")
             continue
-        if version not in newest or revision > newest[version][0]:
-            newest[version] = (revision, tag)
-    for version, (rebuild, tag) in sorted(newest.items(), key=lambda kv: version_key(kv[0])):
+        version, rebuild = m.group(1), int(m.group(2) or 0)
+        if version not in newest or (rebuild, provider == GHCR_PROVIDER) > newest[version][:2]:
+            newest[version] = (rebuild, provider == GHCR_PROVIDER, tag, provider)
+    for version, (rebuild, _, tag, provider) in sorted(newest.items(), key=lambda kv: version_key(kv[0])):
         shipped = [r for r in out.values() if r["components"][0]["version"] == version]
-        if any(r["artifacts"][0]["build"] == tag for r in shipped):
+        if any(r["artifacts"][0]["build"] == tag and r["artifacts"][0]["provider"] == provider
+               for r in shipped):
             continue
         if shipped:
-            # Homebrew rebuilt a version this catalog ships: the old bottle
-            # stays (locks name it), the rebuild is a revision beside it.
-            key, revision = f"ruby-{tag}", max(rebuild, next_revision(shipped))
+            # Homebrew rebuilt a version this catalog ships, or publishes it
+            # again elsewhere: the old bottle stays (locks name it), the new
+            # one is a revision beside it. The same bytes under another URL
+            # are not a new release.
+            revision = max(rebuild, next_revision(shipped))
+            key = f"ruby-{tag}"
+            if any(r["key"] == key for r in shipped):
+                key = f"ruby-{tag}-r{revision}"
         else:
             key, revision = f"ruby-{version}", None
-        fresh, missing = ruby_release(report, tag, releases[tag], key, revision)
+        try:
+            fresh, missing = build(tag, provider, key, revision)
+        except Failure as failure:
+            report.skip(key, f"portable-ruby {tag} fails the ruby-toolchain/1 checks: {failure}")
+            continue
         if fresh is None:
             report.skip(key, f"portable-ruby {tag} has no {missing} bottle")
             continue
+        digests = {(a["platform"], a["digest"]) for a in fresh["artifacts"]}
+        if any({(a["platform"], a["digest"]) for a in r["artifacts"]} == digests for r in shipped):
+            continue
         out[key] = fresh
         if shipped:
-            report.republish(key, f"Homebrew rebuilt ruby {version} as {tag}")
+            report.republish(key, f"Homebrew rebuilt ruby {version} as {tag} ({provider})")
         else:
             report.added.append(key)
-    report.skip("ruby-lang lines without a portable-ruby build",
-                ", ".join(sorted(l for l in lines if not any(v.startswith(l + ".") for v in newest))) or "none")
     return out
 
 

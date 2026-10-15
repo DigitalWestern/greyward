@@ -1559,14 +1559,20 @@ mod tests {
         for bundle in catalog.bundles() {
             for platform in Platform::ALL {
                 let row = bundle.artifact(*platform, "ruby").unwrap();
-                assert!(
-                    row.url.starts_with(&format!(
+                // A GitHub release asset named for its build, or a registry
+                // blob named for the digest the row pins.
+                let released = row.provider == "homebrew-portable-ruby"
+                    && row.url.starts_with(&format!(
                         "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/{}/portable-ruby-{}.",
                         row.build, row.build
-                    )),
-                    "{}",
-                    row.url
-                );
+                    ));
+                let registry = row.provider == "ghcr-homebrew-portable-ruby"
+                    && row.url
+                        == format!(
+                            "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:{}",
+                            row.digest.hex()
+                        );
+                assert!(released || registry, "{}", row.url);
             }
         }
         // The default is unchanged by the newer rows around it.

@@ -39,12 +39,24 @@ pub struct CredentialRef {
 /// asset CDN serves every repository's release files under URLs that do not
 /// say which repository they belong to, so a lock or catalog row naming one
 /// directly could not be reviewed for its publisher (#699).
+///
+/// An `anonymous_token` endpoint is a registry that answers an anonymous
+/// pull only with a fixed, public `Authorization` value (GitHub's container
+/// registry takes `Bearer QQ==`, the value Homebrew itself sends). It is
+/// the same for everyone and grants nothing, so it is not a credential: it
+/// is compiled in, sent on requests to that endpoint only, and never on a
+/// redirect to another endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
     pub base: String,
     pub credential: Option<CredentialRef>,
     pub redirect_only: bool,
+    pub anonymous_token: Option<&'static str>,
 }
+
+/// The `Authorization` value GitHub's container registry takes for an
+/// anonymous pull of a public image.
+pub const GHCR_ANONYMOUS: &str = "Bearer QQ==";
 
 impl Endpoint {
     /// An anonymous endpoint. `base` must be `https://host[:port]/...`.
@@ -54,6 +66,16 @@ impl Endpoint {
             base: base.into(),
             credential: None,
             redirect_only: false,
+            anonymous_token: None,
+        })
+    }
+
+    /// An anonymous endpoint that is sent the public `token` (see
+    /// [`Endpoint`]).
+    pub fn with_anonymous_token(base: &str, token: &'static str) -> io::Result<Endpoint> {
+        Ok(Endpoint {
+            anonymous_token: Some(token),
+            ..Endpoint::new(base)?
         })
     }
 
@@ -232,6 +254,26 @@ impl SourcePolicy {
             "homebrew-portable-ruby",
             "Homebrew/homebrew-portable-ruby",
         );
+        // Homebrew's portable-ruby builds since 3.4.6, on GitHub's
+        // container registry: a blob URL names the bottle by its sha256,
+        // and a pull redirects to the registry's blob CDN.
+        policy
+            .allow(
+                "ghcr-homebrew-portable-ruby",
+                Endpoint::with_anonymous_token(
+                    "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/",
+                    GHCR_ANONYMOUS,
+                )
+                .expect("shipped endpoint"),
+            )
+            .expect("shipped publisher");
+        policy
+            .allow(
+                "ghcr-homebrew-portable-ruby",
+                Endpoint::redirect_target("https://pkg-containers.githubusercontent.com/")
+                    .expect("shipped endpoint"),
+            )
+            .expect("shipped publisher");
         github_publisher(&mut policy, "erlef-otp-builds", "erlef/otp_builds");
         github_publisher(
             &mut policy,
@@ -337,6 +379,17 @@ impl SourcePolicy {
         self.authorize_hop(publisher, url, true)
     }
 
+    /// The public anonymous-pull token a request to `url` for `publisher`
+    /// carries: that of the publisher's first-hop endpoint covering `url`,
+    /// if it names one. A redirect-only endpoint never does.
+    pub fn anonymous_token(&self, publisher: &str, url: &str) -> Option<&'static str> {
+        self.publisher(publisher)?
+            .endpoints
+            .iter()
+            .filter(|endpoint| !endpoint.redirect_only && endpoint.covers(url))
+            .find_map(|endpoint| endpoint.anonymous_token)
+    }
+
     fn authorize_hop<'a>(
         &'a self,
         publisher: &str,
@@ -387,6 +440,36 @@ impl SourcePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_registry_token_goes_to_the_registry_endpoint_only() {
+        let policy = SourcePolicy::shipped();
+        let publisher = "ghcr-homebrew-portable-ruby";
+        let blob = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:ab";
+        policy.authorize(publisher, blob).unwrap();
+        assert_eq!(
+            policy.anonymous_token(publisher, blob),
+            Some(GHCR_ANONYMOUS)
+        );
+        // The CDN a pull redirects to is reached only by that redirect, and
+        // gets no token.
+        let cdn = "https://pkg-containers.githubusercontent.com/ghcr1/blobs/sha256:ab";
+        policy.authorize(publisher, cdn).unwrap_err();
+        policy.authorize_redirect(publisher, cdn).unwrap();
+        assert_eq!(policy.anonymous_token(publisher, cdn), None);
+        // Another image on the registry is not this publisher's, and no
+        // other publisher's endpoint sends a token.
+        let other = "https://ghcr.io/v2/someone/else/blobs/sha256:ab";
+        policy.authorize(publisher, other).unwrap_err();
+        assert_eq!(policy.anonymous_token(publisher, other), None);
+        assert_eq!(
+            policy.anonymous_token(
+                "homebrew-portable-ruby",
+                "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/x"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn endpoints_match_origin_exactly_and_paths_at_segment_boundaries() {

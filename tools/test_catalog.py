@@ -86,6 +86,36 @@ class Base(unittest.TestCase):
 
 
 class Http(Base):
+    def test_the_registry_token_goes_to_ghcr_only_and_never_past_a_redirect(self):
+        seen = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(request, timeout):
+            seen.append(request)
+            return Response(b"{}")
+
+        saved = catalog.urllib.request.urlopen
+        catalog.urllib.request.urlopen = urlopen
+        try:
+            real_get = self.saved[0]
+            real_get(f"{catalog.GHCR_RUBY}/manifests/4.0.3")
+            real_get("https://nodejs.org/dist/index.json")
+        finally:
+            catalog.urllib.request.urlopen = saved
+        ghcr, node = seen
+        # Unredirected: urllib does not copy it onto the blob CDN's request.
+        self.assertEqual(ghcr.unredirected_hdrs, {"Authorization": "Bearer QQ=="})
+        self.assertNotIn("Authorization", ghcr.headers)
+        self.assertIn("application/vnd.oci.image.index.v1+json", ghcr.headers["Accept"])
+        self.assertEqual(node.unredirected_hdrs, {})
+        self.assertNotIn("Authorization", node.headers)
+
     def test_listings_and_checksum_files_are_fetched_fresh_every_time(self):
         url = "https://go.dev/dl/?mode=json"
         self.net.bodies[url] = "[1]"
@@ -367,20 +397,114 @@ def bottle(tag):
 class Ruby(Base):
     def setUp(self):
         super().setUp()
-        self.net.bodies[
-            "https://raw.githubusercontent.com/ruby/www.ruby-lang.org/master/_data/branches.yml"
-        ] = "- name: 3.4\n  status: normal maintenance\n\n- name: 4.0\n  status: normal maintenance\n"
         self.releases = []
+        self.tags = []
+        github_releases(self.net, catalog.PORTABLE, self.releases)
+        self.net.json(f"{catalog.GHCR_RUBY}/tags/list", {"name": "homebrew/core/portable-ruby", "tags": []})
 
-    def publish(self, tag):
+    def publish(self, tag, prerelease=False, body=None):
         assets = []
         for platform in catalog.PLATFORMS:
             name = f"portable-ruby-{tag}.{catalog.BOTTLE_TAGS[platform]}.bottle.tar.gz"
-            body = bottle(tag)
-            self.net.bodies[f"https://github.com/{catalog.PORTABLE}/releases/download/{tag}/{name}"] = body
-            assets.append(asset(name, body))
-        self.releases.append({"tag_name": tag, "draft": False, "prerelease": False, "assets": assets})
+            data = body or bottle(tag)
+            self.net.bodies[f"https://github.com/{catalog.PORTABLE}/releases/download/{tag}/{name}"] = data
+            assets.append(asset(name, data))
+        self.releases.append({"tag_name": tag, "draft": False, "prerelease": prerelease, "assets": assets})
         github_releases(self.net, catalog.PORTABLE, self.releases)
+
+    def publish_ghcr(self, tag, platforms=catalog.PLATFORMS, body=None, annotated=None):
+        """`tag` on the registry: an image index naming one manifest per
+        bottle (plus one for a platform ward does not ship), each with the
+        bottle as its single layer."""
+        manifests = []
+        for platform, slug in list(catalog.BOTTLE_TAGS.items()) + [(None, "arm64_linux")]:
+            if platform is not None and platform not in platforms:
+                continue
+            data = body or bottle(tag) + slug.encode()
+            digest = "sha256:" + sha256(data)
+            self.net.bodies[f"{catalog.GHCR_RUBY}/blobs/{digest}"] = data
+            manifest = {"schemaVersion": 2, "layers": [{"digest": digest, "size": len(data)}]}
+            manifest_digest = "sha256:" + sha256(json.dumps(manifest).encode())
+            self.net.json(f"{catalog.GHCR_RUBY}/manifests/{manifest_digest}", manifest)
+            manifests.append({"digest": manifest_digest, "annotations": {
+                "org.opencontainers.image.ref.name": f"{tag}.{slug}",
+                "sh.brew.bottle.digest": (annotated or digest)[len("sha256:"):]}})
+        self.net.json(f"{catalog.GHCR_RUBY}/manifests/{tag}", {"schemaVersion": 2, "manifests": manifests})
+        self.tags.append(tag)
+        self.net.json(f"{catalog.GHCR_RUBY}/tags/list", {"name": "homebrew/core/portable-ruby", "tags": self.tags})
+
+    def test_registry_bottles_enter_under_their_blob_urls(self):
+        self.publish("3.4.5")
+        self.publish_ghcr("4.0.2")
+        self.publish_ghcr("4.0.2_1")
+        out, report = self.generate([])
+        self.assertEqual(list(out), ["ruby-3.4.5", "ruby-4.0.2"])
+        rows = out["ruby-4.0.2"]["artifacts"]
+        self.assertEqual({a["build"] for a in rows}, {"4.0.2_1"})
+        self.assertEqual({a["provider"] for a in rows}, {catalog.GHCR_PROVIDER})
+        for a in rows:
+            self.assertEqual(a["url"], f"{catalog.GHCR_RUBY}/blobs/{a['digest']}")
+        self.assertEqual(report.added, ["ruby-3.4.5", "ruby-4.0.2"])
+        # Verified again on the next run, nothing added.
+        again, report = self.generate(list(out.values()))
+        self.assertEqual((again, report.added), (out, []))
+
+    def test_a_version_on_both_channels_with_other_bytes_is_a_revision_and_the_same_bytes_are_not(self):
+        self.publish("3.4.6", prerelease=True)
+        self.publish("3.4.5")
+        github, report = self.generate([])
+        self.assertEqual(list(github), ["ruby-3.4.5"])
+        self.assertEqual(report.skipped, [("portable-ruby 3.4.6", "marked prerelease by Homebrew")])
+        # The shipped catalog already has the prerelease 3.4.6 bottle.
+        shipped = list(github.values()) + [catalog.ruby_release(
+            report, "3.4.6", self.releases[0], "ruby-3.4.6")[0]]
+        self.publish_ghcr("3.4.5", body=bottle("3.4.5"))   # the same bytes
+        self.publish_ghcr("3.4.6")                          # rebuilt bytes
+        out, report = self.generate(shipped)
+        self.assertEqual(sorted(out), ["ruby-3.4.5", "ruby-3.4.6", "ruby-3.4.6-r2"])
+        self.assertEqual(out["ruby-3.4.6-r2"]["revision"], 2)
+        self.assertEqual(out["ruby-3.4.6-r2"]["artifacts"][0]["provider"], catalog.GHCR_PROVIDER)
+        self.assertEqual(report.added, ["ruby-3.4.6-r2"])
+
+    def test_fiddle_as_a_bundled_gem_extension_is_admitted_and_as_a_core_extension_is_not(self):
+        def layout(extra):
+            path = os.path.join(self.scratch.name, "bottle.tar.gz")
+            with tarfile.open(path, "w:gz") as tar:
+                for name in ("bin/ruby", "bin/gem", "bin/bundle", "lib/libruby-static.a",
+                             "include/ruby-4.0.0/ruby.h", extra):
+                    tar.addfile(tarfile.TarInfo(f"portable-ruby/4.0.3/{name}"), io.BytesIO(b""))
+            catalog.check_bottle_layout(path, "4.0.3")
+        layout("lib/ruby/gems/4.0.0/extensions/x86_64-linux/4.0.0-static/fiddle-1.1.8/fiddle.so")
+        for core in ("lib/ruby/4.0.0/x86_64-linux/fiddle.so",
+                     "lib/ruby/gems/4.0.0/extensions/x86_64-linux/4.0.0-static/openssl-4.0/openssl.so"):
+            with self.assertRaisesRegex(catalog.Failure, "dynamic extension"):
+                layout(core)
+
+    def test_a_registry_layer_that_is_not_the_annotated_bottle_is_an_error(self):
+        self.publish_ghcr("4.0.3", annotated="sha256:" + "0" * 64)
+        with self.assertRaisesRegex(catalog.Failure, "sh.brew.bottle.digest"):
+            self.generate([])
+
+    def test_a_registry_tag_without_both_bottles_is_skipped(self):
+        self.publish_ghcr("4.0.3", platforms=(LINUX,))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped, [("ruby-4.0.3", f"portable-ruby 4.0.3 has no {DARWIN} bottle")])
+
+    def test_a_new_bottle_failing_the_recipe_is_skipped_with_the_reason(self):
+        self.publish_ghcr("4.0.4", body=bottle("9.9.9"))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped[0][0], "ruby-4.0.4")
+        self.assertIn("is outside portable-ruby/4.0.4/", report.skipped[0][1])
+
+    def test_a_shipped_registry_bottle_the_registry_withdrew_is_an_error(self):
+        self.publish_ghcr("4.0.3")
+        out, _ = self.generate([])
+        self.tags.clear()
+        self.net.json(f"{catalog.GHCR_RUBY}/tags/list", {"tags": []})
+        with self.assertRaisesRegex(catalog.Failure, "no longer publishes portable-ruby 4.0.3"):
+            self.generate(list(out.values()))
 
     def generate(self, existing):
         report = catalog.Report("ruby")

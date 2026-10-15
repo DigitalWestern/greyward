@@ -1819,7 +1819,7 @@ end
 fn ruby_missing_lock_resolves_a_git_source_through_the_proxy() {
     let temp = TempDir::new("ruby-e2e-git-lock");
     let project = temp.0.join("app");
-    let revision = "7da1699a9e0eb24cb646ec6a3bc710897343da82";
+    let revision = "0fdacef47aa9a4140e472b0ce302a2dd09423a75";
     let remote = "https://github.com/ruby/rake.git";
     std::fs::create_dir_all(project.join(".greyward")).unwrap();
     std::fs::write(

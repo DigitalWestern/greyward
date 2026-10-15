@@ -513,10 +513,14 @@ fn hold_wheels(
     let wheels: Vec<usize> = (0..artifacts.len())
         .filter(|&i| artifacts[i].0.kind == ArtifactKind::Wheel)
         .collect();
-    let leases = fetch_all(&wheels, |&i| {
-        let p = artifacts[i].0;
-        download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)
-    })?;
+    let leases = fetch_all(
+        &wheels,
+        |&i| artifacts[i].0.sha256.to_ascii_lowercase(),
+        |&i| {
+            let p = artifacts[i].0;
+            download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)
+        },
+    )?;
     for (&i, lease) in wheels.iter().zip(&leases) {
         artifacts[i].1 = lease.to_path_buf();
     }
@@ -574,10 +578,15 @@ fn realize_artifacts<'p>(
         .copied()
         .filter(|p| p.kind == ArtifactKind::Wheel)
         .collect();
-    let mut fetched = fetch_each(&wheels, |p| {
-        let lease = download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
-        Ok(lease.to_path_buf())
-    })
+    let mut fetched = fetch_each(
+        &wheels,
+        |p| p.sha256.to_ascii_lowercase(),
+        |p| {
+            let lease =
+                download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
+            Ok(lease.to_path_buf())
+        },
+    )
     .into_iter();
     for &p in packages {
         let wheel_file = match p.kind {

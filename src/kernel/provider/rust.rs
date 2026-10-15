@@ -333,9 +333,13 @@ pub fn realize_runtime(
 
     // The components (rustc, rust-std, cargo) are independent downloads:
     // fetch them on the pool, in row order, first failure in row order.
-    let tarballs = crate::kernel::fetch::fetch_all(&rows, |row| {
-        download_toolchain_artifact_held(store, activity, &row.provider, &row.url, &row.digest)
-    })?;
+    let tarballs = crate::kernel::fetch::fetch_all(
+        &rows,
+        |row| row.digest.clone(),
+        |row| {
+            download_toolchain_artifact_held(store, activity, &row.provider, &row.url, &row.digest)
+        },
+    )?;
 
     let names: Vec<&str> = rows.iter().map(|row| row.component.as_str()).collect();
     let staged = store.stage_with_activity(activity)?;

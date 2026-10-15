@@ -368,9 +368,11 @@ pub fn prefetch_uv_and_runtime(
         Ok((spec, false)) => spec,
         Err(error) => return Ok([Ok(()), Err(error)]),
     };
-    let mut fetched = crate::kernel::fetch::fetch_each(&[uv, cpython], |spec| {
-        fetch_tarball(store, activity, spec)
-    })
+    let mut fetched = crate::kernel::fetch::fetch_each(
+        &[uv, cpython],
+        |spec| artifact_sha256(spec).ok().map(str::to_string),
+        |spec| fetch_tarball(store, activity, spec),
+    )
     .into_iter();
     Ok([fetched.next().unwrap(), fetched.next().unwrap()])
 }

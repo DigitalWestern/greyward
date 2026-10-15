@@ -22,6 +22,12 @@ pub(crate) const FETCH_WORKERS: usize = 4;
 /// one digest never share one), and an error carries the same text as the
 /// call made alone.
 ///
+/// Jobs that name one digest (`digest`) run one after another in input
+/// order, on one worker: in a loop the first of them published the cache
+/// entry before the next was reached, so a later one reads that entry and
+/// its own URL is never asked. Two lock entries with one digest and two
+/// allowed URLs, the second unavailable, sync as they did one at a time.
+///
 /// Jobs start in input order. Once one fails no further job starts, so a
 /// caller that stops at the first error in input order sees the same
 /// error it would have seen fetching one at a time: every job before the
@@ -29,24 +35,59 @@ pub(crate) const FETCH_WORKERS: usize = 4;
 /// an error saying so; such a slot comes after a failure, where an
 /// in-order caller has already stopped.
 ///
-/// A single job runs on the calling thread with its own progress line, as
-/// before. A larger batch shares one line (`ui::Batch`), erased before
-/// this returns.
-pub(crate) fn fetch_each<J, T>(
+/// A single job (or a single digest) runs on the calling thread with its
+/// own progress line, as before. A larger batch shares one line
+/// (`ui::Batch`), erased before this returns.
+pub(crate) fn fetch_each<J, T, K>(
     jobs: &[J],
+    digest: impl Fn(&J) -> K,
     fetch: impl Fn(&J) -> io::Result<T> + Sync,
 ) -> Vec<io::Result<T>>
 where
     J: Sync,
     T: Send,
+    K: Ord,
 {
-    if jobs.len() < 2 {
-        return jobs.iter().map(|job| run_job(|| fetch(job))).collect();
+    // Each group is the input indices of one digest, in input order; the
+    // groups are ordered by their first index.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    {
+        let mut group_of = std::collections::BTreeMap::new();
+        for (index, job) in jobs.iter().enumerate() {
+            let group = *group_of.entry(digest(job)).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[group].push(index);
+        }
     }
     let next = AtomicUsize::new(0);
     // The lowest index that has failed so far, `usize::MAX` while none has.
     let failed = AtomicUsize::new(usize::MAX);
     let slots: Vec<Mutex<Option<io::Result<T>>>> = jobs.iter().map(|_| Mutex::new(None)).collect();
+    // Run one group's jobs in order, stopping at the first failure in the
+    // whole batch.
+    let run_group = |group: &[usize], finished: &dyn Fn()| {
+        for &index in group {
+            if index > failed.load(Ordering::SeqCst) {
+                return;
+            }
+            let result = run_job(|| fetch(&jobs[index]));
+            if result.is_err() {
+                failed.fetch_min(index, Ordering::SeqCst);
+            }
+            finished();
+            *slots[index]
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+        }
+    };
+    if groups.len() < 2 {
+        for group in &groups {
+            run_group(group, &|| {});
+        }
+        return collect(slots);
+    }
     let batch = crate::kernel::ui::Batch::start(jobs.len());
     // What the calling thread carries that a worker thread would not: the
     // operation's policy (a registry download reads its `[sources]` and
@@ -55,31 +96,30 @@ where
     let policy = crate::kernel::policy::effective();
     let parent = crate::kernel::ui::current_phase();
     std::thread::scope(|scope| {
-        for _ in 0..FETCH_WORKERS.min(jobs.len()) {
+        for _ in 0..FETCH_WORKERS.min(groups.len()) {
             scope.spawn(|| {
                 let _policy = crate::kernel::policy::PolicyScope::inherit(policy.clone());
                 let _t = parent.phase("download pool");
-                crate::kernel::ui::in_batch(&batch, || loop {
-                    // Indices are handed out in order, so every index below
-                    // a failed one was taken before it and is finished, not
-                    // skipped.
-                    let index = next.fetch_add(1, Ordering::SeqCst);
-                    if index >= jobs.len() || index > failed.load(Ordering::SeqCst) {
-                        break;
+                crate::kernel::ui::in_batch(&batch, || {
+                    // Groups are handed out in order of their first index,
+                    // so every job below a failed one was taken before it
+                    // and is finished, not skipped.
+                    while let Some(group) = groups.get(next.fetch_add(1, Ordering::SeqCst)) {
+                        if group[0] > failed.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        run_group(group, &|| batch.finished());
                     }
-                    let result = run_job(|| fetch(&jobs[index]));
-                    if result.is_err() {
-                        failed.fetch_min(index, Ordering::SeqCst);
-                    }
-                    batch.finished();
-                    *slots[index]
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
                 })
             });
         }
     });
     drop(batch);
+    collect(slots)
+}
+
+/// The slots in input order; a job never reached says why.
+fn collect<T>(slots: Vec<Mutex<Option<io::Result<T>>>>) -> Vec<io::Result<T>> {
     slots
         .into_iter()
         .map(|slot| {
@@ -103,15 +143,17 @@ fn run_job<T>(fetch: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
 
 /// [`fetch_each`] for a caller that needs every job: the results in input
 /// order, or the first failure in input order.
-pub(crate) fn fetch_all<J, T>(
+pub(crate) fn fetch_all<J, T, K>(
     jobs: &[J],
+    digest: impl Fn(&J) -> K,
     fetch: impl Fn(&J) -> io::Result<T> + Sync,
 ) -> io::Result<Vec<T>>
 where
     J: Sync,
     T: Send,
+    K: Ord,
 {
-    fetch_each(jobs, fetch).into_iter().collect()
+    fetch_each(jobs, digest, fetch).into_iter().collect()
 }
 
 #[cfg(test)]
@@ -125,14 +167,18 @@ mod tests {
         let running = AtomicUsize::new(0);
         let widest = AtomicUsize::new(0);
         let jobs: Vec<u64> = (0..12).collect();
-        let results = fetch_all(&jobs, |&job| {
-            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
-            widest.fetch_max(now, Ordering::SeqCst);
-            // Later jobs finish first.
-            std::thread::sleep(std::time::Duration::from_millis(30 - 2 * job));
-            running.fetch_sub(1, Ordering::SeqCst);
-            Ok(job * 10)
-        })
+        let results = fetch_all(
+            &jobs,
+            |&job| job,
+            |&job| {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                widest.fetch_max(now, Ordering::SeqCst);
+                // Later jobs finish first.
+                std::thread::sleep(std::time::Duration::from_millis(30 - 2 * job));
+                running.fetch_sub(1, Ordering::SeqCst);
+                Ok(job * 10)
+            },
+        )
         .unwrap();
         assert_eq!(results, jobs.iter().map(|job| job * 10).collect::<Vec<_>>());
         let widest = widest.load(Ordering::SeqCst);
@@ -145,18 +191,22 @@ mod tests {
     fn a_batch_reports_the_first_failure_in_input_order() {
         let started = AtomicUsize::new(0);
         let jobs: Vec<usize> = (0..40).collect();
-        let error = fetch_all(&jobs, |&job| {
-            started.fetch_add(1, Ordering::SeqCst);
-            match job {
-                // Fails late, after job 3 has already failed.
-                2 => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    Err(io::Error::other("job 2 failed"))
+        let error = fetch_all(
+            &jobs,
+            |&job| job,
+            |&job| {
+                started.fetch_add(1, Ordering::SeqCst);
+                match job {
+                    // Fails late, after job 3 has already failed.
+                    2 => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        Err(io::Error::other("job 2 failed"))
+                    }
+                    3 => Err(io::Error::other("job 3 failed")),
+                    _ => Ok(job),
                 }
-                3 => Err(io::Error::other("job 3 failed")),
-                _ => Ok(job),
-            }
-        })
+            },
+        )
         .unwrap_err();
         assert_eq!(error.to_string(), "job 2 failed");
         // Jobs are handed out in order, so at most one per worker started
@@ -170,46 +220,89 @@ mod tests {
     #[test]
     fn each_result_stays_at_its_index() {
         let jobs = [1, 2, 3];
-        let results = fetch_each(&jobs, |&job| {
-            if job == 2 {
-                Err(io::Error::other("two"))
-            } else {
-                Ok(job)
-            }
-        });
+        let results = fetch_each(
+            &jobs,
+            |&job| job,
+            |&job| {
+                if job == 2 {
+                    Err(io::Error::other("two"))
+                } else {
+                    Ok(job)
+                }
+            },
+        );
         assert_eq!(results[0].as_ref().unwrap(), &1);
         assert_eq!(results[1].as_ref().unwrap_err().to_string(), "two");
         assert_eq!(results.len(), 3);
     }
 
+    /// Jobs that share a digest run in input order: a later one starts
+    /// only once the earlier, slow one has finished (and, for a download,
+    /// published the entry the later one then reads).
+    #[test]
+    fn jobs_that_share_a_digest_run_in_input_order() {
+        let first_done = std::sync::atomic::AtomicBool::new(false);
+        let jobs = [(0, "x"), (1, "y"), (2, "x"), (3, "z")];
+        let results = fetch_all(
+            &jobs,
+            |&(_, digest)| digest,
+            |&(index, _)| match index {
+                0 => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    first_done.store(true, Ordering::SeqCst);
+                    Ok(index)
+                }
+                2 if !first_done.load(Ordering::SeqCst) => {
+                    Err(io::Error::other("ran before the first of its digest"))
+                }
+                _ => Ok(index),
+            },
+        )
+        .unwrap();
+        assert_eq!(results, [0, 1, 2, 3]);
+    }
+
     #[test]
     fn a_panicking_job_returns_an_error_in_its_slot() {
-        let results = fetch_each(&[0, 1], |&job| {
-            if job == 1 {
-                panic!("broken download");
-            }
-            Ok(job)
-        });
+        let results = fetch_each(
+            &[0, 1],
+            |&job| job,
+            |&job| {
+                if job == 1 {
+                    panic!("broken download");
+                }
+                Ok(job)
+            },
+        );
         assert_eq!(*results[0].as_ref().unwrap(), 0);
         assert_eq!(
             results[1].as_ref().unwrap_err().to_string(),
             "download worker panicked"
         );
 
-        let error = fetch_all(&[0], |_| -> io::Result<()> { panic!("single job") }).unwrap_err();
+        let error = fetch_all(
+            &[0],
+            |&job| job,
+            |_| -> io::Result<()> { panic!("single job") },
+        )
+        .unwrap_err();
         assert_eq!(error.to_string(), "download worker panicked");
     }
 
     #[test]
     fn an_earlier_error_takes_precedence_over_a_worker_panic() {
         let both_started = std::sync::Barrier::new(2);
-        let error = fetch_all(&[0, 1], |&job| -> io::Result<()> {
-            both_started.wait();
-            if job == 1 {
-                panic!("later job");
-            }
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "first job"))
-        })
+        let error = fetch_all(
+            &[0, 1],
+            |&job| job,
+            |&job| -> io::Result<()> {
+                both_started.wait();
+                if job == 1 {
+                    panic!("later job");
+                }
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "first job"))
+            },
+        )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(error.to_string(), "first job");
@@ -225,7 +318,7 @@ mod tests {
         };
         let _scope = crate::kernel::policy::PolicyScope::install(policy);
         let jobs: Vec<usize> = (0..8).collect();
-        let strict = fetch_all(&jobs, |_| Ok(crate::kernel::policy::strict())).unwrap();
+        let strict = fetch_all(&jobs, |&job| job, |_| Ok(crate::kernel::policy::strict())).unwrap();
         assert!(strict.iter().all(|&s| s), "{strict:?}");
     }
 }

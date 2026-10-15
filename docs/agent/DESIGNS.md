@@ -38,7 +38,8 @@ history use them.
 5. GC-safety leftovers (all shipped)
 6. The resolution proxy (#68): delegated tools confined to a greyward-owned registry proxy
 7. A shared system store at `/opt/greyward/store` (#69)
-8. Backlog
+8. Syncing ecosystems in parallel (#747)
+9. Backlog
 
 ---
 
@@ -5634,7 +5635,179 @@ needs `sudo` (heavy CI has it).
 
 ---
 
-## 8. Backlog
+## 8. Syncing ecosystems in parallel (#747)
+
+Written 2026-10-14 with the parallel downloads of #745 and #748, which
+shipped on the same branch. This section answers #747's four design
+questions. No parallel tailor code exists yet.
+
+### In plain words
+
+A project with Python and npm in it syncs one ecosystem after the other:
+`sync_preflighted` in `src/commands/sync.rs` runs `tailor.sync` in a plain
+loop. Cold, that costs the Python toolchain plus the Node toolchain plus
+both dependency sets, end to end. Most of that time is waiting on the
+network. The question is which parts may run at the same time without
+risking the store, the project, or what the user reads.
+
+What shipped already removes most of the waiting inside one ecosystem.
+Independent downloads (a lock's wheels, npm tarballs, registry crates,
+Rust's components, uv beside CPython) now run on a pool of four threads
+(`fetch::fetch_each`, `FETCH_WORKERS`), with one shared progress line
+(`ui::Batch`). The tailors still run one after the other.
+An npm batch that allows multiple strongest SRI digests stays sequential:
+its cache lookup can reuse an earlier package's newly published candidate,
+so fetching it early could change the installed bytes for the same lock.
+
+### 1. Store write concurrency: the critical section
+
+What already serializes, and is already safe across threads of one
+process:
+
+- **The activity lease** (`kernel::activity`). One shared lease is taken
+  for the whole sync and passed down. Clones are `Arc` handles; a thread
+  that borrows the lease takes nothing new, so the per-thread owner check
+  in `local_lease` never fires. Every pool thread of #745 already works
+  this way.
+- **Cache publication** (`fetch::cache_or_download_narrated`). Each
+  attempt streams into its own random `tmp/dl-<suffix>-<hex>` and is
+  published by rename. On Linux a second publisher of the same digest
+  atomically replaces the first file with the same verified bytes. Proven
+  across threads by
+  `concurrent_downloads_of_one_digest_publish_one_entry`.
+- **Staging** (`Store::stage_with_activity`). Each stage is a fresh
+  random directory under `tmp/`.
+- **Object publication** (`Store::commit_with_activity_and_deps` in
+  `src/kernel/store/objects.rs`). The tree is made read-only and synced
+  outside any lock. The critical section is the span under
+  `publish_lock()` (`tmp/.publish.lock`, `flock` on a descriptor opened
+  per call, so two threads exclude each other as two processes do): the
+  completeness re-check, the removal of a crashed leftover, the rename of
+  the stage into `objects/`, the root chmod and the meta record write.
+  That span is already the one place two writers of one store meet, and
+  it already admits writers from other ward processes. Two tailors in one
+  process are no different.
+
+What is not safe for two threads today, and must be named before (a):
+
+- **Policy attribution** (`kernel::policy::Attribution`). Frames are a
+  process-global stack, and `Attribution::open` refuses a thread that
+  would open over another thread's innermost frame (`WouldBlock`).
+  Parallel tailors fail at the first frame by construction. Fixing it
+  means one frame stack per thread, with the closure writer and
+  `object_exceptions` (which reads the innermost frame of the global
+  stack today) reading only their own thread's frame. The policy scopes
+  and the strict-mode scopes (`policy/strict.rs`) are already
+  thread-local, so each tailor thread would also need the sync's scopes
+  installed on it.
+- **Signing.** The signing scope in `comforter` is thread-local too. The
+  current download workers never sign or publish closures, so they need
+  no key. Any future tailor worker that writes a closure must receive an
+  explicit snapshot of the caller's signing key.
+- **The project side.** Each tailor writes its own
+  `.greyward/closures/<ecosystem>.json` and its own projection link
+  (`.venv`, `node_modules`) through the held project descriptor, with
+  `write_closure_with_project_lock` sequencing a projection switch and
+  its envelope. Two ecosystems never write the same name, but they share
+  the project lock held by the command and the toolchain-input lock that
+  `sync_preflighted` holds for the whole run. Sharing the already-held
+  project lock descriptor does not serialize threads within that command.
+  The project-side critical
+  section is therefore "projection switch plus closure envelope, per
+  ecosystem, under the project lock", and it must stay one at a time.
+
+So the critical section for (a) is two spans: the
+store publication under `publish_lock`, and the projection plus closure
+write under the project lock. The second span needs explicit in-process
+serialization, such as a mutex or publication on the caller's thread.
+Fetch, unpack and build can use separate stages before these spans once
+their ambient state and subprocess handling have been addressed below.
+
+### 2. Error attribution
+
+Today, if npm fails after Python succeeded, Python's closure and
+projection are published and npm's are untouched: each ecosystem is
+atomic on its own, and the next `ward` redoes only what is not current.
+Parallel tailors keep that rule. Each tailor runs to its own end (success
+or error), nothing is cancelled midway (a cancelled tailor may hold a
+stage, which GC sweeps, but a half-switched projection is never left
+because the switch is inside the project-lock span). The error reported
+is the first failure in the order the loop runs tailors today, as
+`fetch_each` does for downloads, so the same failure prints the same
+message whether the tailors ran side by side or not. The other tailors'
+errors are not printed; a second run reports them in turn, as today.
+
+### 3. Delegated subprocesses and the sandbox
+
+Two sandboxed runs at once are already possible across processes, and
+within one process the pieces hold up: `supervise` keeps one session per
+operation (the per-process limit was removed with #57), each sandbox gets
+its own stage as scratch, and the resolution proxy is one per process
+(`resolve::proxy::proxy()`) with its own worker pool, so there is no port
+to collide on. What has not been tested is two doors attributing
+traffic to two ledgers at once, and two terminal-owning tools (`npm` and
+`uv` both printing progress) sharing one stderr. Until those are proven,
+parallelism stays in the phases that run no delegated tool: fetch,
+unpack and hash.
+
+### 4. Narration
+
+A tailor's narration is a few `note` lines, its warnings (each followed
+by its `fix:` or `next:` line), and the `synced:` line. Two tailors
+printing at once would interleave them line by line, and a warning could
+be separated from its `fix:`. The rule for (a): each tailor's narration
+is buffered and printed whole when it finishes, in loop order, with
+`warning_lines` already producing both lines as one string. Download
+progress is already coherent: concurrent downloads share one `ui::Batch`
+line, which is erased before the pool returns, so nothing prints onto its
+tail.
+
+### Archive passes (#748): kept as they are
+
+`kernel::archive` reads each tarball three times: its own header reader,
+`tar -t`, then `tar -x`. For the CPython tarball (109 MB gzip, 353 MB
+of tar) each pass is about a second of a 14 second cold toolchain sync;
+the rest is the download.
+
+- Listing from the stream the extractor consumes (#748 option ii) cannot
+  keep the rule that the reader and the host tar agree before anything is
+  written: on one stream the extractor writes while the reader is still
+  reading. Refused.
+- Running `tar -t` beside the header reader instead of after it keeps
+  that rule, but it lets `tar -t` run on an archive the reader is about to
+  refuse. Today a decompression bomb (a registry tarball is publisher
+  content) is stopped by the reader's `MAX_ARCHIVE_BYTES` count before
+  any tool sees it; run in parallel, `tar -t` would decompress the whole
+  bomb and `supervise::local_output` would buffer its entire listing in
+  memory, with no way to stop the child when the reader refuses. Not
+  done for about one second. It becomes safe once `supervise` can hand
+  back a running local child that the caller can kill (stdout read with a
+  cap), at which point the listing can overlap the reader and be killed
+  on a refusal.
+- Hashing while streaming (option iii): there is nothing to cut. Object
+  publication (`commit_with_activity_and_deps`) does not hash the staged
+  tree; object identity comes from the inputs. Its costs are the
+  read-only walk and `sync_tree`, which durability needs.
+
+### Recommendation
+
+Do (b) first, as #747 picks, and it is mostly done: with downloads
+pooled inside each ecosystem, the remaining serial cost of a polyglot
+cold sync is the toolchain downloads of different ecosystems (CPython,
+then Node). The next step is a cross-ecosystem prefetch in
+`sync_preflighted`: before the loop, every present tailor names the
+toolchain artifacts its `sync` will fetch (the rows whose objects are
+missing), and one `fetch_each` batch downloads them all. Then the loop
+runs as today and finds them cached. That needs no change to policy
+frames, the project lock or narration. Measured numbers are in the #745
+and #748 pull request; the polyglot fixture's cold sync is the one to
+watch, since it is the sum of two toolchains. Decide on (a) only after
+that lands and is measured, and only with the per-thread attribution
+frames above.
+
+---
+
+## 9. Backlog
 
 Unranked. "GC Package B/C/D" means the shipped GC-safety work.
 

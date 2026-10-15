@@ -196,6 +196,7 @@ fn list_inner(
     compression: Compression,
     activity: Option<&StoreActivity>,
 ) -> io::Result<Vec<Entry>> {
+    let _t = crate::kernel::ui::phase("archive check");
     // The caller's lease covers both the in-process read and the
     // cross-check child.
     let entries = read_archive(archive, compression)
@@ -1287,6 +1288,7 @@ fn extract_validated_inner(
     activity: Option<&StoreActivity>,
 ) -> io::Result<()> {
     validate_with_options(entries, options)?;
+    let _t = crate::kernel::ui::phase("archive extract");
     let mut command = extract_command(archive, destination, options, compression);
     let status = status_for(&mut command, activity)
         .map_err(|e| io::Error::new(e.kind(), format!("extract {}: {e}", archive.display())))?;

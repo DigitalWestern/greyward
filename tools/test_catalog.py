@@ -46,6 +46,10 @@ def sha512(body):
     return hashlib.sha512(body).hexdigest()
 
 
+# A FakeNetwork body: the upstream does not answer at that URL.
+DOWN = object()
+
+
 class FakeNetwork:
     """`catalog.http_get`, answered from a table; records every request."""
 
@@ -58,6 +62,9 @@ class FakeNetwork:
         body = self.bodies.get(url)
         if body is None:
             return None
+        if body is DOWN:
+            # What the real http_get raises once its retries are spent.
+            raise catalog.Unreachable(f"{url}: HTTP Error 503: Service Unavailable")
         return body if isinstance(body, bytes) else body.encode()
 
     def json(self, url, value):
@@ -123,6 +130,22 @@ class Http(Base):
         self.net.bodies[url] = "[1, 2]"
         self.assertEqual(catalog.fetch_json(url), [1, 2])
         self.assertEqual(self.net.requests.count(url), 2)
+
+    def test_an_upstream_that_never_answers_is_unreachable_not_a_verdict(self):
+        attempts = []
+
+        def urlopen(request, timeout):
+            attempts.append(request.full_url)
+            raise catalog.urllib.error.HTTPError(request.full_url, 503, "Service Unavailable", {}, io.BytesIO())
+
+        saved = catalog.urllib.request.urlopen
+        catalog.urllib.request.urlopen = urlopen
+        try:
+            with self.assertRaises(catalog.Unreachable):
+                self.saved[0]("https://builds.dotnet.microsoft.com/dotnet/x.sha512")
+        finally:
+            catalog.urllib.request.urlopen = saved
+        self.assertEqual(len(attempts), 4)
 
     def test_a_404_is_not_remembered(self):
         url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/x.tar.gz.sha512"
@@ -498,6 +521,15 @@ class Ruby(Base):
         self.assertEqual(out, {})
         self.assertEqual(report.skipped[0][0], "ruby-4.0.4")
         self.assertIn("is outside portable-ruby/4.0.4/", report.skipped[0][1])
+
+    def test_a_new_bottle_that_cannot_be_downloaded_fails_the_run(self):
+        # An outage says nothing about the bottle: it is not skipped as
+        # failing the recipe, so the drift job cannot pass over it.
+        self.publish_ghcr("4.0.4")
+        blob = next(url for url in self.net.bodies if "/blobs/" in url)
+        self.net.bodies[blob] = DOWN
+        with self.assertRaises(catalog.Unreachable):
+            self.generate([])
 
     def test_a_shipped_registry_bottle_the_registry_withdrew_is_an_error(self):
         self.publish_ghcr("4.0.3")
@@ -1819,6 +1851,26 @@ class Dotnet(Base):
             "dotnet-sdk-10.0.100",
             "the release metadata and the .sha512 beside the archive disagree "
             f"(dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())})")])
+
+    def test_a_new_sdks_sha512_that_cannot_be_fetched_fails_the_drift_run(self):
+        # The case a weekly drift run met as "no drift": the new release's
+        # .sha512 never answers. That is not a disagreement to skip over.
+        self.publish("10.0", "10.0.100")
+        self.shipped("10.0.100")
+        self.publish("10.0", "10.0.101")
+        self.net.bodies[self.url("10.0.101", LINUX) + ".sha512"] = DOWN
+        argv = sys.argv
+        sys.argv = ["catalog.py", "--drift", "dotnet"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    catalog.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("::error title=dotnet upstream could not be read::", out.getvalue())
+        self.assertNotIn("no drift", out.getvalue())
 
     def test_a_shipped_rows_sha512_that_disagrees_is_an_error(self):
         self.publish("10.0", "10.0.100")

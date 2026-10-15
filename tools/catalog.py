@@ -91,6 +91,13 @@ class Failure(Exception):
     """A row that does not verify, or an upstream that cannot be read."""
 
 
+class Unreachable(Failure):
+    """An upstream that did not answer after every retry. It says nothing
+    about a release, so it is never read as a verdict on one: a step that
+    leaves out a release whose checks fail re-raises it, and the run (the
+    weekly drift job too) fails."""
+
+
 # --------------------------------------------------------------------------
 # HTTP. Listings, indexes and checksum files change upstream (a new release,
 # a re-published asset), so they are always fetched fresh: a cached answer
@@ -144,12 +151,13 @@ def http_get(url):
             with urllib.request.urlopen(request, timeout=120) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
+            e.close()
             if e.code == 404:
                 return None
             last = e
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = e
-    raise Failure(f"{url}: {last}")
+    raise Unreachable(f"{url}: {last}")
 
 
 def fetch(url, missing_ok=False):
@@ -929,6 +937,8 @@ def generate_ruby(existing, report):
             key, revision = f"ruby-{version}", None
         try:
             fresh, missing = build(tag, provider, key, revision)
+        except Unreachable:
+            raise
         except Failure as failure:
             report.skip(key, f"portable-ruby {tag} fails the ruby-toolchain/1 checks: {failure}")
             continue
@@ -1187,6 +1197,8 @@ def generate_dotnet(existing, report):
     def cross_check(rel):
         try:
             return dotnet_cross_check(rel), None
+        except Unreachable:
+            raise
         except Failure as failure:
             return 0, str(failure)
 
@@ -1551,7 +1563,9 @@ def main():
         except Failure as failure:
             print(f"error: {failure}", file=sys.stderr)
             if args.drift:
-                annotate(f"{eco} catalog no longer verifies", str(failure))
+                title = (f"{eco} upstream could not be read" if isinstance(failure, Unreachable)
+                         else f"{eco} catalog no longer verifies")
+                annotate(title, str(failure))
             ok = False
     sys.exit(0 if ok else 1)
 

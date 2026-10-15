@@ -752,7 +752,10 @@ identical, an upstream re-publish becomes a new release with a higher
 fails if the file would change; `--drift` does the same with a GitHub
 Actions error annotation per catalog, and the weekly `catalog-drift`
 workflow runs it, so a release upstream publishes is noticed without
-waiting for someone to regenerate. On a pull request that changes a catalog,
+waiting for someone to regenerate. An upstream that does not answer after
+the retries fails the run: it is never read as a release to leave out
+(a checksum disagreement, a bottle failing the recipe), which would let
+the job report no drift over an outage. On a pull request that changes a catalog,
 heavy.yml's `catalog` job runs `--against <base commit>`: it fails on any
 release the base ships that the pull request removes or changes, and
 verifies every checked-in row, the added ones included, against upstream

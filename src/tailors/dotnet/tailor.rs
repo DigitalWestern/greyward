@@ -381,24 +381,20 @@ fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
     ])
 }
 
-/// The selection request [`toolchain_rows`] state.
+/// The selection request [`toolchain_rows`] state: `sdk.version` and
+/// `sdk.rollForward` as one range, read the way the .NET host reads them
+/// (`super::rollforward`).
 fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
-    use crate::kernel::toolchain::invalid;
-    use crate::kernel::toolchain::resolve::{parse_version, value};
-    use crate::kernel::toolchain::VersionRequest;
-    let mut request = Request::newest();
-    if let Some(text) = value(rows, "global.json", "sdk.version") {
-        if value(rows, "global.json", "sdk.rollForward") != Some("disable") {
-            return Err(invalid(
-                "global.json sdk.rollForward must be \"disable\" for an exact toolchain lock",
-            ));
-        }
-        request = request.with(
-            "dotnet-sdk",
-            VersionRequest::Exact(parse_version("global.json sdk.version", text)?),
-        );
-    }
-    Ok(request)
+    use crate::kernel::toolchain::resolve::{value, UPDATE_HINT};
+    let request = super::rollforward::sdk_request(
+        value(rows, "global.json", "sdk.version"),
+        value(rows, "global.json", "sdk.rollForward"),
+    )
+    .map_err(|error| crate::kernel::toolchain::invalid(format!("{error}; {UPDATE_HINT}")))?;
+    Ok(match request {
+        Some(request) => Request::newest().with("dotnet-sdk", request),
+        None => Request::newest(),
+    })
 }
 
 #[cfg(test)]

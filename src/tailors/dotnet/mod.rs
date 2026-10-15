@@ -15,6 +15,7 @@ pub mod edit;
 pub mod objects;
 pub(crate) mod registry;
 mod resolve;
+mod rollforward;
 pub mod tailor;
 mod unpack;
 
@@ -225,36 +226,44 @@ pub fn realize_runtime(
         .map(|(path, _)| path)
 }
 
-/// global.json gate: it must name the SELECTED SDK exactly, with
-/// rollForward disabled and no redirection. Comparing against the shipped
-/// constant would let a catalog refresh start failing locked projects.
-/// The project is read through the held descriptor.
+/// global.json gate: the SELECTED SDK must be one the .NET host would
+/// accept under the file's `sdk.version` and `sdk.rollForward`
+/// (`rollforward::sdk_request`, the same reading that selected it), and
+/// nothing may redirect SDK discovery. Comparing against the shipped
+/// constant would let a catalog refresh start failing locked projects. The
+/// project is read through the held descriptor.
 pub fn check_global_json(project: &ProjectRoot, sdk_version: &str) -> io::Result<()> {
     let rel = Path::new("global.json");
     if !regular_file_if_present(project, rel, "global.json")? {
         return Ok(());
     }
     let text = read_input_text(project, rel)?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| err(format!("global.json: {e}")))?;
+    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| err(format!("global.json: {e}")))?;
     reject_global_redirects(&v, "global.json")?;
-    let sdk = v
-        .get("sdk")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| err("global.json must contain an sdk object"))?;
-    let want = sdk
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| err("global.json sdk.version is required"))?;
-    if want != sdk_version {
+    // A global.json with no sdk object states nothing about the SDK.
+    let Some(sdk) = v.get("sdk") else {
+        return Ok(());
+    };
+    let sdk = sdk
+        .as_object()
+        .ok_or_else(|| err("global.json sdk must be an object"))?;
+    let field = |name: &str| -> io::Result<Option<&str>> {
+        match sdk.get(name) {
+            None => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text.as_str())),
+            Some(_) => Err(err(format!("global.json sdk.{name} must be a string"))),
+        }
+    };
+    let Some(request) = rollforward::sdk_request(field("version")?, field("rollForward")?)? else {
+        return Ok(());
+    };
+    let selected = crate::kernel::toolchain::Version::parse(sdk_version)?;
+    if !request.matches(&selected) {
         return Err(err(format!(
-            "global.json requires SDK {want}; pinned: {sdk_version}"
+            "global.json admits SDK {request}; locked: {sdk_version}; \
+             run `ward update --toolchain dotnet`"
         )));
-    }
-    if sdk.get("rollForward").and_then(serde_json::Value::as_str) != Some("disable") {
-        return Err(err(
-            "global.json must set \"rollForward\": \"disable\" (ward pins the SDK exactly)",
-        ));
     }
     Ok(())
 }
@@ -1784,40 +1793,52 @@ mod tests {
     }
 
     /// The global.json gate answers to the selection, so a project locked to
-    /// an older SDK keeps passing after the shipped catalog moves on.
+    /// an older SDK keeps passing after the shipped catalog moves on, and it
+    /// reads rollForward as the range the host reads.
     #[test]
     fn the_global_json_gate_compares_against_the_selected_sdk() {
         let scratch = TempDir::named("dotnet-globaljson");
         let temp = scratch.0.clone();
-        fs::write(
-            temp.join("global.json"),
-            "{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"disable\"}}",
-        )
-        .unwrap();
-        check_global_json(&ProjectRoot::open(&temp).unwrap(), "9.0.100").unwrap();
-        let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("requires SDK 9.0.100"), "{error}");
+        let gate = |text: &str, selected: &str| {
+            fs::write(temp.join("global.json"), text).unwrap();
+            check_global_json(&ProjectRoot::open(&temp).unwrap(), selected)
+        };
+        let exact = r#"{"sdk":{"version":"9.0.100","rollForward":"disable"}}"#;
+        gate(exact, "9.0.100").unwrap();
+        let error = gate(exact, SDK_VERSION).unwrap_err().to_string();
+        assert!(error.contains("admits SDK ==9.0.100"), "{error}");
         assert!(error.contains(SDK_VERSION), "{error}");
-        // The right version still has to pin rollForward and redirect nothing.
+        // A roll-forward policy admits its range, and only its range.
+        let feature =
+            "\u{feff}{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"latestFeature\"}}";
+        gate(feature, SDK_VERSION).unwrap();
+        let error = gate(feature, "10.0.100").unwrap_err().to_string();
+        assert!(error.contains(">=9.0.100,<9.1"), "{error}");
+        // No rollForward is the host's patch policy: the same feature band.
+        gate(r#"{"sdk":{"version":"9.0.300"}}"#, SDK_VERSION).unwrap();
+        assert!(gate(r#"{"sdk":{"version":"9.0.100"}}"#, SDK_VERSION).is_err());
+        // What the host ignores constrains nothing.
+        gate(r#"{"sdk":{"version":"9.0.*"}}"#, SDK_VERSION).unwrap();
+        gate(r#"{"sdk":{"allowPrerelease":false}}"#, SDK_VERSION).unwrap();
+        gate(r#"{"tools":{}}"#, SDK_VERSION).unwrap();
+        // Redirection and an unknown policy are refused.
         for (text, refusal) in [
             (
-                format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
-                "rollForward",
-            ),
-            (
                 format!(
-                    "{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}},\
-                     \"msbuild-sdks\":{{\"X\":\"1.0\"}}}}"
+                    r#"{{"sdk":{{"version":"{SDK_VERSION}","rollForward":"disable"}},"msbuild-sdks":{{"X":"1.0"}}}}"#
                 ),
                 "SDK redirection",
             ),
+            (
+                format!(r#"{{"sdk":{{"version":"{SDK_VERSION}","paths":[".dotnet"]}}}}"#),
+                "SDK redirection",
+            ),
+            (
+                format!(r#"{{"sdk":{{"version":"{SDK_VERSION}","rollForward":"newest"}}}}"#),
+                "roll-forward policy",
+            ),
         ] {
-            fs::write(temp.join("global.json"), &text).unwrap();
-            let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
-                .unwrap_err()
-                .to_string();
+            let error = gate(&text, SDK_VERSION).unwrap_err().to_string();
             assert!(error.contains(refusal), "{text}: {error}");
         }
         // No global.json at all is no constraint.
@@ -2393,12 +2414,12 @@ mod tests {
         let bad_global = base.join("bad-global");
         fs::create_dir(&bad_global).unwrap();
         fs::write(bad_global.join("project.csproj"), minimal_csproj()).unwrap();
-        fs::write(bad_global.join("global.json"), "{}").unwrap();
+        fs::write(bad_global.join("global.json"), r#"{"sdk":"9.0.100"}"#).unwrap();
         let error = preflight(&ProjectRoot::open(&bad_global).unwrap(), SDK_VERSION).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("global.json must contain an sdk object"),
+                .contains("global.json sdk must be an object"),
             "{error}"
         );
 

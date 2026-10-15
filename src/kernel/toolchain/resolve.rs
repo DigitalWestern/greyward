@@ -1036,32 +1036,59 @@ mod tests {
     }
 
     #[test]
-    fn dotnet_needs_roll_forward_disabled_for_an_exact_sdk() {
-        let rows = vec![
-            row("global.json", "sdk.version", Some("9.0.317")),
-            row("global.json", "sdk.rollForward", Some("disable")),
-        ];
-        assert_eq!(request("dotnet", &rows), "dotnet-sdk ==9.0.317");
-        for roll in [None, Some("latestPatch")] {
-            let rows = vec![
-                row("global.json", "sdk.version", Some("9.0.317")),
+    fn dotnet_reads_roll_forward_as_a_range() {
+        let rows = |version, roll| {
+            vec![
+                row("global.json", "sdk.version", version),
                 row("global.json", "sdk.rollForward", roll),
-            ];
-            let error = refusal("dotnet", &rows);
-            assert!(
-                error.contains("sdk.rollForward must be \"disable\""),
-                "{roll:?}: {error}"
-            );
-        }
+            ]
+        };
         assert_eq!(
-            request(
-                "dotnet",
-                &[
-                    row("global.json", "sdk.version", None),
-                    row("global.json", "sdk.rollForward", None)
-                ]
-            ),
-            "newest"
+            request("dotnet", &rows(Some("9.0.317"), Some("disable"))),
+            "dotnet-sdk ==9.0.317"
         );
+        assert_eq!(
+            request("dotnet", &rows(Some("9.0.317"), None)),
+            "dotnet-sdk >=9.0.317,<9.0.400"
+        );
+        assert_eq!(
+            request("dotnet", &rows(Some("8.0.400"), Some("latestFeature"))),
+            "dotnet-sdk >=8.0.400,<8.1"
+        );
+        assert_eq!(
+            request("dotnet", &rows(Some("10.0.100"), Some("latestMajor"))),
+            "dotnet-sdk >=10.0.100"
+        );
+        assert_eq!(request("dotnet", &rows(None, None)), "newest");
+        assert_eq!(request("dotnet", &rows(Some("9.0.*"), None)), "newest");
+        let error = refusal("dotnet", &rows(Some("9.0.317"), Some("newest")));
+        assert!(error.contains("roll-forward policy"), "{error}");
+        assert!(error.contains(UPDATE_HINT), "{error}");
+
+        // The range selects the catalog default when it admits it, else
+        // the newest release inside it, the same as any other range.
+        let catalog = catalog(
+            "dotnet",
+            "dotnet-sdk",
+            &["10.0.401", "9.0.317", "9.0.318", "8.0.420", "8.0.119"],
+        );
+        let select = |version, roll| {
+            catalog
+                .select(&request_for("dotnet", &rows(Some(version), Some(roll))).unwrap())
+                .map(|bundle| bundle.release.clone())
+        };
+        assert_eq!(
+            select("8.0.100", "latestFeature").unwrap(),
+            "dotnet-sdk-8.0.420"
+        );
+        assert_eq!(
+            select("8.0.100", "latestPatch").unwrap(),
+            "dotnet-sdk-8.0.119"
+        );
+        assert_eq!(
+            select("10.0.100", "latestMajor").unwrap(),
+            "dotnet-sdk-10.0.401"
+        );
+        assert!(select("11.0.100", "latestMajor").is_err());
     }
 }

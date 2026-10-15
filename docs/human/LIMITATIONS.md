@@ -933,9 +933,17 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## .NET
 
-- **Only an exact `global.json` selects the SDK.** `sdk.rollForward` must be `"disable"`;
-  there is no second source and no roll-forward, so a mismatch is a hard error rather than a
-  quiet upgrade.
+- **`global.json` is the one SDK source, read as the .NET host reads it.** `sdk.version`
+  with `sdk.rollForward` is a range (`disable` exact; `patch`/`latestPatch` or no policy the
+  same feature band; `feature`/`latestFeature` the same minor; `minor`/`latestMinor` the
+  same major; `major`/`latestMajor` anything newer). Greyward locks the catalog default when
+  the range admits it, otherwise the newest catalog SDK inside it, and writes that exact SDK
+  to `greyward-toolchain.toml`. The non-`latest` policies would make the host prefer the
+  lowest band installed on that machine; Greyward does not imitate a per-machine choice, the
+  range is the contract. `allowPrerelease` is not read and the catalog holds release SDKs
+  only, so a project whose range admits only a preview SDK (11.0 today) is refused at
+  toolchain selection. A `version` the host cannot parse (`9.0.*`) is ignored, as the host
+  ignores it. `sdk.paths` and `msbuild-sdks` (SDK redirection) are refused.
 - **Strictest v0 boundary of any tailor** (all loud): one SDK-style .csproj only — no .sln, no
   ProjectReference lock entries, no Central Package Management, no
   packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.

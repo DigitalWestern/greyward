@@ -511,8 +511,11 @@ the pinned NuGet installs from that feed in locked mode, verifying every
 contentHash. The SDK is the extractor and part of the object identity. Builds
 are the strictest boundary: `ward run` refuses build-capable verbs
 (MSBuild executes arbitrary code and belongs only in the sandbox), and every
-`ward build` runs a fresh offline locked restore into scratch. `global.json`
-must be an exact pin with `rollForward = "disable"`. A missing lock and
+`ward build` runs a fresh offline locked restore into scratch. `global.json`'s
+`sdk.version` and `sdk.rollForward` are read as the range the .NET host
+reads (`dotnet/rollforward.rs`); the toolchain lock records the one catalog
+SDK selected inside it, and every sync checks that SDK is still in the
+range. A missing lock and
 `ward attest` run restore confined through the resolution door
 (`dotnet/door.rs`), with a `nuget.config` whose one source is the
 session's NuGet mirror (`dotnet/registry.rs`).

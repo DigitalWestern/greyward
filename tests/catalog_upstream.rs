@@ -313,6 +313,27 @@ fn cargo_rows_match_upstream() {
     verify("cargo");
 }
 
+/// A dated nightly is not a catalog row: it is resolved from its signed
+/// channel manifest when a lock is written. polars pins this one.
+#[test]
+#[ignore = "network: fetches a dated nightly channel manifest and its signature"]
+fn a_dated_rust_nightly_resolves_from_its_signed_manifest() {
+    let bundle = greyward::kernel::provider::rust_nightly::select("nightly-2026-09-01")
+        .unwrap()
+        .unwrap();
+    assert_eq!(bundle.release, "rust-nightly-2026-09-01");
+    assert_eq!(bundle.component("rustc").unwrap().version, "1.100.0");
+    assert!(bundle.complete_everywhere());
+    for row in &bundle.artifacts {
+        assert!(
+            row.url
+                .starts_with("https://static.rust-lang.org/dist/2026-09-01/"),
+            "{}",
+            row.url
+        );
+    }
+}
+
 #[test]
 #[ignore = "network: downloads every pinned conda-forge package (about 100 MB)"]
 fn native_library_pins_match_conda_forge() {

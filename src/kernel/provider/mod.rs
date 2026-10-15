@@ -22,4 +22,5 @@ pub mod objects;
 pub mod rust;
 pub mod rust_channel;
 pub mod rust_extras;
+pub mod rust_nightly;
 pub mod rust_path;

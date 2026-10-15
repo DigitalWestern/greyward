@@ -430,6 +430,29 @@ beside a channel, components, targets or a profile, and so does the lock's
 reader. `ward fmt` runs the tree's own `rustfmt`, so the import is also the
 formatter object.
 
+A nightly channel is the other toolchain the same hook answers for
+(`provider/rust_nightly.rs`): the cargo tailor's reader tries `path` first,
+then a `nightly` or `nightly-YYYY-MM-DD` channel, and leaves everything
+else to the catalog. A dated nightly fetches
+`dist/<date>/channel-rust-nightly.toml` and its `.asc` from
+static.rust-lang.org through the source policy, checks the detached
+signature against the Rust release key built into the binary from
+`tools/keys/rust-release-signing-key.asc` (`kernel/openpgp.rs`: v4 RSA
+keys and signatures over SHA-256 or SHA-512, issuer matched by key ID or
+fingerprint, verified with ring), requires the manifest's own `date` to
+be the asked-for one, and builds a bundle from its rows: rustc, rust-std
+and cargo for every platform, rustfmt only when every platform has it,
+and the manifest pinned by its sha256 as a stable release's is. The
+release key is `rust-nightly-<date>`, the rows' build is
+`nightly-<date>`, and the rustc version is the release the nightly leads
+up to (`1.100.0` for `1.100.0-nightly`), since versions are dotted
+numbers; rustfmt's is `nightly`, which names its archive's root directory.
+Plain `nightly` reads the date from the undated manifest and locks that
+day's. Nothing else changes: the lock's rows realize, provision
+components from the pinned manifest and identify objects exactly as a
+catalog release's do, so the signature is checked once, when the lock is
+written.
+
 **go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
 (`go mod tidy -diff`, then `go mod download -json all`), and Greyward
@@ -1261,6 +1284,7 @@ and build inputs tailors share, so no tailor reaches into another):
     gitsrc.rs       git sources realized by commit
     policy.rs       permissive/strict exception policy and the [signing] trust chain
     error.rs        failure classes (refused, stale, unsupported, network) and their exit statuses
+    openpgp.rs      detached OpenPGP signature check (v4 RSA) against a pinned keyring
     signing.rs      Ed25519 closure signing: key files, canonical bytes, verify
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, drop.rs --drop-object,
@@ -1289,7 +1313,8 @@ and build inputs tailors share, so no tailor reaches into another):
                     rust.catalog.toml, toolchain files), rust_channel.rs and
                     rust_extras.rs (components, targets and profiles from
                     the channel manifest), rust_path.rs (a local toolchain
-                    directory), crates.rs (Cargo.lock
+                    directory), rust_nightly.rs (a nightly from its signed
+                    channel manifest), crates.rs (Cargo.lock
                     vendoring; sdists with Rust extensions too),
                     crates_index.rs (crates.io's sparse index as a
                     resolution-proxy route) and cargo_door.rs (the store

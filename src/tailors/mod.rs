@@ -505,8 +505,9 @@ pub trait Tailor: Sync {
     fn toolchain_catalog(&self) -> io::Result<Catalog>;
 
     /// The reader of a toolchain that is not a catalog release at all: a
-    /// directory on this machine (`kernel::toolchain::PATH_SOURCE`), which
-    /// the lock then records in place of a catalog selection. The command
+    /// directory on this machine (`kernel::toolchain::PATH_SOURCE`), or a
+    /// Rust nightly resolved from its signed channel manifest, which the
+    /// lock then records in place of a catalog selection. The command
     /// layer hands it to resolution on `EcosystemInput::external`. `None`
     /// means the catalog always answers, as it does for every ecosystem
     /// that has no such thing.

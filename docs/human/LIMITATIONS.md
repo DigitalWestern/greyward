@@ -807,7 +807,7 @@ Selection covers every CPython patch, end-of-life minors included, that python-b
   row's unit test.
 - **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
   escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
-  manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
+  manifests. **Fail-closed rows**: alternative registries; the beta channel. Loud.
   Cross `targets` get their standard library from the release's signed channel manifest,
   but Greyward provides no linker or C sysroot for them, so a crate that links for another
   platform still needs one on the machine. A custom toolchain works as a local directory
@@ -833,6 +833,16 @@ Selection covers every CPython patch, end-of-life minors included, that python-b
   aarch64-apple-darwin build), **but ward drives cargo 1.68 or newer only.** ward reaches
   crates.io through the sparse index and passes settings with `cargo --config`, which cargo
   1.68 and 1.63 introduced. An older pin is selected and locked, then fails when cargo runs.
+- **A nightly is resolved when the lock is written, not shipped.**
+  `channel = "nightly-YYYY-MM-DD"` fetches that day's channel manifest from
+  static.rust-lang.org, checks its signature against the Rust release key, and locks its
+  rustc, rust-std, cargo and rustfmt rows (rustfmt only when every platform has it) and the
+  manifest's sha256. Plain `nightly` takes the newest nightly at that moment and keeps it
+  until `ward update --toolchain rust`, where rustup would move every day. Locking needs
+  network; using the lock does not refetch or recheck the manifest. A nightly rustc's
+  version is recorded as the release it leads up to (`1.100.0` for `1.100.0-nightly`) with
+  the date in the release key. A host-suffixed channel (`nightly-2026-09-01-x86_64-...`) and
+  `beta` are refused.
 - **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
   `minimal`), not rustup's configured default; ask for `profile = "default"` to get
   clippy, rustfmt and the docs. **No channel means the catalog's default release**

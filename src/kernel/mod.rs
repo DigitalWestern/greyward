@@ -21,6 +21,7 @@ pub mod hostview;
 pub(crate) mod ldcache;
 pub mod lookalike;
 pub mod objmeta;
+pub mod openpgp;
 pub mod pep440;
 pub mod platform;
 pub mod policy;

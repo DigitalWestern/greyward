@@ -913,14 +913,23 @@ mod tests {
         assert_eq!(request("rust", &legacy("1.96.1")), "rustc ==1.96.1");
         assert_eq!(request("rust", &modern("1.96.1")), "rustc ==1.96.1");
         assert_eq!(request("rust", &modern("stable")), "newest");
-        for channel in ["nightly", "beta", "nightly-2026-01-01", "1.96.1-x86_64"] {
+        for channel in ["beta", "1.96.1-x86_64"] {
             let error = refusal("rust", &modern(channel));
             assert!(
                 error.contains(&format!("rust channel {channel} is not supported")),
                 "{channel}: {error}"
             );
             assert!(
-                error.contains("use an exact version or stable"),
+                error.contains("use an exact version, stable, nightly or nightly-YYYY-MM-DD"),
+                "{channel}: {error}"
+            );
+        }
+        // A nightly is the external selection's (`rust_nightly`), never a
+        // catalog request.
+        for channel in ["nightly", "nightly-2026-01-01"] {
+            let error = refusal("rust", &modern(channel));
+            assert!(
+                error.contains("resolves it from its signed channel manifest"),
                 "{channel}: {error}"
             );
         }

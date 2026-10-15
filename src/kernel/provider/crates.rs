@@ -464,14 +464,18 @@ fn fetch_registry_crates(
     crates: &[CargoCrate],
 ) -> Vec<io::Result<crate::kernel::fetch::CacheLease>> {
     let registry: Vec<&CargoCrate> = crates.iter().filter(|krate| krate.git.is_none()).collect();
-    crate::kernel::fetch::fetch_each(&registry, |krate| {
-        download_verified_held(store, activity, &krate.url, &krate.sha256).map_err(|e| {
-            err(format!(
-                "{}@{}: fetch {}: {e}",
-                krate.name, krate.version, krate.url
-            ))
-        })
-    })
+    crate::kernel::fetch::fetch_each(
+        &registry,
+        |krate| krate.sha256.to_ascii_lowercase(),
+        |krate| {
+            download_verified_held(store, activity, &krate.url, &krate.sha256).map_err(|e| {
+                err(format!(
+                    "{}@{}: fetch {}: {e}",
+                    krate.name, krate.version, krate.url
+                ))
+            })
+        },
+    )
 }
 
 fn realize_vendor_inner(

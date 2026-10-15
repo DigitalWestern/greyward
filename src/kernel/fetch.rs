@@ -3203,10 +3203,14 @@ mod integrity_tests {
         let source = store.root.join("source");
         fs::write(&source, &bytes).unwrap();
         let url = format!("file://{}", source.display());
-        let jobs = vec![url.as_str(); 8];
-        let leases = fetch_all(&jobs, |url| {
-            download_verified_held(&store, activity, url, &hex)
-        })
+        // Keyed apart, so the pool runs them at once rather than grouping
+        // the one digest onto one worker as callers do.
+        let jobs: Vec<(usize, &str)> = (0..8).map(|i| (i, url.as_str())).collect();
+        let leases = fetch_all(
+            &jobs,
+            |&(i, _)| i,
+            |(_, url)| download_verified_held(&store, activity, url, &hex),
+        )
         .unwrap();
         let cache = store.cache_path("sha256", &hex);
         assert!(leases.iter().all(|lease| **lease == *cache));
@@ -3234,9 +3238,11 @@ mod integrity_tests {
             .err()
             .unwrap()
             .to_string();
-        let error = fetch_all(&jobs, |(url, hex)| {
-            download_verified_held(&store, activity, url, hex)
-        })
+        let error = fetch_all(
+            &jobs,
+            |(_, hex)| hex.clone(),
+            |(url, hex)| download_verified_held(&store, activity, url, hex),
+        )
         .err()
         .unwrap();
         assert_eq!(error.to_string(), alone);

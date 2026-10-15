@@ -361,6 +361,17 @@ pub(super) fn has_alternative_integrities(packages: &[NpmPackage]) -> bool {
         .any(|p| sri_candidates(&p.integrity).is_ok_and(|candidates| candidates.len() > 1))
 }
 
+/// The digest a registry tarball is cached under, for the fetch pool: two
+/// entries that name one digest (through two URLs) run in lock order, so
+/// the later one reads the entry the earlier one published, as it did one
+/// at a time. `None` for an integrity that does not parse; those share a
+/// group and fail in order.
+pub(super) fn tarball_digest(package: &NpmPackage) -> Option<Digest> {
+    sri_candidates(&package.integrity)
+        .ok()
+        .and_then(|candidates| candidates.into_iter().next())
+}
+
 pub(super) fn fetch_npm_tarballs<'a>(
     store: &Store,
     activity: &StoreActivity,
@@ -376,7 +387,7 @@ pub(super) fn fetch_npm_tarballs<'a>(
     if has_alternative_integrities(packages) {
         registry.into_iter().map(fetch).collect()
     } else {
-        crate::kernel::fetch::fetch_all(&registry, |&p| fetch(p))
+        crate::kernel::fetch::fetch_all(&registry, |&p| tarball_digest(p), |&p| fetch(p))
     }
 }
 
@@ -410,6 +421,45 @@ mod tests {
             "sha512-{}",
             crate::kernel::base64::encode(&hex::decode(digest.hex()).unwrap())
         )
+    }
+
+    /// Two entries name one digest through two URLs: the first is slow, the
+    /// second is gone. One at a time, the second read the entry the first
+    /// published and never asked its URL; on the pool it still must.
+    #[test]
+    fn a_later_url_for_one_digest_waits_for_the_earlier_download() {
+        let scratch = TempDir::named("npm-fetch-same-digest");
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
+            fs::create_dir_all(scratch.0.join(subdir)).unwrap();
+        }
+        let store = Store::for_test(scratch.0.clone());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let bytes = b"one tarball, two allowed URLs".to_vec();
+        let digest = sha512_of(&bytes);
+        let (slow, writer) = crate::kernel::testutil::slow_file_url(
+            &scratch.0.join("slow"),
+            bytes,
+            std::time::Duration::from_millis(300),
+        );
+        let mut a = registry_package(&sri_of(&digest));
+        a.url = slow;
+        let mut b = registry_package(&sri_of(&digest));
+        b.path = "node_modules/other/node_modules/addon".into();
+        b.url = format!("file://{}", scratch.0.join("gone").display());
+        let mut c = registry_package(&sri_of(&sha512_of(b"unrelated")));
+        c.url = format!("file://{}", scratch.0.join("gone-too").display());
+        // `c` fails at once and comes after both, so it is not the error;
+        // its presence makes the batch a real parallel one.
+        let packages = [a, b, c];
+        let error = fetch_npm_tarballs(&store, &activity, &packages)
+            .err()
+            .unwrap();
+        writer.join().unwrap();
+        assert!(error.to_string().contains("gone-too"), "{error}");
+        let fetched = fetch_npm_tarballs(&store, &activity, &packages[..2]).unwrap();
+        assert!(fetched.iter().all(|(_, _, d)| d == &digest));
     }
 
     #[test]

@@ -1409,6 +1409,8 @@ when the two differ.
     ruby/native.rs         native gems: C-runtime-only first, host fallback identity
     ruby/native_libs.rs    native gems build with ward's pinned native library set
     ruby/gem_home.rs       what a failed gem build may leave before its retry
+    ruby/helper.rs         the Bundler helper script the pinned Ruby runs
+    ruby/sources.rs        path gems (inside the project) and git gems
     elixir/mod.rs          Mix/Hex, AST-validated lockfile
     elixir/check_locked.rs whether mix deps.get --check-locked must run again
     dotnet/mod.rs          NuGet packages.lock.json (greyward-mandatory)

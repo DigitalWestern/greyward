@@ -24,6 +24,9 @@ pub static KINDS: &[ObjectKind] = &[
             "host_fallback",
             "host_inputs",
             "gem:",
+            // A git checkout installed into the object (`sources`); only a
+            // plan with a git gem writes one, so other ids are unchanged.
+            "git:",
         ],
         live_contract: Some(ruby_gems_contract),
     },
@@ -51,6 +54,7 @@ fn ruby_gems_contract(identity: &Identity) -> Result<(), String> {
     }
     crate::kernel::hostfallback::identity_contract(identity, |name| {
         identity.inputs.contains_key(&format!("gem:{name}"))
+            || identity.inputs.contains_key(&format!("git:{name}"))
     })?;
     native_contract(identity)
 }
@@ -80,8 +84,15 @@ fn native_contract(identity: &Identity) -> Result<(), String> {
              identity's native_libs input implies"
         ));
     }
-    if has_libs && !inputs.keys().any(|key| key.starts_with("gem:")) {
-        return Err("Ruby native_libs/gem relation: native_libs requires a gem: input".into());
+    // A git checkout builds as a native gem does, so it mounts the set too.
+    if has_libs
+        && !inputs
+            .keys()
+            .any(|key| key.starts_with("gem:") || key.starts_with("git:"))
+    {
+        return Err(
+            "Ruby native_libs/gem relation: native_libs requires a gem: or git: input".into(),
+        );
     }
     Ok(())
 }

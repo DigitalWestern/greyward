@@ -259,8 +259,9 @@ pub(crate) fn package_version(
 /// is rebased onto the crate), the member's `features` added to the
 /// workspace's, the member's `optional` and `public` taken as written, and
 /// the member's `default-features = true` overriding a workspace `false`
-/// (a member `false` against a workspace default is only a warning in cargo
-/// and changes nothing). Every other key on the member entry (`version`,
+/// (a member `false` against a workspace default changes nothing: cargo
+/// warns before edition 2024 and refuses it from 2024 on, as this does when
+/// `edition_2024` is set). Every other key on the member entry (`version`,
 /// `path`, `git`, `package`, ...) is ignored, as cargo ignores it.
 fn merge_dependency(
     base: &toml::Value,
@@ -268,6 +269,7 @@ fn merge_dependency(
     workspace_root: &Path,
     crate_dir: &Path,
     field: &str,
+    edition_2024: bool,
 ) -> io::Result<toml::Value> {
     let mut merged = match base {
         toml::Value::String(version) => {
@@ -305,9 +307,18 @@ fn merge_dependency(
             .or_else(|| table.get("default_features"))
             .and_then(toml::Value::as_bool)
     };
-    if default_features(member) == Some(true) && default_features(&merged) == Some(false) {
-        merged.remove("default_features");
-        merged.insert("default-features".into(), toml::Value::Boolean(true));
+    match (default_features(member), default_features(&merged)) {
+        (Some(true), Some(false)) => {
+            merged.remove("default_features");
+            merged.insert("default-features".into(), toml::Value::Boolean(true));
+        }
+        (Some(false), Some(true) | None) if edition_2024 => {
+            return Err(err(format!(
+                "{field}: default-features = false has no effect, because the workspace \
+                 dependency keeps default features on; cargo refuses this from edition 2024"
+            )));
+        }
+        _ => {}
     }
     for key in ["optional", "public"] {
         match member.get(key) {
@@ -328,6 +339,7 @@ fn normalize_dependencies(
     workspace: &toml::Table,
     workspace_root: &Path,
     crate_dir: &Path,
+    edition_2024: bool,
 ) -> io::Result<()> {
     for (name, value) in deps.iter_mut() {
         if !inherits(value) {
@@ -342,7 +354,14 @@ fn normalize_dependencies(
             workspace_root,
         )?;
         let member = value.as_table().cloned().unwrap_or_default();
-        *value = merge_dependency(base, &member, workspace_root, crate_dir, &field)?;
+        *value = merge_dependency(
+            base,
+            &member,
+            workspace_root,
+            crate_dir,
+            &field,
+            edition_2024,
+        )?;
     }
     Ok(())
 }
@@ -406,9 +425,17 @@ pub(crate) fn normalize(
         let lints = workspace_value(&workspace, None, "lints", "lints", &root)?.clone();
         out.insert("lints".into(), lints);
     }
+    // The package's effective edition, inherited or not (cargo's default
+    // is 2015): some dependency rules tighten from 2024 on.
+    let edition_2024 = out
+        .get("package")
+        .and_then(|package| package.get("edition"))
+        .and_then(toml::Value::as_str)
+        .and_then(|edition| edition.parse::<u32>().ok())
+        .is_some_and(|edition| edition >= 2024);
     for table in DEPENDENCY_TABLES {
         if let Some(deps) = out.get_mut(table).and_then(toml::Value::as_table_mut) {
-            normalize_dependencies(deps, table, &workspace, &root, crate_dir)?;
+            normalize_dependencies(deps, table, &workspace, &root, crate_dir, edition_2024)?;
         }
     }
     if let Some(targets) = out.get_mut("target").and_then(toml::Value::as_table_mut) {
@@ -416,7 +443,14 @@ pub(crate) fn normalize(
             for table in DEPENDENCY_TABLES {
                 if let Some(deps) = target.get_mut(table).and_then(toml::Value::as_table_mut) {
                     let prefix = format!("target.{cfg}.{table}");
-                    normalize_dependencies(deps, &prefix, &workspace, &root, crate_dir)?;
+                    normalize_dependencies(
+                        deps,
+                        &prefix,
+                        &workspace,
+                        &root,
+                        crate_dir,
+                        edition_2024,
+                    )?;
                 }
             }
         }
@@ -642,6 +676,58 @@ plain = { version = "1.0", public = true }
             Some(&toml::Value::Boolean(false))
         );
         assert_eq!(out["dependencies"]["off"].get("default-features"), None);
+    }
+
+    /// A member's `default-features = false` over a workspace dependency
+    /// that keeps defaults on is ignored up to edition 2021 and refused from
+    /// edition 2024, inherited edition included, as cargo does.
+    #[test]
+    fn an_ignored_default_features_false_is_refused_from_edition_2024() {
+        let scratch = TempDir::named("cargo-inherit-edition");
+        let root = scratch.0.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\n[workspace.package]\nedition = \"2024\"\n\
+             [workspace.dependencies]\non = \"1\"\nset = { version = \"1\", default-features = true }\noff = { version = \"1\", default-features = false }\n",
+        )
+        .unwrap();
+        let member = root.join("m");
+        let manifest = |edition: &str, dep: &str| {
+            table(&format!(
+                "[package]\nname = \"m\"\nversion = \"1.0.0\"\n{edition}\n[dependencies]\n{dep} = {{ workspace = true, default-features = false }}\n"
+            ))
+        };
+        for dep in ["on", "set"] {
+            let out = normalize(&member, &root, &manifest("edition = \"2021\"", dep))
+                .unwrap()
+                .unwrap();
+            assert_eq!(out["dependencies"][dep].get("default-features"), {
+                if dep == "set" {
+                    Some(&toml::Value::Boolean(true))
+                } else {
+                    None
+                }
+            });
+            for edition in ["edition = \"2024\"", "edition.workspace = true"] {
+                let error = normalize(&member, &root, &manifest(edition, dep))
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains(&format!("dependencies.{dep}: default-features = false")),
+                    "{error}"
+                );
+                assert!(error.contains("edition 2024"), "{error}");
+            }
+        }
+        // Agreeing with a workspace `false` is fine in any edition.
+        let out = normalize(&member, &root, &manifest("edition = \"2024\"", "off"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out["dependencies"]["off"].get("default-features"),
+            Some(&toml::Value::Boolean(false))
+        );
     }
 
     /// A workspace whose `exclude` covers the crate, and whose `members` do

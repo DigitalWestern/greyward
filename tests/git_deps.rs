@@ -629,3 +629,77 @@ fn cargo_git_workspace_members_are_vendored_normalized() {
         "shared license\n"
     );
 }
+
+/// A git crate whose links expand past the materialization budget is
+/// refused, and the refusal leaves nothing behind: no vendor object and no
+/// half-built stage in the store's `tmp` (#776 review).
+#[test]
+fn a_refused_git_crate_copy_leaves_no_stage() {
+    let _serial = serial();
+    let root = TempDir::new("gitdep-cargo-budget");
+    let repo = root.0.join("fanout-repo");
+    std::fs::create_dir_all(repo.join("app/src")).unwrap();
+    std::fs::create_dir_all(repo.join("shared/l0")).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["config", "user.email", "t@example.invalid"], &repo);
+    git(&["config", "user.name", "t"], &repo);
+    // Ten files, then five levels of ten links each to the level below:
+    // the crate's one link to the top expands to over 100,000 entries.
+    for i in 0..10 {
+        std::fs::write(repo.join(format!("shared/l0/f{i}")), "x").unwrap();
+    }
+    for level in 1..=5 {
+        let dir = repo.join(format!("shared/l{level}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..10 {
+            std::os::unix::fs::symlink(format!("../l{}", level - 1), dir.join(format!("d{i}")))
+                .unwrap();
+        }
+    }
+    std::fs::write(
+        repo.join("app/Cargo.toml"),
+        "[package]\nname = \"fanout\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("app/src/lib.rs"), "").unwrap();
+    std::os::unix::fs::symlink("../shared/l5", repo.join("app/data")).unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-qm", "fanout"], &repo);
+    let commit = git(&["rev-parse", "HEAD"], &repo);
+    let url = format!("file://{}", repo.display());
+
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let attribution = policy::Attribution::open("cargo").expect("test attribution");
+    let source = format!("git+{url}?rev={commit}#{commit}");
+    let lock = format!(
+        "version = 3\n\n[[package]]\nname = \"fanout\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
+    );
+    let plan = greyward::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let error = greyward::tailors::cargo::realize_vendor(&store, activity, &plan)
+        .expect_err("a link expansion past the budget must be refused")
+        .to_string();
+    attribution.discard();
+    assert!(error.contains("past 100000 entries"), "{error}");
+
+    let names = |dir: &str| -> Vec<String> {
+        match std::fs::read_dir(store.root.join(dir)) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let stages: Vec<String> = names("tmp")
+        .into_iter()
+        .filter(|name| name.starts_with("stage-"))
+        .collect();
+    assert!(stages.is_empty(), "stages left behind: {stages:?}");
+    let vendors: Vec<String> = names("objects")
+        .into_iter()
+        .filter(|name| name.contains("-vendor-"))
+        .collect();
+    assert!(vendors.is_empty(), "vendor objects published: {vendors:?}");
+}

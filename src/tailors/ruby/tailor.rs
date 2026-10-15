@@ -5,7 +5,8 @@ use crate::comforter;
 use crate::comforter::status::{standard_state, string, State};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
-    component, list, purl_encode, push_hash, required, toolchain_component, version_of,
+    component, list, purl_encode, push_hash, push_property, required, toolchain_component,
+    version_of,
 };
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::objmeta::ObjectKind;
@@ -159,6 +160,9 @@ impl Tailor for Ruby {
         ruby::record_unpinned_digests(&plan, |kind, subject, detail| {
             attribution.record(kind, subject, detail)
         })?;
+        // Before any git source is fetched: a policy that denies
+        // `git-dependency` stops here.
+        ruby::record_git_dependencies(&plan)?;
         let gems = ruby::realize_gems(store, activity, platform, &plan, &ruby_obj, toolchain)?;
         ruby::project_ruby_env(
             activity,
@@ -250,6 +254,25 @@ impl Tailor for Ruby {
                 detail: string(&package["full_name"]),
             });
         }
+        for package in plan["path_gems"].as_array().unwrap_or(&empty) {
+            out.packages.push(PackageRow {
+                name: string(&package["name"]),
+                version: string(&package["version"]),
+                detail: format!("path: {}", string(&package["path"])),
+            });
+        }
+        for package in plan["git_gems"].as_array().unwrap_or(&empty) {
+            let revision = string(&package["revision"]);
+            out.packages.push(PackageRow {
+                name: string(&package["name"]),
+                version: string(&package["version"]),
+                detail: format!(
+                    "git: {} at {}",
+                    super::sources::git_url(&string(&package["url"])),
+                    revision.get(..12).unwrap_or(&revision)
+                ),
+            });
+        }
         out
     }
 
@@ -307,6 +330,46 @@ impl Tailor for Ruby {
             push_hash(&mut c, "SHA-256", &required(eco, &p, "sha256")?);
             out.push(c);
         }
+        let optional = |key: &str| -> io::Result<Vec<Value>> {
+            match plan.get(key) {
+                None => Ok(Vec::new()),
+                Some(_) => list(eco, plan, key),
+            }
+        };
+        // A path gem is the project's own code, not the registry's: a
+        // registry purl would name a package that may exist there with
+        // other contents. Its identity is its directory, as a Node `file:`
+        // package's is.
+        for p in optional("path_gems")? {
+            let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
+            let mut c = component(&name, &ver, String::new(), eco);
+            c.as_object_mut().unwrap().remove("purl");
+            push_property(&mut c, "greyward:local", &required(eco, &p, "path")?);
+            out.push(c);
+        }
+        // A git gem's purl says which repository and commit it is
+        // (`vcs_url`, per the purl spec).
+        for p in optional("git_gems")? {
+            let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
+            // Named as ward fetched it, without credentials the lock's
+            // remote may carry.
+            let vcs = format!(
+                "git+{}@{}",
+                super::sources::git_url(&required(eco, &p, "url")?),
+                required(eco, &p, "revision")?
+            );
+            out.push(component(
+                &name,
+                &ver,
+                format!(
+                    "pkg:gem/{}@{}?vcs_url={}",
+                    purl_encode(&name),
+                    purl_encode(&ver),
+                    purl_encode(&vcs)
+                ),
+                eco,
+            ));
+        }
         out.push(toolchain_component(
             body,
             "ruby_object",
@@ -358,4 +421,71 @@ fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
         );
     }
     Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn body() -> Value {
+        json!({
+            "ruby_object": "/store/objects/abc123-ruby-3.4.6",
+            "plan": {
+                "ruby_version": "3.4.6",
+                "bundler_version": "2.6.9",
+                "gems": [{"name": "rake", "version": "13.2.1", "platform": "ruby",
+                          "full_name": "rake-13.2.1", "sha256": "a".repeat(64)}],
+                "path_gems": [{"name": "app", "version": "1.0.0", "path": "."}],
+                "git_gems": [{"name": "rack", "version": "3.2.0",
+                              "url": "https://user:token@github.com/rack/rack.git",
+                              "revision": "0123456789abcdef0123456789abcdef01234567",
+                              "checkout": "rack-0123456789ab"}],
+            },
+        })
+    }
+
+    /// A path gem is the project's own code: no registry purl, its
+    /// directory instead. A git gem names its repository and commit, never
+    /// the credentials its lock remote carries.
+    #[test]
+    fn sbom_components_name_where_path_and_git_gems_come_from() {
+        let mut out = Vec::new();
+        Ruby.sbom_components("ruby", &body(), &mut out).unwrap();
+        let named = |name: &str| out.iter().find(|c| c["name"] == name).unwrap().clone();
+        assert_eq!(named("rake")["purl"], "pkg:gem/rake@13.2.1");
+        let app = named("app");
+        assert!(app.get("purl").is_none(), "{app}");
+        assert!(app["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "greyward:local" && p["value"] == "."));
+        assert_eq!(
+            named("rack")["purl"],
+            "pkg:gem/rack@3.2.0?vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2Frack%2Frack.git%400123456789abcdef0123456789abcdef01234567"
+        );
+        // A closure written before #771 has neither list.
+        let mut old = body();
+        let plan = old["plan"].as_object_mut().unwrap();
+        plan.remove("path_gems");
+        plan.remove("git_gems");
+        let mut out = Vec::new();
+        Ruby.sbom_components("ruby", &old, &mut out).unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn the_listing_shows_path_and_git_gems() {
+        let listing = Ruby.listing("ruby", &body());
+        let details: Vec<&str> = listing.packages.iter().map(|p| p.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            [
+                "rake-13.2.1",
+                "path: .",
+                "git: https://github.com/rack/rack.git at 0123456789ab"
+            ]
+        );
+    }
 }

@@ -335,9 +335,17 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   download with the digest in the catalog embedded in the binary, so that digest is as
   trustworthy as the Greyward release that ships it. When the catalogs are generated,
   `tools/catalog.py` checks the signature of each Rust release's channel manifest (not yet of
-  `channel-rust-stable.toml`, which names the newest) and of Node's `SHASUMS256.txt`; every
+  `channel-rust-stable.toml`, which names the newest) and of Node's `SHASUMS256.txt`. A Rust
+  nightly is not in a catalog: ward itself checks its dated channel manifest's signature,
+  against the same Rust release key built into the binary, once, when it writes the lock;
+  from then on the lock's digests are the pin, as for a catalog row. Every
   other source is **TOFU** (trust on first use: a checksum taken when the
-  row was pinned, with no signature behind it), one row each in the sections below. What each
+  row was pinned, with no signature behind it), one row each in the sections below.
+- **A new upstream release is not usable until a Greyward release ships it.** The catalogs
+  take every patch release each upstream publishes for both platforms, but only as of the
+  last `tools/catalog.py` run. The weekly `catalog-drift` workflow fails when upstream has
+  published one the catalogs lack; until a refreshed catalog ships, a project pinning it is
+  refused by name. Rust nightlies are the exception (below). What each
   upstream publishes is in `docs/agent/DESIGNS.md` §2 "PR 0 evidence"; checking it is WP3.
 - **The conda-forge native libraries are TOFU.** `src/kernel/provider/nativelibs.rs` pins
   their sha256 from conda-forge's repodata, taken once. ward checks nothing signed for them,

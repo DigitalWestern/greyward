@@ -181,9 +181,10 @@ def without_github_digest(net, repo, name):
     net.json(url, releases)
 
 
-def run_quietly(eco, check):
+def run_quietly(eco, check, drift=False):
     """`catalog.run` on the catalog under `catalog.REPO`: (ok, what it printed)."""
-    args = type("Args", (), {"check": check, "set_default": None, "against": None})()
+    args = type("Args", (), {"check": check, "set_default": None, "against": None,
+                             "drift": drift})()
     with contextlib.redirect_stdout(io.StringIO()) as out:
         ok = catalog.run(eco, args)
     return ok, out.getvalue()
@@ -913,6 +914,40 @@ class Go(Base):
         self.assertIn('default = "go-1.26.3"', now)
         self.assertIn('key = "go-1.26.4"', now)
         self.assertIn(text[text.index('\n[[release]]'):], now)
+
+    def test_drift_annotates_a_release_not_shipped_yet_and_writes_nothing(self):
+        self.publish("1.26.3")
+        self.shipped("1.26.3")
+        path = os.path.join(self.scratch.name, catalog.FILES["go"])
+        text = read(path)
+        ok, out = run_quietly("go", check=False, drift=True)
+        self.assertTrue(ok)
+        self.assertIn("go: no drift", out)
+        self.publish("1.26.4")
+        ok, out = run_quietly("go", check=False, drift=True)
+        self.assertFalse(ok)
+        self.assertIn("::error title=go catalog drift::src/tailors/go/catalog.toml lacks 1 "
+                      "release(s) upstream publishes: go-1.26.4. Run `python3 tools/catalog.py go` "
+                      "and open a pull request.", out)
+        self.assertEqual(read(path), text)
+
+    def test_drift_annotates_a_shipped_row_that_no_longer_verifies(self):
+        self.publish("1.26.3")
+        self.shipped("1.26.3")
+        name = "go1.26.3.darwin-arm64.tar.gz"
+        self.net.bodies[f"https://dl.google.com/go/{name}.sha256"] = "0" * 64
+        argv = sys.argv
+        sys.argv = ["catalog.py", "--drift", "go"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    catalog.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("::error title=go catalog no longer verifies::go "
+                      f"{name} .sha256: sha256:{'0' * 64}", out.getvalue())
 
 
 class Against(Base):

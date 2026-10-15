@@ -745,7 +745,10 @@ already shipped are re-verified against the choices they record and must be
 identical, an upstream re-publish becomes a new release with a higher
 `revision` beside the old one, and the default moves only with
 `--set-default <release>`. `--check` rewrites nothing and
-fails if the file would change. On a pull request that changes a catalog,
+fails if the file would change; `--drift` does the same with a GitHub
+Actions error annotation per catalog, and the weekly `catalog-drift`
+workflow runs it, so a release upstream publishes is noticed without
+waiting for someone to regenerate. On a pull request that changes a catalog,
 heavy.yml's `catalog` job runs `--against <base commit>`: it fails on any
 release the base ships that the pull request removes or changes, and
 verifies every checked-in row, the added ones included, against upstream

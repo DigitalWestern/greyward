@@ -28,6 +28,8 @@ Usage, from the repository root:
     python3 tools/catalog.py                 # every ecosystem
     python3 tools/catalog.py go node         # just these
     python3 tools/catalog.py --check go      # verify, write nothing, exit 1 on drift
+    python3 tools/catalog.py --drift         # the same, with GitHub Actions annotations
+                                             # (catalog-drift.yml runs it weekly)
     python3 tools/catalog.py --set-default go-1.27.1 go
     python3 tools/catalog.py --against origin/main   # a PR's catalogs: append-only, rows verified
 
@@ -1477,6 +1479,8 @@ def run(eco, args):
         with open(path) as f:
             current = f.read()
     report.print()
+    if getattr(args, "drift", False):
+        return drift(eco, report, current == text)
     if args.check:
         if current != text:
             print(f"{eco}: {FILES[eco]} differs from what upstream publishes today "
@@ -1487,6 +1491,30 @@ def run(eco, args):
         with open(path, "w") as f:
             f.write(text)
         print(f"{eco}: wrote {FILES[eco]}")
+    return True
+
+
+def annotate(title, message):
+    """One GitHub Actions error annotation: the scheduled drift job's
+    failure names the catalog and what to run, not just an exit code."""
+    print(f"::error title={title}::{message}")
+
+
+def drift(eco, report, unchanged):
+    """`--drift`: every shipped row re-verified (the generator already did,
+    and raised on a row upstream withdrew or changed), then a failure when
+    upstream publishes a release the catalog does not ship yet."""
+    if report.added:
+        annotate(f"{eco} catalog drift",
+                 f"{FILES[eco]} lacks {len(report.added)} release(s) upstream publishes: "
+                 f"{', '.join(report.added)}. Run `python3 tools/catalog.py {eco}` and open a "
+                 f"pull request.")
+        return False
+    if not unchanged:
+        annotate(f"{eco} catalog drift",
+                 f"{FILES[eco]} is not what `python3 tools/catalog.py {eco}` writes; regenerate it.")
+        return False
+    print(f"{eco}: no drift")
     return True
 
 
@@ -1501,9 +1529,15 @@ def main():
     parser.add_argument("--against", metavar="REF",
                         help="check the checked-in catalogs against git revision REF: no row "
                              "of REF removed or changed, every row verified upstream; write nothing")
+    parser.add_argument("--drift", action="store_true",
+                        help="re-verify every shipped row and fail, with a GitHub Actions "
+                             "annotation, when upstream publishes a release not shipped yet; "
+                             "write nothing (the weekly catalog-drift workflow)")
     args = parser.parse_args()
-    if args.against and (args.check or args.set_default):
-        parser.error("--against verifies only; it takes neither --check nor --set-default")
+    if args.against and (args.check or args.set_default or args.drift):
+        parser.error("--against verifies only; it takes neither --check, --drift nor --set-default")
+    if args.drift and (args.check or args.set_default):
+        parser.error("--drift verifies only; it takes neither --check nor --set-default")
     ecosystems = args.ecosystems or list(FILES)
     unknown = [eco for eco in ecosystems if eco not in FILES]
     if unknown:
@@ -1516,6 +1550,8 @@ def main():
             ok = run(eco, args) and ok
         except Failure as failure:
             print(f"error: {failure}", file=sys.stderr)
+            if args.drift:
+                annotate(f"{eco} catalog no longer verifies", str(failure))
             ok = False
     sys.exit(0 if ok else 1)
 

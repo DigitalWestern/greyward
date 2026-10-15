@@ -432,10 +432,24 @@ pub(crate) fn progress_line(what: &str, done: u64, total: Option<u64>) -> String
     }
 }
 
+/// The one-line body of a batch of concurrent downloads: how many of the
+/// batch have finished and the bytes moved so far. Pure, like
+/// `progress_line`.
+pub(crate) fn batch_line(finished: usize, total: usize, bytes: u64) -> String {
+    format!(
+        "downloading {finished}/{total} artifacts  {}",
+        human_bytes(bytes)
+    )
+}
+
 /// A download's progress on stderr, redrawn in place and erased when it
 /// ends. Narration, so `--quiet` silences it; a redrawn line is noise in a
 /// log file, so a stderr that is not a terminal gets nothing either. The
 /// value is inert in both cases, so callers need no branch.
+///
+/// Inside a [`Batch`] (a download running on one of `fetch`'s pool
+/// threads) it draws nothing itself: there is one cursor row, so its bytes
+/// go to the batch's single line instead.
 pub struct Progress {
     what: String,
     total: Option<u64>,
@@ -443,19 +457,22 @@ pub struct Progress {
     drawn: bool,
     live: bool,
     next: Instant,
+    batch: Option<std::sync::Arc<Batch>>,
 }
 
 impl Progress {
     /// Start reporting a download of `what` (the artifact's name), with its
     /// total size when the server declared one.
     pub fn start(what: &str, total: Option<u64>) -> Self {
+        let batch = CURRENT_BATCH.with(|current| current.borrow().clone());
         Self {
             what: what.to_string(),
             total,
             done: 0,
             drawn: false,
-            live: !quiet() && io::stderr().is_terminal(),
+            live: batch.is_none() && !quiet() && io::stderr().is_terminal(),
             next: Instant::now(),
+            batch,
         }
     }
 
@@ -466,6 +483,10 @@ impl Progress {
     /// where `write!` returns.
     pub fn advance(&mut self, bytes: u64) {
         self.done = self.done.saturating_add(bytes);
+        if let Some(batch) = &self.batch {
+            batch.advance(bytes, false);
+            return;
+        }
         if !self.live {
             return;
         }
@@ -494,6 +515,113 @@ impl Drop for Progress {
             erase_progress_line();
         }
     }
+}
+
+/// One progress line for downloads that run at once (`fetch::fetch_each`):
+/// several `Progress` lines would fight over the one cursor row, so the
+/// pool's threads report into this and it draws
+/// `downloading 12/70 artifacts  34.0 MiB`. The pool drops it before it
+/// returns, which erases the line, so nothing a caller prints afterwards (a
+/// warning and its `fix:` line) lands on its tail. Inert under `--quiet`
+/// and off a terminal, like `Progress`.
+pub struct Batch {
+    total: usize,
+    live: bool,
+    state: std::sync::Mutex<BatchState>,
+}
+
+struct BatchState {
+    finished: usize,
+    bytes: u64,
+    drawn: bool,
+    next: Instant,
+}
+
+thread_local! {
+    /// The batch this thread's downloads report into, while it runs one of
+    /// the pool's jobs ([`in_batch`]).
+    static CURRENT_BATCH: std::cell::RefCell<Option<std::sync::Arc<Batch>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl Batch {
+    /// Start a batch of `total` downloads.
+    pub fn start(total: usize) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            total,
+            live: !quiet() && io::stderr().is_terminal(),
+            state: std::sync::Mutex::new(BatchState {
+                finished: 0,
+                bytes: 0,
+                drawn: false,
+                next: Instant::now(),
+            }),
+        })
+    }
+
+    /// One of the batch's downloads is over, cache hit or not.
+    pub fn finished(&self) {
+        self.advance(0, true);
+    }
+
+    /// Account for `bytes` more, and one more finished download when
+    /// `finished`, redrawing at most once per interval. Writes are ignored
+    /// on failure, as `Progress::advance`'s are. The lock is held across
+    /// the write, so two threads never interleave one line.
+    fn advance(&self, bytes: u64, finished: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.bytes = state.bytes.saturating_add(bytes);
+        state.finished += usize::from(finished);
+        if !self.live {
+            return;
+        }
+        let now = Instant::now();
+        if now < state.next {
+            return;
+        }
+        state.next = now + PROGRESS_INTERVAL;
+        let mut stderr = io::stderr();
+        let _ = write!(
+            stderr,
+            "\rward: {}\x1b[K",
+            batch_line(state.finished, self.total, state.bytes)
+        );
+        let _ = stderr.flush();
+        state.drawn = true;
+        LINE_HELD.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        let drawn = self
+            .state
+            .get_mut()
+            .map(|state| state.drawn)
+            .unwrap_or_else(|poisoned| poisoned.into_inner().drawn);
+        if self.live && drawn {
+            erase_progress_line();
+        }
+    }
+}
+
+/// Run `job` with this thread's downloads reporting into `batch`. A pool
+/// thread calls it around its work: a thread-local is not inherited, so
+/// the spawner cannot set it for the thread.
+pub fn in_batch<T>(batch: &std::sync::Arc<Batch>, job: impl FnOnce() -> T) -> T {
+    /// Clears the thread's batch on the way out, a panic included.
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            CURRENT_BATCH.with(|current| current.borrow_mut().take());
+        }
+    }
+    CURRENT_BATCH.with(|current| *current.borrow_mut() = Some(std::sync::Arc::clone(batch)));
+    let _leave = Leave;
+    job()
 }
 
 /// Is a progress line currently occupying the cursor's row? The panic hook
@@ -698,15 +826,12 @@ pub fn timed<T>(name: &str, job: impl FnOnce() -> T) -> T {
 }
 
 /// The phase open on this thread, to open phases under from another
-/// thread: a pool worker's `parent.phase("artifact fetch")` is a child of
-/// the phase that started the pool, not a second top-level row. Test-only
-/// until the parallel download pool (#745) is its first caller.
-#[cfg(test)]
+/// thread: a pool worker's `parent.phase("download pool")` is a child of
+/// the phase that started the pool, not a second top-level row.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseParent(Option<Vec<String>>);
 
 /// The phase open on this thread, for [`PhaseParent::phase`].
-#[cfg(test)]
 pub fn current_phase() -> PhaseParent {
     if !verbose() {
         return PhaseParent(None);
@@ -714,7 +839,6 @@ pub fn current_phase() -> PhaseParent {
     PhaseParent(Some(OPEN_PHASE.with(|open| open.borrow().clone())))
 }
 
-#[cfg(test)]
 impl PhaseParent {
     /// Time the rest of the caller's scope as `name`, nested under the
     /// phase this was taken from, on whatever thread calls it.
@@ -942,6 +1066,11 @@ mod tests {
         );
         // Overshoot (a server that under-declares) clamps at 100%.
         assert!(progress_line("x", 30, Some(10)).ends_with("(100%)"));
+        // Concurrent downloads share one line: a count and the bytes.
+        assert_eq!(
+            batch_line(12, 70, 34 * 1024 * 1024 + 200 * 1024),
+            "downloading 12/70 artifacts  34.2 MiB"
+        );
         assert_eq!(human_bytes(1), "1 B");
         assert_eq!(human_bytes(3 << 30), "3.0 GiB");
     }
@@ -983,6 +1112,34 @@ mod tests {
         assert_eq!(progress.done, 10);
         drop(progress);
         assert!(!LINE_HELD.load(Ordering::Relaxed));
+    }
+
+    /// A download on a pool thread reports its bytes to the batch and draws
+    /// no line of its own; off a terminal the batch draws nothing either,
+    /// and the thread leaves the batch when its job ends.
+    #[test]
+    fn a_download_inside_a_batch_reports_to_the_batch_line() {
+        let _line = line_held_lock();
+        LINE_HELD.store(false, Ordering::Relaxed);
+        let batch = Batch::start(3);
+        let done = in_batch(&batch, || {
+            let mut progress = Progress::start("a.tgz", Some(10));
+            assert!(!progress.live, "inside a batch the line is the batch's");
+            progress.advance(4);
+            progress.advance(6);
+            progress.done
+        });
+        batch.finished();
+        assert_eq!(done, 10);
+        {
+            let state = batch.state.lock().unwrap();
+            assert_eq!((state.finished, state.bytes, state.drawn), (1, 10, false));
+        }
+        assert!(!LINE_HELD.load(Ordering::Relaxed));
+        assert!(
+            Progress::start("b.tgz", None).batch.is_none(),
+            "the thread left the batch when the job ended"
+        );
     }
 
     /// The panic hook clears the row a live download is holding, so a crash

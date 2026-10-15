@@ -51,6 +51,11 @@ None open.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
+- **Performance (#751).** Downloads within one ecosystem and a toolchain's components already fetch side by side (#745, #748). Left:
+  - #747 sync tailors in parallel. The design is DESIGNS §8. The next step is a cross-ecosystem toolchain prefetch in `sync_preflighted`, since toolchain downloads are the largest serial wait left on a cold polyglot sync.
+  - #768 the fixed costs of `ward add`: the socket scan and the fsyncs on the add path.
+  - #781 toolchain provisioning leftovers: overlap the archive listing once a killable, size-capped child exists, and the fsyncs during stage.
+  - #769 the fsroot held-root tests (`held_at_returns_a_canonical_path_for_any_spelling`) flake under a parallel lib run. Pre-existing on main.
 - **Found in the review of #567 to #610 (2026-10-06).** One checklist issue per theme:
   - #615 remaining design questions: SRI candidate choice, cargo's symlinked members, the `hard_link_target` doc. The issue is closed; its closing comment keeps these three open under their original conditions.
 - **Found in #617 and #618 (2026-10-07).** One checklist issue per theme:

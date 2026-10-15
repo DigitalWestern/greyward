@@ -445,9 +445,11 @@ fn copy_git_crate(
         .map_err(context("normalize workspace-inherited Cargo.toml"))?;
     crate::kernel::gitsrc::validate_symlinks(crate_dir)
         .map_err(context("copied git crate contains escaping symlink"))?;
-    // A directory source's files are not checksummed by cargo (the commit
-    // is the provenance), and `package: null` is what `cargo vendor`
-    // writes for git sources.
+    // Cargo's directory source requires this file. `cargo vendor` writes
+    // `package: null` for a git crate (it has no `.crate` archive) and a
+    // hash per file; the file map is left empty here, so cargo checks no
+    // file of the crate. The pinned commit, realized and validated by
+    // gitsrc, is the provenance, and the store object is read-only.
     fs::write(
         crate_dir.join(".cargo-checksum.json"),
         br#"{"files":{},"package":null}"#,

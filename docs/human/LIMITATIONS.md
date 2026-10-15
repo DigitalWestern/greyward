@@ -809,13 +809,20 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `dep = { workspace = true }`, `[lints] workspace = true`, an inherited path dependency on
   a sibling member) is vendored with those values written out from the root `Cargo.toml`
   inside the same checkout, as `cargo package` does; the original manifest stays beside it
-  as `Cargo.toml.orig`, and an inherited `readme` or `license-file` is copied into the crate.
-  A crate that inherits nothing is copied unchanged. The workspace is the nearest
-  `[workspace]` manifest at or above the crate, or the one `package.workspace` names; one
-  outside the checkout, or a field the workspace does not define, is refused by name. A
-  symlink in the crate that points elsewhere in the checkout is vendored as the bytes it
-  points at (a directory whole, its own links followed the same way); one that would leave
-  the checkout or loop into a directory that contains it is refused, and a dangling one is
+  as `Cargo.toml.orig`, and an inherited `readme` or `license-file` from outside the crate
+  is copied into it when the crate has no file of that name (otherwise the path points
+  outside, where cargo never reads it for a dependency). Inherited dependencies merge as
+  cargo merges them: features add up, `optional` and `public` come from the member, a member
+  `default-features = true` overrides a workspace `false`, and any other key on the member
+  entry is ignored. A crate that inherits nothing is copied unchanged. The workspace is the
+  one `package.workspace` names, or else the nearest `[workspace]` manifest at or above the
+  crate that does not `exclude` it (cargo's rule: an `exclude` entry covers it and no
+  `members` entry names it); one outside the checkout, a field the workspace does not
+  define, or `[lints] workspace = true` beside the member's own lint tables is refused by
+  name. A symlink in the crate that points elsewhere in the checkout is vendored as the
+  bytes it points at (a directory whole, its own links followed the same way), up to
+  100,000 entries and 2 GiB per crate; one that would leave the checkout, loop into a
+  directory that contains it, or expand past that cap is refused, and a dangling one is
   left out. A crate found more than four directories below the repository root is not
   found. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
   Cross `targets` get their standard library from the release's signed channel manifest,

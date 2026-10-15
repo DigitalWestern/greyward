@@ -3,6 +3,7 @@
 //! per thread, `std::thread::scope`, no async runtime.
 
 use std::io;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -40,7 +41,7 @@ where
     T: Send,
 {
     if jobs.len() < 2 {
-        return jobs.iter().map(&fetch).collect();
+        return jobs.iter().map(|job| run_job(|| fetch(job))).collect();
     }
     let next = AtomicUsize::new(0);
     // The lowest index that has failed so far, `usize::MAX` while none has.
@@ -66,7 +67,7 @@ where
                     if index >= jobs.len() || index > failed.load(Ordering::SeqCst) {
                         break;
                     }
-                    let result = fetch(&jobs[index]);
+                    let result = run_job(|| fetch(&jobs[index]));
                     if result.is_err() {
                         failed.fetch_min(index, Ordering::SeqCst);
                     }
@@ -91,6 +92,13 @@ where
                 })
         })
         .collect()
+}
+
+// A failed job must occupy its result slot even when it unwinds. Otherwise
+// `thread::scope` panics on join and bypasses input-order error reporting.
+fn run_job<T>(fetch: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    catch_unwind(AssertUnwindSafe(fetch))
+        .unwrap_or_else(|_| Err(io::Error::other("download worker panicked")))
 }
 
 /// [`fetch_each`] for a caller that needs every job: the results in input
@@ -172,6 +180,39 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap(), &1);
         assert_eq!(results[1].as_ref().unwrap_err().to_string(), "two");
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn a_panicking_job_returns_an_error_in_its_slot() {
+        let results = fetch_each(&[0, 1], |&job| {
+            if job == 1 {
+                panic!("broken download");
+            }
+            Ok(job)
+        });
+        assert_eq!(*results[0].as_ref().unwrap(), 0);
+        assert_eq!(
+            results[1].as_ref().unwrap_err().to_string(),
+            "download worker panicked"
+        );
+
+        let error = fetch_all(&[0], |_| -> io::Result<()> { panic!("single job") }).unwrap_err();
+        assert_eq!(error.to_string(), "download worker panicked");
+    }
+
+    #[test]
+    fn an_earlier_error_takes_precedence_over_a_worker_panic() {
+        let both_started = std::sync::Barrier::new(2);
+        let error = fetch_all(&[0, 1], |&job| -> io::Result<()> {
+            both_started.wait();
+            if job == 1 {
+                panic!("later job");
+            }
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "first job"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "first job");
     }
 
     /// A worker reads the caller's policy, not the default a bare thread

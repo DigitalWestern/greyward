@@ -78,10 +78,12 @@ impl Uv {
         selected: &Selected,
     ) -> io::Result<Uv> {
         // A cold store needs both tarballs: download them side by side.
-        crate::kernel::provider::cpython::prefetch_uv_and_runtime(
+        let [uv_fetch, runtime_fetch] = crate::kernel::provider::cpython::prefetch_uv_and_runtime(
             store, activity, platform, selected,
         )?;
+        uv_fetch?;
         let obj = super::realize_uv(store, activity, platform, selected)?;
+        runtime_fetch?;
         let runtime = super::realize_runtime(store, activity, platform, selected)?;
         let version = selected.version("uv")?.to_string();
         Ok(Uv {
@@ -644,6 +646,57 @@ pub(crate) fn root_ledger(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runtime_prefetch_failure_does_not_hide_a_uv_archive_error() {
+        use crate::kernel::activity::ActivityMode;
+        use crate::kernel::fetch::{cache_insert, Digest};
+        use crate::kernel::provider::cpython;
+        use crate::kernel::testutil::TempDir;
+
+        let temp = TempDir::named("python-prefetch-error-order");
+        for dir in ["objects", "meta", "cache/sha256", "tmp"] {
+            std::fs::create_dir_all(temp.0.join(dir)).unwrap();
+        }
+        let store = Store::for_test(temp.0.clone());
+        let activity = store.activity(ActivityMode::Shared).unwrap();
+        let platform = Platform::host().unwrap();
+        let mut selected = cpython::shipped_newest().unwrap();
+        let bad_archive = temp.0.join("bad-uv");
+        std::fs::write(&bad_archive, b"not a gzip archive").unwrap();
+        let (hex, _) = cache_insert(&store, &activity, &bad_archive).unwrap();
+        for artifact in &mut selected.bundle.artifacts {
+            if artifact.component == "uv" {
+                artifact.digest = Digest::sha256(&hex).unwrap();
+            }
+            if artifact.component == "cpython" {
+                // Refused by source policy before any network access.
+                artifact.url = "https://refused.example/cpython.tar.gz".into();
+            }
+        }
+        let expected =
+            super::super::realize_uv(&store, &activity, platform, &selected).unwrap_err();
+        assert!(
+            expected.to_string().contains("extract uv tarball"),
+            "{expected}"
+        );
+        let error = Uv::realize(&store, &activity, platform, &selected)
+            .err()
+            .expect("the bad uv archive must fail");
+        assert_eq!(error.kind(), expected.kind());
+        assert_eq!(error.to_string(), expected.to_string());
+
+        // A malformed second row must also wait for uv's full realization.
+        for artifact in &mut selected.bundle.artifacts {
+            if artifact.component == "cpython" {
+                artifact.digest = Digest::sha512(&"b".repeat(128)).unwrap();
+            }
+        }
+        let error = Uv::realize(&store, &activity, platform, &selected)
+            .err()
+            .expect("the bad uv archive must still fail first");
+        assert_eq!(error.to_string(), expected.to_string());
+    }
 
     /// PR 0's two forms of the `--no-build` refusal, and an ordinary
     /// failure that names nothing.

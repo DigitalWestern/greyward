@@ -564,3 +564,142 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     warm.discard();
     assert!(error.contains(policy::HOST_GIT_TRANSPORT), "{error}");
 }
+
+/// Workspace members of a git dependency are vendored with their inherited
+/// fields written out, and a link to a file elsewhere in the checkout is
+/// copied as that file (#776).
+#[test]
+fn cargo_git_workspace_members_are_vendored_normalized() {
+    let _serial = serial();
+    let root = TempDir::new("gitdep-cargo-workspace");
+    let (url, commit) = common::cargo_workspace_repo(&root.0);
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let _attribution = policy::Attribution::open("cargo").expect("test attribution");
+
+    let source = format!("git+{url}?rev={commit}#{commit}");
+    let lock = format!(
+        "version = 3\n\n\
+         [[package]]\nname = \"wsapp\"\nversion = \"0.3.0\"\nsource = \"{source}\"\ndependencies = [\n \"wsshared\",\n]\n\n\
+         [[package]]\nname = \"wsshared\"\nversion = \"0.3.0\"\nsource = \"{source}\"\n"
+    );
+    let plan = greyward::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let vendor = greyward::tailors::cargo::realize_vendor(&store, activity, &plan).expect("vendor");
+
+    let manifest = |dir: &str| -> toml::Table {
+        toml::from_str(&std::fs::read_to_string(vendor.join(dir).join("Cargo.toml")).unwrap())
+            .unwrap()
+    };
+    let app = manifest("wsapp-0.3.0");
+    let expected: toml::Table = toml::from_str(
+        "[package]\nname = \"wsapp\"\nversion = \"0.3.0\"\nedition = \"2021\"\nlicense-file = \"../../LICENSE\"\n\n\
+         [dependencies]\nwsshared = { path = \"../shared\", version = \"0.3.0\" }\n",
+    )
+    .unwrap();
+    assert_eq!(app, expected);
+    let shared = manifest("wsshared-0.3.0");
+    assert_eq!(shared["package"]["version"].as_str(), Some("0.3.0"));
+    // A license file from the workspace root is brought into the crate
+    // that has none, as `cargo package` does.
+    assert_eq!(shared["package"]["license-file"].as_str(), Some("LICENSE"));
+    assert_eq!(
+        std::fs::read_to_string(vendor.join("wsshared-0.3.0/LICENSE")).unwrap(),
+        "shared license\n"
+    );
+    assert_eq!(
+        shared["lints"]["rust"]["unsafe_code"].as_str(),
+        Some("forbid")
+    );
+    // The original stays beside it, as `cargo package` keeps it.
+    assert!(
+        std::fs::read_to_string(vendor.join("wsapp-0.3.0/Cargo.toml.orig"))
+            .unwrap()
+            .contains("version.workspace = true")
+    );
+    // The link to the repository's LICENSE is the file now.
+    let license = vendor.join("wsapp-0.3.0/LICENSE");
+    assert!(std::fs::symlink_metadata(&license)
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(
+        std::fs::read_to_string(&license).unwrap(),
+        "shared license\n"
+    );
+}
+
+/// A git crate whose links expand past the materialization budget is
+/// refused, and the refusal leaves nothing behind: no vendor object and no
+/// half-built stage in the store's `tmp` (#776 review).
+#[test]
+fn a_refused_git_crate_copy_leaves_no_stage() {
+    let _serial = serial();
+    let root = TempDir::new("gitdep-cargo-budget");
+    let repo = root.0.join("fanout-repo");
+    std::fs::create_dir_all(repo.join("app/src")).unwrap();
+    std::fs::create_dir_all(repo.join("shared/l0")).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["config", "user.email", "t@example.invalid"], &repo);
+    git(&["config", "user.name", "t"], &repo);
+    // Ten files, then five levels of ten links each to the level below:
+    // the crate's one link to the top expands to over 100,000 entries.
+    for i in 0..10 {
+        std::fs::write(repo.join(format!("shared/l0/f{i}")), "x").unwrap();
+    }
+    for level in 1..=5 {
+        let dir = repo.join(format!("shared/l{level}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..10 {
+            std::os::unix::fs::symlink(format!("../l{}", level - 1), dir.join(format!("d{i}")))
+                .unwrap();
+        }
+    }
+    std::fs::write(
+        repo.join("app/Cargo.toml"),
+        "[package]\nname = \"fanout\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("app/src/lib.rs"), "").unwrap();
+    std::os::unix::fs::symlink("../shared/l5", repo.join("app/data")).unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-qm", "fanout"], &repo);
+    let commit = git(&["rev-parse", "HEAD"], &repo);
+    let url = format!("file://{}", repo.display());
+
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let attribution = policy::Attribution::open("cargo").expect("test attribution");
+    let source = format!("git+{url}?rev={commit}#{commit}");
+    let lock = format!(
+        "version = 3\n\n[[package]]\nname = \"fanout\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
+    );
+    let plan = greyward::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let error = greyward::tailors::cargo::realize_vendor(&store, activity, &plan)
+        .expect_err("a link expansion past the budget must be refused")
+        .to_string();
+    attribution.discard();
+    assert!(error.contains("past 100000 entries"), "{error}");
+
+    let names = |dir: &str| -> Vec<String> {
+        match std::fs::read_dir(store.root.join(dir)) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let stages: Vec<String> = names("tmp")
+        .into_iter()
+        .filter(|name| name.starts_with("stage-"))
+        .collect();
+    assert!(stages.is_empty(), "stages left behind: {stages:?}");
+    let vendors: Vec<String> = names("objects")
+        .into_iter()
+        .filter(|name| name.contains("-vendor-"))
+        .collect();
+    assert!(vendors.is_empty(), "vendor objects published: {vendors:?}");
+}

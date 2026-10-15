@@ -805,9 +805,29 @@ Selection covers every patch of each maintained CPython minor that python-build-
   that leads out of the workspace is refused. A git dependency resolved through the proxy
   has no offline test yet (the fixture registry holds no upload-pack body), only the git
   row's unit test.
-- **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
-  escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
-  manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
+- **Pinned Git dependencies work for standalone crates and workspace members** (#776). A
+  member that inherits from its repository's workspace (`version.workspace = true`,
+  `dep = { workspace = true }`, `[lints] workspace = true`, an inherited path dependency on
+  a sibling member) is vendored with those values written out from the root `Cargo.toml`
+  inside the same checkout, as `cargo package` does; the original manifest stays beside it
+  as `Cargo.toml.orig`, and an inherited `readme` or `license-file` from outside the crate
+  is copied into it when the crate has no file of that name (otherwise the path points
+  outside, where cargo never reads it for a dependency). Inherited dependencies merge as
+  cargo merges them: features add up, `optional` and `public` come from the member, a member
+  `default-features = true` overrides a workspace `false` (a member `false` over workspace
+  defaults is ignored, and refused from edition 2024 as cargo refuses it), and any other key
+  on the member entry is ignored. A refused git crate leaves no half-built vendor tree in
+  the store. A crate that inherits nothing is copied unchanged. The workspace is the
+  one `package.workspace` names, or else the nearest `[workspace]` manifest at or above the
+  crate that does not `exclude` it (cargo's rule: an `exclude` entry covers it and no
+  `members` entry names it); one outside the checkout, a field the workspace does not
+  define, or `[lints] workspace = true` beside the member's own lint tables is refused by
+  name. A symlink in the crate that points elsewhere in the checkout is vendored as the
+  bytes it points at (a directory whole, its own links followed the same way), up to
+  100,000 entries and 2 GiB per crate; one that would leave the checkout, loop into a
+  directory that contains it, or expand past that cap is refused, and a dangling one is
+  left out. A crate found more than four directories below the repository root is not
+  found. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
   Cross `targets` get their standard library from the release's signed channel manifest,
   but Greyward provides no linker or C sysroot for them, so a crate that links for another
   platform still needs one on the machine. A custom toolchain works as a local directory

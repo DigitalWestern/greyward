@@ -160,6 +160,65 @@ pub(super) fn discard_failed_attempt(
     }
 }
 
+/// Remove what a failed install of the git checkout `checkout` leaves in
+/// `gem_home`: the checkout's copy under `bundler/gems/`, its extension
+/// directories under `bundler/gems/extensions/<platform>/<abi>/` (Bundler
+/// names each `<checkout>` or `<checkout>-<gem directory>`), and the
+/// directories above them the attempt created. Then refuse if anything
+/// else differs from `before`, as [`discard_failed_attempt`] does.
+pub(super) fn discard_failed_git_attempt(
+    gem_home: &Path,
+    checkout: &str,
+    before: &Manifest,
+) -> io::Result<()> {
+    let known = |relative: &Path| before.0.contains_key(relative);
+    let checkouts = Path::new(super::GIT_CHECKOUTS);
+    remove_if_new(gem_home, &checkouts.join(checkout), &known)?;
+    let extensions = checkouts.join("extensions");
+    let mut new_parents = Vec::new();
+    if gem_home.join(&extensions).is_dir() {
+        for platform in fs::read_dir(gem_home.join(&extensions))? {
+            let platform = extensions.join(platform?.file_name());
+            if !gem_home.join(&platform).is_dir() {
+                continue;
+            }
+            for abi in fs::read_dir(gem_home.join(&platform))? {
+                let abi = platform.join(abi?.file_name());
+                if !gem_home.join(&abi).is_dir() {
+                    continue;
+                }
+                for entry in fs::read_dir(gem_home.join(&abi))? {
+                    let entry = entry?.file_name();
+                    let name = entry.to_string_lossy();
+                    if name == checkout || name.starts_with(&format!("{checkout}-")) {
+                        remove_if_new(gem_home, &abi.join(&entry), &known)?;
+                    }
+                }
+                new_parents.push(abi);
+            }
+            new_parents.push(platform);
+        }
+    }
+    new_parents.push(extensions);
+    new_parents.push(checkouts.to_path_buf());
+    new_parents.push(PathBuf::from("bundler"));
+    for directory in new_parents {
+        if known(&directory) {
+            continue;
+        }
+        let _ = fs::remove_dir(gem_home.join(directory));
+    }
+    let after = manifest(gem_home)?;
+    match first_change(before, &after) {
+        None => Ok(()),
+        Some(path) => Err(io::Error::other(format!(
+            "the failed build changed {} in the gem home, outside the checkout's own \
+             directories; it was not retried against the whole host",
+            gem_home.join(path).display()
+        ))),
+    }
+}
+
 /// Remove `relative` under `gem_home` if the attempt created it. A path
 /// that was there before is the comparison's to report, not ours to
 /// delete.
@@ -310,5 +369,34 @@ mod tests {
         assert!(message.contains("not retried"), "{message}");
         // RubyGems' own leftovers went regardless.
         assert!(!home.0.join("gems/failext-1.0").exists());
+    }
+
+    /// What a failed build of a git checkout leaves: the copied checkout,
+    /// with the build's own files in it, and Bundler's extension directory
+    /// for it. Those go, and so do the directories above them the attempt
+    /// made; a write anywhere else refuses the retry.
+    #[test]
+    fn a_failed_git_checkout_build_is_discarded() {
+        let home = gem_home("git");
+        let before = manifest(&home.0).unwrap();
+        let checkout = "gitgem-repo-0123456789ab";
+        let copy = home.0.join("bundler/gems").join(checkout);
+        fs::create_dir_all(copy.join("ext/gitnative")).unwrap();
+        fs::write(copy.join("ext/gitnative/Makefile"), "all:\n").unwrap();
+        let extensions = home
+            .0
+            .join("bundler/gems/extensions/x86_64-linux/3.4.0-static");
+        fs::create_dir_all(extensions.join(checkout)).unwrap();
+        fs::create_dir_all(extensions.join(format!("{checkout}-sub"))).unwrap();
+        fs::write(extensions.join(checkout).join("gem_make.out"), "abort\n").unwrap();
+        discard_failed_git_attempt(&home.0, checkout, &before).unwrap();
+        assert_eq!(manifest(&home.0).unwrap(), before);
+
+        fs::create_dir_all(&copy).unwrap();
+        fs::create_dir_all(extensions.join("other-checkout")).unwrap();
+        let error = discard_failed_git_attempt(&home.0, checkout, &before).unwrap_err();
+        assert!(error.to_string().contains("not retried"), "{error}");
+        assert!(!copy.exists());
+        assert!(extensions.join("other-checkout").exists());
     }
 }

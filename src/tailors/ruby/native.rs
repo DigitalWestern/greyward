@@ -14,7 +14,11 @@ pub(super) use crate::kernel::hostfallback::{same_host_state, RUNTIME_ONLY_VIEW}
 /// records the gems that fell back to the whole host.
 const HOST_FALLBACK_RECORDS: FallbackRecords = FallbackRecords {
     kind: "ruby-gems-host-fallback",
-    names: |identity, name| identity.inputs.contains_key(&format!("gem:{name}")),
+    // A gem by its full name, or a git checkout by its directory name.
+    names: |identity, name| {
+        identity.inputs.contains_key(&format!("gem:{name}"))
+            || identity.inputs.contains_key(&format!("git:{name}"))
+    },
     what: "gems",
 };
 
@@ -82,29 +86,124 @@ impl GemInstall<'_> {
         named: &Path,
         native: bool,
     ) -> io::Result<Option<String>> {
+        let staged = self.staged;
+        let args = |native_libs: Option<&Path>| {
+            let mut args = vec![
+                "install".to_string(),
+                named.display().to_string(),
+                staged.display().to_string(),
+            ];
+            if let Some(set) = native_libs {
+                args.push(set.display().to_string());
+            }
+            args
+        };
+        // What the GEM_HOME held before a hermetic attempt, so a failed one
+        // can be undone before the retry (see `gem_home`).
+        let hermetic = native && !self.platform.is_macos();
+        let before = hermetic.then(|| gem_home::manifest(staged)).transpose()?;
+        let discard = || match &before {
+            Some(before) => gem_home::discard_failed_attempt(staged, &gem.full_name, before),
+            None => Ok(()),
+        };
+        self.attempts(&gem.full_name, native, args, |_| Ok(Vec::new()), discard)
+    }
+
+    /// Install the gems of one git checkout: copy the fetched tree at
+    /// `tree` to `<GEM_HOME>/bundler/gems/<checkout>`, where Bundler reads
+    /// it at run time, and run Bundler's own installer over it in the
+    /// sandbox (the helper's `git-install` mode). Each attempt starts from
+    /// a fresh copy. A checkout's gemspecs are only known once evaluated,
+    /// so it is built as a native gem is: hermetic first on Linux.
+    pub(super) fn install_git(
+        &self,
+        checkout: &super::sources::Checkout<'_>,
+        tree: &Path,
+    ) -> io::Result<Option<String>> {
+        let staged = self.staged;
+        let first = checkout.first;
+        let name = &first.checkout;
+        let dest = staged.join(GIT_CHECKOUTS).join(name);
+        let args = |native_libs: Option<&Path>| {
+            let mut args = vec![
+                "git-install".to_string(),
+                native_libs
+                    .map(|set| set.display().to_string())
+                    .unwrap_or_default(),
+                first.url.clone(),
+                first.revision.clone(),
+                name.clone(),
+                first.glob.clone(),
+            ];
+            args.extend(
+                checkout
+                    .gems
+                    .iter()
+                    .map(|gem| format!("{}:{}", gem.name, gem.version)),
+            );
+            args
+        };
+        let hermetic = !self.platform.is_macos();
+        let before = hermetic.then(|| gem_home::manifest(staged)).transpose()?;
+        // A fresh copy of the checkout for each attempt, and an empty
+        // Gemfile in the attempt's home: Bundler finds its root from one.
+        let place = |home: &Path| -> io::Result<Vec<(String, String)>> {
+            if fs::symlink_metadata(&dest).is_ok() {
+                crate::kernel::store::remove_tree(&dest)?;
+            }
+            fs::create_dir_all(staged.join(GIT_CHECKOUTS))?;
+            crate::comforter::clone_tree_with_activity(self.activity, tree, &dest, self.platform)
+                .map_err(|e| io::Error::new(e.kind(), format!("copy the checkout: {e}")))?;
+            let gemfile = home.join("Gemfile");
+            fs::write(&gemfile, "")?;
+            Ok(vec![(
+                "BUNDLE_GEMFILE".to_string(),
+                gemfile.display().to_string(),
+            )])
+        };
+        let discard = || match &before {
+            Some(before) => gem_home::discard_failed_git_attempt(staged, name, before),
+            None => Ok(()),
+        };
+        self.attempts(name, true, args, place, discard)
+    }
+
+    /// Run the helper with the arguments `args` gives (passed the native
+    /// library set when the build mounts it) in the sandbox, hermetic
+    /// first when the build is `native` (`install_gem`). `prepare` runs in
+    /// each attempt's fresh home before the helper does and returns any
+    /// environment the attempt adds; `discard` undoes a failed hermetic
+    /// attempt.
+    fn attempts(
+        &self,
+        label: &str,
+        native: bool,
+        args: impl Fn(Option<&Path>) -> Vec<String>,
+        prepare: impl Fn(&Path) -> io::Result<Vec<(String, String)>>,
+        discard: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Option<String>> {
         let (platform, ruby_obj, scratch, staged) =
             (self.platform, self.ruby_obj, self.scratch, self.staged);
-        let mut homes = AttemptHomes::new(scratch, &gem.full_name);
+        let mut homes = AttemptHomes::new(scratch, label);
         // Only a native gem compiles anything, so only its build gets the
         // native library set.
         let native_libs = self.native_libs.filter(|_| native);
         let install = |host_view: HostView| {
             let home = homes.next()?;
+            let extra = prepare(&home)?;
             let mut argv = vec![
                 ruby_obj.join("bin/ruby").display().to_string(),
                 self.helper.display().to_string(),
-                "install".to_string(),
-                named.display().to_string(),
-                staged.display().to_string(),
             ];
+            argv.extend(args(native_libs));
             let mut env = vec![
                 ("GEM_HOME".to_string(), staged.display().to_string()),
                 ("GEM_PATH".to_string(), staged.display().to_string()),
                 ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
             ];
+            env.extend(extra);
             let mut read = vec![ruby_obj.to_path_buf(), scratch.to_path_buf()];
             if let Some(set) = native_libs {
-                argv.push(set.display().to_string());
                 env.extend(super::native_libs::build_env(set, host_view));
                 read.push(set.to_path_buf());
             }
@@ -137,22 +236,14 @@ impl GemInstall<'_> {
             };
             crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(self.activity))
         };
-        // What the GEM_HOME held before a hermetic attempt, so a failed one
-        // can be undone before the retry (see `gem_home`).
-        let hermetic = native && !platform.is_macos();
-        let before = hermetic.then(|| gem_home::manifest(staged)).transpose()?;
-        let discard = || match &before {
-            Some(before) => gem_home::discard_failed_attempt(staged, &gem.full_name, before),
-            None => Ok(()),
-        };
         let attempt = Attempt {
             record: crate::kernel::policy::record,
             discard,
             fingerprint: crate::kernel::hostview::host_build_inputs,
             build: install,
         };
-        install_gem(platform, native, &gem.full_name, attempt)
-            .map_err(|error| gem_install_error(&gem.full_name, error))
+        install_gem(platform, native, label, attempt)
+            .map_err(|error| gem_install_error(label, error))
     }
 }
 

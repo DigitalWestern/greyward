@@ -192,7 +192,8 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 - **A Node `file:` or `link:` dependency outside the project is refused** by every door
   (edits, a missing lock, `attest`), naming the manifest and the path: the confined npm or
   pnpm reads the project alone, and a resolution record names files inside the project only.
-  Move it inside the project, or depend on it from a registry. A scoped registry in `.npmrc`
+  Move it inside the project, or depend on it from a registry. A Ruby `path:` gem outside
+  the project is refused the same way at sync. A scoped registry in `.npmrc`
   and a direct-URL tarball are fetched through interception and recorded as
   `unattested-index`, which the company policy denies.
 - **pnpm edits require a root `packageManager` field** with an exact pinned version.
@@ -866,9 +867,23 @@ Selection covers every patch of each maintained CPython minor that python-build-
   signature or attestation for the bottles; the digest is the bottle hashed at pin time,
   compared with GitHub's own asset digest. Nothing can be checked later. The default
   (3.4.6) is a release Homebrew marked prerelease and reverted in brew.
-- **git and path gems fail closed; non-rubygems.org sources fail closed.** So do gems whose
+- **Path and git gems.** A `PATH` gem (a Gemfile's `gemspec`, or `path:`) must sit
+  inside the project: one outside it, or reached through a symlink that leads out, is
+  refused, naming the gem and the path. Bundler loads it from the project at run time, so
+  it adds nothing to the gems object; the closure lists it and the SBOM names its
+  directory, with no registry purl. A `GIT` gem is fetched at the lock's revision by ward's
+  own git code, records `git-dependency` (plus `host-git-transport` over ssh, `git://` or
+  a local path) before the fetch, and is installed into the gems object where Bundler
+  reads it, `bundler/gems/<repo>-<commit prefix>`, by Bundler's own installer in the
+  sandbox. Its gemspecs are only known once evaluated, so every git checkout builds as a
+  native gem does: against the C runtime first on Linux, with ward's native library set
+  mounted. Submodules are checked out whatever the lock's `submodules:` says. Like after
+  `bundle install`, a git gem's executables run through `bundle exec` (`ward run bundle
+  exec <exe>`); RubyGems alone does not know the gem.
+- **Sources other than rubygems.org, path and git fail closed.** So do gems whose
   installers need network or absent host libraries (mysql2/rmagick-class) — no
-  declared-artifacts mechanism for gems yet. **Default/bundled-gem preactivation edge**: a
+  declared-artifacts mechanism for gems yet. A lock `BUNDLED WITH` a Bundler newer than the
+  store's (2.6.9) is refused. **Default/bundled-gem preactivation edge**: a
   locked json/psych/openssl older than the toolchain's default can Gem::LoadError if something
   activates the default before Bundler setup. Untested matrix; potentially silent.
 - **`bundle exec` compatibility is unproven**: env-based GEM_HOME activation works for

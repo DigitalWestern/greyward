@@ -604,6 +604,16 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
+    /// What this tailor's sync places in a project outside `.greyward`, as
+    /// path patterns relative to the project (`**/` for any depth): the
+    /// visible environment links (`node_modules`, `.venv`). They are ward's
+    /// own output, never another ecosystem's resolution input, so
+    /// [`resolution_excludes`] keeps every pattern here out of every
+    /// executable-manifest walk and snapshot.
+    fn projected_paths(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// `ward attest`: this ecosystem's lock check, when it has one. `None`
     /// is refused (or, unnamed, skipped) when targets are chosen, before
     /// any preflight or store work.
@@ -631,6 +641,38 @@ pub trait Attester: Sync {
         host: &dyn EditHost,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)>;
+}
+
+/// Everything ward itself places in a project: its state directory and
+/// every tailor's [`Tailor::projected_paths`].
+pub fn projected_paths() -> Vec<&'static str> {
+    let mut paths = vec![".greyward"];
+    for tailor in registry() {
+        for path in tailor.projected_paths() {
+            if !paths.contains(path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// The path patterns an executable-manifest tailor keeps out of both its
+/// resolution-input walk (`kernel::resolve::inputs::project_files`) and its
+/// door's snapshot: its own (`own`, the tool's private state) and
+/// everything ward projects ([`projected_paths`]). A project with several
+/// ecosystems has another tailor's `node_modules` or `.venv` link in it by
+/// the time this one resolves; that link is ward's output, not this
+/// tool's input. The walk and the snapshot must use this same list, or the
+/// complete-input check finds a path one saw and the other did not.
+pub fn resolution_excludes(own: &[&'static str]) -> Vec<&'static str> {
+    let mut patterns = own.to_vec();
+    for path in projected_paths() {
+        if !patterns.contains(&path) {
+            patterns.push(path);
+        }
+    }
+    patterns
 }
 
 /// The resolution files `tailor` names in `project`, or `None` when it
@@ -1016,6 +1058,45 @@ mod tests {
 
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
+
+    /// Every executable-manifest tailor leaves every other tailor's
+    /// projection out of its resolution inputs: a Rails app with a
+    /// JavaScript front end has node's `node_modules` link (and a
+    /// workspace member's) in it by the time Ruby resolves.
+    #[test]
+    fn executable_manifest_inputs_leave_out_every_projection() {
+        let excludes = resolution_excludes(&[".git"]);
+        for path in [".git", ".greyward", "**/node_modules", "**/.venv"] {
+            assert!(excludes.contains(&path), "{path}: {excludes:?}");
+        }
+        let temp = crate::kernel::testutil::TempDir::new();
+        std::fs::create_dir_all(temp.0.join("packages/web")).unwrap();
+        std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
+        std::fs::write(temp.0.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+        std::fs::write(temp.0.join("Gemfile.lock"), "GEM\n").unwrap();
+        std::fs::write(temp.0.join(".greyward/closure.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("/store/forest", temp.0.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink("/store/member", temp.0.join("packages/web/node_modules"))
+            .unwrap();
+        std::os::unix::fs::symlink("/store/env", temp.0.join(".venv")).unwrap();
+        std::fs::write(temp.0.join("packages/web/package.json"), "{}").unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        assert_eq!(
+            by_id("ruby").unwrap().resolution_inputs(&project).unwrap(),
+            vec![PathBuf::from("packages/web/package.json")]
+        );
+        assert_eq!(
+            by_id("elixir")
+                .unwrap()
+                .resolution_inputs(&project)
+                .unwrap(),
+            vec![
+                PathBuf::from("Gemfile"),
+                PathBuf::from("Gemfile.lock"),
+                PathBuf::from("packages/web/package.json"),
+            ]
+        );
+    }
 
     /// Every shipped ecosystem has a resolution door, so `ward attest` can
     /// check each one's lock: a tailor that loses its attester stops being

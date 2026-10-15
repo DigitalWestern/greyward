@@ -338,14 +338,12 @@ impl PublishFacts<'_> {
         }
     }
 
-    /// The pre-run sha256 of a regular file under the lock root (a
-    /// manifest the receipt vouches for), `None` when it was not one.
-    pub fn input_digest(&self, relative: &Path) -> Option<[u8; 32]> {
+    /// The pre-run record digest of a regular file or symlink under the
+    /// lock root (a manifest the receipt vouches for), `None` when it was
+    /// neither.
+    pub fn input_digest(&self, relative: &Path) -> Option<String> {
         let real = self.snapshot.lock_root().real.join(relative);
-        match self.snapshot.baseline(&real) {
-            Some(EntryState::File { sha256, .. }) => Some(*sha256),
-            _ => None,
-        }
+        self.snapshot.baseline(&real).and_then(EntryState::digest)
     }
 }
 
@@ -502,7 +500,11 @@ fn check_planning_inputs(
 ) -> io::Result<()> {
     for (relative, digest) in expected {
         let path = snapshot.lock_root().real.join(relative);
-        if !matches!(snapshot.baseline(&path), Some(EntryState::File { sha256, .. }) if hex::encode(sha256) == *digest)
+        if snapshot
+            .baseline(&path)
+            .and_then(EntryState::digest)
+            .as_ref()
+            != Some(digest)
         {
             return Err(io::Error::other(format!(
                 "{relative} changed while planning; nothing was published; run `ward` again"
@@ -1255,7 +1257,22 @@ mod tests {
             .contains("changed while planning"));
         assert!(check_planning_inputs(&snapshot, &BTreeMap::new()).is_ok());
         // A link introduced after the input walk cannot enter an otherwise
-        // identical complete snapshot without being represented in a receipt.
+        // identical complete snapshot without being represented in a receipt:
+        // the snapshot names it by its target text, so the complete-input
+        // comparison sees a path the walk never recorded.
+        let before = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap()
+        .project_file_digests()
+        .unwrap();
         std::os::unix::fs::symlink("deps.lock", fx.project.join("late-link")).unwrap();
         let with_link = Snapshot::build(
             &fx.harness.store,
@@ -1268,7 +1285,24 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(with_link.project_file_digests().is_err());
+        let after = with_link.project_file_digests().unwrap();
+        assert_ne!(after, before);
+        assert_eq!(
+            after.get("late-link"),
+            Some(&super::super::record::symlink_digest(b"deps.lock"))
+        );
+        // A planner whose basis names the link by its target text accepts
+        // the staged link; a different target is a changed input.
+        let named = BTreeMap::from([(
+            "late-link".to_string(),
+            super::super::record::symlink_digest(b"deps.lock"),
+        )]);
+        assert!(check_planning_inputs(&with_link, &named).is_ok());
+        let moved = BTreeMap::from([(
+            "late-link".to_string(),
+            super::super::record::symlink_digest(b"elsewhere"),
+        )]);
+        assert!(check_planning_inputs(&with_link, &moved).is_err());
     }
 
     #[test]
@@ -1505,7 +1539,7 @@ exit 37
                                 "{} {} {} {}\n",
                                 facts.ledger.ledger,
                                 hex::encode(lock.sha256),
-                                hex::encode(manifest),
+                                manifest,
                                 facts.isolation
                             )
                             .into_bytes(),

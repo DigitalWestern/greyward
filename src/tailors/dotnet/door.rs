@@ -21,6 +21,12 @@ const WHY: &str = "evaluates the project's MSBuild files and fetches packages fr
 /// and it is discarded.
 pub(super) const EXCLUDE: [&str; 4] = ["obj", "bin", ".git", ".greyward"];
 
+/// [`EXCLUDE`] and everything ward projects into a project: what both the
+/// resolution-input walk and the door's snapshot leave out.
+pub(super) fn excludes() -> Vec<&'static str> {
+    crate::tailors::resolution_excludes(&EXCLUDE)
+}
+
 /// Stands for the run's scratch directory in an argument.
 const SCRATCH: &str = "@SCRATCH@";
 
@@ -98,7 +104,7 @@ fn dotnet_confined<'a>(run: &mut DotnetRun<'a>) -> io::Result<ConfinedSpec<'a>> 
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.sdk_obj.to_path_buf()];
-    confined.exclude = EXCLUDE
+    confined.exclude = excludes()
         .iter()
         .map(|pattern| PathGlob::new(pattern))
         .collect::<io::Result<_>>()?;

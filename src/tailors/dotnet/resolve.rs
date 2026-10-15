@@ -29,7 +29,7 @@ pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf
                 .ok_or_else(|| err(".NET resolution output path is not UTF-8"))
         })
         .collect::<io::Result<_>>()?;
-    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &outputs)
+    crate::kernel::resolve::inputs::project_files(project, &super::door::excludes(), &outputs)
 }
 
 /// Every resolution file of `project` that exists, by digest: a closure's
@@ -347,7 +347,23 @@ mod tests {
         let before = resolution_basis(&project).unwrap();
         fs::write(temp.0.join("config/nested/version.txt"), "2.0.0").unwrap();
         assert_ne!(resolution_basis(&project).unwrap(), before);
+        // An in-project link is an input of its own, recorded by its target
+        // text; another ecosystem's projection is not an input at all; a
+        // link out of the project is refused.
         std::os::unix::fs::symlink("config", temp.0.join("linked")).unwrap();
+        std::os::unix::fs::symlink("/elsewhere", temp.0.join("node_modules")).unwrap();
+        assert_eq!(
+            resolution_inputs(&project).unwrap(),
+            vec![
+                PathBuf::from("config/nested/version.txt"),
+                PathBuf::from("linked")
+            ]
+        );
+        assert_eq!(
+            resolution_basis(&project).unwrap().get("linked"),
+            Some(&record::symlink_digest(b"config"))
+        );
+        std::os::unix::fs::symlink("../outside", temp.0.join("escape")).unwrap();
         assert!(resolution_inputs(&project).is_err());
     }
 

@@ -291,7 +291,7 @@ fn read_basis(object: &serde_json::Map<String, Value>, ecosystem: &str) -> io::R
     })?;
     if let Some((path, _)) = digests.iter().find(|(path, digest)| {
         record::record_path(Path::new(path)).as_deref() != Some(path.as_str())
-            || !record::is_sha256_hex(digest)
+            || !record::is_entry_digest(digest)
     }) {
         return Err(refuse(&format!(
             "has a `{BASIS_FIELD}` entry for {path:?} that is not a record path and a sha256"

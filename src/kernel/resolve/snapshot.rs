@@ -134,6 +134,19 @@ pub enum EntryState {
 }
 
 impl EntryState {
+    /// How a resolution record names this entry: a regular file by the
+    /// sha256 of its bytes, a symlink by `record::symlink_digest` of its
+    /// target text, anything else not at all.
+    pub fn digest(&self) -> Option<String> {
+        match self {
+            EntryState::File { sha256, .. } => Some(hex::encode(sha256)),
+            EntryState::Symlink { target } => Some(super::record::symlink_digest(
+                std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str()),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             EntryState::File { .. } => "regular file",
@@ -319,25 +332,17 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Every regular project file in the immutable pre-run snapshot.
+    /// Every regular project file and symlink in the immutable pre-run
+    /// snapshot, by record digest ([`EntryState::digest`]).
     pub(super) fn project_file_digests(&self) -> io::Result<BTreeMap<String, String>> {
-        self.baseline
+        Ok(self
+            .baseline
             .iter()
             .filter_map(|(path, state)| {
                 let relative = path.strip_prefix(&self.lock_root().real).ok()?;
-                match state {
-                    EntryState::File { sha256, .. } => Some(Ok((
-                        relative.to_string_lossy().into_owned(),
-                        hex::encode(sha256),
-                    ))),
-                    EntryState::Symlink { .. } => Some(Err(io::Error::other(format!(
-                        "{} is a symlink in the staged resolution inputs; nothing was published",
-                        relative.display()
-                    )))),
-                    _ => None,
-                }
+                Some((relative.to_string_lossy().into_owned(), state.digest()?))
             })
-            .collect()
+            .collect())
     }
 
     /// Walk the stage again and compare it with the baseline by content.

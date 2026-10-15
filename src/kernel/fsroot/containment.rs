@@ -62,6 +62,29 @@ enum Deepest {
 }
 
 impl ProjectRoot {
+    /// The target text of a project input that is itself a symlink: its
+    /// parents resolved the way `read_input` resolves them, the last
+    /// component read without following it. `None` when the name is
+    /// absent or is not a symlink. A resolution record names such an input
+    /// by its target text rather than by what it points at.
+    pub fn input_link(&self, relative: &Path) -> io::Result<Option<std::ffi::OsString>> {
+        let name = input_name(relative)?;
+        match stat_at(self.dir.as_raw_fd(), &name) {
+            Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFLNK => {
+                Ok(link_target_at(self.dir.as_raw_fd(), &name)?.map(std::ffi::OsString::from_vec))
+            }
+            Ok(_) => Ok(None),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR)
+                    || error.raw_os_error() == Some(libc::ELOOP) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Where the project input `relative` (plain components only, or `.`
     /// for the root itself) leads, symlinks followed from the held
     /// descriptor. A name that does not exist yet is judged by its deepest

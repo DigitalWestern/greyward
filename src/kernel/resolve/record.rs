@@ -278,7 +278,7 @@ impl ResolutionRecord {
                         "{field} names {path:?}, which is not a plain relative path"
                     ));
                 }
-                if !is_sha256_hex(digest) {
+                if !is_entry_digest(digest) {
                     return Err(format!("{field}[{path:?}] is not a sha256"));
                 }
             }
@@ -379,6 +379,45 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// How a record spells a symlink among its files: this prefix and the
+/// sha256 of the link's target text. A link is recorded as a link, never
+/// as what it points at, and the prefix keeps it from ever reading as a
+/// regular file whose bytes happen to hash the same.
+pub const SYMLINK_DIGEST_PREFIX: &str = "symlink:";
+
+/// The record digest of a symlink whose target text is `target`.
+pub fn symlink_digest(target: &[u8]) -> String {
+    format!("{SYMLINK_DIGEST_PREFIX}{}", sha256_hex(target))
+}
+
+/// A digest a record may hold for one of its files: a regular file's
+/// sha256, or a symlink's [`symlink_digest`].
+pub fn is_entry_digest(text: &str) -> bool {
+    is_sha256_hex(text)
+        || text
+            .strip_prefix(SYMLINK_DIGEST_PREFIX)
+            .is_some_and(is_sha256_hex)
+}
+
+/// The record digest of one project path, or `None` when it names neither
+/// a regular file nor a symlink. Parents are resolved the way
+/// `ProjectRoot::read_input` resolves them; a symlink at the last
+/// component is recorded by its target text and not followed, the same
+/// way the resolution snapshot copies it.
+pub fn entry_digest(project: &ProjectRoot, relative: &Path) -> io::Result<Option<String>> {
+    if let Some(target) = project.input_link(relative)? {
+        return Ok(Some(symlink_digest(
+            std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str()),
+        )));
+    }
+    if project.input_entry(relative)? != Entry::Regular {
+        return Ok(None);
+    }
+    Ok(project
+        .read_input(relative)?
+        .map(|bytes| sha256_hex(&bytes)))
+}
+
 /// A record path: relative, `/`-separated, with no empty, `.` or `..`
 /// component and no backslash. One spelling per file, so a path can be
 /// compared as a string.
@@ -407,9 +446,9 @@ pub fn record_path(path: &Path) -> Option<String> {
     valid_record_path(&joined).then_some(joined)
 }
 
-/// The sha256 of each project file in `paths` that exists, keyed by its
-/// record path: what a door puts in `outputs` or `inputs`. Files are read as
-/// project inputs (`ProjectRoot::read_input`).
+/// The [`entry_digest`] of each project file or symlink in `paths` that
+/// exists, keyed by its record path: what a door puts in `outputs` or
+/// `inputs`. Files are read as project inputs (`ProjectRoot::read_input`).
 pub fn file_digests(
     project: &ProjectRoot,
     paths: &[PathBuf],
@@ -417,11 +456,8 @@ pub fn file_digests(
     let mut digests = BTreeMap::new();
     for path in paths {
         let key = record_path(path).ok_or_else(|| not_a_record_path(path))?;
-        if project.input_entry(Path::new(&key))? != Entry::Regular {
-            continue;
-        }
-        if let Some(bytes) = project.read_input(Path::new(&key))? {
-            digests.insert(key, sha256_hex(&bytes));
+        if let Some(digest) = entry_digest(project, Path::new(&key))? {
+            digests.insert(key, digest);
         }
     }
     Ok(digests)
@@ -693,7 +729,12 @@ fn check_disk(
     inputs: &BTreeSet<String>,
     project: &ProjectRoot,
 ) -> io::Result<Option<Finding>> {
-    let exists = |path: &str| project.is_input_file(Path::new(path));
+    // A symlink counts as present and is compared by its target text, the
+    // way `file_digests` recorded it.
+    let exists = |path: &str| {
+        project.is_input_file(Path::new(path))
+            || matches!(project.input_link(Path::new(path)), Ok(Some(_)))
+    };
     if let Some(path) = outputs
         .iter()
         .find(|path| exists(path) && !record.outputs.contains_key(*path))
@@ -717,9 +758,7 @@ fn check_disk(
     ] {
         for (path, digest) in map {
             let current = if exists(path) {
-                project
-                    .read_input(Path::new(path))?
-                    .map(|bytes| sha256_hex(&bytes))
+                entry_digest(project, Path::new(path))?
             } else {
                 None
             };
@@ -835,7 +874,7 @@ impl ResolutionRecord {
             for path in paths {
                 let key = record_path(path).ok_or_else(|| not_a_record_path(path))?;
                 if let Some(digest) = facts.input_digest(Path::new(&key)) {
-                    digests.insert(key, hex::encode(digest));
+                    digests.insert(key, digest);
                 }
             }
             Ok(digests)
@@ -1470,6 +1509,12 @@ mod tests {
                 }),
             ),
             (
+                "is not a sha256",
+                Box::new(|facts| {
+                    facts.inputs.insert("link".into(), "symlink:abc".into());
+                }),
+            ),
+            (
                 "both an output and an input",
                 Box::new(|facts| {
                     facts.inputs.insert("test.lock".into(), sha256_hex(b"x"));
@@ -1514,6 +1559,49 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             assert!(error.to_string().contains(needle), "{needle}: {error}");
         }
+    }
+
+    /// A symlink among a record's files is named by its target text, never
+    /// followed, and never confused with a regular file.
+    #[test]
+    fn a_symlink_is_recorded_by_its_target_text() {
+        let temp = TempDir::named("record-symlink");
+        std::fs::create_dir_all(temp.0.join("data")).unwrap();
+        std::fs::write(temp.0.join("data/site.yml"), "x").unwrap();
+        std::os::unix::fs::symlink("data", temp.0.join("_data")).unwrap();
+        std::os::unix::fs::symlink("data/site.yml", temp.0.join("site.yml")).unwrap();
+        std::os::unix::fs::symlink("gone", temp.0.join("dangling")).unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let listed: Vec<PathBuf> = ["_data", "site.yml", "dangling", "data/site.yml", "absent"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let digests = file_digests(&project, &listed).unwrap();
+        assert_eq!(
+            digests,
+            BTreeMap::from([
+                ("_data".to_string(), symlink_digest(b"data")),
+                ("dangling".to_string(), symlink_digest(b"gone")),
+                ("data/site.yml".to_string(), sha256_hex(b"x")),
+                ("site.yml".to_string(), symlink_digest(b"data/site.yml")),
+            ])
+        );
+        // The link is not followed: what it points at is covered only
+        // where that file is listed itself.
+        let alone = file_digests(&project, &[PathBuf::from("site.yml")]).unwrap();
+        assert_eq!(
+            alone,
+            BTreeMap::from([("site.yml".to_string(), symlink_digest(b"data/site.yml"))])
+        );
+        assert!(!alone.values().any(|digest| *digest == sha256_hex(b"x")));
+        // The bytes `symlink:` names are not a file's: the prefix keeps
+        // the two apart even where the hashes would agree.
+        assert_ne!(symlink_digest(b"x"), sha256_hex(b"x"));
+        let mut input = facts();
+        input.inputs.extend(digests);
+        input.inputs.remove("data/site.yml");
+        let record = ResolutionRecord::new(input).unwrap();
+        assert_eq!(record.inputs["_data"], symlink_digest(b"data"));
     }
 
     #[test]

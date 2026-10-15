@@ -346,6 +346,24 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   csproj are code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler), Elixir's
   (mix) and .NET's (restore) resolvers all run confined, reaching their registry only
   through Greyward's proxy.
+- **Executable manifests bind every visible project file, and a symlink out of the project
+  is refused.** A Gemfile, a mix.exs and a csproj can read any file, so Ruby, Elixir and
+  .NET resolution copy the whole project into the sandbox and the receipt names every
+  regular file and symlink in it. Left out: `.git`, `.greyward`, each tool's own state
+  (`vendor/bundle`, `.bundle`, `deps`, `_build`, `obj`, `bin`), and everything a tailor's
+  sync places in the project (`node_modules` and `.venv` at any depth, declared by each
+  tailor's `projected_paths`), so a Rails app with a JavaScript front end resolves after
+  the node tailor has linked `node_modules`. A symlink checked into the repository is
+  recorded as a link (the sha256 of its target text, spelled `symlink:<sha256>`) and
+  recreated as a link in the sandbox copy; it is not walked through. A link whose target
+  is absolute or climbs out of the project, followed the way the kernel follows it
+  (through any other link on the way), is refused by name before the resolver runs. A link
+  into an excluded directory (into `node_modules`, say) is recorded but dangles in the
+  sandbox, so a Gemfile that reads through one fails there. Python's, Node's, Cargo's and
+  Go's resolution inputs are explicit lists, not this walk: a listed input that is a
+  symlink is recorded the same way, as a link, and the file it points at is covered only
+  if it is listed too. A closure recorded before this change whose inputs include such a
+  link reads as out of step once; one `ward` records it again.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,

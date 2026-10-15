@@ -18,7 +18,7 @@ const HELPER_FILE: &str = "helper.rb";
 /// Executable Gemfiles can load arbitrary project files. Bind all visible
 /// regular files until precise input discovery has a reviewed design.
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &OUTPUTS)
+    crate::kernel::resolve::inputs::project_files(project, &super::door::excludes(), &OUTPUTS)
 }
 
 /// The Gemfile and Gemfile.lock, by digest: a closure's

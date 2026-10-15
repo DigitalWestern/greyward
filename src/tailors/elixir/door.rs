@@ -25,6 +25,12 @@ pub(crate) const OUTPUTS: [&str; 2] = ["mix.exs", "mix.lock"];
 /// run's scratch (`MIX_DEPS_PATH`) and builds nothing.
 pub(super) const EXCLUDE: [&str; 4] = ["deps", "_build", ".git", ".greyward"];
 
+/// [`EXCLUDE`] and everything ward projects into a project: what both the
+/// resolution-input walk and the door's snapshot leave out.
+pub(super) fn excludes() -> Vec<&'static str> {
+    crate::tailors::resolution_excludes(&EXCLUDE)
+}
+
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there.
 pub(crate) const SCRATCH: &str = "@SCRATCH@";
@@ -107,7 +113,7 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
-    confined.exclude = EXCLUDE
+    confined.exclude = excludes()
         .iter()
         .map(|pattern| PathGlob::new(pattern))
         .collect::<io::Result<_>>()?;

@@ -69,6 +69,12 @@ impl Tailor for Python {
         super::resolve::resolution_inputs(project)
     }
 
+    /// The environment link, at the project root and wherever the Python
+    /// door already treats a `.venv` as environment state.
+    fn projected_paths(&self) -> &'static [&'static str] {
+        &["**/.venv"]
+    }
+
     fn attester(&self) -> Option<&dyn Attester> {
         Some(self)
     }

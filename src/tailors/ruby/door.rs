@@ -23,6 +23,13 @@ pub(crate) const OUTPUTS: [&str; 2] = ["Gemfile", "Gemfile.lock"];
 /// (`BUNDLE_IGNORE_CONFIG=1`, gems in the run's scratch).
 pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".greyward"];
 
+/// [`EXCLUDE`] and everything ward projects into a project (another
+/// ecosystem's `node_modules` or `.venv` link): what both the
+/// resolution-input walk and the door's snapshot leave out.
+pub(super) fn excludes() -> Vec<&'static str> {
+    crate::tailors::resolution_excludes(&EXCLUDE)
+}
+
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there, the one greyward-written
 /// directory the sandbox sees.
@@ -121,7 +128,7 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
-    confined.exclude = EXCLUDE
+    confined.exclude = excludes()
         .iter()
         .map(|pattern| PathGlob::new(pattern))
         .collect::<io::Result<_>>()?;

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// Executable mix manifests can load app manifests, nested configuration,
 /// and arbitrary data. Cover every visible regular project file.
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &OUTPUTS)
+    crate::kernel::resolve::inputs::project_files(project, &super::door::excludes(), &OUTPUTS)
 }
 
 /// mix.exs, mix.lock and the config files, by digest: a closure's

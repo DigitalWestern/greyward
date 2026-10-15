@@ -411,6 +411,18 @@ fn crate_dir_in_repo(root: &Path, name: &str, version: &str) -> io::Result<PathB
     Err(err(format!("git source {} {detail}", root.display())))
 }
 
+/// Removes a staging directory when dropped, whatever path left the
+/// function that made it. A path already moved or removed is left alone.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if fs::symlink_metadata(&self.0).is_ok() {
+            let _ = crate::kernel::store::remove_tree(&self.0);
+        }
+    }
+}
+
 /// Copy one git crate out of its realized checkout into the staged vendor
 /// tree: the crate's directory, with any symlink that leads elsewhere in the
 /// checkout replaced by the bytes it points at, and a manifest that inherits
@@ -522,6 +534,10 @@ fn realize_vendor_inner(
     }
 
     let staged = store.stage_with_activity(activity)?;
+    // Every refusal below (a link budget, a cycle, a bad archive) returns
+    // early; the half-built tree goes with it rather than wait for GC.
+    // After a commit the stage path is gone or rolled back already.
+    let _cleanup = RemoveOnDrop(staged.clone());
     for (krate, root) in &git_roots {
         // Cargo's directory source wants the crate's own directory, so a
         // workspace repository is searched for the crate the lock names.

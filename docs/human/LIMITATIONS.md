@@ -813,8 +813,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   is copied into it when the crate has no file of that name (otherwise the path points
   outside, where cargo never reads it for a dependency). Inherited dependencies merge as
   cargo merges them: features add up, `optional` and `public` come from the member, a member
-  `default-features = true` overrides a workspace `false`, and any other key on the member
-  entry is ignored. A crate that inherits nothing is copied unchanged. The workspace is the
+  `default-features = true` overrides a workspace `false` (a member `false` over workspace
+  defaults is ignored, and refused from edition 2024 as cargo refuses it), and any other key
+  on the member entry is ignored. A refused git crate leaves no half-built vendor tree in
+  the store. A crate that inherits nothing is copied unchanged. The workspace is the
   one `package.workspace` names, or else the nearest `[workspace]` manifest at or above the
   crate that does not `exclude` it (cargo's rule: an `exclude` entry covers it and no
   `members` entry names it); one outside the checkout, a field the workspace does not

@@ -3,16 +3,26 @@
 //! an armored v4 binary-document signature, RSA PKCS#1 v1.5 over SHA-256 or
 //! SHA-512 (RFC 4880 sections 4, 5.2, 5.5 and 12.2).
 //!
-//! What it trusts is the keyring it is handed: every key packet in it, the
-//! primary key and each subkey, signs. That is how `gpgv --keyring` treats
-//! a keyring too, and the keyrings handed here are files checked into the
-//! repository and embedded in the binary, so their contents are the trust
-//! decision. Nothing else is accepted: another packet version, algorithm,
-//! signature class or a signature whose issuer is not in the keyring is
-//! refused.
+//! What it trusts is the keyring it is handed, and in it only the keys its
+//! owner certified for signing, as `gpgv --keyring` does. The primary key
+//! signs when its newest self-certification of a user ID (verified)
+//! carries the sign key flag. A subkey signs when its newest binding
+//! signature from the primary (verified) carries the sign flag and embeds
+//! the subkey's own back-signature (verified), so an encryption-only
+//! subkey never signs, nor does a subkey another party attached. A
+//! revocation of the primary key or of a subkey removes it, whether or not
+//! its signature can be read. Self-signatures may use SHA-1, as keys made
+//! in 2013 do; a document signature must use SHA-256 or SHA-512. Nothing
+//! else is accepted: another packet version, algorithm, signature class or
+//! a signature whose issuer is not a signing key of the keyring is refused.
+//! Key expiry is not read: the keyrings handed here are files checked into
+//! the repository, and replacing one is the way to retire a key.
 
 use ring::signature::{RsaParameters, RsaPublicKeyComponents};
-use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA512};
+use ring::signature::{
+    RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY, RSA_PKCS1_2048_8192_SHA256,
+    RSA_PKCS1_2048_8192_SHA512,
+};
 use sha1::{Digest as _, Sha1};
 use std::io;
 
@@ -23,18 +33,33 @@ fn invalid(what: impl Into<String>) -> io::Error {
 /// Packet tags this reader knows (RFC 4880 section 4.3).
 const TAG_SIGNATURE: u8 = 2;
 const TAG_PUBLIC_KEY: u8 = 6;
+const TAG_USER_ID: u8 = 13;
 const TAG_PUBLIC_SUBKEY: u8 = 14;
+const TAG_USER_ATTRIBUTE: u8 = 17;
 
 /// Public-key algorithm 1: RSA (Encrypt or Sign).
 const ALGO_RSA: u8 = 1;
-/// Hash algorithms 8 and 10: SHA-256 and SHA-512.
+/// Hash algorithms 2, 8 and 10: SHA-1 (self-signatures only), SHA-256 and
+/// SHA-512.
+const HASH_SHA1: u8 = 2;
 const HASH_SHA256: u8 = 8;
 const HASH_SHA512: u8 = 10;
-/// Signature class 0x00: a signature of a binary document.
+/// Signature classes (RFC 4880 section 5.2.1).
 const CLASS_BINARY: u8 = 0x00;
-/// Signature subpackets 16 and 33: issuer key ID, issuer fingerprint.
+const CLASS_CERTIFICATIONS: std::ops::RangeInclusive<u8> = 0x10..=0x13;
+const CLASS_SUBKEY_BINDING: u8 = 0x18;
+const CLASS_PRIMARY_BINDING: u8 = 0x19;
+const CLASS_KEY_REVOCATION: u8 = 0x20;
+const CLASS_SUBKEY_REVOCATION: u8 = 0x28;
+/// Signature subpackets: creation time, issuer key ID, key flags, embedded
+/// signature, issuer fingerprint.
+const SUBPACKET_CREATED: u8 = 2;
 const SUBPACKET_ISSUER: u8 = 16;
+const SUBPACKET_KEY_FLAGS: u8 = 27;
+const SUBPACKET_EMBEDDED_SIGNATURE: u8 = 32;
 const SUBPACKET_ISSUER_FINGERPRINT: u8 = 33;
+/// Key flag 0x02: this key may sign data.
+const FLAG_SIGN: u8 = 0x02;
 
 /// One RSA public key of a keyring: its v4 fingerprint and its numbers.
 #[derive(Clone, Debug)]
@@ -50,6 +75,61 @@ impl RsaKey {
     }
 }
 
+/// The bytes a key packet is hashed as inside a signature: 0x99, the
+/// two-byte body length, the body.
+fn key_frame(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 3);
+    out.push(0x99);
+    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// A key packet of a keyring while it is read, with what its signatures
+/// have shown so far.
+struct Candidate<'a> {
+    body: &'a [u8],
+    key: RsaKey,
+    /// The newest verified self-signature's (creation time, key flags).
+    newest: Option<(u32, u8)>,
+    revoked: bool,
+}
+
+impl<'a> Candidate<'a> {
+    fn new(body: &'a [u8]) -> io::Result<Candidate<'a>> {
+        Ok(Candidate {
+            body,
+            key: rsa_key(body)?,
+            newest: None,
+            revoked: false,
+        })
+    }
+
+    fn offer(&mut self, signature: &Signature) {
+        let flags = signature.key_flags.unwrap_or(0);
+        if self
+            .newest
+            .is_none_or(|(created, _)| signature.created >= created)
+        {
+            self.newest = Some((signature.created, flags));
+        }
+    }
+
+    fn signs(&self) -> bool {
+        !self.revoked && self.newest.is_some_and(|(_, flags)| flags & FLAG_SIGN != 0)
+    }
+}
+
+/// Where the reader is in a transferable public key: what the signature
+/// packets that follow are about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum After<'a> {
+    Primary,
+    UserId(&'a [u8]),
+    Subkey,
+    Other,
+}
+
 /// The public keys a signature may come from.
 #[derive(Clone, Debug)]
 pub struct Keyring {
@@ -57,26 +137,119 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    /// Every v4 RSA key packet (primary and subkey) of an armored public
-    /// key block. Packets of other kinds (user IDs, their certifications)
-    /// are skipped; a key packet this reader cannot use is refused, so a
-    /// keyring never silently loses a key.
+    /// The signing keys of an armored public key block (see the module
+    /// documentation). A key packet this reader cannot use is refused, so
+    /// a keyring never silently loses a key; a signature packet it cannot
+    /// read grants nothing and is passed over.
     pub fn from_armored(text: &str) -> io::Result<Keyring> {
-        let bytes = dearmor(text, "PGP PUBLIC KEY BLOCK")?;
+        Keyring::from_packets(&dearmor(text, "PGP PUBLIC KEY BLOCK")?)
+    }
+
+    fn from_packets(bytes: &[u8]) -> io::Result<Keyring> {
         let mut keys = Vec::new();
-        for (tag, body) in packets(&bytes)? {
-            if tag != TAG_PUBLIC_KEY && tag != TAG_PUBLIC_SUBKEY {
-                continue;
+        let mut primary: Option<Candidate> = None;
+        let mut subkeys: Vec<Candidate> = Vec::new();
+        let mut after = After::Other;
+        let flush =
+            |primary: Option<Candidate>, subkeys: &mut Vec<Candidate>, keys: &mut Vec<RsaKey>| {
+                let Some(primary) = primary else { return };
+                let usable = !primary.revoked;
+                if primary.signs() {
+                    keys.push(primary.key);
+                }
+                keys.extend(
+                    subkeys
+                        .drain(..)
+                        .filter(|subkey| usable && subkey.signs())
+                        .map(|subkey| subkey.key),
+                );
+            };
+        for (tag, body) in packets(bytes)? {
+            match tag {
+                TAG_PUBLIC_KEY => {
+                    flush(primary.take(), &mut subkeys, &mut keys);
+                    primary = Some(Candidate::new(body)?);
+                    after = After::Primary;
+                }
+                TAG_USER_ID => after = After::UserId(body),
+                TAG_USER_ATTRIBUTE => after = After::Other,
+                TAG_PUBLIC_SUBKEY => {
+                    if primary.is_none() {
+                        return Err(invalid("OpenPGP subkey packet precedes its primary key"));
+                    }
+                    subkeys.push(Candidate::new(body)?);
+                    after = After::Subkey;
+                }
+                TAG_SIGNATURE => {
+                    let Some(primary) = primary.as_mut() else {
+                        continue;
+                    };
+                    // A revocation counts unread: refusing a key is safe.
+                    match body.get(1).copied() {
+                        Some(CLASS_KEY_REVOCATION) => {
+                            primary.revoked = true;
+                            continue;
+                        }
+                        Some(CLASS_SUBKEY_REVOCATION) if after == After::Subkey => {
+                            if let Some(subkey) = subkeys.last_mut() {
+                                subkey.revoked = true;
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let Ok(signature) = Signature::parse(body) else {
+                        continue;
+                    };
+                    match after {
+                        After::UserId(user_id)
+                            if CLASS_CERTIFICATIONS.contains(&signature.class) =>
+                        {
+                            let mut prefix = key_frame(primary.body);
+                            prefix.push(0xb4);
+                            prefix.extend_from_slice(&(user_id.len() as u32).to_be_bytes());
+                            prefix.extend_from_slice(user_id);
+                            if signature.verifies(&primary.key, &prefix) {
+                                primary.offer(&signature);
+                            }
+                        }
+                        After::Subkey if signature.class == CLASS_SUBKEY_BINDING => {
+                            let subkey = subkeys.last_mut().expect("a subkey was read");
+                            let mut prefix = key_frame(primary.body);
+                            prefix.extend_from_slice(&key_frame(subkey.body));
+                            if !signature.verifies(&primary.key, &prefix) {
+                                continue;
+                            }
+                            // A signing subkey must also sign the primary
+                            // back: without that, anyone's key could be
+                            // bound as a signer of this one's.
+                            let signs = signature.key_flags.unwrap_or(0) & FLAG_SIGN != 0;
+                            let backed = signature
+                                .embedded
+                                .and_then(|bytes| Signature::parse(bytes).ok())
+                                .is_some_and(|back| {
+                                    back.class == CLASS_PRIMARY_BINDING
+                                        && back.verifies(&subkey.key, &prefix)
+                                });
+                            if !signs || backed {
+                                subkey.offer(&signature);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
-            keys.push(rsa_key(body)?);
         }
+        flush(primary.take(), &mut subkeys, &mut keys);
         if keys.is_empty() {
-            return Err(invalid("the OpenPGP keyring holds no public key"));
+            return Err(invalid("the OpenPGP keyring holds no signing key"));
         }
         Ok(Keyring { keys })
     }
 
-    /// The upper-case hex v4 fingerprints of every key, primary first.
+    /// The upper-case hex v4 fingerprints of every signing key, primary
+    /// first.
     pub fn fingerprints(&self) -> Vec<String> {
         self.keys
             .iter()
@@ -95,39 +268,38 @@ impl Keyring {
             ));
         };
         let signature = Signature::parse(body)?;
+        if signature.class != CLASS_BINARY {
+            return Err(invalid(format!(
+                "OpenPGP signature class {:#04x} is not a binary-document signature",
+                signature.class
+            )));
+        }
+        if signature.hash != HASH_SHA256 && signature.hash != HASH_SHA512 {
+            return Err(invalid(format!(
+                "OpenPGP signature hash algorithm {} is not supported; only SHA-256 and SHA-512 are",
+                signature.hash
+            )));
+        }
+        let issuer = signature
+            .issuer
+            .as_deref()
+            .ok_or_else(|| invalid("the OpenPGP signature names no issuer"))?;
         let key = self
             .keys
             .iter()
             .find(|key| signature.issued_by(key))
             .ok_or_else(|| {
                 invalid(format!(
-                    "the OpenPGP signature was made by key {}, which is not in the pinned keyring",
-                    hex::encode_upper(&signature.issuer)
+                    "the OpenPGP signature was made by key {}, which is not a signing key of the pinned keyring",
+                    hex::encode_upper(issuer)
                 ))
             })?;
-        let mut message = Vec::with_capacity(data.len() + signature.hashed.len() + 6);
-        message.extend_from_slice(data);
-        message.extend_from_slice(signature.hashed);
-        // The v4 trailer: version, 0xFF, and the hashed portion's length.
-        message.extend_from_slice(&[4, 0xff]);
-        message.extend_from_slice(&(signature.hashed.len() as u32).to_be_bytes());
-        // An MPI drops leading zero bytes; PKCS#1 wants the modulus length.
-        let mut padded = vec![0; key.n.len().saturating_sub(signature.value.len())];
-        padded.extend_from_slice(signature.value);
-        let algorithm: &RsaParameters = match signature.hash {
-            HASH_SHA256 => &RSA_PKCS1_2048_8192_SHA256,
-            _ => &RSA_PKCS1_2048_8192_SHA512,
-        };
-        let public = RsaPublicKeyComponents {
-            n: &key.n,
-            e: &key.e,
-        };
-        public.verify(algorithm, &message, &padded).map_err(|_| {
-            invalid(format!(
+        if !signature.verifies(key, data) {
+            return Err(invalid(format!(
                 "the OpenPGP signature does not verify with key {}",
                 hex::encode_upper(key.fingerprint)
-            ))
-        })?;
+            )));
+        }
         Ok(hex::encode_upper(key.fingerprint))
     }
 }
@@ -257,12 +429,19 @@ fn rsa_key(body: &[u8]) -> io::Result<RsaKey> {
 
 /// The parts of a v4 signature packet the check reads.
 struct Signature<'a> {
+    class: u8,
     hash: u8,
     /// From the version byte through the hashed subpackets: what the
     /// signature covers after the data.
     hashed: &'a [u8],
     /// The issuer: a key ID (8 bytes) or a v4 fingerprint (20 bytes).
-    issuer: Vec<u8>,
+    issuer: Option<Vec<u8>>,
+    /// The hashed creation time (0 when absent).
+    created: u32,
+    /// The hashed key flags' first byte, on a self-signature.
+    key_flags: Option<u8>,
+    /// An embedded signature (a signing subkey's back-signature).
+    embedded: Option<&'a [u8]>,
     value: &'a [u8],
 }
 
@@ -271,19 +450,14 @@ impl<'a> Signature<'a> {
         let [4, class, algo, hash, a, b, rest @ ..] = body else {
             return Err(invalid("only version 4 OpenPGP signatures are supported"));
         };
-        if *class != CLASS_BINARY {
-            return Err(invalid(format!(
-                "OpenPGP signature class {class:#04x} is not a binary-document signature"
-            )));
-        }
         if *algo != ALGO_RSA {
             return Err(invalid(format!(
                 "OpenPGP signature algorithm {algo} is not supported; only RSA is"
             )));
         }
-        if *hash != HASH_SHA256 && *hash != HASH_SHA512 {
+        if ![HASH_SHA1, HASH_SHA256, HASH_SHA512].contains(hash) {
             return Err(invalid(format!(
-                "OpenPGP signature hash algorithm {hash} is not supported; only SHA-256 and SHA-512 are"
+                "OpenPGP signature hash algorithm {hash} is not supported"
             )));
         }
         let truncated = || invalid("OpenPGP signature packet is truncated");
@@ -301,11 +475,27 @@ impl<'a> Signature<'a> {
         // The issuer may sit in either area: it only names a key, and the
         // RSA check proves the key.
         let mut issuer = None;
+        let mut created = 0;
+        let mut key_flags = None;
+        let mut embedded = None;
+        // Creation time and key flags count only when signed.
+        for (kind, data) in subpackets(hashed_subpackets)? {
+            match (kind, data) {
+                (SUBPACKET_CREATED, [a, b, c, d]) => created = u32::from_be_bytes([*a, *b, *c, *d]),
+                (SUBPACKET_KEY_FLAGS, [flags, ..]) => key_flags = Some(*flags),
+                _ => {}
+            }
+        }
+        // The embedded back-signature proves itself, so it may sit in
+        // either area, as gpg allows.
         for (kind, data) in subpackets(hashed_subpackets)?
             .into_iter()
             .chain(subpackets(unhashed_subpackets)?)
         {
             match (kind, data) {
+                (SUBPACKET_EMBEDDED_SIGNATURE, data) if embedded.is_none() => {
+                    embedded = Some(data);
+                }
                 (SUBPACKET_ISSUER_FINGERPRINT, [4, fingerprint @ ..])
                     if fingerprint.len() == 20 =>
                 {
@@ -318,18 +508,48 @@ impl<'a> Signature<'a> {
             }
         }
         Ok(Signature {
+            class: *class,
             hash: *hash,
             hashed,
-            issuer: issuer.ok_or_else(|| invalid("the OpenPGP signature names no issuer"))?,
+            issuer,
+            created,
+            key_flags,
+            embedded,
             value,
         })
     }
 
     fn issued_by(&self, key: &RsaKey) -> bool {
-        match self.issuer.len() {
-            20 => self.issuer == key.fingerprint,
-            _ => self.issuer == key.key_id(),
+        match self.issuer.as_deref() {
+            Some(issuer) if issuer.len() == 20 => issuer == key.fingerprint,
+            Some(issuer) => issuer == key.key_id(),
+            None => false,
         }
+    }
+
+    /// Whether `key` made this signature over `data` (the document, or a
+    /// self-signature's key and user ID frames).
+    fn verifies(&self, key: &RsaKey, data: &[u8]) -> bool {
+        let mut message = Vec::with_capacity(data.len() + self.hashed.len() + 6);
+        message.extend_from_slice(data);
+        message.extend_from_slice(self.hashed);
+        // The v4 trailer: version, 0xFF, and the hashed portion's length.
+        message.extend_from_slice(&[4, 0xff]);
+        message.extend_from_slice(&(self.hashed.len() as u32).to_be_bytes());
+        // An MPI drops leading zero bytes; PKCS#1 wants the modulus length.
+        let mut padded = vec![0; key.n.len().saturating_sub(self.value.len())];
+        padded.extend_from_slice(self.value);
+        let algorithm: &RsaParameters = match self.hash {
+            HASH_SHA1 => &RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
+            HASH_SHA256 => &RSA_PKCS1_2048_8192_SHA256,
+            _ => &RSA_PKCS1_2048_8192_SHA512,
+        };
+        RsaPublicKeyComponents {
+            n: &key.n,
+            e: &key.e,
+        }
+        .verify(algorithm, &message, &padded)
+        .is_ok()
     }
 }
 
@@ -377,14 +597,125 @@ mod tests {
     }
 
     #[test]
-    fn the_rust_keyring_is_its_primary_key_and_both_subkeys() {
+    fn the_rust_keyring_signs_with_its_primary_key_and_its_signing_subkey_only() {
+        // Its first subkey, 8E9AA3F7AB3F5826, is bound for encryption only
+        // (key flags 0x0C), and gpgv will not take a signature from it.
         let keyring = Keyring::from_armored(RUST_KEY).unwrap();
+        let fingerprints = keyring.fingerprints();
+        assert_eq!(fingerprints.len(), 2, "{fingerprints:?}");
+        assert_eq!(fingerprints[0], "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE");
+        assert!(fingerprints[1].ends_with("5CB4A9347B3B09DC"));
+        assert!(!fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint.ends_with("8E9AA3F7AB3F5826")));
+    }
+
+    // A generated keyring (testdata/openpgp/make_fixture.py): a primary key
+    // certified to sign, an encryption-only subkey and a signing subkey
+    // with its back-signature, each having signed one document. gpgv takes
+    // the primary's and the signing subkey's signatures and has no public
+    // key for the encryption-only one's.
+    const FIXTURE_KEYRING: &str = include_str!("testdata/openpgp/keyring.asc");
+    const FIXTURE_DOCUMENT: &[u8] = include_bytes!("testdata/openpgp/document.txt");
+    const BY_PRIMARY: &str = include_str!("testdata/openpgp/by-primary.asc");
+    const BY_SIGNING_SUBKEY: &str = include_str!("testdata/openpgp/by-signing-subkey.asc");
+    const BY_ENCRYPT_ONLY: &str = include_str!("testdata/openpgp/by-encrypt-only.asc");
+    const FIXTURE_PRIMARY: &str = "340A0550CD93D89CAEF838052D42F4455D5F5D31";
+    const FIXTURE_SIGNING: &str = "520C6B0CBBCB71F340CE6975F46A975FF0519798";
+
+    #[test]
+    fn the_primary_key_and_a_signing_subkey_sign() {
+        let keyring = Keyring::from_armored(FIXTURE_KEYRING).unwrap();
         assert_eq!(
-            keyring.fingerprints()[0],
-            "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
+            keyring.fingerprints(),
+            vec![FIXTURE_PRIMARY.to_string(), FIXTURE_SIGNING.to_string()]
         );
-        assert_eq!(keyring.fingerprints().len(), 3);
-        assert!(keyring.fingerprints()[2].ends_with("5CB4A9347B3B09DC"));
+        assert_eq!(
+            keyring
+                .verify_detached(FIXTURE_DOCUMENT, BY_PRIMARY)
+                .unwrap(),
+            FIXTURE_PRIMARY
+        );
+        assert_eq!(
+            keyring
+                .verify_detached(FIXTURE_DOCUMENT, BY_SIGNING_SUBKEY)
+                .unwrap(),
+            FIXTURE_SIGNING
+        );
+    }
+
+    #[test]
+    fn a_signature_by_an_encryption_only_subkey_is_refused() {
+        let keyring = Keyring::from_armored(FIXTURE_KEYRING).unwrap();
+        let error = keyring
+            .verify_detached(FIXTURE_DOCUMENT, BY_ENCRYPT_ONLY)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("1217D17ACD1336BE6411B676FBC211CB3589FB43, which is not a signing key"),
+            "{error}"
+        );
+    }
+
+    /// The fixture keyring's packets, with `edit` applied.
+    fn edited_keyring(edit: impl FnOnce(&mut Vec<(u8, Vec<u8>)>)) -> io::Result<Keyring> {
+        let bytes = dearmor(FIXTURE_KEYRING, "PGP PUBLIC KEY BLOCK").unwrap();
+        let mut list: Vec<(u8, Vec<u8>)> = packets(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(|(tag, body)| (tag, body.to_vec()))
+            .collect();
+        edit(&mut list);
+        let mut out = Vec::new();
+        for (tag, body) in list {
+            out.push(0xc0 | tag);
+            out.push(0xff);
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            out.extend_from_slice(&body);
+        }
+        Keyring::from_packets(&out)
+    }
+
+    #[test]
+    fn a_signing_subkey_without_a_valid_binding_does_not_sign() {
+        // The signing subkey's binding is the last packet. A changed byte
+        // in its signed part breaks the primary's signature over it.
+        let keyring = edited_keyring(|list| {
+            let (_, binding) = list.last_mut().unwrap();
+            binding[8] ^= 1;
+        })
+        .unwrap();
+        assert_eq!(keyring.fingerprints(), vec![FIXTURE_PRIMARY.to_string()]);
+        // A binding with no back-signature: the embedded signature is in
+        // the unhashed area, so dropping that area leaves the primary's
+        // signature valid and the subkey's consent missing.
+        let keyring = edited_keyring(|list| {
+            let (_, binding) = list.last_mut().unwrap();
+            let hashed = u16::from_be_bytes([binding[4], binding[5]]) as usize;
+            let at = 6 + hashed;
+            let unhashed = u16::from_be_bytes([binding[at], binding[at + 1]]) as usize;
+            binding.splice(at..at + 2 + unhashed, [0, 0]);
+        })
+        .unwrap();
+        assert_eq!(keyring.fingerprints(), vec![FIXTURE_PRIMARY.to_string()]);
+    }
+
+    #[test]
+    fn a_revocation_removes_the_key_it_names() {
+        // A subkey revocation after the signing subkey, unreadable: it is
+        // honoured anyway.
+        let keyring = edited_keyring(|list| {
+            list.push((TAG_SIGNATURE, vec![4, CLASS_SUBKEY_REVOCATION]));
+        })
+        .unwrap();
+        assert_eq!(keyring.fingerprints(), vec![FIXTURE_PRIMARY.to_string()]);
+        // A key revocation takes the primary and every subkey with it.
+        let error = edited_keyring(|list| {
+            list.insert(1, (TAG_SIGNATURE, vec![4, CLASS_KEY_REVOCATION]));
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no signing key"), "{error}");
     }
 
     #[test]
@@ -417,7 +748,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("85AB96E6FA1BE5FE, which is not in"),
+                .contains("85AB96E6FA1BE5FE, which is not a signing key"),
             "{error}"
         );
     }

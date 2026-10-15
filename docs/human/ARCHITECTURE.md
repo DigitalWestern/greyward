@@ -439,7 +439,11 @@ static.rust-lang.org through the source policy, checks the detached
 signature against the Rust release key built into the binary from
 `tools/keys/rust-release-signing-key.asc` (`kernel/openpgp.rs`: v4 RSA
 keys and signatures over SHA-256 or SHA-512, issuer matched by key ID or
-fingerprint, verified with ring), requires the manifest's own `date` to
+fingerprint, verified with ring; only the keys the keyring certifies to
+sign count, as for gpgv: the primary key by its verified self-signature's
+key flags, a subkey by its verified binding with the sign flag and the
+subkey's own back-signature, so the key's encryption-only subkey never
+signs), requires the manifest's own `date` to
 be the asked-for one, and builds a bundle from its rows: rustc, rust-std
 and cargo for every platform, rustfmt only when every platform has it,
 and the manifest pinned by its sha256 as a stable release's is. The

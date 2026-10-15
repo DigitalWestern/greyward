@@ -846,8 +846,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   the `.sha256` on dl.google.com, neither signed. A `.asc` signature by Google's Linux
   packaging key sits beside every archive, which ward does not check yet; go.dev does not
   document it, and the JSON that lists releases is unsigned.
-- **Only the Go lines go.dev lists as supported are realizable** (every release of each). An
-  unmatched `go.mod` selection fails before store or network access. A non-default
+- **Every stable Go release from 1.16.1 on is realizable**, end-of-life lines included. The
+  first release of 1.16 to 1.20 (`go1.16` to `go1.20`, named without a patch number) is not
+  pinned, so an exact `toolchain go1.20` is refused; `go 1.20` alone is a minimum and is
+  satisfied. An unmatched `go.mod` selection fails before store or network access. A non-default
   `toolchain` directive is exact; `go` alone is a minimum that takes the default (1.27.0) when
   it satisfies, else the newest release, where go itself would take the lowest.
   **Fail-closed rows**: go.work workspaces (including ancestor detection);

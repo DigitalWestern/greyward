@@ -671,14 +671,17 @@ class Go(Base):
             ],
         }
 
-    def test_supported_stable_releases_enter_with_go_devs_digests(self):
+    def test_every_stable_release_enters_with_go_devs_digests(self):
+        # A line go.dev no longer lists as supported still enters: a
+        # project pinned to its last patch gets exactly that patch.
         self.publish("1.25.9", supported=False)
         self.publish("1.26.3")
         self.publish("1.27rc1", stable=False)
         self.publish("1.26.4", stable=False)  # go.dev's own flag, even on a x.y.z version
         out, report = self.generate([])
-        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3")})
-        self.assertEqual((report.added, report.skipped), (["go-1.26.3"], []))
+        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3"),
+                               "go-1.25.9": self.expected("1.25.9")})
+        self.assertEqual((report.added, report.skipped), (["go-1.26.3", "go-1.25.9"], []))
         self.assertEqual(out["go-1.26.3"]["artifacts"][1]["url"],
                          "https://go.dev/dl/go1.26.3.linux-amd64.tar.gz")
 

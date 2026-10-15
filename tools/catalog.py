@@ -393,14 +393,14 @@ def checksum_lines(source, text):
 
 # --------------------------------------------------------------------------
 # Go: go.dev's release JSON (sha256), cross-checked with dl.google.com's
-# per-file .sha256. Supported lines are the ones go.dev lists without
-# include=all.
+# per-file .sha256. Every stable release go.dev still lists is shipped,
+# whether or not its line is still supported: a project pinned to an old
+# patch must get exactly that patch. Releases without a darwin-arm64
+# archive (before 1.16) are skipped, as selection needs both platforms.
 
 
 def go_rows(report):
     everything = fetch_json("https://go.dev/dl/?mode=json&include=all")
-    supported = fetch_json("https://go.dev/dl/?mode=json")
-    lines = {".".join(r["version"][2:].split(".")[:2]) for r in supported}
     by_version = {}
     for r in everything:
         if not r.get("stable"):
@@ -417,7 +417,7 @@ def go_rows(report):
             elif (f["os"], f["arch"]) == ("linux", "amd64"):
                 files[LINUX] = f
         by_version[version] = files
-    return lines, by_version
+    return by_version
 
 
 def go_release(version, files):
@@ -437,7 +437,7 @@ def go_cross_check(rel):
 
 
 def generate_go(existing, report):
-    lines, by_version = go_rows(report)
+    by_version = go_rows(report)
     out = {}
     for rel in existing:
         version = rel["components"][0]["version"]
@@ -448,7 +448,7 @@ def generate_go(existing, report):
         out[rel["key"]] = rel
     for version, files in by_version.items():
         key = f"go-{version}"
-        if key in out or ".".join(version.split(".")[:2]) not in lines:
+        if key in out:
             continue
         missing = [p for p in PLATFORMS if p not in files]
         if missing:

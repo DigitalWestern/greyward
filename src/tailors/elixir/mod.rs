@@ -1474,7 +1474,24 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let hex_empty = hex_deps_identity(&spec, &empty_plan).expect("empty Hex identity");
     let hex_dependency =
         hex_deps_identity(&spec, &dependency_plan).expect("Hex dependency identity");
-    vec![beam, hex_empty, hex_dependency]
+    let git_plan = ElixirPlan {
+        git: vec![GitDep {
+            app: "lib".into(),
+            url: "https://example.invalid/lib.git".into(),
+            rev: "c".repeat(40),
+            branch: None,
+            r#ref: None,
+            tag: None,
+            sparse: None,
+            subdir: None,
+            depth: None,
+            submodules: false,
+        }],
+        ..dependency_plan.clone()
+    };
+    let hex_git = hex_deps_identity(&spec, &git_plan).expect("Hex identity with git deps");
+    let checkouts = git::identity(&git_plan.git);
+    vec![beam, hex_empty, hex_dependency, hex_git, checkouts]
 }
 
 #[cfg(test)]

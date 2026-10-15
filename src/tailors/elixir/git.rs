@@ -125,7 +125,7 @@ pub(super) fn input(dep: &GitDep) -> (String, String) {
     )
 }
 
-fn identity(deps: &[GitDep]) -> Identity {
+pub(super) fn identity(deps: &[GitDep]) -> Identity {
     let mut inputs = BTreeMap::from([("schema".to_string(), SCHEMA.to_string())]);
     inputs.extend(deps.iter().map(input));
     Identity {

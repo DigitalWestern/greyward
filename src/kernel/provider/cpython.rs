@@ -304,6 +304,7 @@ pub fn realize_uv(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
+    let _t = crate::kernel::ui::phase("provision uv");
     let sha256 = artifact_sha256(spec)?;
     let tarball = download_toolchain_artifact_held(
         store,
@@ -325,6 +326,7 @@ pub fn realize_uv(
     if !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
+    let _stage = crate::kernel::ui::phase("stage");
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -391,6 +393,9 @@ pub fn realize_runtime(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
+    // Under --verbose: the download, the archive check and extraction, and
+    // the stage, as rows under this one.
+    let _t = crate::kernel::ui::phase("provision cpython");
 
     let sha256 = artifact_sha256(spec)?;
     let tarball = download_toolchain_artifact_held(
@@ -410,6 +415,8 @@ pub fn realize_runtime(
         crate::kernel::archive::Compression::Gzip,
     )
     .map_err(|e| io::Error::new(e.kind(), format!("extract CPython tarball: {e}")))?;
+    // Publication: the read-only walk, the durable sync, the rename.
+    let _stage = crate::kernel::ui::phase("stage");
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();

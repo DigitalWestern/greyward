@@ -826,15 +826,12 @@ pub fn timed<T>(name: &str, job: impl FnOnce() -> T) -> T {
 }
 
 /// The phase open on this thread, to open phases under from another
-/// thread: a pool worker's `parent.phase("artifact fetch")` is a child of
-/// the phase that started the pool, not a second top-level row. Test-only
-/// until the parallel download pool (#745) is its first caller.
-#[cfg(test)]
+/// thread: a pool worker's `parent.phase("download pool")` is a child of
+/// the phase that started the pool, not a second top-level row.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseParent(Option<Vec<String>>);
 
 /// The phase open on this thread, for [`PhaseParent::phase`].
-#[cfg(test)]
 pub fn current_phase() -> PhaseParent {
     if !verbose() {
         return PhaseParent(None);
@@ -842,7 +839,6 @@ pub fn current_phase() -> PhaseParent {
     PhaseParent(Some(OPEN_PHASE.with(|open| open.borrow().clone())))
 }
 
-#[cfg(test)]
 impl PhaseParent {
     /// Time the rest of the caller's scope as `name`, nested under the
     /// phase this was taken from, on whatever thread calls it.

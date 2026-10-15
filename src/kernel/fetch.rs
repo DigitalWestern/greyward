@@ -1306,6 +1306,7 @@ fn cache_or_download_narrated(
     };
     let activity = activity.clone();
     let gc_lock = acquire_cache_lock(store)?;
+    let hit = crate::kernel::ui::phase("cache re-verify");
     for candidate in candidates {
         let dest = store.cache_path(candidate.algo(), candidate.hex());
         if !dest.is_file() {
@@ -1329,6 +1330,9 @@ fn cache_or_download_narrated(
             Err(_) => {}
         }
     }
+    drop(hit);
+    // Streamed, verified and published: the network wait and the hash.
+    let _t = crate::kernel::ui::phase("download");
     let cache_dir = store.cache_path(digest.algo(), digest.hex());
     fs::create_dir_all(cache_dir.parent().unwrap())
         .map_err(|e| io::Error::new(e.kind(), format!("cache dir: {e}")))?;

@@ -839,6 +839,13 @@ impl PolicyScope {
         if let Some(line) = strict_trace(&policy) {
             crate::kernel::ui::trace(&line);
         }
+        Self::inherit(policy)
+    }
+
+    /// Put an operation's `policy` in force on a worker thread it started
+    /// (the download pool), from a snapshot taken by [`effective`] on the
+    /// operation's thread. Silent: the operation already said it was strict.
+    pub(crate) fn inherit(policy: Policy) -> Self {
         let id = NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
         with_scopes(|scopes| scopes.push((id, Arc::new(policy))));
         Self {

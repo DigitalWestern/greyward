@@ -47,9 +47,17 @@ where
     let failed = AtomicUsize::new(usize::MAX);
     let slots: Vec<Mutex<Option<io::Result<T>>>> = jobs.iter().map(|_| Mutex::new(None)).collect();
     let batch = crate::kernel::ui::Batch::start(jobs.len());
+    // What the calling thread carries that a worker thread would not: the
+    // operation's policy (a registry download reads its `[sources]` and
+    // credentials from it, and a bare thread would read the default) and
+    // the phase the downloads are timed under.
+    let policy = crate::kernel::policy::effective();
+    let parent = crate::kernel::ui::current_phase();
     std::thread::scope(|scope| {
         for _ in 0..FETCH_WORKERS.min(jobs.len()) {
             scope.spawn(|| {
+                let _policy = crate::kernel::policy::PolicyScope::inherit(policy.clone());
+                let _t = parent.phase("download pool");
                 crate::kernel::ui::in_batch(&batch, || loop {
                     // Indices are handed out in order, so every index below
                     // a failed one was taken before it and is finished, not
@@ -164,5 +172,19 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap(), &1);
         assert_eq!(results[1].as_ref().unwrap_err().to_string(), "two");
         assert_eq!(results.len(), 3);
+    }
+
+    /// A worker reads the caller's policy, not the default a bare thread
+    /// would: a registry download takes its `[sources]` from it.
+    #[test]
+    fn workers_read_the_callers_policy() {
+        let policy = crate::kernel::policy::Policy {
+            strict: true,
+            ..Default::default()
+        };
+        let _scope = crate::kernel::policy::PolicyScope::install(policy);
+        let jobs: Vec<usize> = (0..8).collect();
+        let strict = fetch_all(&jobs, |_| Ok(crate::kernel::policy::strict())).unwrap();
+        assert!(strict.iter().all(|&s| s), "{strict:?}");
     }
 }

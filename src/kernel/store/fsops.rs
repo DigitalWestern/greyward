@@ -294,6 +294,10 @@ pub(crate) fn mkdir_at(dirfd: RawFd, name: &[u8], mode: libc::mode_t) -> io::Res
 /// entry is durable. Plain fsync rather than `File::sync_all`, whose Darwin
 /// F_FULLFSYNC is not defined for directories; EINTR is retried.
 pub(crate) fn fsync_directory(dirfd: RawFd) -> io::Result<()> {
+    #[cfg(test)]
+    if DIRECTORY_SYNC_FAILURE.with(std::cell::Cell::get) {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
     loop {
         // SAFETY: dirfd is borrowed for the duration of the call.
         if unsafe { libc::fsync(dirfd) } == 0 {
@@ -304,6 +308,25 @@ pub(crate) fn fsync_directory(dirfd: RawFd) -> io::Result<()> {
             return Err(error);
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_SYNC_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Fail directory durability checks on this thread, restoring the previous
+/// setting even if the test unwinds.
+#[cfg(test)]
+pub(crate) fn with_directory_sync_failure<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DIRECTORY_SYNC_FAILURE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _reset = Reset(DIRECTORY_SYNC_FAILURE.with(|slot| slot.replace(true)));
+    f()
 }
 
 /// Make a just-published tree's contents durable before anything records it

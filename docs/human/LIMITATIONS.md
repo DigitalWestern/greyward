@@ -944,11 +944,20 @@ Selection covers every patch of each maintained CPython minor that python-build-
   only, so a project whose range admits only a preview SDK (11.0 today) is refused at
   toolchain selection. A `version` the host cannot parse (`9.0.*`) is ignored, as the host
   ignores it. `sdk.paths` and `msbuild-sdks` (SDK redirection) are refused.
-- **Strictest v0 boundary of any tailor** (all loud): one SDK-style .csproj only — no .sln, no
-  ProjectReference lock entries, no Central Package Management, no
-  packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.
-  Ancestor SDK inputs (global.json, Directory.Packages.props, Directory.Build.rsp,
-  packages.config) fail closed.
+- **Strictest boundary of any tailor** (all loud): one SDK-style project at the root, or the
+  root solution's (.sln/.slnx) SDK-style members, each with its own packages.lock.json.
+  A listed project restore cannot read (C++, packages.config, an MSBuild SDK fetched from
+  NuGet such as Microsoft.Build.Traversal or Aspire, a path outside the checkout) is skipped
+  with a `requirement-skipped` exception; the solution is refused only when no member is
+  left. Two members in one directory are refused (their locks would collide), and
+  `ward build` refuses two members with one file name (their artifacts directories would
+  collide). Windows-targeting members (`net8.0-windows`, WPF, Windows Forms) sync, but
+  `ward build` leaves them out: their targeting pack is fetched beside the lock, not pinned
+  by it. No PackageDownload, no UsingTask, no workloads, nuget.org only. Ancestor SDK inputs
+  (global.json, Directory.Packages.props, Directory.Build.rsp, packages.config) fail closed.
+  Output properties (OutputPath, OutDir, BaseOutputPath, PublishDir) must stay inside the
+  checkout; `ward build` puts output in scratch whatever they say. A
+  `CustomBeforeMicrosoftCommonTargets` the project sets is replaced during `ward build`.
 - **Build-capable dotnet verbs are refused at `ward run`**; everything compiling goes
   through `ward build dotnet`, which covers build only (no test/publish verbs). The guard
   is advisory — `sh -c` can bypass it. Missing-lock restore runs in the resolution

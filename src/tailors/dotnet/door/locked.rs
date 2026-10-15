@@ -8,7 +8,10 @@ use crate::kernel::resolve::door::{LockedList, Staged};
 use std::path::PathBuf;
 
 /// The [`LockedList`] of a restore publishing `outputs`: each of them
-/// named `packages.lock.json`, read as the strict lock reader reads it.
+/// named `packages.lock.json` that the run left, read as the strict lock
+/// reader reads it. Outputs name a lock beside every project file in the
+/// tree, and a project restore never reached writes none; the members'
+/// locks are required by the run's result check before this reads them.
 pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>) -> LockedList<'a> {
     Box::new(move |staged: &Staged<'_>| {
         let mut found = Vec::new();
@@ -16,8 +19,9 @@ pub(crate) fn locked_list<'a>(outputs: Vec<PathBuf>) -> LockedList<'a> {
             path.file_name()
                 .is_some_and(|name| name == "packages.lock.json")
         }) {
-            let bytes = staged.read_lock(path)?;
-            found.extend(lock_packages(&String::from_utf8_lossy(&bytes))?);
+            if let Some(bytes) = staged.read(path)? {
+                found.extend(lock_packages(&String::from_utf8_lossy(&bytes))?);
+            }
         }
         Ok(found)
     })

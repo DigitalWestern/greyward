@@ -520,6 +520,37 @@ range. A missing lock and
 (`dotnet/door.rs`), with a `nuget.config` whose one source is the
 session's NuGet mirror (`dotnet/registry.rs`).
 
+A project is one SDK-style project file at the root, or a solution
+(`dotnet/solution.rs`). With a `.sln` or `.slnx` at the root (several:
+the one listing the most projects), its members are the projects it
+lists, each with its own `packages.lock.json` beside it. Restore and build
+run over a solution Greyward generates in scratch, listing only the
+members, with `SolutionDir` and its siblings set to the real root so the
+project's own MSBuild files see the paths they expect. A listed project
+restore cannot read on Linux or offline is skipped and recorded as a
+`requirement-skipped` exception, not refused: a C++ or `packages.config`
+project, one that needs an MSBuild SDK fetched from NuGet
+(`Microsoft.Build.Traversal`, `Aspire.AppHost.Sdk`), or one outside the
+checkout. A Windows-targeting project (`net8.0-windows`, WPF, Windows
+Forms) stays a member and restores with `EnableWindowsTargeting`; `ward
+build` leaves it out, naming it, because its build needs a Windows
+targeting pack that restore fetches beside the lock and no lock pins. The
+solution is refused only when no member is left. `Directory.Build.props`, `Directory.Build.targets` and
+`Directory.Packages.props` (Central Package Management) are resolution
+inputs, scanned like project files. The packages object is the union of
+every member's lock; realization verifies it by restoring verifier
+projects that pin each lock's packages under the framework that lock
+restored them for. A solution builds in MSBuild's artifacts mode, every
+project's obj and bin under one scratch `artifacts/`, and `artifacts/bin`
+is published. Output properties (`OutputPath`, `OutDir`,
+`BaseOutputPath`, `PublishDir`) are accepted when they stay in the
+checkout, and a targets file Greyward passes as
+`CustomBeforeMicrosoftCommonTargets` moves every project's output to
+scratch anyway: `Microsoft.Common.CurrentVersion.targets` imports it after
+the project and the SDK's default output paths, before `OutDir` and
+`TargetDir` are derived. Properties that move restore (`RestoreSources`,
+`BaseIntermediateOutputPath` and the like) stay refused.
+
 ## Resolution doors
 
 A resolution door is where Greyward runs an ecosystem's own tool to choose
@@ -546,7 +577,7 @@ The census, by door kind:
 | Python (uv) | confined | confined | confined | confined |
 | Ruby (Bundler) | confined | confined | confined | confined |
 | Elixir (mix) | `update` confined, `add`/`remove` refused | confined | confined | confined |
-| .NET | refused | confined | none (reads the lock) | confined |
+| .NET | refused | confined (a solution: one restore of every member) | none (reads the locks) | confined |
 
 `ward x` resolves a registry tool into `~/.greyward/x` through a door of its
 own kind, confined the same way.

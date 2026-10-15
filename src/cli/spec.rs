@@ -449,7 +449,7 @@ in use; retry after it exits.",
 Runs the ecosystem's build tool inside the network-denied sandbox with the
 pinned toolchain and the realized dependency objects. The ecosystem is
 inferred when exactly one build-capable project (Cargo.toml, go.mod,
-mix.exs, *.csproj) is found from here upward; name it when several are.
+mix.exs, *.csproj, *.sln) is found from here upward; name it when several are.
 Every argument after the ecosystem is handed to the tool unchanged, so
 'ward build --release' works; use '--' if the first tool argument is
 '-h' or '--help'. Like 'run', it sets the project up first when the

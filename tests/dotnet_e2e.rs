@@ -144,6 +144,109 @@ fn assert_signed_dotnet_resolution(temp: &TempDir) {
     assert_eq!(std::fs::read(closure_path).unwrap(), closure_before);
 }
 
+/// Write `files` (path, text) under `root`.
+fn write_tree(root: &Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+}
+
+/// A solution of two projects, one referencing the other, with central
+/// package versions, an output path set by the project, and a C++ project
+/// restore cannot read. Sync restores both members through one generated
+/// solution and writes each its lock; the C++ project is skipped and
+/// recorded; build runs the solution offline and publishes every
+/// project's output.
+fn assert_solution_sync_and_build(temp: &TempDir) {
+    let root = temp.0.join("dotnet-solution");
+    write_tree(
+        &root,
+        &[
+            (
+                "app.slnx",
+                "<Solution>\n  <Folder Name=\"/src/\">\n    \
+                 <Project Path=\"src/App/App.csproj\" />\n    \
+                 <Project Path=\"src\\Lib\\Lib.csproj\" />\n  </Folder>\n  \
+                 <Project Path=\"native/native.vcxproj\" />\n</Solution>\n",
+            ),
+            (
+                "Directory.Build.props",
+                "<Project><PropertyGroup>\
+                 <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>\
+                 <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>\
+                 <TargetFramework>net9.0</TargetFramework>\
+                 </PropertyGroup></Project>\n",
+            ),
+            (
+                "Directory.Packages.props",
+                "<Project><ItemGroup>\
+                 <PackageVersion Include=\"Newtonsoft.Json\" Version=\"13.0.4\" />\
+                 </ItemGroup></Project>\n",
+            ),
+            (
+                "src/Lib/Lib.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>\
+                 <PackageReference Include=\"Newtonsoft.Json\" />\
+                 </ItemGroup></Project>\n",
+            ),
+            (
+                "src/Lib/Greeting.cs",
+                "namespace Lib;\npublic static class Greeting {\n    \
+                 public static string Json() => \
+                 Newtonsoft.Json.JsonConvert.SerializeObject(new { dotnet = \"sln\" });\n}\n",
+            ),
+            (
+                "src/App/App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+                 <OutputType>Exe</OutputType>\
+                 <OutputPath>../../Output/$(Configuration)/</OutputPath>\
+                 </PropertyGroup><ItemGroup>\
+                 <ProjectReference Include=\"../Lib/Lib.csproj\" />\
+                 </ItemGroup></Project>\n",
+            ),
+            (
+                "src/App/Program.cs",
+                "System.Console.WriteLine(\"dn sln: \" + Lib.Greeting.Json());\n",
+            ),
+            ("native/native.vcxproj", "<Project />\n"),
+        ],
+    );
+    let sync = common::ward(&root, &temp.0, &["sync"]);
+    let stderr = common::text(&sync.stderr);
+    assert!(sync.status.success(), "solution sync: {stderr}");
+    for member in ["src/App", "src/Lib"] {
+        let lock = std::fs::read_to_string(root.join(member).join("packages.lock.json"))
+            .unwrap_or_else(|e| panic!("{member}: no lock: {e}"));
+        assert!(lock.contains("Newtonsoft.Json"), "{member}: {lock}");
+    }
+    assert!(!root.join("native/packages.lock.json").exists());
+    let closure = std::fs::read_to_string(root.join(".greyward/closures/dotnet.json")).unwrap();
+    assert!(closure.contains("native/native.vcxproj"), "{closure}");
+
+    // A second sync reads the committed locks.
+    assert_ok(ward(&root, &temp.0, &["sync"]), "solution re-sync");
+    assert_ok(ward(&root, &temp.0, &["build"]), "solution build");
+    assert!(
+        !root.join("Output").exists(),
+        "the build wrote the project's own OutputPath"
+    );
+    let bin = std::fs::read_dir(root.join("bin"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with("greyward-"))
+        .expect("published solution output")
+        .path();
+    let app = bin.join("App/debug/App.dll");
+    assert!(bin.join("Lib/debug/Lib.dll").is_file(), "{}", bin.display());
+    let out = assert_ok(
+        ward(&root, &temp.0, &["run", "dotnet", app.to_str().unwrap()]),
+        "run the solution's app",
+    );
+    assert!(out.contains("{\"dotnet\":\"sln\"}"), "{out}");
+}
+
 #[test]
 #[ignore]
 fn dotnet_sync_sandboxed_build_and_run() {
@@ -262,5 +365,7 @@ fn dotnet_sync_sandboxed_build_and_run() {
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
 
+    assert_solution_sync_and_build(&temp);
+    // Last: it writes a policy every later sync under the temp root reads.
     assert_signed_dotnet_resolution(&temp);
 }

@@ -2,7 +2,9 @@
 //! `run`, `ls`, `status`, and `sbom` do for a NuGet-locked project.
 
 use crate::comforter;
-use crate::comforter::status::{standard_state, string, State};
+use crate::comforter::status::{
+    object_liveness_state, recorded_inputs_state, standard_state, string, State,
+};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_property, required, toolchain_component, version_of,
@@ -43,6 +45,8 @@ fn realize_and_project(
         Some(checked) => checked,
         None => dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?,
     };
+    // A solution's skipped projects are this closure's exceptions.
+    checked.record_skips()?;
     let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
     let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain, &checked)?;
     // The resolution files this plan was built from, so the resolution
@@ -57,6 +61,7 @@ fn realize_and_project(
         &packages,
         &plan,
         &lock_sha256,
+        &checked.lock_inputs(),
         basis,
         toolchain,
         attribution,
@@ -307,6 +312,16 @@ impl Tailor for Dotnet {
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
+        // A solution's closure records each member lock.
+        if body["inputs"]
+            .as_array()
+            .is_some_and(|inputs| !inputs.is_empty())
+        {
+            if let Some(state) = object_liveness_state(body, &["sdk_object", "packages_object"]) {
+                return Ok(state);
+            }
+            return recorded_inputs_state(project, body);
+        }
         standard_state(
             project,
             body,

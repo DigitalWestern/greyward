@@ -421,14 +421,9 @@ fn target_row(root: &ProjectRoot) -> io::Result<Option<InputRow>> {
     let global = root.read_file(Path::new("global.json"))?;
     let global_selects = global
         .as_deref()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-        .and_then(|value| {
-            value
-                .get("sdk")?
-                .get("version")?
-                .as_str()
-                .map(str::to_owned)
-        })
+        .map(crate::kernel::toolchain::input::read_global_json)
+        .transpose()?
+        .flatten()
         .is_some_and(|version| {
             super::rollforward::sdk_request(Some(&version), None)
                 .ok()
@@ -581,12 +576,17 @@ mod tests {
         std::fs::write(temp.0.join("app.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><TargetFramework Condition=\"'$(Optional)' == 'true'\">net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
         let why = toolchain_rows(&root).unwrap_err().to_string();
         assert!(why.contains("unevaluated MSBuild condition"), "{why}");
-        std::fs::write(
-            temp.0.join("global.json"),
-            r#"{"sdk":{"version":"9.0.317","rollForward":"disable"}}"#,
-        )
-        .unwrap();
-        toolchain_rows(&root).unwrap();
+        for prefix in ["", "\u{feff}"] {
+            std::fs::write(
+                temp.0.join("global.json"),
+                format!(
+                    "{prefix}{}",
+                    r#"{"sdk":{"version":"9.0.317","rollForward":"disable"}}"#
+                ),
+            )
+            .unwrap();
+            toolchain_rows(&root).unwrap();
+        }
     }
 
     /// Without a global.json version, the newest target framework picks

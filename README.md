@@ -290,11 +290,11 @@ Three things to know before you adopt this.
 - A closure is one file per ecosystem, not one per platform, and it records
   the platform it was synced on, so a mixed Mac and Linux team overwrites
   one record with the other; the loser reads `elsewhere` in `ward status`.
-- Every sync rewrites the record's `projected_at`, so a local sync
-  dirties the committed file even when nothing about the environment
-  changed.
+- A sync preserves the record and its `projected_at` when the complete
+  envelope, including its signature, is unchanged. A changed envelope
+  gets the current timestamp.
 
-The last two point the same way: let one protected job on one platform write
+For consistent platform and signing choices, let one protected job on one platform write
 the closures that get committed. The CI recipe is in
 [docs/human/CLI.md](docs/human/CLI.md#gating-a-pull-request-with-sync-and-audit).
 

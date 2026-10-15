@@ -587,11 +587,9 @@ mod tests {
         write_project(
             &temp.0,
             "App/App.csproj",
-            &csproj(
-                "<ItemGroup><ProjectReference Include=\"../Hidden/Hidden.csproj\" /></ItemGroup>",
-            ),
+            &csproj("<ProjectReference Include=\"../Hidden/Hidden.csproj\" />"),
         );
-        write_project(&temp.0, "Hidden/Hidden.csproj", &csproj("<ItemGroup><PackageReference Include=\"Example.Private\" Version=\"1.0.0\" PrivateAssets=\"all\" /></ItemGroup>"));
+        write_project(&temp.0, "Hidden/Hidden.csproj", &csproj("<PackageReference Include=\"Example.Private\" Version=\"1.0.0\" PrivateAssets=\"all\" />"));
         write_project(
             &temp.0,
             "App/packages.lock.json",
@@ -624,7 +622,7 @@ mod tests {
         write_project(
             &temp.0,
             "Root.csproj",
-            &csproj("<ItemGroup><ProjectReference Include=\"Hidden/Hidden.csproj\" /></ItemGroup>"),
+            &csproj("<ProjectReference Include=\"Hidden/Hidden.csproj\" />"),
         );
         write_project(
             &temp.0,
@@ -679,9 +677,7 @@ mod tests {
             write_project(
                 &temp.0,
                 "App/App.csproj",
-                &csproj(&format!(
-                    "<ItemGroup><ProjectReference Include=\"{reference}\" /></ItemGroup>"
-                )),
+                &csproj(&format!("<ProjectReference Include=\"{reference}\" />")),
             );
             write_project(&temp.0, target, body);
             let why = preflight(&project, "9.0.317").unwrap_err().to_string();
@@ -695,23 +691,35 @@ mod tests {
         write_project(
             &temp.0,
             "App.csproj",
-            &csproj("<Import Project=\"custom.data\" />"),
+            &csproj("").replace("</Project>", "<Import Project=\"custom.data\" /></Project>"),
         );
         let project = ProjectRoot::open(&temp.0).unwrap();
         for feature in [
-            "<ItemGroup><PackageDownload Include=\"Example.Hidden\" Version=\"[1.0.0]\" /></ItemGroup>",
+            "<ItemGroup><PackageDownload Include=\"Example.Hidden\" Version=\"[1.0.0]\" />",
             "<UsingTask TaskName=\"Hidden\" AssemblyFile=\"hidden.dll\" />",
             "<PropertyGroup><RestoreSources>https://example.test</RestoreSources></PropertyGroup>",
             "<Sdk Name=\"Other.Sdk\" Version=\"1.0.0\" />",
-            "<ItemGroup><ProjectReference Include=\"Hidden.csproj\" /></ItemGroup>",
+            "<ProjectReference Include=\"Hidden.csproj\" />",
         ] {
             let text = format!("<Project>{feature}</Project>");
             let encodings = [
                 text.as_bytes().to_vec(),
-                std::iter::once(0xfeffu16).chain(text.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
-                std::iter::once(0xfeffu16).chain(text.encode_utf16()).flat_map(u16::to_be_bytes).collect(),
-                std::iter::once('\u{feff}').chain(text.chars()).flat_map(|c| (c as u32).to_le_bytes()).collect(),
-                std::iter::once('\u{feff}').chain(text.chars()).flat_map(|c| (c as u32).to_be_bytes()).collect(),
+                std::iter::once(0xfeffu16)
+                    .chain(text.encode_utf16())
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+                std::iter::once(0xfeffu16)
+                    .chain(text.encode_utf16())
+                    .flat_map(u16::to_be_bytes)
+                    .collect(),
+                std::iter::once('\u{feff}')
+                    .chain(text.chars())
+                    .flat_map(|c| (c as u32).to_le_bytes())
+                    .collect(),
+                std::iter::once('\u{feff}')
+                    .chain(text.chars())
+                    .flat_map(|c| (c as u32).to_be_bytes())
+                    .collect(),
             ];
             for bytes in encodings {
                 fs::write(temp.0.join("custom.data"), bytes).unwrap();
@@ -764,9 +772,7 @@ mod tests {
         write_project(
             &temp.0,
             "App/App.csproj",
-            &csproj(
-                "<ItemGroup><ProjectReference Include=\"../Windows/Windows.csproj\" /></ItemGroup>",
-            ),
+            &csproj("<ProjectReference Include=\"../Windows/Windows.csproj\" />"),
         );
         write_project(&temp.0, "Windows/Windows.csproj", &csproj(""));
         write_project(

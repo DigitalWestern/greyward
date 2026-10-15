@@ -795,9 +795,11 @@ fn decode_msbuild(bytes: &[u8]) -> io::Result<String> {
             return Err(err("invalid UTF-32 MSBuild input"));
         }
         return bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| {
-                let chunk: [u8; 4] = chunk.try_into().expect("four-byte chunk");
+                let chunk = *chunk;
                 char::from_u32(if little {
                     u32::from_le_bytes(chunk)
                 } else {
@@ -823,7 +825,9 @@ fn decode_msbuild(bytes: &[u8]) -> io::Result<String> {
             return Err(err("invalid UTF-16 MSBuild input"));
         }
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| {
                 let chunk = [chunk[0], chunk[1]];
                 if little {

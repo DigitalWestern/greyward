@@ -856,6 +856,12 @@ pub(super) fn realize_node_env_with_node_object(
     gyp_python: &crate::kernel::toolchain::Selected,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
+    // Every registry package is checked against the effective node list
+    // before any cache is consulted: a warm environment built under another
+    // policy is not reused for a lock the list now refuses.
+    for package in &plan.packages {
+        super::classify::check_registry(package)?;
+    }
     let gyp_python_id =
         crate::kernel::provider::cpython::cpython_object_id(gyp_python, platform)
             .map_err(|e| io::Error::new(e.kind(), format!("python for node-gyp: {e}")))?;

@@ -29,10 +29,55 @@ pub(crate) const REGISTRY: PackageRegistry = PackageRegistry {
 /// `Tailor::registry_exists`: `Some(latest version)` when PyPI knows
 /// `name`.
 pub(crate) fn registry_exists(name: &str) -> io::Result<Option<String>> {
+    let policy = crate::kernel::policy::effective();
+    if let Some(registry) = super::pypi::default_registry(&policy)? {
+        crate::kernel::ui::trace(&format!(
+            "asking registry {} about '{name}': {}",
+            registry.name, registry.url
+        ));
+        let files = super::pypi::simple_page(&policy.registries, registry, name).map_err(|error| {
+            other(format!(
+                "could not ask registry {} whether '{name}' exists ({error}); say which ecosystem: {}:{name}",
+                registry.name, REGISTRY.prefix
+            ))
+        })?;
+        return Ok(files.map(|files| newest_release(name, &files).unwrap_or_else(|| "?".into())));
+    }
     let url = format!("https://pypi.org/pypi/{name}/json");
     registry_latest(REGISTRY, name, &url, |v| {
         v["info"]["version"].as_str().map(str::to_string)
     })
+}
+
+/// The newest final release a simple page's file names carry
+/// (`name-1.2.0.tar.gz`, `name-1.2.0-py3-none-any.whl`), else the newest
+/// pre-release.
+fn newest_release(name: &str, files: &[(String, String, String)]) -> Option<String> {
+    use crate::kernel::pep440::Version;
+    let prefix = super::pypi::normalize_name(name).replace('-', "_");
+    let versions: Vec<(Version, &str)> = files
+        .iter()
+        .filter_map(|(filename, _, _)| {
+            let stem = filename
+                .strip_suffix(".tar.gz")
+                .or_else(|| filename.strip_suffix(".zip"))
+                .or_else(|| filename.strip_suffix(".whl"))?;
+            let normalized = stem.to_ascii_lowercase().replace(['-', '.'], "_");
+            let rest = normalized.strip_prefix(&format!("{prefix}_"))?;
+            // The version is the next dash-separated piece of the original.
+            let start = stem.len() - rest.len();
+            let version = stem[start..].split('-').next()?;
+            Some((Version::parse(version).ok()?, version))
+        })
+        .collect();
+    let newest = |pre: bool| {
+        versions
+            .iter()
+            .filter(|(version, _)| version.is_prerelease() == pre)
+            .max_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, spelled)| spelled.to_string())
+    };
+    newest(false).or_else(|| newest(true))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,6 +703,28 @@ fn python_uv(edit: &ManifestEdit<'_>, door: &mut ResolutionDoor<'_>) -> io::Resu
 
 #[cfg(test)]
 mod tests {
+    /// `ward add` against a configured registry reads the newest final
+    /// release from the simple page's file names, whatever their spelling.
+    #[test]
+    fn the_newest_release_comes_from_the_file_names() {
+        let file = |name: &str| (name.to_string(), String::new(), String::new());
+        let files = [
+            file("Corp.Widget-1.9.0.tar.gz"),
+            file("corp_widget-1.10.0-py3-none-any.whl"),
+            file("corp_widget-2.0.0rc1.tar.gz"),
+            file("corp_widgetry-9.0.0.tar.gz"),
+        ];
+        assert_eq!(
+            super::newest_release("corp-widget", &files).as_deref(),
+            Some("1.10.0")
+        );
+        assert_eq!(
+            super::newest_release("corp-widget", &files[2..3]).as_deref(),
+            Some("2.0.0rc1")
+        );
+        assert_eq!(super::newest_release("other", &files), None);
+    }
+
     use super::*;
     use crate::kernel::testutil::TempDir;
 

@@ -1,0 +1,9 @@
+//! Private registries: the policy grammar that declares them, the credentials
+//! they authenticate with, and the one URL prefix test every check shares.
+
+pub mod config;
+pub mod covers;
+pub mod credential;
+pub mod effective;
+pub mod lock;
+pub mod route;

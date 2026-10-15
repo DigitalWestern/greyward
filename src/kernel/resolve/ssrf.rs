@@ -35,9 +35,41 @@ impl Lookup for SystemLookup {
     }
 }
 
+/// The ranges a `network = "private"` registry may resolve to (machine
+/// policy only): RFC 1918, shared address space, unique local, loopback.
+const PRIVATE: &[&str] = &[
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "fc00::/7",
+    "::1/128",
+];
+
+/// Cloud metadata services inside the private ranges: refused under every
+/// setting.
+const METADATA: &[&str] = &["100.100.100.200/32", "fd00:ec2::254/128"];
+
+/// Whether `address` is one a private-mode registry may use: inside
+/// [`PRIVATE`] and not a metadata address. Everything else private
+/// (link-local, the embedding forms, multicast) stays refused.
+fn private_allowed(address: IpAddr) -> bool {
+    let inside = |blocks: &[&str]| {
+        blocks
+            .iter()
+            .filter_map(|block| iana::Block::parse(block))
+            .any(|block| block.contains(address))
+    };
+    inside(PRIVATE) && !inside(METADATA)
+}
+
 /// Looks up once, validates every address, returns exactly that list.
 pub struct ValidatingResolver {
     lookup: Arc<dyn Lookup>,
+    /// A `network = "private"` registry's resolver: an answer may be all
+    /// globally routable or all inside the private ranges, never a mix.
+    pub(crate) private: bool,
     /// Tests only: accept loopback answers, so the fixture upstream on
     /// `127.0.0.1` is reachable. Every other refused range stays refused,
     /// and the SSRF tests build their resolver with this off.
@@ -53,6 +85,7 @@ impl ValidatingResolver {
     pub fn new(lookup: Arc<dyn Lookup>) -> Self {
         Self {
             lookup,
+            private: false,
             #[cfg(test)]
             allow_loopback: false,
             #[cfg(test)]
@@ -81,13 +114,21 @@ impl PinnedResolve for ValidatingResolver {
                 format!("{host} resolved to no address"),
             ));
         }
-        for address in &addresses {
-            if let Some(reason) = self.refusal(*address) {
-                return Err(ResolveRefusal(format!(
-                    "{host} resolves to {reason}; the proxy connects only to globally routable \
-                     addresses"
-                ))
-                .into_io());
+        let all_private = self.private && addresses.iter().all(|a| private_allowed(*a));
+        if !all_private {
+            for address in &addresses {
+                if let Some(reason) = self.refusal(*address) {
+                    let rule = if self.private {
+                        "a private registry's answer must be all globally routable or all inside \
+                         10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7 or loopback, and never a \
+                         metadata address"
+                    } else {
+                        "the proxy connects only to globally routable addresses"
+                    };
+                    return Err(
+                        ResolveRefusal(format!("{host} resolves to {reason}; {rule}")).into_io(),
+                    );
+                }
             }
         }
         let validated: Vec<SocketAddr> = addresses
@@ -142,6 +183,46 @@ mod tests {
             let why = refused(mixed.resolve("registry.test", 443).unwrap_err());
             assert!(why.contains("registry.test"), "{why}");
         }
+    }
+
+    #[test]
+    fn private_mode_takes_all_private_or_all_public_answers() {
+        let private = |answers: &[&str]| {
+            let mut resolver = resolver(answers);
+            resolver.private = true;
+            resolver.resolve("nexus.corp.test", 443)
+        };
+        for ok in [
+            &["10.1.2.3"][..],
+            &["172.16.0.9", "192.168.1.1"],
+            &["100.64.0.1"],
+            &["127.0.0.1"],
+            &["::1"],
+            &["fd12::1"],
+            &["93.184.216.34"],
+        ] {
+            assert!(private(ok).is_ok(), "{ok:?}");
+        }
+        for refused_answer in [
+            &["10.0.0.1", "93.184.216.34"][..],
+            &["169.254.169.254"],
+            &["fe80::1"],
+            &["::ffff:10.0.0.1"],
+            &["64:ff9b::a00:1"],
+            &["2002:a00:1::1"],
+            &["100.100.100.200"],
+            &["fd00:ec2::254"],
+            &["224.0.0.1"],
+            &["0.0.0.0"],
+        ] {
+            refused(private(refused_answer).unwrap_err());
+        }
+        // The default mode is unchanged.
+        refused(
+            resolver(&["10.1.2.3"])
+                .resolve("nexus.corp.test", 443)
+                .unwrap_err(),
+        );
     }
 
     #[test]

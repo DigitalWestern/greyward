@@ -910,13 +910,20 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `unpinned-digest`, as for any gem). It is its own store object, planned, installed and
   run with; no other version is ever picked. A lock no newer keeps the shipped Bundler. A
   project with no lock is resolved by the shipped Bundler, which writes its own version.
+  `bundle lock --add-checksums` does not normally pin Bundler itself: add its verified
+  gem SHA-256 to the lock's CHECKSUMS section as described in
+  [Ruby Bundler pinning](CLI.md), and restore it if Bundler rewrites it away.
 - **Git sources while the lock is written.** `bundle lock` (and `ward add`/`update`/
   `remove`) reaches git only for the hosts the Gemfile's git options name (`git:`, a
-  `git "..." do` block, `git_source`, and the `github:`, `gist:` and `bitbucket:`
-  shorthands), read from its text without evaluating it, and only git fetches are served
-  there; each records `git-dependency` in the receipt. A remote built by interpolation, or
-  named in a file `eval_gemfile` loads, is not read, and Bundler's clone of it is refused,
-  naming the host. A gemspec's `git ls-files` sees a throwaway index of the project copy
+  `git "..." do` block, `git_source`, and the `github:`, `gitlab:`, `gist:` and `bitbucket:`
+  shorthands), tokenized without evaluating it. Comments and unrelated strings are skipped.
+  Only git smart-HTTP fetches are served there, on 443 or the exact HTTPS port the literal
+  remote names. Each records `git-dependency` in the receipt. A remote whose host is built
+  by interpolation or a variable, or named in a file `eval_gemfile` loads, is not read.
+  Bundler's clone of it is refused, naming the host, unless another declaration names
+  that host. Interpolation in a path after a literal host is supported. This is a limited
+  scan of Ruby tokens, so some other valid Ruby spellings fail closed too.
+  A gemspec's `git ls-files` sees a throwaway index of the project copy
   (`git add -A`, so `.gitignore` applies), removed after the run: a file the project's
   `.gitignore` drops but its repository tracks is missing from that list.
 - **Default/bundled-gem preactivation edge**: a

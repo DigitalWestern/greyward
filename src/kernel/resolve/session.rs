@@ -44,7 +44,8 @@ pub enum Intercept {
     /// npm, pnpm, uv).
     Tls,
     /// [`Intercept::Tls`] for git alone: a tunnel to one of the session's
-    /// `git_hosts` on port 443 is terminated and serves git fetches only;
+    /// `git_hosts` (on 443, or on the port an entry names) is terminated
+    /// and serves git's smart HTTP fetches only;
     /// every other tunnel is refused as under
     /// [`Intercept::RefuseVisibly`]. For mirror-dialect tools that clone
     /// the git sources a manifest names while they resolve (Bundler).
@@ -68,8 +69,9 @@ pub struct SessionConfig {
     pub door: String,
     pub routes: Vec<Route>,
     pub intercept: Intercept,
-    /// The hosts [`Intercept::Git`] serves git fetches from, lowercase.
-    /// Unused under the other modes.
+    /// The hosts [`Intercept::Git`] serves git fetches from, lowercase: a
+    /// bare host on port 443, or `host:port` on that port alone. Unused
+    /// under the other modes.
     pub git_hosts: Vec<String>,
     /// The run's effective policy, copied: the proxy only reads it.
     pub policy: Policy,

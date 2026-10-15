@@ -1057,7 +1057,7 @@ fn connect<S: Stream>(context: &Context, request: &Request, reader: &mut BufRead
             Ok(())
         }
         // Git alone, and only to the hosts the manifest names.
-        Intercept::Git if port != GIT_PORT && state.config.git_hosts.contains(&host) => {
+        Intercept::Git if git_host_listed(&state.config.git_hosts, &host, port) => {
             super::intercept::serve_tunnel(context, &tunnel, record, reader);
             Ok(())
         }
@@ -1065,6 +1065,15 @@ fn connect<S: Stream>(context: &Context, request: &Request, reader: &mut BufRead
             refuse_tunnel(state, &tunnel, record, out)
         }
     };
+}
+
+/// Whether a git-only session admits a tunnel to `host` on `port`: a listed
+/// bare host on 443, or a listed `host:port` exactly.
+fn git_host_listed(hosts: &[String], host: &str, port: u16) -> bool {
+    hosts.iter().any(|listed| match listed.rsplit_once(':') {
+        Some((name, listed_port)) => name == host && listed_port.parse() == Ok(port),
+        None => port == 443 && listed == host,
+    })
 }
 
 /// Refuse an authenticated tunnel, naming the host and why, and record the
@@ -1383,6 +1392,19 @@ mod tests {
         get, mirror, proxy_authorization, send, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
     use crate::kernel::testutil::SocketDir;
+
+    /// A git-only session's host list: a bare host admits 443 alone, a
+    /// `host:port` that port alone, and nothing else matches.
+    #[test]
+    fn git_hosts_admit_443_or_their_exact_port() {
+        let hosts = ["git.test".to_string(), "ported.test:8443".to_string()];
+        assert!(git_host_listed(&hosts, "git.test", 443));
+        assert!(!git_host_listed(&hosts, "git.test", 8443));
+        assert!(!git_host_listed(&hosts, "git.test", GIT_PORT));
+        assert!(git_host_listed(&hosts, "ported.test", 8443));
+        assert!(!git_host_listed(&hosts, "ported.test", 443));
+        assert!(!git_host_listed(&hosts, "other.test", 443));
+    }
 
     #[test]
     fn retry_after_reads_seconds_and_http_dates() {

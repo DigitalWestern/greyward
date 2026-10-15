@@ -187,7 +187,9 @@ fn body_cap(target: &Target<'_>, head: &http::Head) -> u64 {
 }
 
 /// [`serve`], except that a git-only session ([`Intercept::Git`]) serves
-/// a git fetch and nothing else, even on a host a route serves.
+/// git's smart HTTP fetch and nothing else, even on a host a route serves:
+/// not the GitHub commit lookups and raw file reads other tools' git rows
+/// accept.
 fn serve_in_session(
     context: &Context,
     target: &Target<'_>,
@@ -199,7 +201,7 @@ fn serve_in_session(
         let raw = format!("{}{}", target.origin, request.target);
         let fetch = Url::parse(&raw)
             .ok()
-            .and_then(|url| git_fetch(&url, &request.method));
+            .and_then(|url| smart_http_fetch(&url, &request.method));
         if !matches!(fetch, Some(Ok(_))) {
             let why = format!(
                 "inside the tunnel to {}, only git fetches are served",
@@ -415,11 +417,19 @@ fn hop_allowed(
 ) -> Result<(), String> {
     let class = classify(&state.config.routes, next, method)
         .map_err(|why| format!("redirect to {}: {why}", redact::url(next.as_str(), &[])))?;
+    // A git-only session follows a git fetch to another smart-HTTP fetch
+    // alone.
+    let git_only = state.config.intercept == Intercept::Git;
+    if git_only && !matches!(smart_http_fetch(next, method), Some(Ok(_))) {
+        return Err(format!(
+            "redirect to {}: only git fetches are served in this session",
+            redact::url(next.as_str(), &[])
+        ));
+    }
     if std::mem::discriminant(&class) == std::mem::discriminant(first) {
         return Ok(());
     }
-    // A git-only session follows a git fetch to another git fetch alone.
-    if state.config.intercept == Intercept::Git {
+    if git_only {
         return Err(format!(
             "redirect to {}: only git fetches are served in this session",
             redact::url(next.as_str(), &[])
@@ -523,31 +533,10 @@ fn git_subject(repository: &str) -> String {
 /// named as the repository's URL; `Some(Err(why))` for a push; `None` for
 /// anything that is not git.
 fn git_fetch(url: &Url, method: &str) -> Option<Result<String, String>> {
+    if let Some(fetch) = smart_http_fetch(url, method) {
+        return Some(fetch);
+    }
     let path = url.path();
-    let service = url
-        .query_pairs()
-        .find(|(key, _)| key == "service")
-        .map(|(_, value)| value.into_owned());
-    let origin = url.origin().ascii_serialization();
-    if path.ends_with("/git-receive-pack")
-        || (path.ends_with("/info/refs") && service.as_deref() == Some("git-receive-pack"))
-    {
-        return Some(Err(
-            "git-receive-pack (a push) is not part of resolving dependencies".into(),
-        ));
-    }
-    if let Some(repository) = path.strip_suffix("/info/refs") {
-        if service.as_deref() == Some("git-upload-pack") && method != "POST" {
-            return Some(Ok(format!("{origin}{repository}")));
-        }
-        return None;
-    }
-    if let Some(repository) = path.strip_suffix("/git-upload-pack") {
-        if method == "POST" && url.query().is_none() {
-            return Some(Ok(format!("{origin}{repository}")));
-        }
-        return None;
-    }
     // GitHub's raw file read at a pinned commit, which uv makes for a
     // GitHub dependency's `pyproject.toml` instead of cloning it:
     // `/<owner>/<repo>/<40-hex commit>/<path>`. It reads the repository at
@@ -572,6 +561,39 @@ fn git_fetch(url: &Url, method: &str) -> Option<Result<String, String>> {
             }
         }
     }
+    None
+}
+
+/// [`git_fetch`] for git's smart HTTP alone: the `info/refs` discovery of
+/// `git-upload-pack` and the `git-upload-pack` POST. A push is
+/// `Some(Err(why))`, anything else `None`.
+fn smart_http_fetch(url: &Url, method: &str) -> Option<Result<String, String>> {
+    let path = url.path();
+    let service = url
+        .query_pairs()
+        .find(|(key, _)| key == "service")
+        .map(|(_, value)| value.into_owned());
+    let origin = url.origin().ascii_serialization();
+    if path.ends_with("/git-receive-pack")
+        || (path.ends_with("/info/refs") && service.as_deref() == Some("git-receive-pack"))
+    {
+        return Some(Err(
+            "git-receive-pack (a push) is not part of resolving dependencies".into(),
+        ));
+    }
+    if let Some(repository) = path.strip_suffix("/info/refs") {
+        if service.as_deref() == Some("git-upload-pack") && matches!(method, "GET" | "HEAD") {
+            return Some(Ok(format!("{origin}{repository}")));
+        }
+        return None;
+    }
+    if let Some(repository) = path.strip_suffix("/git-upload-pack") {
+        if method == "POST" && url.query().is_none() {
+            return Some(Ok(format!("{origin}{repository}")));
+        }
+        return None;
+    }
+
     None
 }
 
@@ -899,9 +921,11 @@ mod tests {
         let harness = Harness::new("intercept-git-only");
         let mut config = harness.config(Policy::default(), Mode::Online);
         config.intercept = Intercept::Git;
-        config.git_hosts = vec!["third.test".into()];
-        let (session, address) = harness.open(config);
+        // The upstream listens on a test port, so the session lists that
+        // exact `host:port`; a bare host would admit 443 alone.
         let authority = format!("third.test:{}", harness.upstream.port());
+        config.git_hosts = vec![authority.clone()];
+        let (session, address) = harness.open(config);
         let refs = "/a/repo.git/info/refs?service=git-upload-pack";
         harness
             .upstream
@@ -939,7 +963,7 @@ mod tests {
             .iter()
             .any(|fact| fact.kind == policy::UNATTESTED_INDEX
                 && fact.subject == other
-                && fact.detail.contains("(third.test)")));
+                && fact.detail.contains(&format!("({authority})"))));
     }
 
     /// The same `git ls-remote` against the recorded GitHub answers, first
@@ -1422,6 +1446,29 @@ mod tests {
 
     fn fetch(url: &str, method: &str) -> Option<Result<String, String>> {
         git_fetch(&Url::parse(url).unwrap(), method)
+    }
+
+    /// A git-only session's classifier is smart HTTP alone: GitHub's raw
+    /// file read and commit lookup, which the full git row accepts, are
+    /// not fetches there.
+    #[test]
+    fn smart_http_alone_excludes_githubs_other_reads() {
+        let commit = "a".repeat(40);
+        let raw = Url::parse(&format!(
+            "https://raw.githubusercontent.com/o/r/{commit}/pyproject.toml"
+        ))
+        .unwrap();
+        let api = Url::parse("https://api.github.com/repos/o/r/commits/main").unwrap();
+        for url in [&raw, &api] {
+            assert!(matches!(git_fetch(url, "GET"), Some(Ok(_))), "{url}");
+            assert_eq!(smart_http_fetch(url, "GET"), None, "{url}");
+        }
+        let refs = Url::parse("https://h.test/o/r.git/info/refs?service=git-upload-pack").unwrap();
+        let pack = Url::parse("https://h.test/o/r.git/git-upload-pack").unwrap();
+        assert!(matches!(smart_http_fetch(&refs, "GET"), Some(Ok(_))));
+        assert!(matches!(smart_http_fetch(&pack, "POST"), Some(Ok(_))));
+        let push = Url::parse("https://h.test/o/r.git/git-receive-pack").unwrap();
+        assert!(matches!(smart_http_fetch(&push, "POST"), Some(Err(_))));
     }
 
     #[test]

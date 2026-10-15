@@ -960,6 +960,25 @@ one the lock pins. It is recorded before any gem is fetched. A policy that
 denies it, or `--strict`, refuses such a lock; `bundle lock
 --add-checksums` writes the section.
 
+Ruby Bundler pinning: when `BUNDLED WITH` names a newer Bundler than the
+store Ruby ships, that Bundler is also an artifact that needs a checksum.
+`bundle lock --add-checksums` normally only pins the project's dependencies.
+To pin Bundler, obtain the exact `bundler-<version>.gem` for the version in
+`BUNDLED WITH`, verify its origin and SHA-256, then add this entry to the
+lock's existing `CHECKSUMS` section (create the section if it is absent):
+
+```text
+CHECKSUMS
+  bundler (4.0.3) sha256=<64 hexadecimal characters of the verified gem SHA-256>
+```
+
+Keep the entries for the project's ordinary gems. Run `ward sync` again.
+Greyward checks the Bundler download against that exact digest and accepts
+it under `deny = ["unpinned-digest"]`. Review and restore the entry after
+commands that regenerate `Gemfile.lock`, since Bundler may drop entries
+for artifacts absent from its dependency list. A new `BUNDLED WITH` version
+needs its own verified checksum.
+
 `young-package` is recorded, under `name@version`, for a registry package
 a resolution locked less than `[packages] min_age_days` (7 by default)
 after it was published. It is judged once, when the lock is written (`ward

@@ -162,8 +162,10 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     }
     let online = run.online;
     let mut files = std::mem::take(&mut run.files);
-    // A `bundle` run starts through the helper (`spec`).
-    if run.args[0] == "bundle" && !files.iter().any(|(path, _)| path == Path::new(HELPER_FILE)) {
+    // Both the bundle launcher and the removal editor use the helper.
+    if (run.args[0] == "bundle" || run.args.get(1) == Some(&"@SCRATCH@/helper.rb"))
+        && !files.iter().any(|(path, _)| path == Path::new(HELPER_FILE))
+    {
         files.push((
             PathBuf::from(HELPER_FILE),
             super::HELPER.as_bytes().to_vec(),

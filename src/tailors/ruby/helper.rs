@@ -77,6 +77,16 @@ if mode == "indexed"
   ok = with_index.call(-> { system(RbConfig.ruby, "-x", bundle, *ARGV) })
   exit(ok ? 0 : ($?.exitstatus || 1))
 end
+if mode == "remove"
+  # Bundler's editor evaluates gemspecs too. Activate the same exact
+  # Bundler as the later lock run and give them the project index.
+  activate_bundler.call
+  require "bundler"
+  require "bundler/injector"
+  abort "no gems requested" if ARGV.empty?
+  with_index.call(-> { Bundler::Injector.remove(ARGV) })
+  exit 0
+end
 if mode == "install"
   # Direct Gem::Installer: the `gem install` CLI requires remote_fetcher at
   # LOAD time, which trips EPERM under the network-denied sandbox. This

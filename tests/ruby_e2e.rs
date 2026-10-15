@@ -1683,6 +1683,25 @@ fn ruby_lock_bundled_with_a_newer_bundler_syncs_with_it() {
 
     let newer = temp.0.join("newer");
     bundled_with_project(&newer, version, Some((&sha256, &tiny_sha)));
+    // Under the policy, the ordinary gem's checksum is insufficient:
+    // Bundler's artifact needs its own pin. Follow the documented repair
+    // by adding its verified SHA-256 under CHECKSUMS, without a Gemfile
+    // dependency on Bundler.
+    let lock = std::fs::read_to_string(newer.join("Gemfile.lock")).unwrap();
+    let bundler_entry = format!("  bundler ({version}) sha256={sha256}\n");
+    std::fs::write(newer.join("Gemfile.lock"), lock.replace(&bundler_entry, "")).unwrap();
+    std::fs::create_dir_all(newer.join(".greyward")).unwrap();
+    std::fs::write(
+        newer.join(".greyward/policy.toml"),
+        "deny = [\"unpinned-digest\"]\n",
+    )
+    .unwrap();
+    let denied = ward_offline(&newer, &temp.0, &["sync"]);
+    let error = String::from_utf8_lossy(&denied.stderr);
+    assert_eq!(denied.status.code(), Some(3), "{error}");
+    assert!(error.contains("bundler-2.99.0"), "{error}");
+    assert!(error.contains("verified gem SHA-256"), "{error}");
+    std::fs::write(newer.join("Gemfile.lock"), lock).unwrap();
     let out = ward_offline(&newer, &temp.0, &["sync"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "sync failed: {stderr}");
@@ -1756,7 +1775,10 @@ fn ruby_lock_generation_answers_a_gemspecs_git_ls_files() {
     write_tree(
         &project,
         &[
-            ("Gemfile", "source \"https://rubygems.org\"\n\ngemspec\n"),
+            (
+                "Gemfile",
+                "source \"https://rubygems.org\"\n\ngemspec\ngem \"rake\", \"13.4.2\"\n",
+            ),
             (
                 "app.gemspec",
                 r#"Gem::Specification.new do |s|
@@ -1779,4 +1801,60 @@ end
     let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
     assert!(lock.contains("    app (1.0.0)"), "{lock}");
     assert!(!project.join(".git").exists());
+    let removed = ward(&project, &temp.0, &["remove", "rake"]);
+    let stderr = String::from_utf8_lossy(&removed.stderr);
+    assert!(removed.status.success(), "remove failed: {stderr}");
+    assert!(!stderr.contains("not a git repository"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    assert!(!lock.contains("rake"), "{lock}");
+    assert!(lock.contains("    app (1.0.0)"), "{lock}");
+    assert!(!project.join(".git").exists());
+}
+
+/// A missing lock makes Bundler itself clone the Git dependency through
+/// the confined resolver. The proxy records that fetch and enforces the
+/// policy before serving it, then ward installs the locked checkout.
+#[test]
+#[ignore]
+fn ruby_missing_lock_resolves_a_git_source_through_the_proxy() {
+    let temp = TempDir::new("ruby-e2e-git-lock");
+    let project = temp.0.join("app");
+    let revision = "7da1699a9e0eb24cb646ec6a3bc710897343da82";
+    let remote = "https://github.com/ruby/rake.git";
+    std::fs::create_dir_all(project.join(".greyward")).unwrap();
+    std::fs::write(
+        project.join("Gemfile"),
+        format!(
+            "source \"https://rubygems.org\"\ngem \"rake\", git: \"{remote}\", ref: \"{revision}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".greyward/policy.toml"),
+        "deny = [\"git-dependency\"]\n",
+    )
+    .unwrap();
+    let denied = ward(&project, &temp.0, &["sync"]);
+    let error = String::from_utf8_lossy(&denied.stderr);
+    assert!(!denied.status.success(), "{error}");
+    assert!(error.contains("git-dependency"), "{error}");
+    assert!(!project.join("Gemfile.lock").exists());
+    std::fs::remove_file(project.join(".greyward/policy.toml")).unwrap();
+
+    let out = ward(&project, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "sync failed: {stderr}");
+    assert!(stderr.contains("git-dependency"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    assert!(lock.contains(&format!("  revision: {revision}")), "{lock}");
+    assert!(lock.contains("    rake (13.3.0)"), "{lock}");
+    let said = assert_ok(
+        ward(
+            &project,
+            &temp.0,
+            &["run", "bundle", "exec", "rake", "--version"],
+        ),
+        "the Git dependency's executable",
+    );
+    assert!(said.contains("rake, version 13.3.0"), "{said}");
 }

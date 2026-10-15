@@ -357,8 +357,9 @@ pub(super) fn for_lock(
             crate::kernel::policy::UNPINNED_DIGEST,
             &format!("{NAME}-{}", locked.version),
             "Gemfile.lock has no CHECKSUMS entry for the Bundler it was written with, so its \
-             sha256 is the one rubygems.org served; `bundle lock --add-checksums` pins it in \
-             the lock",
+             sha256 is the one rubygems.org served; add `bundler (<BUNDLED WITH version>) \
+             sha256=<verified gem SHA-256>` under CHECKSUMS in Gemfile.lock, as documented \
+             in docs/human/CLI.md (Ruby Bundler pinning)",
         )?;
     }
     let pin = pin(store, &locked)?;

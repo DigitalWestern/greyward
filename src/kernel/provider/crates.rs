@@ -453,6 +453,31 @@ fn reject_workspace_inheritance(crate_dir: &Path, name: &str) -> io::Result<()> 
     Ok(())
 }
 
+/// The `.crate` archive of every registry crate in `crates`, in order. They
+/// are independent downloads, so they run on the fetch pool; the caller
+/// walks the crates in order as before and takes each archive's result
+/// where its download used to be, so a git source that fails ahead of an
+/// archive that failed is still the error reported.
+fn fetch_registry_crates(
+    store: &Store,
+    activity: &StoreActivity,
+    crates: &[CargoCrate],
+) -> Vec<io::Result<crate::kernel::fetch::CacheLease>> {
+    let registry: Vec<&CargoCrate> = crates.iter().filter(|krate| krate.git.is_none()).collect();
+    crate::kernel::fetch::fetch_each(
+        &registry,
+        |krate| krate.sha256.to_ascii_lowercase(),
+        |krate| {
+            download_verified_held(store, activity, &krate.url, &krate.sha256).map_err(|e| {
+                err(format!(
+                    "{}@{}: fetch {}: {e}",
+                    krate.name, krate.version, krate.url
+                ))
+            })
+        },
+    )
+}
+
 fn realize_vendor_inner(
     store: &Store,
     activity: &StoreActivity,
@@ -470,6 +495,7 @@ fn realize_vendor_inner(
     // as .crate archives. Both end up as a vendored directory below.
     let mut archives = Vec::new();
     let mut git_roots = Vec::new();
+    let mut fetched = fetch_registry_crates(store, activity, &crates).into_iter();
     for krate in &crates {
         if let Some(git) = &krate.git {
             let object = crate::kernel::gitsrc::ensure_git_source(store, activity, &git.inner)
@@ -485,13 +511,9 @@ fn realize_vendor_inner(
             git_roots.push((krate.clone(), object));
             continue;
         }
-        let archive =
-            download_verified_held(store, activity, &krate.url, &krate.sha256).map_err(|e| {
-                err(format!(
-                    "{}@{}: fetch {}: {e}",
-                    krate.name, krate.version, krate.url
-                ))
-            })?;
+        let archive = fetched
+            .next()
+            .ok_or_else(|| err("internal: a registry crate was not fetched"))??;
         archives.push(archive);
     }
 

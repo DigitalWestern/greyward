@@ -327,22 +327,26 @@ pub fn realize_runtime(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
+    // Under --verbose the object's provisioning is one row, split into the
+    // downloads, the archive check and extraction, and the stage below.
+    let _t = crate::kernel::ui::phase("provision rust");
 
-    let mut tarballs = Vec::new();
-    for row in &rows {
-        tarballs.push(download_toolchain_artifact_held(
-            store,
-            activity,
-            &row.provider,
-            &row.url,
-            &row.digest,
-        )?);
-    }
+    // The components (rustc, rust-std, cargo) are independent downloads:
+    // fetch them on the pool, in row order, first failure in row order.
+    let tarballs = crate::kernel::fetch::fetch_all(
+        &rows,
+        |row| row.digest.clone(),
+        |row| {
+            download_toolchain_artifact_held(store, activity, &row.provider, &row.url, &row.digest)
+        },
+    )?;
 
     let names: Vec<&str> = rows.iter().map(|row| row.component.as_str()).collect();
     let staged = store.stage_with_activity(activity)?;
     extract_rust_components_for(activity, &staged, platform, &names, &tarballs)?;
 
+    // Publication: the read-only walk, the durable sync, the rename.
+    let _stage = crate::kernel::ui::phase("stage");
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();

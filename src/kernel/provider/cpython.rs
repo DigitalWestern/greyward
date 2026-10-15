@@ -341,27 +341,34 @@ pub fn realize_uv(
 /// [`realize_runtime`]): the two are independent downloads, and each
 /// realize then finds its tarball in the cache and verifies it again. Only
 /// the artifacts whose objects are missing are fetched, and only when both
-/// are; one alone is fetched by its realize, as before. The first failure
-/// in that order (uv, then CPython) is the one reported, with the text the
-/// realize would have printed.
+/// are; one alone is fetched by its realize, as before. Consume each
+/// result immediately before its realize, so a CPython fetch error cannot
+/// hide an earlier uv extraction or publication error.
 pub fn prefetch_uv_and_runtime(
     store: &Store,
     activity: &StoreActivity,
     platform: Platform,
     selected: &Selected,
-) -> io::Result<()> {
+) -> io::Result<[io::Result<()>; 2]> {
     crate::kernel::platform::require_host(platform, "uv")?;
     let uv = row(selected, platform, "uv", UV_RECIPE)?;
-    let cpython = row(selected, platform, "cpython", CPYTHON_RECIPE)?;
-    for identity in [
-        uv_identity_of(&uv, platform)?,
-        cpython_identity_of(&cpython, platform)?,
-    ] {
-        if store.has_with_activity(activity, &identity.object_id())? {
-            return Ok(());
-        }
+    if store.has_with_activity(activity, &uv_identity_of(&uv, platform)?.object_id())? {
+        return Ok([Ok(()), Ok(())]);
     }
-    crate::kernel::fetch::fetch_all(&[uv, cpython], |spec| {
+    // Even row/lookup failures for the second component belong after uv's
+    // entire realization, just as they did before prefetching.
+    let cpython = row(selected, platform, "cpython", CPYTHON_RECIPE).and_then(|spec| {
+        let id = cpython_identity_of(&spec, platform)?.object_id();
+        store
+            .has_with_activity(activity, &id)
+            .map(|has| (spec, has))
+    });
+    let cpython = match cpython {
+        Ok((_, true)) => return Ok([Ok(()), Ok(())]),
+        Ok((spec, false)) => spec,
+        Err(error) => return Ok([Ok(()), Err(error)]),
+    };
+    let mut fetched = crate::kernel::fetch::fetch_each(&[uv, cpython], |spec| {
         download_toolchain_artifact_held(
             store,
             activity,
@@ -369,8 +376,10 @@ pub fn prefetch_uv_and_runtime(
             &spec.url,
             &Digest::sha256(artifact_sha256(spec)?)?,
         )
-    })?;
-    Ok(())
+        .map(|_| ())
+    })
+    .into_iter();
+    Ok([fetched.next().unwrap(), fetched.next().unwrap()])
 }
 
 /// Realize the CPython this selection names. Returns the object path

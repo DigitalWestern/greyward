@@ -351,6 +351,16 @@ pub(super) fn fetch_tarball(
     )
 }
 
+/// Alternative SRI digests make downloads depend on earlier cache writes:
+/// an earlier package can publish the candidate a later package must reuse.
+/// Keep these batches sequential so scheduling cannot change installed bytes.
+pub(super) fn has_alternative_integrities(packages: &[NpmPackage]) -> bool {
+    packages
+        .iter()
+        .filter(|p| p.git.is_none())
+        .any(|p| sri_candidates(&p.integrity).is_ok_and(|candidates| candidates.len() > 1))
+}
+
 pub(super) fn fetch_npm_tarballs<'a>(
     store: &Store,
     activity: &StoreActivity,
@@ -359,10 +369,15 @@ pub(super) fn fetch_npm_tarballs<'a>(
     // Independent downloads, so they run on the fetch pool; the results
     // and the first failure come back in package order.
     let registry: Vec<&NpmPackage> = packages.iter().filter(|p| p.git.is_none()).collect();
-    crate::kernel::fetch::fetch_all(&registry, |&p| {
+    let fetch = |p: &'a NpmPackage| {
         let (tarball, digest) = fetch_tarball(store, activity, p)?;
         Ok((p, tarball, digest))
-    })
+    };
+    if has_alternative_integrities(packages) {
+        registry.into_iter().map(fetch).collect()
+    } else {
+        crate::kernel::fetch::fetch_all(&registry, |&p| fetch(p))
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +410,40 @@ mod tests {
             "sha512-{}",
             crate::kernel::base64::encode(&hex::decode(digest.hex()).unwrap())
         )
+    }
+
+    #[test]
+    fn alternative_integrities_reuse_the_candidate_published_in_input_order() {
+        let scratch = TempDir::named("npm-fetch-alternatives");
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
+            fs::create_dir_all(scratch.0.join(subdir)).unwrap();
+        }
+        let store = Store::for_test(scratch.0.clone());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let first = vec![7u8; 4 * 1024 * 1024];
+        let other = b"another allowed tarball";
+        let first_digest = sha512_of(&first);
+        let other_digest = sha512_of(other);
+        fs::write(scratch.0.join("first"), &first).unwrap();
+        fs::write(scratch.0.join("other"), other).unwrap();
+        let mut a = registry_package(&sri_of(&first_digest));
+        a.url = format!("file://{}", scratch.0.join("first").display());
+        let mut b = registry_package(&format!(
+            "{} {}",
+            sri_of(&first_digest),
+            sri_of(&other_digest)
+        ));
+        b.url = format!("file://{}", scratch.0.join("other").display());
+        let packages = [a, b];
+        assert!(has_alternative_integrities(&packages));
+        let fetched = fetch_npm_tarballs(&store, &activity, &packages).unwrap();
+        assert!(fetched.iter().all(|(_, _, digest)| digest == &first_digest));
+        assert_eq!(fs::read(&fetched[1].1).unwrap(), first);
+        assert!(!store
+            .cache_path(other_digest.algo(), other_digest.hex())
+            .exists());
     }
 
     /// Two allowed tarballs: the classification is filed under one whose

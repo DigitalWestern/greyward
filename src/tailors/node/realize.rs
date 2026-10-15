@@ -427,13 +427,19 @@ fn fetch_plan_sources(
             }
         }
     }
-    let mut prefetched: BTreeMap<(String, String), io::Result<_>> = distinct
-        .iter()
-        .map(|p| (p.url.clone(), p.integrity.clone()))
-        .zip(crate::kernel::fetch::fetch_each(&distinct, |&p| {
-            fetch_tarball(store, activity, p)
-        }))
-        .collect();
+    let mut prefetched: BTreeMap<(String, String), io::Result<_>> = BTreeMap::new();
+    // Preserve the original cache lookup order for SRI alternatives,
+    // including cache writes by any interleaved git realization.
+    if !classify::has_alternative_integrities(&plan.packages) {
+        prefetched.extend(
+            distinct
+                .iter()
+                .map(|p| (p.url.clone(), p.integrity.clone()))
+                .zip(crate::kernel::fetch::fetch_each(&distinct, |&p| {
+                    fetch_tarball(store, activity, p)
+                })),
+        );
+    }
     for p in &plan.packages {
         // Git dependencies are realized as their own store objects; the loop
         // below extracts tarballs, so they are collected separately.
@@ -1502,6 +1508,54 @@ pub(super) fn remove_dangling_bin_links(staged: &Path, plan: &NpmPlan) -> io::Re
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn plan_sources_preserve_cache_choice_for_alternative_integrities() {
+        let temp = crate::kernel::testutil::TempDir::named("node-plan-alternatives");
+        for subdir in ["objects", "meta", "cache/sha512", "tmp"] {
+            fs::create_dir_all(temp.0.join(subdir)).unwrap();
+        }
+        let store = Store::for_test(temp.0.clone());
+        let activity = store
+            .activity(crate::kernel::activity::ActivityMode::Shared)
+            .unwrap();
+        let first = vec![7u8; 4 * 1024 * 1024];
+        let other = b"another allowed tarball";
+        let sri = |bytes: &[u8]| {
+            format!(
+                "sha512-{}",
+                crate::kernel::base64::encode(&sha2::Sha512::digest(bytes))
+            )
+        };
+        fs::write(temp.0.join("first"), &first).unwrap();
+        fs::write(temp.0.join("other"), other).unwrap();
+        let package = |name: &str, integrity: String| NpmPackage {
+            path: format!("node_modules/{name}"),
+            name: name.into(),
+            version: "1.0.0".into(),
+            url: format!("file://{}", temp.0.join(name).display()),
+            integrity,
+            bin: Vec::new(),
+            foreign_platform: false,
+            needs_workspace: false,
+            patch: None,
+            git: None,
+        };
+        let plan = NpmPlan {
+            node_version: "24.20.0".into(),
+            packages: vec![
+                package("first", sri(&first)),
+                package("other", format!("{} {}", sri(&first), sri(other))),
+            ],
+            links: Vec::new(),
+            workspaces: Vec::new(),
+            lock_source: "package-lock.json".into(),
+        };
+        let (leases, tarballs, _, matched) = fetch_plan_sources(&store, &activity, &plan).unwrap();
+        assert_eq!(leases.len(), 2);
+        assert_eq!(matched["node_modules/first"], matched["node_modules/other"]);
+        assert_eq!(fs::read(&tarballs[1].1).unwrap(), first);
+    }
 
     struct StoreEnv(Option<std::ffi::OsString>);
 

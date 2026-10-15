@@ -314,7 +314,7 @@ fn check_basis(
 ) -> io::Result<()> {
     let mut listed = files.outputs.clone();
     listed.extend(files.inputs.iter().cloned());
-    let current = record::file_digests(project, &listed)?;
+    let current = record::digests_like(project, &listed, basis)?;
     let changed = differing(basis, &current);
     if changed.is_empty() {
         return Ok(());

@@ -13,13 +13,14 @@
 
 use super::age::{self, LockedPackage};
 use super::confine::{self, ConfinedOutcome, ConfinedRun, ForcedInputs, SocketScan, Stdout};
+use super::inputs::LinkRules;
 use super::ledger::{self, Diagnostics, LedgerObjects, PortableLedger};
 use super::outputs::{Forbidden, OutputFile, Outputs};
 use super::proxy::Proxy;
 use super::relay::{self, ToolStatus};
 use super::routes::{Permitted, ProxyAddress, Route};
 use super::session::{Fact, Intercept, Mode as Network, SessionConfig, SessionReport};
-use super::snapshot::{EntryState, PathGlob, Snapshot, SnapshotSpec};
+use super::snapshot::{EntryState, PathGlob, Snapshot, SnapshotSpec, WithheldLink};
 use super::transaction::{HoldSpec, Published, Transaction};
 use super::{DelegateReport, DelegateSpec, DelegateStdio, DoorKind, ResolutionDoor};
 use crate::kernel::activity::StoreActivity;
@@ -209,6 +210,12 @@ pub struct ConfinedSpec<'a> {
     pub expected_inputs: BTreeMap<String, String>,
     /// Also refuse newly added project files outside the consumed generation.
     pub complete_inputs: bool,
+    /// How a complete-input door treats the symlinks in its copy
+    /// ([`Snapshot::settle_links`]): ward's projections are dropped, links
+    /// that lead out are withheld (an `outward-symlink` exception each), and
+    /// a required or output one that leads out refuses the run. `None`
+    /// copies links as they are.
+    pub links: Option<LinkRules>,
     /// The tool's own check of its result ([`ResultCheck`]).
     pub check: Option<ResultCheck<'a>>,
     /// The registry packages the run's lock names ([`LockedList`]), for
@@ -250,6 +257,7 @@ impl<'a> ConfinedSpec<'a> {
             facts: Vec::new(),
             expected_inputs: BTreeMap::new(),
             complete_inputs: false,
+            links: None,
             check: None,
             locked: None,
             lookup_routes: Vec::new(),
@@ -322,6 +330,8 @@ pub struct PublishFacts<'f> {
     pub isolation: &'static str,
     /// The exceptions this run recorded.
     pub exceptions: &'f [Fact],
+    /// The door walked every project entry (`ConfinedSpec::links`).
+    walked: bool,
     snapshot: &'f Snapshot,
     staged: &'f Outputs,
 }
@@ -338,12 +348,11 @@ impl PublishFacts<'_> {
         }
     }
 
-    /// The pre-run record digest of a regular file or symlink under the
-    /// lock root (a manifest the receipt vouches for), `None` when it was
-    /// neither.
+    /// The pre-run record digest of an input under the lock root (a
+    /// manifest the receipt vouches for), spelled as [`snapshot_digest`]
+    /// spells it.
     pub fn input_digest(&self, relative: &Path) -> Option<String> {
-        let real = self.snapshot.lock_root().real.join(relative);
-        self.snapshot.baseline(&real).and_then(EntryState::digest)
+        snapshot_digest(self.snapshot, relative, self.walked)
     }
 }
 
@@ -408,15 +417,27 @@ pub(super) fn run(
             forbidden: &key_ids,
         },
     )?;
-    check_planning_inputs(&snapshot, &confined.expected_inputs)?;
+    if confined.complete_inputs {
+        snapshot.normalize_executable_inputs()?;
+    }
+    if let Some(rules) = &confined.links {
+        let withheld = snapshot.settle_links(rules)?;
+        if !withheld.is_empty() {
+            snapshot.normalize_executable_inputs()?;
+        }
+        let facts = withheld_facts(&confined, rules, &policy, &withheld)?;
+        confined.facts.extend(facts);
+    }
+    check_planning_inputs(
+        &snapshot,
+        &confined.expected_inputs,
+        confined.links.is_some(),
+    )?;
     if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
         return Err(io::Error::other(
             "project files changed while planning executable-manifest resolution; \
              nothing was published; run `ward` again",
         ));
-    }
-    if confined.complete_inputs {
-        snapshot.normalize_executable_inputs()?;
     }
     let mut ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
@@ -475,6 +496,7 @@ pub(super) fn run(
         ledger_sha256: &ledger_sha256,
         isolation: ran.outcome.tier.isolation(),
         exceptions: &facts,
+        walked: confined.links.is_some(),
         snapshot: &snapshot,
         staged: &outputs,
     };
@@ -493,19 +515,70 @@ pub(super) fn run(
     Ok(report(status, ran.outcome, Some(objects)))
 }
 
+/// The `outward-symlink` exception for each link [`Snapshot::settle_links`]
+/// withheld from the tool. A link the tool cannot do without (a declared
+/// output, a `required` path) refuses the run instead, as does a policy
+/// that denies the kind: both before the tool starts.
+fn withheld_facts(
+    confined: &ConfinedSpec<'_>,
+    rules: &LinkRules,
+    policy: &Policy,
+    withheld: &[WithheldLink],
+) -> io::Result<Vec<Fact>> {
+    let mut facts = Vec::new();
+    for link in withheld {
+        let target = Path::new(&link.target);
+        if confined.outputs.contains(&link.path) || rules.is_required(&link.path) {
+            let end = super::inputs::LinkEnd::Outside(link.why.clone());
+            return Err(super::inputs::refused_link(&link.path, target, &end));
+        }
+        let subject = link.path.display().to_string();
+        let detail = format!(
+            "a symlink to {}, which {}; left out of {}'s copy of the project",
+            target.display(),
+            link.why,
+            confined.name
+        );
+        if policy::denied(policy, policy::OUTWARD_SYMLINK) {
+            return Err(crate::kernel::error::refused(
+                io::ErrorKind::PermissionDenied,
+                policy::refusal(policy, policy::OUTWARD_SYMLINK, &subject, &detail),
+            ));
+        }
+        facts.push(Fact {
+            kind: policy::OUTWARD_SYMLINK,
+            subject,
+            detail,
+        });
+    }
+    Ok(facts)
+}
+
+/// The pre-run record digest of `relative` under the lock root: a regular
+/// file's sha256. A symlink is named by its target text where the door
+/// walks every project entry (`walked`, an executable manifest), and
+/// otherwise by the bytes of the file it leads to inside the snapshot,
+/// the way a list-based planner and `record::file_digests` read it. `None`
+/// for anything else.
+fn snapshot_digest(snapshot: &Snapshot, relative: &Path, walked: bool) -> Option<String> {
+    let real = snapshot.lock_root().real.join(relative);
+    match snapshot.input_state(&real)? {
+        EntryState::Symlink { .. } if !walked => match snapshot.followed(&real)? {
+            state @ EntryState::File { .. } => state.digest(),
+            _ => None,
+        },
+        state => state.digest(),
+    }
+}
+
 /// Bind a detached planner's snapshot to the generation it already read.
 fn check_planning_inputs(
     snapshot: &Snapshot,
     expected: &BTreeMap<String, String>,
+    walked: bool,
 ) -> io::Result<()> {
     for (relative, digest) in expected {
-        let path = snapshot.lock_root().real.join(relative);
-        if snapshot
-            .baseline(&path)
-            .and_then(EntryState::digest)
-            .as_ref()
-            != Some(digest)
-        {
+        if snapshot_digest(snapshot, Path::new(relative), walked).as_ref() != Some(digest) {
             return Err(io::Error::other(format!(
                 "{relative} changed while planning; nothing was published; run `ward` again"
             )));
@@ -1251,11 +1324,11 @@ mod tests {
         )
         .unwrap();
         fs::write(fx.project.join("deps.lock"), OLD_LOCK).unwrap();
-        assert!(check_planning_inputs(&snapshot, &expected)
+        assert!(check_planning_inputs(&snapshot, &expected, false)
             .unwrap_err()
             .to_string()
             .contains("changed while planning"));
-        assert!(check_planning_inputs(&snapshot, &BTreeMap::new()).is_ok());
+        assert!(check_planning_inputs(&snapshot, &BTreeMap::new(), false).is_ok());
         // A link introduced after the input walk cannot enter an otherwise
         // identical complete snapshot without being represented in a receipt:
         // the snapshot names it by its target text, so the complete-input
@@ -1297,12 +1370,185 @@ mod tests {
             "late-link".to_string(),
             super::super::record::symlink_digest(b"deps.lock"),
         )]);
-        assert!(check_planning_inputs(&with_link, &named).is_ok());
+        assert!(check_planning_inputs(&with_link, &named, true).is_ok());
         let moved = BTreeMap::from([(
             "late-link".to_string(),
             super::super::record::symlink_digest(b"elsewhere"),
         )]);
-        assert!(check_planning_inputs(&with_link, &moved).is_err());
+        assert!(check_planning_inputs(&with_link, &moved, true).is_err());
+        // A list-based planner hashed the bytes it read through the link,
+        // and the staged link leads to those bytes: unchanged, accepted. Its
+        // link text is never what such a planner consumed.
+        let read =
+            super::super::record::file_digests(&held, &[PathBuf::from("late-link")]).unwrap();
+        assert_eq!(
+            read["late-link"],
+            super::super::record::sha256_hex(OLD_LOCK)
+        );
+        assert!(check_planning_inputs(&with_link, &read, false).is_ok());
+        assert!(check_planning_inputs(&with_link, &named, false).is_err());
+    }
+
+    /// The finished copy is judged link by link before the tool runs. An
+    /// inward link stays. Ward's projection into the store is dropped. A
+    /// link out of the project, or through a dropped or excluded entry, is
+    /// withheld from the copy but still named by its target text, and the
+    /// door records an `outward-symlink` exception for it, or refuses it
+    /// when it is an output or a required path.
+    #[test]
+    fn settle_links_withholds_what_leads_out_and_drops_projections() {
+        let fx = fixture("settle-links");
+        let store_root = fx.harness.store.root.clone();
+        fs::create_dir_all(store_root.join("forest")).unwrap();
+        fs::create_dir_all(fx.project.join("data")).unwrap();
+        fs::create_dir_all(fx.project.join("fixtures/node_modules")).unwrap();
+        fs::create_dir_all(fx.project.join(".git")).unwrap();
+        fs::write(fx.project.join("data/a.yml"), "a").unwrap();
+        fs::write(fx.project.join("fixtures/node_modules/config.rb"), "c").unwrap();
+        let link = |target: &Path, name: &str| {
+            std::os::unix::fs::symlink(target, fx.project.join(name)).unwrap()
+        };
+        link(Path::new("data/a.yml"), "inward");
+        link(Path::new("/etc/passwd"), "outward");
+        link(Path::new("../x"), "climb");
+        link(&store_root.join("forest"), "node_modules");
+        link(Path::new("node_modules/../../data"), "fixture");
+        link(Path::new(".git/config"), "git-config");
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let rules = LinkRules::new(&["**/node_modules"], &["Gemfile"], vec![store_root]).unwrap();
+        // The walk of the live project makes the same decisions.
+        let walked = super::super::inputs::walk(
+            &held,
+            &super::super::inputs::WalkSpec {
+                excludes: &[".git"],
+                outputs: &[],
+                links: &rules,
+            },
+        )
+        .unwrap();
+        let mut snapshot = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[PathGlob::new(".git").unwrap()],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        snapshot.normalize_executable_inputs().unwrap();
+        let withheld = snapshot.settle_links(&rules).unwrap();
+        let names: Vec<&Path> = withheld.iter().map(|link| link.path.as_path()).collect();
+        assert_eq!(
+            names,
+            [
+                Path::new("climb"),
+                Path::new("fixture"),
+                Path::new("git-config"),
+                Path::new("outward")
+            ]
+        );
+        assert_eq!(
+            walked
+                .outward
+                .keys()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>(),
+            names
+        );
+        let staged = snapshot.lock_root().staged.clone();
+        assert!(fs::symlink_metadata(staged.join("inward")).is_ok());
+        for gone in ["outward", "climb", "fixture", "git-config", "node_modules"] {
+            assert!(fs::symlink_metadata(staged.join(gone)).is_err(), "{gone}");
+        }
+        assert!(staged.join("fixtures/node_modules/config.rb").is_file());
+        // The complete-input comparison still sees every withheld link, by
+        // its target text, and never the projection: what the walk recorded.
+        let digests = snapshot.project_file_digests().unwrap();
+        assert_eq!(digests, walked.digests);
+        assert_eq!(
+            digests["outward"],
+            super::super::record::symlink_digest(b"/etc/passwd")
+        );
+        assert!(!digests.contains_key("node_modules"));
+        assert!(check_planning_inputs(&snapshot, &walked.digests, true).is_ok());
+        // Nothing the tool did not do shows as a change.
+        assert!(snapshot.diff().unwrap().is_empty());
+
+        let confined = ConfinedSpec::new("ruby", "bundler", "test");
+        let facts = withheld_facts(&confined, &rules, &Policy::default(), &withheld).unwrap();
+        assert_eq!(facts.len(), 4);
+        assert!(facts
+            .iter()
+            .all(|fact| fact.kind == policy::OUTWARD_SYMLINK));
+        assert_eq!(facts[3].subject, "outward");
+        assert!(
+            facts[3].detail.contains("/etc/passwd"),
+            "{}",
+            facts[3].detail
+        );
+        let denied = Policy {
+            deny: [policy::OUTWARD_SYMLINK.to_string()].into(),
+            ..Policy::default()
+        };
+        assert!(withheld_facts(&confined, &rules, &denied, &withheld).is_err());
+        let gemfile = [WithheldLink {
+            path: PathBuf::from("Gemfile"),
+            target: "../Gemfile".into(),
+            why: "climbs out of the project".into(),
+        }];
+        let error = withheld_facts(&confined, &rules, &Policy::default(), &gemfile).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Gemfile is a symlink to ../Gemfile"),
+            "{error}"
+        );
+        let mut writes = ConfinedSpec::new("ruby", "bundler", "test");
+        writes.outputs = vec![PathBuf::from("outward")];
+        assert!(withheld_facts(&writes, &rules, &Policy::default(), &withheld).is_err());
+    }
+
+    /// A link swapped after the walk captured its target text never reaches
+    /// the tool unseen: the snapshot names what it copied, and the
+    /// complete-input comparison refuses the difference. A swap to a link
+    /// that leads out is withheld from the copy by the stage's own judgment
+    /// whatever the walk saw.
+    #[test]
+    fn a_link_swapped_after_the_walk_is_caught_by_the_snapshot() {
+        let fx = fixture("swapped-link");
+        fs::create_dir_all(fx.project.join("data")).unwrap();
+        std::os::unix::fs::symlink("data", fx.project.join("link")).unwrap();
+        let held = ProjectRoot::open(&fx.project).unwrap();
+        let rules = LinkRules::default();
+        let walked = super::super::inputs::walk(
+            &held,
+            &super::super::inputs::WalkSpec {
+                excludes: &[],
+                outputs: &[],
+                links: &rules,
+            },
+        )
+        .unwrap();
+        fs::remove_file(fx.project.join("link")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/env", fx.project.join("link")).unwrap();
+        let mut snapshot = Snapshot::build(
+            &fx.harness.store,
+            &fx.harness.activity,
+            &SnapshotSpec {
+                lock_root: &held,
+                extra_roots: &[],
+                exclude: &[],
+                forbidden: &[],
+            },
+        )
+        .unwrap();
+        let withheld = snapshot.settle_links(&rules).unwrap();
+        assert_eq!(withheld.len(), 1);
+        assert!(fs::symlink_metadata(snapshot.lock_root().staged.join("link")).is_err());
+        assert_ne!(snapshot.project_file_digests().unwrap(), walked.digests);
+        assert!(check_planning_inputs(&snapshot, &walked.digests, true).is_err());
     }
 
     #[test]

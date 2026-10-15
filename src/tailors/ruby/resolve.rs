@@ -2,7 +2,7 @@
 //! session's RubyGems mirror for a missing lock and `ward attest`, and the
 //! planner's two helper checks confined with no route at all.
 
-use super::door::{ruby_tool, run_ruby, run_ruby_checked, RubyPublish, RubyRun, OUTPUTS, SCRATCH};
+use super::door::{ruby_tool, run_ruby, run_ruby_checked, RubyPublish, RubyRun, SCRATCH};
 use super::{err, GEMFILE, GEMFILE_LOCK, HELPER};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
@@ -15,20 +15,20 @@ use std::path::{Path, PathBuf};
 /// The helper's file name in the run's scratch directory.
 const HELPER_FILE: &str = "helper.rb";
 
-/// Executable Gemfiles can load arbitrary project files. Bind all visible
-/// regular files until precise input discovery has a reviewed design.
+/// Executable Gemfiles can load arbitrary project files. Bind every
+/// visible project entry, files by their bytes and symlinks by their
+/// target text (`kernel::resolve::inputs::walk`).
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    crate::kernel::resolve::inputs::project_files(project, &super::door::excludes(), &OUTPUTS)
+    Ok(super::door::walk(project)?.inputs)
 }
 
-/// The Gemfile and Gemfile.lock, by digest: a closure's
+/// The Gemfile, Gemfile.lock and every other walked entry, by digest,
+/// captured by the same walk that judged each link: a closure's
 /// `resolution_basis`.
 pub(crate) fn resolution_basis(
     project: &ProjectRoot,
 ) -> io::Result<crate::comforter::join::Digests> {
-    let mut files: Vec<PathBuf> = OUTPUTS.iter().map(PathBuf::from).collect();
-    files.extend(resolution_inputs(project)?);
-    record::file_digests(project, &files)
+    Ok(super::door::walk(project)?.digests)
 }
 
 /// `prepare`: Gemfile.lock, resolved by the store Bundler when there is

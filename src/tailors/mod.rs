@@ -643,10 +643,9 @@ pub trait Attester: Sync {
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)>;
 }
 
-/// Everything ward itself places in a project: its state directory and
-/// every tailor's [`Tailor::projected_paths`].
+/// Every tailor's [`Tailor::projected_paths`].
 pub fn projected_paths() -> Vec<&'static str> {
-    let mut paths = vec![".greyward"];
+    let mut paths = Vec::new();
     for tailor in registry() {
         for path in tailor.projected_paths() {
             if !paths.contains(path) {
@@ -657,22 +656,28 @@ pub fn projected_paths() -> Vec<&'static str> {
     paths
 }
 
-/// The path patterns an executable-manifest tailor keeps out of both its
-/// resolution-input walk (`kernel::resolve::inputs::project_files`) and its
-/// door's snapshot: its own (`own`, the tool's private state) and
-/// everything ward projects ([`projected_paths`]). A project with several
+/// How an executable-manifest tailor treats the symlinks in its project,
+/// in both its resolution-input walk (`kernel::resolve::inputs::walk`) and
+/// its door's snapshot (`Snapshot::settle_links`). A project with several
 /// ecosystems has another tailor's `node_modules` or `.venv` link in it by
-/// the time this one resolves; that link is ward's output, not this
-/// tool's input. The walk and the snapshot must use this same list, or the
-/// complete-input check finds a path one saw and the other did not.
-pub fn resolution_excludes(own: &[&'static str]) -> Vec<&'static str> {
-    let mut patterns = own.to_vec();
-    for path in projected_paths() {
-        if !patterns.contains(&path) {
-            patterns.push(path);
+/// the time this one resolves: a link at one of [`projected_paths`] into
+/// the store (configured or canonical) is ward's output, not this tool's
+/// input. A real directory or a foreign link at such a path stays an input.
+/// `required` names what the tool cannot do without, so a link there that
+/// leads out of the project is refused rather than withheld.
+pub(crate) fn resolution_links(
+    required: &[&str],
+) -> io::Result<crate::kernel::resolve::inputs::LinkRules> {
+    let mut roots = Vec::new();
+    if let Ok(configured) = crate::kernel::store::Store::configured_path() {
+        if let Ok(canonical) = configured.canonicalize() {
+            if canonical != configured {
+                roots.push(canonical);
+            }
         }
+        roots.push(configured);
     }
-    patterns
+    crate::kernel::resolve::inputs::LinkRules::new(&projected_paths(), required, roots)
 }
 
 /// The resolution files `tailor` names in `project`, or `None` when it
@@ -1062,29 +1067,45 @@ mod tests {
     /// Every executable-manifest tailor leaves every other tailor's
     /// projection out of its resolution inputs: a Rails app with a
     /// JavaScript front end has node's `node_modules` link (and a
-    /// workspace member's) in it by the time Ruby resolves.
+    /// workspace member's) in it by the time Ruby resolves. Only ward's
+    /// own links into the store are left out: a checked-in `node_modules`
+    /// directory is an input, and a foreign link there is named by its
+    /// target text.
     #[test]
     fn executable_manifest_inputs_leave_out_every_projection() {
-        let excludes = resolution_excludes(&[".git"]);
-        for path in [".git", ".greyward", "**/node_modules", "**/.venv"] {
-            assert!(excludes.contains(&path), "{path}: {excludes:?}");
+        let projected = projected_paths();
+        for path in ["**/node_modules", "**/.venv"] {
+            assert!(projected.contains(&path), "{path}: {projected:?}");
         }
+        let store = crate::kernel::store::Store::configured_path().unwrap();
         let temp = crate::kernel::testutil::TempDir::new();
         std::fs::create_dir_all(temp.0.join("packages/web")).unwrap();
+        std::fs::create_dir_all(temp.0.join("fixtures/node_modules")).unwrap();
         std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
         std::fs::write(temp.0.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
         std::fs::write(temp.0.join("Gemfile.lock"), "GEM\n").unwrap();
         std::fs::write(temp.0.join(".greyward/closure.json"), "{}").unwrap();
-        std::os::unix::fs::symlink("/store/forest", temp.0.join("node_modules")).unwrap();
-        std::os::unix::fs::symlink("/store/member", temp.0.join("packages/web/node_modules"))
-            .unwrap();
-        std::os::unix::fs::symlink("/store/env", temp.0.join(".venv")).unwrap();
+        std::fs::write(temp.0.join("fixtures/node_modules/config.rb"), "x").unwrap();
+        std::os::unix::fs::symlink(store.join("forest"), temp.0.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            store.join("member"),
+            temp.0.join("packages/web/node_modules"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(store.join("env"), temp.0.join(".venv")).unwrap();
+        std::os::unix::fs::symlink("/elsewhere/env", temp.0.join("packages/web/.venv")).unwrap();
         std::fs::write(temp.0.join("packages/web/package.json"), "{}").unwrap();
         let project = ProjectRoot::open(&temp.0).unwrap();
         assert_eq!(
             by_id("ruby").unwrap().resolution_inputs(&project).unwrap(),
-            vec![PathBuf::from("packages/web/package.json")]
+            vec![
+                PathBuf::from("fixtures/node_modules/config.rb"),
+                PathBuf::from("packages/web/.venv"),
+                PathBuf::from("packages/web/package.json"),
+            ]
         );
+        std::fs::remove_dir_all(temp.0.join("fixtures")).unwrap();
+        std::fs::remove_file(temp.0.join("packages/web/.venv")).unwrap();
         assert_eq!(
             by_id("elixir")
                 .unwrap()

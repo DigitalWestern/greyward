@@ -17,10 +17,9 @@ pub(crate) fn resolution_outputs(project: &ProjectRoot) -> io::Result<Vec<PathBu
     Ok(vec![find_project(project)?, PathBuf::from(LOCK_FILE)])
 }
 
-/// MSBuild property functions and imported targets can read arbitrary project
-/// data. Bind every regular file visible to its snapshot until precise input
-/// declarations have a reviewed design.
-pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+/// The walk of every project entry MSBuild could read, the project file
+/// and its lock recorded as outputs.
+fn walk(project: &ProjectRoot) -> io::Result<crate::kernel::resolve::inputs::Walk> {
     let outputs = resolution_outputs(project)?;
     let outputs: Vec<_> = outputs
         .iter()
@@ -29,17 +28,22 @@ pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf
                 .ok_or_else(|| err(".NET resolution output path is not UTF-8"))
         })
         .collect::<io::Result<_>>()?;
-    crate::kernel::resolve::inputs::project_files(project, &super::door::excludes(), &outputs)
+    super::door::walk(project, &outputs)
 }
 
-/// Every resolution file of `project` that exists, by digest: a closure's
-/// `resolution_basis`.
+/// MSBuild property functions and imported targets can read arbitrary
+/// project data. Bind every visible project entry, files by their bytes
+/// and symlinks by their target text.
+pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
+    Ok(walk(project)?.inputs)
+}
+
+/// Every resolution file of `project` that exists, by digest, captured by
+/// the same walk that judged each link: a closure's `resolution_basis`.
 pub(crate) fn resolution_basis(
     project: &ProjectRoot,
 ) -> io::Result<crate::comforter::join::Digests> {
-    let mut listed = resolution_outputs(project)?;
-    listed.extend(resolution_inputs(project)?);
-    record::file_digests(project, &listed)
+    Ok(walk(project)?.digests)
 }
 
 /// Command-line global properties hold the lock contract unless imported
@@ -50,7 +54,16 @@ fn reject_lock_controls(
     project: &ProjectRoot,
     basis: &crate::comforter::join::Digests,
 ) -> io::Result<()> {
-    for path in basis.keys().filter(|path| path.as_str() != LOCK_FILE) {
+    // A symlink is named by its target text. One that stays in the project
+    // leads to a file scanned under its own name; one that leads out is
+    // withheld from restore's copy.
+    for path in basis
+        .iter()
+        .filter(|(path, digest)| {
+            path.as_str() != LOCK_FILE && !digest.starts_with(record::SYMLINK_DIGEST_PREFIX)
+        })
+        .map(|(path, _)| path)
+    {
         let bytes = project
             .read_input(Path::new(path))?
             .ok_or_else(|| err("MSBuild input vanished"))?;

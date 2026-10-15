@@ -3,7 +3,9 @@
 //! mirror, or with no route at all for the helper's lock checks.
 
 use super::{forced_env, registry, ENV_REMOVE, ENV_REMOVE_PREFIXES, GEMFILE};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::{ConfinedSpec, Publish, ReceiptProducer, Wire, Wiring};
+use crate::kernel::resolve::inputs::{self, LinkRules, Walk, WalkSpec};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
@@ -23,11 +25,34 @@ pub(crate) const OUTPUTS: [&str; 2] = ["Gemfile", "Gemfile.lock"];
 /// (`BUNDLE_IGNORE_CONFIG=1`, gems in the run's scratch).
 pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".greyward"];
 
-/// [`EXCLUDE`] and everything ward projects into a project (another
-/// ecosystem's `node_modules` or `.venv` link): what both the
-/// resolution-input walk and the door's snapshot leave out.
-pub(super) fn excludes() -> Vec<&'static str> {
-    crate::tailors::resolution_excludes(&EXCLUDE)
+/// What Bundler cannot resolve without besides [`OUTPUTS`]: a gemspec the
+/// Gemfile's `gemspec` names and the Ruby version files. A link among
+/// them that leads out of the project is refused, never withheld.
+const REQUIRED: [&str; 5] = [
+    "Gemfile",
+    "Gemfile.lock",
+    "**/*.gemspec",
+    ".ruby-version",
+    ".tool-versions",
+];
+
+/// How the walk and the snapshot treat the project's symlinks
+/// (`tailors::resolution_links`).
+pub(super) fn links() -> io::Result<LinkRules> {
+    crate::tailors::resolution_links(&REQUIRED)
+}
+
+/// Every project entry a Gemfile could read, by digest
+/// (`kernel::resolve::inputs::walk`).
+pub(super) fn walk(project: &ProjectRoot) -> io::Result<Walk> {
+    inputs::walk(
+        project,
+        &WalkSpec {
+            excludes: &EXCLUDE,
+            outputs: &OUTPUTS,
+            links: &links()?,
+        },
+    )
 }
 
 /// Stands for the run's scratch directory in an argument: the helper and
@@ -128,7 +153,8 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
-    confined.exclude = excludes()
+    confined.links = Some(links()?);
+    confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
         .collect::<io::Result<_>>()?;

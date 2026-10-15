@@ -4,7 +4,7 @@
 //! confined with no route at all.
 
 use super::check_locked::{check_locked_inputs, check_locked_passed, record_check_locked};
-use super::door::{elixir_tool, run_mix, run_mix_checked, MixPublish, MixRun, OUTPUTS, SCRATCH};
+use super::door::{elixir_tool, run_mix, run_mix_checked, MixPublish, MixRun, SCRATCH};
 use super::{err, read_mix_lock, require_lock, validate_plan, ElixirPlan, HexDep, HELPER};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
@@ -17,19 +17,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Executable mix manifests can load app manifests, nested configuration,
-/// and arbitrary data. Cover every visible regular project file.
+/// and arbitrary data. Cover every visible project entry, files by their
+/// bytes and symlinks by their target text (`kernel::resolve::inputs::walk`).
 pub(crate) fn resolution_inputs(project: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
-    crate::kernel::resolve::inputs::project_files(project, &super::door::excludes(), &OUTPUTS)
+    Ok(super::door::walk(project)?.inputs)
 }
 
-/// mix.exs, mix.lock and the config files, by digest: a closure's
-/// `resolution_basis`.
+/// mix.exs, mix.lock and every other walked entry, by digest, captured by
+/// the same walk that judged each link: a closure's `resolution_basis`.
 pub(crate) fn resolution_basis(
     project: &ProjectRoot,
 ) -> io::Result<crate::comforter::join::Digests> {
-    let mut listed: Vec<PathBuf> = OUTPUTS.iter().map(PathBuf::from).collect();
-    listed.extend(resolution_inputs(project)?);
-    record::file_digests(project, &listed)
+    Ok(super::door::walk(project)?.digests)
 }
 
 /// `prepare`: mix.lock, resolved by the store mix when there is none. The

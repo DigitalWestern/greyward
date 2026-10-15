@@ -3,7 +3,9 @@
 //! mirror, named by a `nuget.config` the wiring writes.
 
 use super::{registry, ENV_REMOVE, ENV_REMOVE_PREFIXES};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::{ConfinedSpec, Publish, ReceiptProducer, Wire, Wiring};
+use crate::kernel::resolve::inputs::{self, LinkRules, Walk, WalkSpec};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
@@ -21,10 +23,44 @@ const WHY: &str = "evaluates the project's MSBuild files and fetches packages fr
 /// and it is discarded.
 pub(super) const EXCLUDE: [&str; 4] = ["obj", "bin", ".git", ".greyward"];
 
-/// [`EXCLUDE`] and everything ward projects into a project: what both the
-/// resolution-input walk and the door's snapshot leave out.
-pub(super) fn excludes() -> Vec<&'static str> {
-    crate::tailors::resolution_excludes(&EXCLUDE)
+/// What restore cannot do without: every MSBuild project, import and
+/// solution, the NuGet configuration in each spelling NuGet reads, the SDK
+/// pin and the locks. A link among them that leads out of the project is
+/// refused, never withheld.
+const REQUIRED: [&str; 13] = [
+    "**/*.csproj",
+    "**/*.fsproj",
+    "**/*.vbproj",
+    "**/*.proj",
+    "**/*.props",
+    "**/*.targets",
+    "**/*.sln",
+    "**/*.slnx",
+    "**/nuget.config",
+    "**/NuGet.Config",
+    "**/NuGet.config",
+    "global.json",
+    "**/packages.lock.json",
+];
+
+/// How the walk and the snapshot treat the project's symlinks
+/// (`tailors::resolution_links`).
+pub(super) fn links() -> io::Result<LinkRules> {
+    crate::tailors::resolution_links(&REQUIRED)
+}
+
+/// Every project entry MSBuild could read, by digest, with `outputs` (the
+/// project file and its lock) recorded but not listed as inputs
+/// (`kernel::resolve::inputs::walk`).
+pub(super) fn walk(project: &ProjectRoot, outputs: &[&str]) -> io::Result<Walk> {
+    inputs::walk(
+        project,
+        &WalkSpec {
+            excludes: &EXCLUDE,
+            outputs,
+            links: &links()?,
+        },
+    )
 }
 
 /// Stands for the run's scratch directory in an argument.
@@ -104,7 +140,8 @@ fn dotnet_confined<'a>(run: &mut DotnetRun<'a>) -> io::Result<ConfinedSpec<'a>> 
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.sdk_obj.to_path_buf()];
-    confined.exclude = excludes()
+    confined.links = Some(links()?);
+    confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
         .collect::<io::Result<_>>()?;

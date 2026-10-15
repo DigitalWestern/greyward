@@ -1004,6 +1004,15 @@ from the lock, and `ward add` warns before it edits the manifest. Git,
 path and other-index packages are not judged. The company template does
 not deny it: a fork or a plugin named after its host trips it too.
 
+`outward-symlink` is recorded, under the link's path, when a project
+whose manifest is code (a Gemfile, a mix.exs, an MSBuild project) holds
+a symlink that leads out of the project, or through a path the resolver's
+copy leaves out (`.git`, ward's own `node_modules` link): the resolver
+runs without that link, and the resolution record still names it by its
+target text, so retargeting it makes the receipt stale. A link at a
+manifest, lock or configuration path is refused instead, since the
+resolver needs it. The company template does not deny it.
+
 A refusal names the knob that refused and the edit that lifts it, not just
 the kind: `policy denies weak-integrity: left-pad: sha1 integrity;
 'weak-integrity' is in the deny list in /etc/greyward/policy.toml; remove that

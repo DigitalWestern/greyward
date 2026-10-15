@@ -3,7 +3,9 @@
 //! with no route at all for the helper's lock parse.
 
 use super::{beam_path, forced_env, registry, ENV_REMOVE, ENV_REMOVE_PREFIXES};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::{ConfinedSpec, Publish, ReceiptProducer, Wire, Wiring};
+use crate::kernel::resolve::inputs::{self, LinkRules, Walk, WalkSpec};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
@@ -25,10 +27,28 @@ pub(crate) const OUTPUTS: [&str; 2] = ["mix.exs", "mix.lock"];
 /// run's scratch (`MIX_DEPS_PATH`) and builds nothing.
 pub(super) const EXCLUDE: [&str; 4] = ["deps", "_build", ".git", ".greyward"];
 
-/// [`EXCLUDE`] and everything ward projects into a project: what both the
-/// resolution-input walk and the door's snapshot leave out.
-pub(super) fn excludes() -> Vec<&'static str> {
-    crate::tailors::resolution_excludes(&EXCLUDE)
+/// What mix cannot resolve without: every app's manifest and lock, the
+/// configuration a mix.exs imports, and the version file. A link among
+/// them that leads out of the project is refused, never withheld.
+const REQUIRED: [&str; 4] = ["**/mix.exs", "**/mix.lock", "config/**", ".tool-versions"];
+
+/// How the walk and the snapshot treat the project's symlinks
+/// (`tailors::resolution_links`).
+pub(super) fn links() -> io::Result<LinkRules> {
+    crate::tailors::resolution_links(&REQUIRED)
+}
+
+/// Every project entry a mix.exs could read, by digest
+/// (`kernel::resolve::inputs::walk`).
+pub(super) fn walk(project: &ProjectRoot) -> io::Result<Walk> {
+    inputs::walk(
+        project,
+        &WalkSpec {
+            excludes: &EXCLUDE,
+            outputs: &OUTPUTS,
+            links: &links()?,
+        },
+    )
 }
 
 /// Stands for the run's scratch directory in an argument: the helper and
@@ -113,7 +133,8 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
-    confined.exclude = excludes()
+    confined.links = Some(links()?);
+    confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
         .collect::<io::Result<_>>()?;

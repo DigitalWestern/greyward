@@ -377,7 +377,7 @@ fn resolution_changes(
     named.extend(digests("inputs")?);
     let mut changed = BTreeSet::new();
     for (path, digest) in &named {
-        let current = record::entry_digest(project, Path::new(path))
+        let current = record::current_digest(project, Path::new(path), digest)
             .map_err(|error| format!("read {path}: {error}"))?;
         if current.as_deref() != Some(digest.as_str()) {
             changed.insert(path.clone());
@@ -392,7 +392,8 @@ fn resolution_changes(
     if let Some(files) = files {
         let mut listed = files.outputs;
         listed.extend(files.inputs);
-        let present = record::file_digests(project, &listed).map_err(|error| error.to_string())?;
+        let present =
+            record::digests_like(project, &listed, &named).map_err(|error| error.to_string())?;
         for path in present.into_keys() {
             if !named.contains_key(&path) {
                 changed.insert(path);

@@ -35,7 +35,7 @@
 //! [`RegistryProtocol::log`]: super::routes::RegistryProtocol::log
 
 use super::proxy::{LookupAnswer, Proxy};
-use super::routes::{file_key, Lookup};
+use super::routes::{file_key, Lookup, Route};
 use super::session::{Fact, PublishTimes, SessionConfig, SessionReport};
 use super::tlog::{self, Checkpoint, Log};
 use crate::kernel::policy::{self, Policy, SourceOrigin, YOUNG_PACKAGE};
@@ -65,6 +65,11 @@ pub struct LockedPackage {
     /// these are judged by the latest of their own upload times rather than
     /// the version's first. Empty: the version is judged.
     pub files: Vec<String>,
+    /// The route of the registry that served it, when its lock says: its
+    /// publish time is then read from that registry alone, so another
+    /// registry's copy of the same name and version never stands in.
+    /// `None`: any route's (an ecosystem with one registry).
+    pub route: Option<String>,
 }
 
 impl LockedPackage {
@@ -73,12 +78,27 @@ impl LockedPackage {
             name: name.into(),
             version: version.into(),
             files: Vec::new(),
+            route: None,
         }
     }
 
     pub fn with_files(mut self, files: Vec<String>) -> Self {
         self.files = files;
         self
+    }
+
+    pub fn on_route(mut self, route: impl Into<String>) -> Self {
+        self.route = Some(route.into());
+        self
+    }
+
+    /// The routes whose times and lookups judge this package.
+    fn routes<'a>(&'a self, config: &'a SessionConfig) -> impl Iterator<Item = &'a Route> + 'a {
+        config.routes.iter().filter(move |route| {
+            self.route
+                .as_deref()
+                .is_none_or(|id| route.protocol.route_id() == id)
+        })
     }
 }
 
@@ -127,7 +147,7 @@ pub(super) fn judge(
         if published_at(&config, observed, package).is_some() {
             continue;
         }
-        let found = config.routes.iter().find_map(|route| {
+        let found = package.routes(&config).find_map(|route| {
             let lookup =
                 route
                     .protocol
@@ -323,7 +343,7 @@ fn untimed_files(
     package: &LockedPackage,
 ) -> Option<String> {
     let timed = |version: &str| {
-        config.routes.iter().any(|route| {
+        package.routes(config).any(|route| {
             let route_id = route.protocol.route_id().to_string();
             let (name, version) = route.protocol.package_key(&package.name, version);
             times.contains_key(&(route_id, name, version))
@@ -437,8 +457,8 @@ fn published_at(
     times: &PublishTimes,
     package: &LockedPackage,
 ) -> Option<Seen> {
-    config.routes.iter().find_map(|route| {
-        let protocol = route.protocol;
+    package.routes(config).find_map(|route| {
+        let protocol = &route.protocol;
         let route_id = protocol.route_id().to_string();
         let time = |version: &str| {
             let (name, version) = protocol.package_key(&package.name, version);
@@ -761,6 +781,55 @@ mod tests {
                 Reply::new(200, body.as_bytes()).header("Content-Type", "application/json"),
             ),
         );
+    }
+
+    /// A package the lock says one registry served is judged by that
+    /// registry's times and lookups alone: another route's old time for the
+    /// same name and version does not stand in, and a route the session
+    /// does not have leaves its age unknown.
+    #[test]
+    fn a_package_is_judged_by_the_registry_that_served_it() {
+        let harness = Harness::new("age-route");
+        let observed = PublishTimes::from([(
+            (
+                "elsewhere".to_string(),
+                "seen".to_string(),
+                "3.0".to_string(),
+            ),
+            NOW - 400 * SECONDS_PER_DAY,
+        )]);
+        let packages = [
+            LockedPackage::new("seen", "3.0").on_route("fixture"),
+            LockedPackage::new("other", "1.0").on_route("missing"),
+        ];
+        let policy = Policy::default();
+        let config = harness.config(policy.clone(), Mode::Online);
+        let judged = judge(
+            &harness.proxy,
+            config,
+            &observed,
+            &packages,
+            at(NOW),
+            &policy,
+        )
+        .unwrap();
+        let details: Vec<(&str, &str)> = judged
+            .young
+            .iter()
+            .map(|young| (young.fact.subject.as_str(), young.fact.detail.as_str()))
+            .collect();
+        assert_eq!(details.len(), 2, "{details:?}");
+        assert!(
+            details[0].0 == "other@1.0" && details[0].1.contains("no document"),
+            "{details:?}"
+        );
+        assert!(
+            details[1].0 == "seen@3.0" && details[1].1.contains("404"),
+            "{details:?}"
+        );
+        // The served route was asked; the missing one could not be.
+        assert_eq!(harness.upstream.hits("/meta/seen.json"), 1);
+        assert_eq!(harness.upstream.hits("/meta/other.json"), 0);
     }
 
     #[test]

@@ -8,9 +8,10 @@ use super::cargo_lock::{
 };
 use super::sdist_view::{self, SdistWheel};
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_held, Digest};
+use crate::kernel::fetch::{download_registry_held, Digest};
 use crate::kernel::hostfallback::RUNTIME_ONLY_VIEW;
 use crate::kernel::platform::Platform;
+use crate::kernel::registries::config::Ecosystem;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::sandbox::HostView;
 use crate::kernel::sandbox::Sandbox;
@@ -216,24 +217,62 @@ fn wrap_sandbox_build_error_with_tail(
     crate::kernel::error::describe(error, message)
 }
 
-fn build_toolchain_plan(python_version: &str) -> Plan {
-    Plan {
+/// The pinned build tools as a plan. Their files are on PyPI's file host;
+/// when the effective python `[sources]` list does not hold `public`, each
+/// is found by file name on the default registry's simple page instead,
+/// with the same pinned sha256, so every build's identity is unchanged.
+fn build_toolchain_plan(python_version: &str) -> io::Result<Plan> {
+    let policy = crate::kernel::policy::effective();
+    let mirror = match policy.registries.ecosystem(Ecosystem::Python) {
+        list if list.includes_public() => None,
+        _ => super::pypi::default_registry(&policy)?,
+    };
+    let mut packages = Vec::new();
+    for (name, version, filename, url, sha) in BUILD_TOOLCHAIN {
+        let url = match mirror {
+            None => url.to_string(),
+            Some(registry) => bootstrap_url(&policy.registries, registry, name, filename, sha)?,
+        };
+        packages.push(LockedPackage {
+            index: None,
+            name: (*name).into(),
+            version: (*version).into(),
+            filename: (*filename).into(),
+            url,
+            sha256: (*sha).into(),
+            kind: ArtifactKind::Wheel,
+            git: None,
+        });
+    }
+    Ok(Plan {
         ecosystem: "python".into(),
         python_version: python_version.into(),
-        packages: BUILD_TOOLCHAIN
-            .iter()
-            .map(|(name, version, filename, url, sha)| LockedPackage {
-                index: None,
-                name: (*name).into(),
-                version: (*version).into(),
-                filename: (*filename).into(),
-                url: (*url).into(),
-                sha256: (*sha).into(),
-                kind: ArtifactKind::Wheel,
-                git: None,
-            })
-            .collect(),
-    }
+        packages,
+    })
+}
+
+/// Where `registry` serves the pinned build tool `filename` with `sha`.
+fn bootstrap_url(
+    sources: &crate::kernel::registries::effective::Sources,
+    registry: &crate::kernel::registries::config::Registry,
+    name: &str,
+    filename: &str,
+    sha: &str,
+) -> io::Result<String> {
+    let files = super::pypi::simple_page(sources, registry, name)?.unwrap_or_default();
+    files
+        .into_iter()
+        .find(|(listed, _, sha256)| listed == filename && sha256 == sha)
+        .map(|(_, url, _)| url)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "registry {} does not serve {filename} with sha256 {sha}, which building a source distribution needs\nfix: have registry {} proxy PyPI's {name}, or list public in the machine policy's [sources].python",
+                    registry.name, registry.name
+                ),
+            )
+        })
 }
 
 fn has_package(plan: &Plan, wanted: &str) -> bool {
@@ -438,7 +477,7 @@ pub(crate) fn plan_sdist_identity_input(
     let python = crate::tailors::python::cpython_identity_input(selected, platform)?;
     // One lease for the whole plan: the archive children, the staged work
     // directory and the Cargo run all borrow it.
-    let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+    let sdist = download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(activity, &sdist)?;
     let fast_requirements = build_requires::fast_path(&info.build_requires);
     let fast_sdist = fast_requirements
@@ -453,7 +492,7 @@ pub(crate) fn plan_sdist_identity_input(
     }
 
     let build_plan = if fast_requirements {
-        build_toolchain_plan(selected.version("cpython")?)
+        build_toolchain_plan(selected.version("cpython")?)?
     } else {
         build_requires::resolve_build_plan(door, selected, &info.build_requires, runtime_plan)?
     };
@@ -466,7 +505,8 @@ pub(crate) fn plan_sdist_identity_input(
     let identity = if info.rust_build {
         let work = store.stage_with_activity(activity)?;
         let result: io::Result<Identity> = (|| {
-            let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+            let sdist =
+                download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
             let source =
                 build_requires::extract_sdist_for(activity, &sdist, &work.join("source"), &info)?;
             drop(sdist);
@@ -1025,7 +1065,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
 
     // One lease for the whole build: the archive children, the staged work
     // directory and the Cargo run all borrow it.
-    let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+    let sdist = download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
     let info = build_requires::inspect_sdist_for(activity, &sdist)?;
     // A Rust source needs the new schema even if its Python backend only
     // declares setuptools/wheel, because rust/vendor are identity inputs.
@@ -1046,7 +1086,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         }
     }
     let build_plan = if fast_requirements {
-        build_toolchain_plan(selected.version("cpython")?)
+        build_toolchain_plan(selected.version("cpython")?)?
     } else {
         build_requires::resolve_build_plan(door, selected, &info.build_requires, runtime_plan)?
     };
@@ -1060,7 +1100,7 @@ pub(crate) fn build_sdist_wheel_at_depth(
         native_libs_identity_id(store, platform, info.native_build, fast_requirements)?;
     // Re-verify and reacquire the lease for the actual copy/extraction below,
     // so gc cannot collect the cached artifact while it is being used.
-    let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+    let sdist = download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
 
     let work = store.stage_with_activity(activity)?;
     let outdir = work.join("out");
@@ -1412,7 +1452,7 @@ pub fn ensure_build_environment(
     crate::tailors::install_kinds();
     super::env::realize_env_for(
         door,
-        &build_toolchain_plan(selected.version("cpython")?),
+        &build_toolchain_plan(selected.version("cpython")?)?,
         selected,
     )
 }
@@ -1455,7 +1495,8 @@ mod tests {
         writer.finish().unwrap();
         let sha256 = hex::encode(sha2::Sha256::digest(std::fs::read(&archive).unwrap()));
         let url = format!("file://{}", archive.display());
-        let lease = super::download_verified_held(&store, &activity, &url, &sha256).unwrap();
+        let lease =
+            crate::kernel::fetch::download_verified_held(&store, &activity, &url, &sha256).unwrap();
         let info = super::build_requires::inspect_sdist(&lease).unwrap();
         assert!(!info.rust_build);
         let work = store.stage_with_activity(&activity).unwrap();

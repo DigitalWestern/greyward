@@ -11,9 +11,10 @@ use crate::comforter::{
     ClosureRefs, InputRecord,
 };
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_verified_held;
+use crate::kernel::fetch::download_registry_held;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::hostfallback::{self, FallbackRecords, RUNTIME_ONLY_VIEW};
+use crate::kernel::registries::config::Ecosystem;
 use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
@@ -340,6 +341,32 @@ pub(crate) fn planned_env_object_id(
     Ok(environment_identity(door, plan, &cpython_id, selected, rust)?.object_id())
 }
 
+/// What [`realize_env_at_depth`] checks before any cache is consulted: the
+/// host, the plan against `selected`, and every registry package of `plan`
+/// against the effective python source list, so a warm environment built
+/// under another policy is not reused for a lock the list now refuses.
+fn preflight(
+    plan: &Plan,
+    selected: &Selected,
+    platform: crate::kernel::platform::Platform,
+) -> io::Result<()> {
+    crate::kernel::platform::require_host(platform, "Python environment")?;
+    agreeing(plan, selected)?;
+    let policy = crate::kernel::policy::effective();
+    for package in plan.packages.iter().filter(|package| package.git.is_none()) {
+        crate::kernel::registries::lock::check(
+            &policy.registries,
+            crate::kernel::registries::config::Ecosystem::Python,
+            &crate::kernel::registries::lock::Entry {
+                name: &package.name,
+                index: package.index.as_deref(),
+                file: &package.url,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Internal realization entry point used by sdist build environments. The
 /// depth is carried through nested build-requirement sdists so a malicious or
 /// pathological chain cannot recurse forever.
@@ -352,8 +379,7 @@ pub(crate) fn realize_env_at_depth(
 ) -> io::Result<PathBuf> {
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Python environment")?;
-    agreeing(plan, selected)?;
+    preflight(plan, selected, platform)?;
     let python_obj = python::realize_runtime(store, activity, platform, selected)?;
 
     // Identity planning and realization use exactly the same input builder.
@@ -485,7 +511,8 @@ fn hold_wheels(
     let mut leases = Vec::new();
     for (p, path) in artifacts {
         if p.kind == ArtifactKind::Wheel {
-            let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+            let lease =
+                download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
             *path = lease.to_path_buf();
             leases.push(lease);
         }
@@ -538,7 +565,8 @@ fn realize_artifacts<'p>(
     for &p in packages {
         let wheel_file = match p.kind {
             ArtifactKind::Wheel => {
-                let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+                let lease =
+                    download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
                 let path = lease.to_path_buf();
                 drop(lease);
                 path
@@ -614,6 +642,22 @@ fn python_closure_body(
         "python": python,
         "inputs": inputs,
     });
+    // The configured registry that served each file, for the receipt and
+    // `ward audit`.
+    let sources = crate::kernel::policy::effective().registries;
+    if let Some(packages) = body["plan"]["packages"].as_array_mut() {
+        for package in packages {
+            if !package["git"].is_null() {
+                continue;
+            }
+            let url = package["url"].as_str().unwrap_or_default();
+            if let Some(registry) =
+                crate::kernel::registries::lock::served_by(&sources, Ecosystem::Python, url)
+            {
+                package["registry"] = registry;
+            }
+        }
+    }
     if let Some(record) = runtime_record {
         crate::comforter::merge_record(&mut body, record);
     }

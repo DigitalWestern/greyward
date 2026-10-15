@@ -562,12 +562,13 @@ fn withheld_facts(
 /// for anything else.
 fn snapshot_digest(snapshot: &Snapshot, relative: &Path, walked: bool) -> Option<String> {
     let real = snapshot.lock_root().real.join(relative);
-    match snapshot.input_state(&real)? {
-        EntryState::Symlink { .. } if !walked => match snapshot.followed(&real)? {
+    if walked {
+        snapshot.input_state(&real)?.digest()
+    } else {
+        match snapshot.followed(&real)? {
             state @ EntryState::File { .. } => state.digest(),
             _ => None,
-        },
-        state => state.digest(),
+        }
     }
 }
 
@@ -1350,6 +1351,7 @@ mod tests {
         fs::create_dir_all(fx.project.join("config/deep")).unwrap();
         fs::write(fx.project.join("config/settings"), "config generation").unwrap();
         std::os::unix::fs::symlink("config/deep", fx.project.join("directory-link")).unwrap();
+        std::os::unix::fs::symlink("config", fx.project.join("config-alias")).unwrap();
         std::os::unix::fs::symlink("directory-link/../settings", fx.project.join(".npmrc"))
             .unwrap();
         let with_link = Snapshot::build(
@@ -1394,6 +1396,18 @@ mod tests {
         assert!(check_planning_inputs(&with_link, &named, false).is_err());
         let config = super::super::record::file_digests(&held, &[PathBuf::from(".npmrc")]).unwrap();
         assert!(check_planning_inputs(&with_link, &config, false).is_ok());
+        // An explicitly listed config can also live below a directory
+        // symlink, without being a symlink itself. The snapshot has the
+        // target path, so resolve parents through that captured baseline.
+        let config_parent = PathBuf::from("config-alias/settings");
+        let nested =
+            super::super::record::file_digests(&held, std::slice::from_ref(&config_parent))
+                .unwrap();
+        assert!(check_planning_inputs(&with_link, &nested, false).is_ok());
+        assert_eq!(
+            snapshot_digest(&with_link, &config_parent, false),
+            config.get(".npmrc").cloned()
+        );
         fs::write(fx.project.join("config/settings"), "changed later").unwrap();
         // Snapshot facts still identify the captured bytes after live edits.
         assert_eq!(

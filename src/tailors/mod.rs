@@ -606,10 +606,10 @@ pub trait Tailor: Sync {
 
     /// What this tailor's sync places in a project outside `.greyward`, as
     /// path patterns relative to the project (`**/` for any depth): the
-    /// visible environment links (`node_modules`, `.venv`). They are ward's
-    /// own output, never another ecosystem's resolution input, so
-    /// [`resolution_excludes`] keeps every pattern here out of every
-    /// executable-manifest walk and snapshot.
+    /// visible environment links (`node_modules`, `.venv`).
+    /// [`resolution_links`] verifies links at these paths point into the
+    /// store before omitting them from executable-manifest inputs. Real
+    /// directories and unrelated inward links at these paths stay inputs.
     fn projected_paths(&self) -> &'static [&'static str] {
         &[]
     }

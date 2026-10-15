@@ -75,7 +75,7 @@ struct Checkouts {
 impl Checkouts {
     /// Realize `git`'s checkouts (recording `git-dependency` for each).
     fn of(door: &ResolutionDoor<'_>, git: &[GitDep]) -> io::Result<Self> {
-        let object =
+        let (object, _) =
             super::git::realize_checkouts(door.store(), door.lease(), door.platform(), git)?;
         Ok(Checkouts {
             links: super::git::deps_links(object.as_deref(), git),
@@ -845,6 +845,128 @@ mod tests {
         again.unwrap();
         assert!(recorded.is_empty(), "{recorded:?}");
         assert_eq!(fs::read_to_string(dir.join("mix.lock")).unwrap(), lock);
+        done();
+    }
+
+    /// A mix.lock git dependency: fetched at its locked commit from a
+    /// local repository, recorded as a git dependency, and found already
+    /// checked out by the confined gate and attest runs, which have no
+    /// route to it. The deps object carries the checkout mix reads.
+    #[test]
+    #[ignore = "realizes the store BEAM over the network"]
+    fn mix_checks_a_git_dependency_without_its_host() {
+        let _env = policy::test_env_lock();
+        let _serial = policy::attribution_test_lock();
+        let Some(harness) = hex_harness("mix_checks_a_git_dependency", false) else {
+            return;
+        };
+        let selected = super::super::shipped_selection().unwrap();
+        let platform = Platform::host().unwrap();
+        let beam =
+            super::super::realize_runtime(&harness.store, &harness.activity, platform, &selected)
+                .unwrap();
+        let temp = TempDir::named("elixir-git-dep");
+        fs::create_dir_all(temp.0.join("lib")).unwrap();
+        let repo = temp.0.join("lib").canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(
+            repo.join("mix.exs"),
+            "defmodule Lib.MixProject do\n  use Mix.Project\n  \
+             def project, do: [app: :lib, version: \"0.1.0\"]\nend\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "one"]);
+        let rev = git(&["rev-parse", "HEAD"]);
+        let url = format!("file://{}", repo.display());
+
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("mix.exs"),
+            manifest(&format!("{{:lib, git: {url:?}}}")),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("mix.lock"),
+            format!("%{{\n  \"lib\": {{:git, {url:?}, {rev:?}, []}},\n}}\n"),
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&dir.canonicalize().unwrap()).unwrap();
+
+        let (planned, recorded) = through_door(harness, DoorKind::Planner, |door| {
+            plan_elixir(door, &held, &beam, &selected)
+        });
+        let (plan, _, _) = planned.unwrap();
+        assert!(plan.deps.is_empty(), "{:?}", plan.deps);
+        assert_eq!(plan.git.len(), 1, "{:?}", plan.git);
+        assert_eq!(
+            (plan.git[0].app.as_str(), plan.git[0].rev.as_str()),
+            ("lib", rev.as_str())
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e.kind == policy::GIT_DEPENDENCY && e.detail.contains(&rev)),
+            "{recorded:?}"
+        );
+
+        let (attested, _) = through_door(harness, DoorKind::Attest, |door| {
+            attest_project(door, &held, &beam, &selected)
+        });
+        attested.unwrap();
+        // An in-sync lock with a git dependency is not re-resolved.
+        let lock = fs::read(dir.join("mix.lock")).unwrap();
+        let (relocked, recorded) = through_door(harness, DoorKind::MissingLock, |door| {
+            relock_if_stale(door, &held, &beam, &selected)
+        });
+        relocked.unwrap();
+        assert!(
+            !recorded.iter().any(|e| e.kind == policy::LOCK_DISAGREEMENT),
+            "{recorded:?}"
+        );
+        assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), lock);
+
+        // A build realizes the deps under its own attribution, which the
+        // git dependency is recorded in again; the object keeps it.
+        let attribution = Attribution::open("elixir").unwrap();
+        let deps = super::super::realize_deps(
+            &harness.store,
+            &harness.activity,
+            platform,
+            &plan,
+            &beam,
+            &selected,
+        )
+        .unwrap();
+        let recorded = attribution.recorded();
+        attribution.discard();
+        assert!(
+            recorded.iter().any(|e| e.kind == policy::GIT_DEPENDENCY),
+            "{recorded:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(deps.join("lib/.git/HEAD"))
+                .unwrap()
+                .trim(),
+            rev
+        );
+        assert!(deps.join("lib/mix.exs").is_file());
         done();
     }
 

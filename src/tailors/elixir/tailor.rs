@@ -408,9 +408,8 @@ impl Tailor for Elixir {
         // repository and commit it is (`vcs_url`, per the purl spec), and
         // its version is that commit.
         if let Some(git) = plan.get("git").filter(|git| !git.is_null()) {
-            let git: Vec<elixir::GitDep> = serde_json::from_value(git.clone()).map_err(|e| {
-                crate::kernel::cyclonedx::err(format!("{eco} closure: git: {e}"))
-            })?;
+            let git: Vec<elixir::GitDep> = serde_json::from_value(git.clone())
+                .map_err(|e| crate::kernel::cyclonedx::err(format!("{eco} closure: git: {e}")))?;
             for dep in git {
                 let purl = format!(
                     "pkg:hex/{}@{}?vcs_url={}",

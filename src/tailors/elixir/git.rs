@@ -168,19 +168,24 @@ fn write_git_marker(checkout: &Path, dep: &GitDep) -> io::Result<()> {
 /// checkout object holding them all. `None` when there are none. The
 /// exceptions are recorded on every call, before anything is fetched, so a
 /// policy denying either kind stops here and every closure built from the
-/// checkouts carries them.
+/// checkouts carries them. The object keeps them too, and so must any
+/// object built from it (they are returned), so a cache hit re-checks them.
 pub(super) fn realize_checkouts(
     store: &Store,
     activity: &StoreActivity,
     platform: Platform,
     deps: &[GitDep],
-) -> io::Result<Option<PathBuf>> {
+) -> io::Result<(Option<PathBuf>, Vec<crate::kernel::policy::Exception>)> {
     if deps.is_empty() {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     }
+    let mut kept = Vec::new();
     for dep in deps {
         validate_git_dep(dep)?;
-        crate::kernel::gitsrc::record_git_dependency(&dep.app, &dep.source())?;
+        kept.extend(crate::kernel::gitsrc::record_git_dependency_kept(
+            &dep.app,
+            &dep.source(),
+        )?);
     }
     let mut sources = Vec::with_capacity(deps.len());
     for dep in deps {
@@ -198,7 +203,7 @@ pub(super) fn realize_checkouts(
     let id = identity.object_id();
     if store.has_with_activity(activity, &id)? {
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
-        return Ok(Some(store.object_path(&id)));
+        return Ok((Some(store.object_path(&id)), kept));
     }
     let staged = store.stage_with_activity(activity)?;
     let built = (|| -> io::Result<()> {
@@ -218,8 +223,8 @@ pub(super) fn realize_checkouts(
         object_deps.object_id(&crate::kernel::store::object_id_from_path(object)?)?;
     }
     store
-        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &object_deps)
-        .map(|(path, _)| Some(path))
+        .commit_with_activity_and_deps(activity, &identity, &staged, &kept, &object_deps)
+        .map(|(path, _)| (Some(path), kept))
 }
 
 /// The links a confined mix run gets: `deps/<app>` in its deps path to the

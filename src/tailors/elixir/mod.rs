@@ -1219,7 +1219,7 @@ pub fn realize_deps(
     let _ = crate::kernel::store::remove_tree(&scratch);
     // Git dependencies: each checkout, `.git` included, copied in beside
     // the Hex ones, so the projection is the deps path mix reads.
-    let checkouts = git::realize_checkouts(store, activity, platform, &plan.git)?;
+    let (checkouts, kept) = git::realize_checkouts(store, activity, platform, &plan.git)?;
     if let Some(checkouts) = &checkouts {
         for dep in &plan.git {
             crate::kernel::store::clone_tree_with_activity(
@@ -1236,7 +1236,7 @@ pub fn realize_deps(
         deps.cache_digest(Digest::sha256(&dep.outer_sha256)?);
     }
     store
-        .commit_with_activity_and_deps(activity, &identity, &staged, &[], &deps)
+        .commit_with_activity_and_deps(activity, &identity, &staged, &kept, &deps)
         .map(|(path, _)| path)
 }
 

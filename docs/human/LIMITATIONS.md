@@ -895,8 +895,22 @@ Selection covers every patch of each maintained CPython minor that python-build-
   non-sandboxed build step in the kernel. **OTP cache hits skip the runtime probe**: the OTP
   object was built on Fedora 44 (glibc 2.43 floor, OpenSSL 3.x); a store copied to an
   incompatible host fails only at execution time. Loud, but late.
-- **Fail-closed rows**: git deps; non-hexpm repos; legacy mix.lock entry shapes (3/6/7-field —
-  "refresh the lock"). **Umbrella projects are untested**. **Only OTP releases with a Linux build in
+- **Fail-closed rows**: non-hexpm repos; legacy mix.lock entry shapes (3/6/7-field —
+  "refresh the lock"); git deps whose lock entry has no full 40-character commit.
+- **Git deps are fetched by ward, not mix.** Each `{:git, url, rev, opts}` lock entry is
+  fetched at its locked commit by the kernel's git code (recorded as `git-dependency`, plus
+  `host-git-transport` for non-https URLs) and checked out with a synthetic `.git` (HEAD and
+  origin only, no history), which is what mix's own lock check reads. `sparse:` and `subdir:`
+  get the whole tree; submodules are always checked out. Confined mix runs see the checkout
+  and never reach the git host, so **changing a git dep's ref in mix.exs, or a project with git
+  deps and no mix.lock, needs a lock written by `mix deps.get` outside ward**: inside, mix
+  cannot fetch the new ref and ward reports "mix could not check".
+- **A stale mix.lock is re-locked by `ward prepare`**, confined, with the disagreement
+  recorded as `lock-disagreement`; `--frozen` and the planner refuse it instead. Mix's
+  archive check is off (`--no-archives-check`): a project naming `archives:` (nerves) is
+  checked without the archive installed.
+- **`.tool-versions` accepts asdf's spellings**: `elixir v1.19.4` and `1.19.4-otp-27`; the
+  `-otp-NN` suffix constrains the OTP major. **Umbrella projects are untested**. **Only OTP releases with a Linux build in
   `greyward-toolchains` are realizable** (OTP 29.0.5 today, with each Elixir 1.20 patch); erlef
   publishes the Darwin builds for many more. **No rebar3 build for OTP 29 exists
   yet**: the pinned otp-28 escript runs on the 29 VM — a version-skew impurity until upstream

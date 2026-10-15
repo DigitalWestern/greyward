@@ -497,6 +497,26 @@ pub trait RegistryProtocol: Send + Sync {
         false
     }
 
+    /// Whether a redirect from `from` (a URL on one of the route's
+    /// endpoints) to `to`, an origin the session's permitted set does not
+    /// name, is followed anyway, for the request that started at
+    /// `requested` (the URL the route resolved, before any redirect): a
+    /// registry that hands its downloads to a storage host of its own
+    /// (proxy.golang.org's module zips on storage.googleapis.com). Say yes
+    /// only for requests whose bytes the tool checks against digests it
+    /// got elsewhere (Go: zips only), judged on `requested` as well as
+    /// `from`: the response is served, cached and classed as `requested`'s,
+    /// so a document that redirects through a download URL must not pick
+    /// up the download's exception. The storage host is then trusted with
+    /// nothing. The kernel asks only for a
+    /// hop straight off a route endpoint, refuses any redirect after the
+    /// handoff, and still requires https without userinfo, the validating
+    /// resolver, and no credential across origins. The tool's allowlisted
+    /// headers, and a request body across a 307 or 308, do follow the hop.
+    fn follows_redirect(&self, _requested: &Url, _from: &Url, _to: &Url) -> bool {
+        false
+    }
+
     /// When each package version the metadata `body`, fetched from `url`,
     /// describes was published: `(name, version, unix seconds)`, as the
     /// registry spells them ([`Self::package_key`] compares them). A body
@@ -661,6 +681,9 @@ impl RegistryProtocol for Fixed {
     }
     fn encoded_slash(&self) -> bool {
         self.0.encoded_slash()
+    }
+    fn follows_redirect(&self, requested: &Url, from: &Url, to: &Url) -> bool {
+        self.0.follows_redirect(requested, from, to)
     }
     fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
         self.0.published(url, body)
@@ -937,6 +960,52 @@ pub fn check_route_path_with(path_and_query: &str, encoded_slash: bool) -> Resul
     Ok(())
 }
 
+/// Whether `requested` (a URL as the tool spelled it) and `mapped` (what a
+/// route resolved its path to) name one resource: the same scheme, host
+/// and port, no userinfo on either, the same path segments once each
+/// segment is percent-decoded once, and the same query as sent. A route
+/// may send a decoded spelling upstream (Go's `%21azure` goes as
+/// `!azure`), so a byte-for-byte comparison would tell them apart. The
+/// path is split before decoding, so an encoded `/` stays inside its
+/// segment and never matches a real boundary. The fragment is ignored: it
+/// is never sent.
+pub fn same_resource(requested: &Url, mapped: &Url) -> bool {
+    let plain = |url: &Url| url.username().is_empty() && url.password().is_none();
+    requested.scheme() == mapped.scheme()
+        && requested.host_str() == mapped.host_str()
+        && requested.port_or_known_default() == mapped.port_or_known_default()
+        && plain(requested)
+        && plain(mapped)
+        && requested.query() == mapped.query()
+        && requested.path().split('/').count() == mapped.path().split('/').count()
+        && requested
+            .path()
+            .split('/')
+            .zip(mapped.path().split('/'))
+            .all(|(left, right)| decode_once(left) == decode_once(right))
+}
+
+/// `%XX` escapes decoded once, to bytes; a malformed escape is kept as it
+/// was.
+fn decode_once(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        if bytes[i] == b'%' {
+            if let (Some(high), Some(low)) = (hex(i + 1), hex(i + 2)) {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 fn escapes_well_formed(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -1154,6 +1223,9 @@ mod tests {
             fn encoded_slash(&self) -> bool {
                 true
             }
+            fn follows_redirect(&self, requested: &Url, _from: &Url, to: &Url) -> bool {
+                requested.path() == "/x" && to.path() == "/sentinel"
+            }
             fn published(&self, _url: &Url, _body: &[u8]) -> Vec<(String, String, i64)> {
                 vec![("n".into(), "1".into(), 7)]
             }
@@ -1203,6 +1275,10 @@ mod tests {
             b"rewritten"
         );
         assert!(wrapped.encoded_slash());
+        let sentinel = Url::parse("https://pypi.org/sentinel").unwrap();
+        assert!(wrapped.follows_redirect(&url, &url, &sentinel));
+        assert!(!wrapped.follows_redirect(&url, &sentinel, &url));
+        assert!(!wrapped.follows_redirect(&sentinel, &url, &sentinel));
         assert_eq!(wrapped.published(&url, b""), SENTINEL.published(&url, b""));
         assert_eq!(
             wrapped.lookup(&endpoints, "n", "1"),
@@ -1217,6 +1293,43 @@ mod tests {
             wrapped.tree_size(&url, b"").unwrap().unwrap_err(),
             "sentinel"
         );
+    }
+
+    /// A requested URL and a route's mapping name one resource when only
+    /// their percent-escapes differ, segment by segment.
+    #[test]
+    fn same_resource_compares_segments_after_one_decoding() {
+        let url = |text: &str| Url::parse(text).unwrap();
+        let mapped = url("https://proxy.golang.org/github.com/!azure/x/@v/list");
+        for same in [
+            "https://proxy.golang.org/github.com/%21azure/x/@v/list",
+            "https://proxy.golang.org:443/github.com/!azure/x/@v/list",
+            "https://proxy.golang.org/github.com/!azure/x/%40v/list#ignored",
+        ] {
+            assert!(same_resource(&url(same), &mapped), "{same}");
+        }
+        for other in [
+            "http://proxy.golang.org/github.com/!azure/x/@v/list",
+            "https://sum.golang.org/github.com/!azure/x/@v/list",
+            "https://proxy.golang.org:8443/github.com/!azure/x/@v/list",
+            "https://u@proxy.golang.org/github.com/!azure/x/@v/list",
+            "https://proxy.golang.org/github.com/%2521azure/x/@v/list",
+            "https://proxy.golang.org/github.com/!azure/x/@v/list?go-get=1",
+            "https://proxy.golang.org/github.com/!azure/x/@v/list/",
+            "https://proxy.golang.org/github.com%2f!azure/x/@v/list",
+        ] {
+            assert!(!same_resource(&url(other), &mapped), "{other}");
+        }
+        // An encoded slash stays inside its segment on both sides.
+        let scoped = url("https://registry.npmjs.org/@s%2fn");
+        assert!(same_resource(
+            &url("https://registry.npmjs.org/@s%2Fn"),
+            &scoped
+        ));
+        assert!(!same_resource(
+            &url("https://registry.npmjs.org/@s/n"),
+            &scoped
+        ));
     }
 
     #[test]

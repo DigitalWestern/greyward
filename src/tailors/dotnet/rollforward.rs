@@ -51,8 +51,15 @@ const POLICIES: &[&str] = &[
 fn sdk_version(text: &str) -> Option<([u64; 3], bool)> {
     let core_end = text.find(['-', '+']).unwrap_or(text.len());
     let (core, rest) = text.split_at(core_end);
-    let prerelease = rest.starts_with('-') && rest.len() > 1;
-    if rest == "-" || rest == "+" {
+    let (pre, build) = match rest.find('+') {
+        Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+        None => (rest, None),
+    };
+    let prerelease = !pre.is_empty();
+    if prerelease && !identifiers(&pre[1..], false) {
+        return None;
+    }
+    if build.is_some_and(|build| !identifiers(build, true)) {
         return None;
     }
     let mut parts = [0u64; 3];
@@ -71,6 +78,21 @@ fn sdk_version(text: &str) -> Option<([u64; 3], bool)> {
     (count == 3).then_some((parts, prerelease))
 }
 
+/// Whether `text` is dot-separated identifiers the host accepts (its
+/// `fx_ver_t` parser): each non-empty, ASCII letters, digits and `-` only,
+/// and in a prerelease a numeric one has no leading zero. Anything else
+/// (`11.0.100-?`, a trailing space) makes the host ignore the version.
+fn identifiers(text: &str, build: bool) -> bool {
+    text.split('.').all(|id| {
+        !id.is_empty()
+            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && (build
+                || id.len() == 1
+                || !id.starts_with('0')
+                || !id.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 fn version(parts: &[u64]) -> io::Result<Version> {
     let text: Vec<String> = parts.iter().map(u64::to_string).collect();
     Version::parse(&text.join("."))
@@ -83,23 +105,28 @@ pub fn sdk_request(
     version_text: Option<&str>,
     roll_forward: Option<&str>,
 ) -> io::Result<Option<VersionRequest>> {
-    if let Some(policy) = roll_forward {
-        if !POLICIES.contains(&policy) {
-            return Err(err(format!(
-                "global.json sdk.rollForward {policy:?} is not a .NET roll-forward policy \
-                 (one of {})",
-                POLICIES.join(", ")
-            )));
-        }
-    }
+    // The host compares policy names without regard to case.
+    let policy = match roll_forward {
+        None => "patch",
+        Some(policy) => POLICIES
+            .iter()
+            .copied()
+            .find(|known| known.eq_ignore_ascii_case(policy))
+            .ok_or_else(|| {
+                err(format!(
+                    "global.json sdk.rollForward {policy:?} is not a .NET roll-forward policy \
+                     (one of {})",
+                    POLICIES.join(", ")
+                ))
+            })?,
+    };
     let Some(text) = version_text else {
         return Ok(None);
     };
-    let Some(([major, minor, patch], prerelease)) = sdk_version(text.trim()) else {
+    let Some(([major, minor, patch], prerelease)) = sdk_version(text) else {
         return Ok(None);
     };
     let low = version(&[major, minor, patch])?;
-    let policy = roll_forward.unwrap_or("patch");
     if policy == "disable" {
         if prerelease {
             return Err(err(format!(
@@ -180,6 +207,13 @@ mod tests {
             "9.0.100.1",
             "09.0.100",
             "9.0.100-",
+            "9.0.100+",
+            "11.0.100-?",
+            "11.0.100-rc..1",
+            "11.0.100-rc.01",
+            "11.0.100+a_b",
+            " 9.0.100",
+            "9.0.100 ",
         ] {
             assert_eq!(
                 shown(Some(ignored), Some("latestPatch")),
@@ -196,6 +230,11 @@ mod tests {
             ">=11.0.100"
         );
         assert_eq!(shown(Some("10.0.100+build"), Some("disable")), "==10.0.100");
+        assert_eq!(
+            shown(Some("9.0.100-rc.1+abc.01"), Some("latestMajor")),
+            ">=9.0.100"
+        );
+        assert_eq!(shown(Some("9.0.100-rc-1.0"), Some("major")), ">=9.0.100");
         let why = sdk_request(Some("11.0.100-rc.1"), Some("disable"))
             .unwrap_err()
             .to_string();
@@ -210,5 +249,14 @@ mod tests {
         assert!(why.contains("\"latest\""), "{why}");
         assert!(why.contains("latestMajor"), "{why}");
         assert!(sdk_request(None, Some("sideways")).is_err());
+    }
+
+    #[test]
+    fn policy_names_ignore_case_as_the_host_does() {
+        let v = Some("9.0.317");
+        assert_eq!(shown(v, Some("LATESTPATCH")), ">=9.0.317,<9.0.400");
+        assert_eq!(shown(v, Some("Disable")), "==9.0.317");
+        assert_eq!(shown(v, Some("latestfeature")), ">=9.0.317,<9.1");
+        assert_eq!(shown(v, Some("MAJOR")), ">=9.0.317");
     }
 }

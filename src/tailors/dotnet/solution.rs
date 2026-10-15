@@ -483,13 +483,14 @@ pub(crate) fn generated_sln(
             .and_then(|stem| stem.to_str())
             .unwrap_or("project");
         // MSBuild refuses a solution with two projects of one name (MSB5004);
-        // the name is a label, references go by path.
-        let name = if names.insert(stem.to_ascii_lowercase()) {
-            stem.to_string()
-        } else {
-            format!("{stem}-{}", index + 1)
-        };
-        names.insert(name.to_ascii_lowercase());
+        // the name is a label, references go by path. A suffixed name may
+        // itself be taken (`Foo-3`, `Foo`, `Foo`), so count up until free.
+        let mut name = stem.to_string();
+        let mut suffix = index + 1;
+        while !names.insert(name.to_ascii_lowercase()) {
+            name = format!("{stem}-{suffix}");
+            suffix += 1;
+        }
         let guid = format!("{{00000000-0000-0000-0000-{:012X}}}", index + 1);
         text.push_str(&format!(
             "Project(\"{{{}}}\") = \"{name}\", \"{absolute}\", \"{guid}\"\nEndProject\n",
@@ -904,6 +905,21 @@ EndProject
                 "/work/repo/test/app.csproj"
             ]
         );
+        // A suffixed label already taken counts on: `Foo-3`, `Foo`, `Foo`
+        // would otherwise label the third `Foo-3` again.
+        let taken = generated_sln(
+            Path::new("/w"),
+            &[
+                "a/Foo-3.csproj".into(),
+                "b/Foo.csproj".into(),
+                "c/foo.csproj".into(),
+            ],
+            &[],
+        )
+        .unwrap();
+        for label in ["Foo-3", "Foo", "foo-4"] {
+            assert!(taken.contains(&format!("= \"{label}\", ")), "{taken}");
+        }
         assert!(generated_sln(Path::new("/work/a;b"), &["A.csproj".into()], &[]).is_err());
         assert!(generated_sln(Path::new("/w"), &["A.csproj".into()], &["a|b".into()]).is_err());
         assert_eq!(

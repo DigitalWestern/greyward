@@ -268,7 +268,7 @@ impl Tailor for Ruby {
                 version: string(&package["version"]),
                 detail: format!(
                     "git: {} at {}",
-                    string(&package["url"]),
+                    super::sources::git_url(&string(&package["url"])),
                     revision.get(..12).unwrap_or(&revision)
                 ),
             });
@@ -351,9 +351,11 @@ impl Tailor for Ruby {
         // (`vcs_url`, per the purl spec).
         for p in optional("git_gems")? {
             let (name, ver) = (required(eco, &p, "name")?, required(eco, &p, "version")?);
+            // Named as ward fetched it, without credentials the lock's
+            // remote may carry.
             let vcs = format!(
                 "git+{}@{}",
-                required(eco, &p, "url")?,
+                super::sources::git_url(&required(eco, &p, "url")?),
                 required(eco, &p, "revision")?
             );
             out.push(component(
@@ -436,7 +438,7 @@ mod tests {
                           "full_name": "rake-13.2.1", "sha256": "a".repeat(64)}],
                 "path_gems": [{"name": "app", "version": "1.0.0", "path": "."}],
                 "git_gems": [{"name": "rack", "version": "3.2.0",
-                              "url": "https://github.com/rack/rack.git",
+                              "url": "https://user:token@github.com/rack/rack.git",
                               "revision": "0123456789abcdef0123456789abcdef01234567",
                               "checkout": "rack-0123456789ab"}],
             },
@@ -444,7 +446,8 @@ mod tests {
     }
 
     /// A path gem is the project's own code: no registry purl, its
-    /// directory instead. A git gem names its repository and commit.
+    /// directory instead. A git gem names its repository and commit, never
+    /// the credentials its lock remote carries.
     #[test]
     fn sbom_components_name_where_path_and_git_gems_come_from() {
         let mut out = Vec::new();

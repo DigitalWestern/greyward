@@ -78,35 +78,75 @@ if mode == "spec"
   exit 0
 end
 if mode == "git-install"
-  # One git source's gems, installed the way `bundle install` installs
-  # them once their checkout is in place: ward fetched the locked commit
-  # and copied its tree to <GEM_HOME>/bundler/gems/<checkout> before this
-  # runs, so Bundler finds it checked out and runs no git. Bundler's own
-  # installer then evaluates and serializes the gemspecs, compiles native
-  # extensions where Bundler looks for them at run time, and writes the
-  # executables' wrappers. Offline: nothing here fetches.
+  # One checkout's gems, installed the way `bundle install` installs them
+  # once the checkout is in place: ward fetched the locked commit and
+  # copied its tree to <GEM_HOME>/bundler/gems/<checkout> before this
+  # runs, so Bundler finds it checked out and fetches nothing. Several
+  # lock sources can name the one directory (a glob each, or a mirror's
+  # URL); each is installed from the one copy. Bundler's own installer
+  # evaluates and serializes the gemspecs, compiles native extensions
+  # where Bundler looks for them at run time, and writes the executables'
+  # wrappers. Offline: nothing here fetches.
   require "bundler"
-  native_libs, uri, revision, checkout, glob, *wanted = ARGV
+  require "fileutils"
+  native_libs, revision, checkout, report, sources = ARGV
+  report = File.expand_path(report)
   build_args = native_build_args.call(native_libs)
-  options = { "uri" => uri, "revision" => revision }
-  options["glob"] = glob unless glob.empty?
-  src = Bundler::Source::Git.new(options)
-  expected = File.join(ENV.fetch("GEM_HOME"), "bundler", "gems", checkout)
-  unless src.install_path.to_s == expected
-    abort "bundler expects #{uri} at #{src.install_path}, not #{expected}"
+  root = File.join(ENV.fetch("GEM_HOME"), "bundler", "gems", checkout)
+  # A gemspec commonly lists its files with `git ls-files`, and Bundler
+  # evaluates it inside a git checkout. ward's copy has no git data, so a
+  # throwaway repository indexes the tree the commit tracked; it is
+  # removed before ward commits the gems object.
+  git_dir = File.join(root, ".git")
+  if File.exist?(git_dir) || File.symlink?(git_dir)
+    abort "#{checkout}: the checkout already has git data"
   end
-  src.send(:serialize_gemspecs_in, src.install_path)
-  specs = src.local_specs
-  wanted.each do |coordinate|
-    name, version = coordinate.split(":", 2)
-    spec = specs.search(name).find { |s| s.version.to_s == version }
-    abort "#{name} #{version}: no such gemspec in #{uri} at #{revision}" unless spec
-    # What `Source::Git#install` does once the checkout is in place, without
-    # its "Using ... from" line: that line names the branch, which asks git.
-    src.send(:generate_bin, spec,
-              disable_extensions: !spec.missing_extensions?, build_args: build_args)
-    puts "installed #{name}-#{version} from #{checkout}"
+  git_env = {
+    "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => File::NULL,
+    "GIT_TERMINAL_PROMPT" => "0",
+    "GIT_AUTHOR_NAME" => "ward", "GIT_AUTHOR_EMAIL" => "ward@invalid",
+    "GIT_AUTHOR_DATE" => "1970-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME" => "ward", "GIT_COMMITTER_EMAIL" => "ward@invalid",
+    "GIT_COMMITTER_DATE" => "1970-01-01T00:00:00Z"
+  }
+  git = lambda do |*args|
+    ok = system(git_env, "git", "-c", "init.defaultBranch=ward", "-c", "commit.gpgsign=false",
+                *args, chdir: root, out: File::NULL)
+    abort "#{checkout}: git #{args.first} failed while indexing the checkout for its gemspecs" unless ok
   end
+  executables = {}
+  begin
+    git.call("init", "-q")
+    git.call("add", "-A", "-f")
+    git.call("commit", "-q", "--allow-empty", "--no-verify", "-m", revision)
+    JSON.parse(sources).each do |source|
+      uri, glob, wanted = source.values_at("uri", "glob", "gems")
+      options = { "uri" => uri, "revision" => revision }
+      options["glob"] = glob unless glob.empty?
+      src = Bundler::Source::Git.new(options)
+      unless src.install_path.to_s == root
+        abort "bundler expects #{uri} at #{src.install_path}, not #{root}"
+      end
+      src.send(:serialize_gemspecs_in, src.install_path)
+      specs = src.local_specs
+      wanted.each do |coordinate|
+        name, version = coordinate.split(":", 2)
+        spec = specs.search(name).find { |s| s.version.to_s == version }
+        abort "#{name} #{version}: no such gemspec in #{uri} at #{revision}" unless spec
+        # What `Source::Git#install` does once the checkout is in place,
+        # without its "Using ... from" line: that line names the branch,
+        # which asks git about the repository ward fetched from.
+        src.send(:generate_bin, spec,
+                  disable_extensions: !spec.missing_extensions?, build_args: build_args)
+        executables[name] = spec.executables
+        puts "installed #{name}-#{version} from #{checkout}"
+      end
+    end
+  ensure
+    FileUtils.rm_rf(git_dir)
+  end
+  # The executables, for ward to check against the plan's other gems.
+  File.write(report, { "executables" => executables }.to_json)
   exit 0
 end
 abort "usage: helper plan <lockfile>" unless mode == "plan"

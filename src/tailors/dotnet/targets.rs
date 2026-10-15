@@ -46,6 +46,22 @@ enum Applies {
 }
 
 impl Applies {
+    fn not(self) -> Applies {
+        match self {
+            Applies::Yes => Applies::No,
+            Applies::No => Applies::Yes,
+            Applies::Unknown => Applies::Unknown,
+        }
+    }
+
+    fn or(self, other: Applies) -> Applies {
+        match (self, other) {
+            (Applies::Yes, _) | (_, Applies::Yes) => Applies::Yes,
+            (Applies::Unknown, _) | (_, Applies::Unknown) => Applies::Unknown,
+            _ => Applies::No,
+        }
+    }
+
     fn and(self, other: Applies) -> Applies {
         match (self, other) {
             (Applies::No, _) | (_, Applies::No) => Applies::No,
@@ -120,6 +136,8 @@ fn tag_end(markup: &str) -> Option<usize> {
 fn declarations(markup: &str, path: &Path) -> io::Result<Vec<Declaration>> {
     // The open elements, each with whether its contents apply.
     let mut open: Vec<(String, Applies)> = Vec::new();
+    // Choose's depth and whether an earlier When branch matched.
+    let mut choices: Vec<(usize, Applies)> = Vec::new();
     let mut found = Vec::new();
     let mut at = 0;
     while let Some(start) = markup[at..].find('<').map(|found| at + found) {
@@ -136,6 +154,7 @@ fn declarations(markup: &str, path: &Path) -> io::Result<Vec<Declaration>> {
             let name = name.trim();
             if let Some(index) = open.iter().rposition(|(open, _)| open == name) {
                 open.truncate(index);
+                choices.retain(|(depth, _)| *depth < index);
             }
             continue;
         }
@@ -145,10 +164,24 @@ fn declarations(markup: &str, path: &Path) -> io::Result<Vec<Declaration>> {
         let name = &inner[..name_end.unwrap_or(inner.len())];
         let empty = inner.ends_with('/');
         let attributes = &inner[name.len()..];
-        let own = attribute_values(attributes, "condition", path)?
+        let mut own = attribute_values(attributes, "condition", path)?
             .first()
             .map(|condition| constant(condition))
             .unwrap_or(Applies::Yes);
+        if let Some((depth, matched)) = choices.last_mut() {
+            if *depth + 1 == open.len() {
+                if name == "when" {
+                    let condition = own;
+                    own = own.and(matched.not());
+                    *matched = matched.or(condition);
+                } else if name == "otherwise" {
+                    own = own.and(matched.not());
+                }
+            }
+        }
+        if name == "choose" {
+            choices.push((open.len(), Applies::No));
+        }
         let parent = open
             .last()
             .map(|(_, applies)| *applies)
@@ -422,6 +455,19 @@ mod tests {
         let choose = "<Project><Choose><When Condition=\"'$(V)' > '1'\"><PropertyGroup>\
              <TargetFrameworks>net10.0</TargetFrameworks></PropertyGroup></When></Choose></Project>";
         assert_eq!(effective(choose), (None, Some(10)));
+    }
+
+    #[test]
+    fn choose_branches_preserve_ambiguity_and_exclude_inactive_otherwise() {
+        let choose = |condition: &str| {
+            format!("<Project><Choose><When Condition=\"{condition}\"><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup></When><Otherwise><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Otherwise></Choose></Project>")
+        };
+        assert_eq!(effective(&choose("false")), (Some(9), None));
+        assert_eq!(effective(&choose("true")), (Some(11), None));
+        assert_eq!(
+            effective(&choose("'$(Optional)' == 'true'")),
+            (None, Some(11))
+        );
     }
 
     #[test]

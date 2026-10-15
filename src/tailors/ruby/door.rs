@@ -4,6 +4,7 @@
 
 use super::{forced_env, registry, ENV_REMOVE, ENV_REMOVE_PREFIXES, GEMFILE};
 use crate::kernel::resolve::door::{ConfinedSpec, Publish, ReceiptProducer, Wire, Wiring};
+use crate::kernel::resolve::session::Intercept;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
@@ -27,6 +28,9 @@ pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".gre
 /// any file the run is handed are written there, the one greyward-written
 /// directory the sandbox sees.
 pub(crate) const SCRATCH: &str = "@SCRATCH@";
+
+/// The helper's file name in the scratch directory.
+pub(super) const HELPER_FILE: &str = "helper.rb";
 
 /// Where a confined Bundler run's results go.
 pub(crate) enum RubyPublish<'a> {
@@ -88,10 +92,13 @@ fn spec(run: &RubyRun<'_>) -> DelegateSpec {
                 .join("bin")
                 .join(if bundle { "ruby" } else { run.args[0] }),
         );
+    // The helper does that (`ruby -x bin/bundle`), around a throwaway git
+    // index of the project copy for the gemspecs' `git ls-files`.
     if bundle {
         spec.args([
-            OsString::from("-x"),
-            run.ruby_obj.join("bin/bundle").into_os_string(),
+            format!("{SCRATCH}/{HELPER_FILE}"),
+            "indexed".into(),
+            "bundle".into(),
         ]);
     }
     spec.args(&run.args[1..]).lock_root(run.lock_root);
@@ -141,8 +148,27 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     } else {
         Vec::new()
     };
+    // A run that may write the lock clones the Gemfile's git sources:
+    // git fetches to the hosts they name, and to no other, go through the
+    // proxy, each recorded as `git-dependency`.
+    if run.online {
+        let root = crate::kernel::fsroot::ProjectRoot::open(run.lock_root)?;
+        let gemfile = root.read_input_string(Path::new(GEMFILE))?;
+        let hosts = super::githosts::git_hosts(gemfile.as_deref().unwrap_or_default());
+        if !hosts.is_empty() {
+            confined.intercept = Intercept::Git;
+            confined.git_hosts = hosts;
+        }
+    }
     let online = run.online;
-    let files = std::mem::take(&mut run.files);
+    let mut files = std::mem::take(&mut run.files);
+    // A `bundle` run starts through the helper (`spec`).
+    if run.args[0] == "bundle" && !files.iter().any(|(path, _)| path == Path::new(HELPER_FILE)) {
+        files.push((
+            PathBuf::from(HELPER_FILE),
+            super::HELPER.as_bytes().to_vec(),
+        ));
+    }
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         let gems = wire.scratch.join("gems");
         // The run's own gem home first; a provisioned Bundler's object
@@ -286,7 +312,7 @@ mod tests {
         assert_eq!(direct.get_program(), "/store/obj/ruby/bin/ruby");
         assert_eq!(
             direct.get_args().collect::<Vec<_>>(),
-            vec!["-x", "/store/obj/ruby/bin/bundle", "lock"],
+            vec!["@SCRATCH@/helper.rb", "indexed", "bundle", "lock"],
         );
         assert!(
             command.contains("PATH=\"/store/obj/ruby/bin:/usr/bin:/bin\""),

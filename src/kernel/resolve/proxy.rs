@@ -1056,7 +1056,14 @@ fn connect<S: Stream>(context: &Context, request: &Request, reader: &mut BufRead
             super::intercept::serve_tunnel(context, &tunnel, record, reader);
             Ok(())
         }
-        Intercept::Tls | Intercept::RefuseVisibly => refuse_tunnel(state, &tunnel, record, out),
+        // Git alone, and only to the hosts the manifest names.
+        Intercept::Git if port != GIT_PORT && state.config.git_hosts.contains(&host) => {
+            super::intercept::serve_tunnel(context, &tunnel, record, reader);
+            Ok(())
+        }
+        Intercept::Tls | Intercept::Git | Intercept::RefuseVisibly => {
+            refuse_tunnel(state, &tunnel, record, out)
+        }
     };
 }
 
@@ -1072,6 +1079,16 @@ fn refuse_tunnel(
         (
             policy::GIT_DEPENDENCY,
             "git:// is unauthenticated; use https://".to_string(),
+        )
+    } else if state.config.intercept == Intercept::Git {
+        (
+            policy::UNATTESTED_INDEX,
+            format!(
+                "{} is not reachable from this door; it reaches registries only through its \
+                 mirror routes, and git only on the hosts the manifest's git sources name ({})",
+                tunnel.host,
+                state.config.git_hosts.join(", ")
+            ),
         )
     } else {
         (

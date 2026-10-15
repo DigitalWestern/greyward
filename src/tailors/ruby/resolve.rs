@@ -2,7 +2,9 @@
 //! session's RubyGems mirror for a missing lock and `ward attest`, and the
 //! planner's two helper checks confined with no route at all.
 
-use super::door::{ruby_tool, run_ruby, run_ruby_checked, RubyPublish, RubyRun, OUTPUTS, SCRATCH};
+use super::door::{
+    ruby_tool, run_ruby, run_ruby_checked, RubyPublish, RubyRun, HELPER_FILE, OUTPUTS, SCRATCH,
+};
 use super::{err, GEMFILE, GEMFILE_LOCK, HELPER};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
@@ -11,9 +13,6 @@ use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// The helper's file name in the run's scratch directory.
-const HELPER_FILE: &str = "helper.rb";
 
 /// Executable Gemfiles can load arbitrary project files. Bind all visible
 /// regular files until precise input discovery has a reviewed design.

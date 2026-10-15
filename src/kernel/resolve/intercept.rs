@@ -38,6 +38,7 @@ use super::routes::{
     check_route_path_with, route_for, Claim, Endpoint, Permitted, RegistryProtocol, RequestClass,
     Route, Upstream,
 };
+use super::session::Intercept;
 use crate::kernel::policy;
 use rustls::{ServerConnection, StreamOwned};
 use std::io::{self, BufReader, Read, Write};
@@ -150,7 +151,7 @@ pub(super) fn serve_tunnel<S: Stream>(
     {
         first = false;
         tls.get_mut().start_response();
-        let served = serve(context, &target, &request, tls.get_mut());
+        let served = serve_in_session(context, &target, &request, tls.get_mut());
         let flushed = tls.get_mut().flush();
         match (served, flushed) {
             (Ok(true), Ok(())) if request.keep_alive => {}
@@ -183,6 +184,34 @@ fn body_cap(target: &Target<'_>, head: &http::Head) -> u64 {
         Ok(url) if matches!(git_fetch(&url, "POST"), Some(Ok(_))) => http::MAX_BODY,
         _ => 0,
     }
+}
+
+/// [`serve`], except that a git-only session ([`Intercept::Git`]) serves
+/// a git fetch and nothing else, even on a host a route serves.
+fn serve_in_session(
+    context: &Context,
+    target: &Target<'_>,
+    request: &Request,
+    out: &mut dyn Write,
+) -> io::Result<bool> {
+    let state = &*context.state;
+    if state.config.intercept == Intercept::Git {
+        let raw = format!("{}{}", target.origin, request.target);
+        let fetch = Url::parse(&raw)
+            .ok()
+            .and_then(|url| git_fetch(&url, &request.method));
+        if !matches!(fetch, Some(Ok(_))) {
+            let why = format!(
+                "inside the tunnel to {}, only git fetches are served",
+                target.origin
+            );
+            let record = Record::new("refused", &request.method, redact::url(&raw, &[]));
+            let keep = request.keep_alive;
+            return mirror::refuse(state, out, record, 403, &why, &Headers::new(), keep)
+                .map(|()| keep);
+        }
+    }
+    serve(context, target, request, out)
 }
 
 /// Serve one request inside the tunnel. `Ok(true)`: the tunnel may carry
@@ -388,6 +417,13 @@ fn hop_allowed(
         .map_err(|why| format!("redirect to {}: {why}", redact::url(next.as_str(), &[])))?;
     if std::mem::discriminant(&class) == std::mem::discriminant(first) {
         return Ok(());
+    }
+    // A git-only session follows a git fetch to another git fetch alone.
+    if state.config.intercept == Intercept::Git {
+        return Err(format!(
+            "redirect to {}: only git fetches are served in this session",
+            redact::url(next.as_str(), &[])
+        ));
     }
     let origin = redact::origin(next);
     match &class {
@@ -851,6 +887,59 @@ mod tests {
                 assert!(harness.upstream.seen().is_empty());
             }
         }
+    }
+
+    /// A git-only session (`Intercept::Git`) opens a tunnel to a listed git
+    /// host alone, serves a git fetch inside it, recorded as
+    /// `git-dependency`, and refuses anything else there: a registry read,
+    /// and a redirect from a git fetch to one. A tunnel to another host is
+    /// refused at `CONNECT`, naming the hosts it may reach.
+    #[test]
+    fn a_git_only_session_serves_git_fetches_to_its_hosts_alone() {
+        let harness = Harness::new("intercept-git-only");
+        let mut config = harness.config(Policy::default(), Mode::Online);
+        config.intercept = Intercept::Git;
+        config.git_hosts = vec!["third.test".into()];
+        let (session, address) = harness.open(config);
+        let authority = format!("third.test:{}", harness.upstream.port());
+        let refs = "/a/repo.git/info/refs?service=git-upload-pack";
+        harness
+            .upstream
+            .set(refs, Behavior::Reply(Reply::new(200, b"0000")));
+        let moved = "/b/repo.git/info/refs?service=git-upload-pack";
+        harness.upstream.set(
+            moved,
+            Behavior::Reply(Reply::new(302, b"").header("location", "/meta/pkg.json")),
+        );
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel =
+            open_tunnel(&address, &authority, "third.test", roots.clone(), &[]).unwrap();
+        let fetched = tunnel_request(&mut tunnel, &get(&authority, refs), b"");
+        assert_eq!(fetched.status, 200, "{}", fetched.text());
+        let read = tunnel_request(&mut tunnel, &get(&authority, "/meta/pkg.json"), b"");
+        assert_eq!(read.status, 403, "{}", read.text());
+        assert!(read.text().contains("only git fetches"), "{}", read.text());
+        drop(tunnel);
+        let mut tunnel =
+            open_tunnel(&address, &authority, "third.test", roots.clone(), &[]).unwrap();
+        let redirected = tunnel_request(&mut tunnel, &get(&authority, moved), b"");
+        assert_eq!(redirected.status, 403, "{}", redirected.text());
+        drop(tunnel);
+        let other = format!("other.test:{}", harness.upstream.port());
+        assert!(open_tunnel(&address, &other, "other.test", roots, &[]).is_err());
+        let report = session.finish();
+        assert_eq!(harness.upstream.hits("/meta/pkg.json"), 0);
+        // The git fetch is recorded for its host; the refused tunnel as
+        // the unattested host it is, naming the git hosts the session has.
+        let facts: Vec<_> = report.facts.exceptions.iter().collect();
+        assert_eq!(facts.len(), 2, "{facts:?}");
+        assert!(facts.iter().any(|fact| fact.kind == policy::GIT_DEPENDENCY
+            && fact.subject == format!("https://{authority}")));
+        assert!(facts
+            .iter()
+            .any(|fact| fact.kind == policy::UNATTESTED_INDEX
+                && fact.subject == other
+                && fact.detail.contains("(third.test)")));
     }
 
     /// The same `git ls-remote` against the recorded GitHub answers, first

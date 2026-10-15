@@ -190,6 +190,8 @@ pub struct ConfinedSpec<'a> {
     /// Intercepting binds the proxy's CA certificate into the sandbox and
     /// gives every git the tool starts the git row ([`git_row`]).
     pub intercept: Intercept,
+    /// The hosts [`Intercept::Git`] serves git fetches from.
+    pub git_hosts: Vec<String>,
     pub network: Network,
     /// `None` passes the spec's arguments with the forced ones appended
     /// (before a `--`, if there is one).
@@ -241,6 +243,7 @@ impl<'a> ConfinedSpec<'a> {
             cache_roots: Vec::new(),
             routes: Vec::new(),
             intercept: Intercept::RefuseVisibly,
+            git_hosts: Vec::new(),
             network: Network::Online,
             wire: None,
             target: Target::Project { receipt: None },
@@ -552,6 +555,7 @@ fn session_config(
         door: door.kind.as_str().to_string(),
         routes: confined.routes.clone(),
         intercept: confined.intercept,
+        git_hosts: confined.git_hosts.clone(),
         policy: policy.clone(),
         mode: confined.network,
         store: door.store.clone(),
@@ -670,7 +674,7 @@ fn run_tool(
     })?;
     let dir = SessionDir::create()?;
     let ca_file = match confined.intercept {
-        Intercept::Tls => Some(dir.write_ca(proxy.authority().pem())?),
+        Intercept::Tls | Intercept::Git => Some(dir.write_ca(proxy.authority().pem())?),
         Intercept::RefuseVisibly => None,
     };
     let advertised = relay::LISTEN_ADDRESS
@@ -753,7 +757,7 @@ fn invocation(
     forced_args: &[OsString],
 ) -> io::Result<Invocation> {
     let ca_file = match confined.intercept {
-        Intercept::Tls => Some(Path::new(relay::CA_FILE)),
+        Intercept::Tls | Intercept::Git => Some(Path::new(relay::CA_FILE)),
         Intercept::RefuseVisibly => None,
     };
     let wiring = match confined.wire.take() {

@@ -890,8 +890,24 @@ Selection covers every patch of each maintained CPython minor that python-build-
   exec` (`ward run bundle exec <exe>`); RubyGems alone does not know the gem.
 - **Sources other than rubygems.org, path and git fail closed.** So do gems whose
   installers need network or absent host libraries (mysql2/rmagick-class) — no
-  declared-artifacts mechanism for gems yet. A lock `BUNDLED WITH` a Bundler newer than the
-  store's (2.6.9) is refused. **Default/bundled-gem preactivation edge**: a
+  declared-artifacts mechanism for gems yet. psych needs libyaml's headers, which ward's
+  native library set does not carry, so a lock naming psych fails on a host without them.
+- **A newer Bundler is provisioned only from the lock.** A lock `BUNDLED WITH` a Bundler
+  newer than the store Ruby's (2.6.9) gets that exact release from rubygems.org, checked
+  against the lock's CHECKSUMS entry for it, or else rubygems.org's API digest (recorded as
+  `unpinned-digest`, as for any gem). It is its own store object, planned, installed and
+  run with; no other version is ever picked. A lock no newer keeps the shipped Bundler. A
+  project with no lock is resolved by the shipped Bundler, which writes its own version.
+- **Git sources while the lock is written.** `bundle lock` (and `ward add`/`update`/
+  `remove`) reaches git only for the hosts the Gemfile's git options name (`git:`, a
+  `git "..." do` block, `git_source`, and the `github:`, `gist:` and `bitbucket:`
+  shorthands), read from its text without evaluating it, and only git fetches are served
+  there; each records `git-dependency` in the receipt. A remote built by interpolation, or
+  named in a file `eval_gemfile` loads, is not read, and Bundler's clone of it is refused,
+  naming the host. A gemspec's `git ls-files` sees a throwaway index of the project copy
+  (`git add -A`, so `.gitignore` applies), removed after the run: a file the project's
+  `.gitignore` drops but its repository tracks is missing from that list.
+- **Default/bundled-gem preactivation edge**: a
   locked json/psych/openssl older than the toolchain's default can Gem::LoadError if something
   activates the default before Bundler setup. Untested matrix; potentially silent.
 - **`bundle exec` compatibility is unproven**: env-based GEM_HOME activation works for

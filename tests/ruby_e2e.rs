@@ -1546,21 +1546,60 @@ fn ruby_path_and_git_sources_sync_and_run() {
 
 /// A project with no gems whose lock names `bundled_with`, and the lock's
 /// CHECKSUMS entry for that Bundler when `checksum` is given.
-fn bundled_with_project(project: &Path, bundled_with: &str, checksum: Option<&str>) {
+fn bundled_with_project(project: &Path, bundled_with: &str, pins: Option<(&str, &str)>) {
     std::fs::create_dir_all(project).unwrap();
-    std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
-    let checksums = checksum
-        .map(|sha| format!("CHECKSUMS\n  bundler ({bundled_with}) sha256={sha}\n\n"))
-        .unwrap_or_default();
+    let Some((bundler_sha, gem_sha)) = pins else {
+        std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+        std::fs::write(
+            project.join("Gemfile.lock"),
+            format!(
+                "GEM\n  remote: https://rubygems.org/\n  specs:\n\n\
+                 PLATFORMS\n  ruby\n\nDEPENDENCIES\n\nBUNDLED WITH\n   {bundled_with}\n"
+            ),
+        )
+        .unwrap();
+        return;
+    };
+    // One gem, pinned by the lock's CHECKSUMS section beside the Bundler.
+    std::fs::write(
+        project.join("Gemfile"),
+        "source \"https://rubygems.org\"\n\ngem \"wardtiny\"\n",
+    )
+    .unwrap();
     std::fs::write(
         project.join("Gemfile.lock"),
         format!(
-            "GEM\n  remote: https://rubygems.org/\n  specs:\n\n\
-             PLATFORMS\n  ruby\n\nDEPENDENCIES\n\n{checksums}\
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n    wardtiny (1.0.0)\n\n\
+             PLATFORMS\n  ruby\n\nDEPENDENCIES\n  wardtiny\n\n\
+             CHECKSUMS\n  bundler ({bundled_with}) sha256={bundler_sha}\n  \
+             wardtiny (1.0.0) sha256={gem_sha}\n\n\
              BUNDLED WITH\n   {bundled_with}\n"
         ),
     )
     .unwrap();
+}
+
+/// A one-file pure-Ruby gem, `wardtiny-1.0.0.gem`, built in `dir`.
+fn tiny_gem(ruby: &Path, dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(
+        dir.join("lib/wardtiny.rb"),
+        "module Wardtiny\n  SAID = \"from-tiny\"\nend\n",
+    )
+    .unwrap();
+    let script = r#"require "rubygems/package"
+spec = Gem::Specification.new do |s|
+  s.name = "wardtiny"
+  s.version = "1.0.0"
+  s.summary = "A gem made for a test"
+  s.authors = ["ward"]
+  s.license = "MIT"
+  s.files = ["lib/wardtiny.rb"]
+end
+puts Gem::Package.build(spec)
+"#;
+    pinned_ruby(ruby, dir, script, "build the tiny gem");
+    dir.join("wardtiny-1.0.0.gem")
 }
 
 /// Build `bundler-<version>.gem` in `dir` from the store Ruby's own
@@ -1638,10 +1677,12 @@ fn ruby_lock_bundled_with_a_newer_bundler_syncs_with_it() {
         .activity(greyward::kernel::activity::ActivityMode::Shared)
         .unwrap();
     let (sha256, _) = greyward::kernel::fetch::cache_insert(&opened, &activity, &gem).unwrap();
+    let tiny = tiny_gem(&ruby, &temp.0.join("tiny-src"));
+    let (tiny_sha, _) = greyward::kernel::fetch::cache_insert(&opened, &activity, &tiny).unwrap();
     drop(activity);
 
     let newer = temp.0.join("newer");
-    bundled_with_project(&newer, version, Some(&sha256));
+    bundled_with_project(&newer, version, Some((&sha256, &tiny_sha)));
     let out = ward_offline(&newer, &temp.0, &["sync"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "sync failed: {stderr}");
@@ -1653,6 +1694,10 @@ fn ruby_lock_bundled_with_a_newer_bundler_syncs_with_it() {
         serde_json::json!({"version": version, "sha256": sha256}),
         "{closure}"
     );
+    // The gem's digest is the lock's CHECKSUMS entry, read by that Bundler.
+    let gems = closure["body"]["plan"]["gems"].as_array().unwrap();
+    assert_eq!(gems.len(), 1, "{closure}");
+    assert_eq!(gems[0]["sha256"], serde_json::json!(tiny_sha), "{closure}");
     let (bundler_obj, meta) = find_object(&store, "ruby-bundler").expect("bundler object");
     assert_immutable_tree(&bundler_obj);
     let inputs = &meta["identity"]["inputs"];
@@ -1680,4 +1725,58 @@ fn ruby_lock_bundled_with_a_newer_bundler_syncs_with_it() {
         "bundle -v in the project",
     );
     assert!(shown.contains(version), "{shown}");
+    let said = assert_ok(
+        ward_offline(
+            &newer,
+            &temp.0,
+            &[
+                "run",
+                "bundle",
+                "exec",
+                "ruby",
+                "-e",
+                "require 'wardtiny'; puts Wardtiny::SAID",
+            ],
+        ),
+        "bundle exec with the locked Bundler",
+    );
+    assert!(said.contains("from-tiny"), "{said}");
+}
+
+/// A project with no lock whose gemspec lists its files with `git ls-files`
+/// (as most do) resolves: Bundler evaluates the gemspec in ward's copy of
+/// the project, which has no git data, so ward indexes the copy for the run
+/// and removes the index after it. The gemspec refuses an empty list, so a
+/// run without the index fails. Nothing of the index reaches the project.
+#[test]
+#[ignore]
+fn ruby_lock_generation_answers_a_gemspecs_git_ls_files() {
+    let temp = TempDir::new("ruby-e2e-indexed");
+    let project = temp.0.join("app");
+    write_tree(
+        &project,
+        &[
+            ("Gemfile", "source \"https://rubygems.org\"\n\ngemspec\n"),
+            (
+                "app.gemspec",
+                r#"Gem::Specification.new do |s|
+  s.name = "app"
+  s.version = "1.0.0"
+  s.summary = "A project whose gemspec asks git for its files"
+  s.authors = ["ward"]
+  s.files = `git ls-files -z`.split("\x0")
+  raise "git ls-files listed nothing" unless s.files.include?("lib/app.rb")
+end
+"#,
+            ),
+            ("lib/app.rb", "module App; end\n"),
+        ],
+    );
+    let out = ward(&project, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "sync failed: {stderr}");
+    assert!(!stderr.contains("not a git repository"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    assert!(lock.contains("    app (1.0.0)"), "{lock}");
+    assert!(!project.join(".git").exists());
 }

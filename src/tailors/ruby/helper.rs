@@ -32,6 +32,51 @@ native_build_args = lambda do |native_libs|
   end
   build_args
 end
+# git's settings for the throwaway repositories below: no host or user
+# configuration, no prompt, and a fixed identity and date.
+index_env = {
+  "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => File::NULL,
+  "GIT_TERMINAL_PROMPT" => "0",
+  "GIT_AUTHOR_NAME" => "ward", "GIT_AUTHOR_EMAIL" => "ward@invalid",
+  "GIT_AUTHOR_DATE" => "1970-01-01T00:00:00Z",
+  "GIT_COMMITTER_NAME" => "ward", "GIT_COMMITTER_EMAIL" => "ward@invalid",
+  "GIT_COMMITTER_DATE" => "1970-01-01T00:00:00Z"
+}
+# And on the command line, after the sandbox's own: no automatic
+# maintenance, which git (2.47 on) starts detached after a commit, where it
+# would write into the repository after the helper removed it.
+index_config = ["-c", "init.defaultBranch=ward", "-c", "commit.gpgsign=false",
+                "-c", "maintenance.auto=false", "-c", "gc.auto=0"]
+# Runs `work` over ward's copy of the project with a throwaway git index of
+# it. Bundler evaluates the project's gemspecs, and a gemspec commonly
+# lists its files with `git ls-files`; the copy has no git data, so the
+# index (no template, so no host hooks) answers those calls. It is removed
+# when `work` ends, and never published. Without git, `work` runs as it
+# would have: the gemspec's own call fails the same way.
+with_index = lambda do |work|
+  require "fileutils"
+  git_dir = File.join(Dir.pwd, ".git")
+  made = !(File.exist?(git_dir) || File.symlink?(git_dir))
+  if made
+    quiet = { out: File::NULL, err: File::NULL }
+    indexed = system(index_env, "git", *index_config, "init", "-q", "--template=", **quiet) &&
+              system(index_env, "git", *index_config, "add", "-A", **quiet)
+    FileUtils.rm_rf(git_dir) unless indexed
+  end
+  begin
+    work.call
+  ensure
+    FileUtils.rm_rf(git_dir) if made
+  end
+end
+if mode == "indexed"
+  # `bundle <args>`, over the throwaway index.
+  require "rbconfig"
+  abort "usage: helper indexed bundle <args>" unless ARGV.shift == "bundle"
+  bundle = File.join(RbConfig::CONFIG["bindir"], "bundle")
+  ok = with_index.call(-> { system(RbConfig.ruby, "-x", bundle, *ARGV) })
+  exit(ok ? 0 : ($?.exitstatus || 1))
+end
 if mode == "install"
   # Direct Gem::Installer: the `gem install` CLI requires remote_fetcher at
   # LOAD time, which trips EPERM under the network-denied sandbox. This
@@ -59,21 +104,24 @@ if mode == "check"
   # Gemfile/lock equivalence + ruby-version gate. This mode EVALS THE
   # GEMFILE (arbitrary ruby, delegated resolver trust): its stdout is
   # never parsed by ward — only the exit status counts, so a hostile
-  # Gemfile cannot forge plan data through this process.
+  # Gemfile cannot forge plan data through this process. Its gemspecs see
+  # the throwaway index, as when the lock was written.
   activate_bundler.call
   require "bundler"
   gemfile, lockfile = ARGV
-  definition = Bundler::Definition.build(Pathname.new(gemfile), Pathname.new(lockfile), false)
-  begin
-    definition.send(:ensure_equivalent_gemfile_and_lockfile)
-  rescue NoMethodError
-    abort "store bundler cannot validate gemfile/lock equivalence"
-  end
-  begin
-    definition.validate_runtime!
-  rescue Bundler::GemNotFound, Bundler::SolveFailure
-  rescue NotImplementedError, NoMethodError
-  end
+  with_index.call(lambda do
+    definition = Bundler::Definition.build(Pathname.new(gemfile), Pathname.new(lockfile), false)
+    begin
+      definition.send(:ensure_equivalent_gemfile_and_lockfile)
+    rescue NoMethodError
+      abort "store bundler cannot validate gemfile/lock equivalence"
+    end
+    begin
+      definition.validate_runtime!
+    rescue Bundler::GemNotFound, Bundler::SolveFailure
+    rescue NotImplementedError, NoMethodError
+    end
+  end)
   exit 0
 end
 if mode == "spec"
@@ -110,17 +158,8 @@ if mode == "git-install"
   if File.exist?(git_dir) || File.symlink?(git_dir)
     abort "#{checkout}: the checkout already has git data"
   end
-  git_env = {
-    "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => File::NULL,
-    "GIT_TERMINAL_PROMPT" => "0",
-    "GIT_AUTHOR_NAME" => "ward", "GIT_AUTHOR_EMAIL" => "ward@invalid",
-    "GIT_AUTHOR_DATE" => "1970-01-01T00:00:00Z",
-    "GIT_COMMITTER_NAME" => "ward", "GIT_COMMITTER_EMAIL" => "ward@invalid",
-    "GIT_COMMITTER_DATE" => "1970-01-01T00:00:00Z"
-  }
   git = lambda do |*args|
-    ok = system(git_env, "git", "-c", "init.defaultBranch=ward", "-c", "commit.gpgsign=false",
-                *args, chdir: root, out: File::NULL)
+    ok = system(index_env, "git", *index_config, *args, chdir: root, out: File::NULL)
     abort "#{checkout}: git #{args.first} failed while indexing the checkout for its gemspecs" unless ok
   end
   executables = {}
@@ -212,36 +251,20 @@ selected = lock.specs.group_by(&:name).map do |name, specs|
   abort "#{name}: no variant for #{local} (have: #{specs.map { |s| s.platform.to_s }.uniq.join(", ")}); run: bundle lock --add-platform #{local}" if best.empty?
   best.first
 end
-# Bundler's parsed checksum registry (handles every format it writes).
+# Bundler's parsed checksums: each rubygems source keeps the lock's
+# entries in its checksum store, which writes a spec's entry back in the
+# lock's own form (`name (version) sha256=<hex>`, Bundler 2.5 through 4).
 # If a CHECKSUMS section exists but yields no usable sha256 for a
 # selected gem, fail CLOSED rather than falling back to the live API.
 has_checksums_section = File.read(lockfile).lines.any? { |l| l.chomp == "CHECKSUMS" }
 checksums = {}
 if has_checksums_section
-  reg = (lock.respond_to?(:checksums) ? lock.checksums : nil)
   selected.each do |s|
     # Bundler writes no checksum for a path or git gem: there is no
     # package file to digest.
     next unless source_kind.call(s.source) == :gem
-    entry = nil
-    if reg
-      key = begin
-        Bundler::LazySpecification.new(s.name, s.version, s.platform)
-      rescue StandardError
-        s
-      end
-      cs = (reg[key] rescue nil) || (reg[s] rescue nil)
-      entry = Array(cs).flatten.find { |c| c.respond_to?(:algo) && c.algo == "sha256" } rescue nil
-    end
-    hexval = nil
-    if entry
-      begin
-        raw = entry.respond_to?(:digest) ? entry.digest : nil
-        hexval = raw.unpack1("H*") if raw
-        hexval ||= entry.to_s[/sha256[-=]([A-Za-z0-9+\/=]+)/, 1]&.unpack1("m0")&.unpack1("H*") rescue nil
-      rescue StandardError
-      end
-    end
+    entry = (s.source.checksum_store.to_lock(s) rescue nil).to_s
+    hexval = entry[/[\s,]sha256=([0-9a-f]{64})(?:,|\z)/, 1]
     abort "#{s.name}: CHECKSUMS section present but no usable sha256 for #{s.name}-#{s.version}; refusing API fallback" if hexval.nil?
     plat = s.platform.to_s
     checksums["#{s.name}-#{s.version}#{plat == "ruby" ? "" : "-#{plat}"}"] = hexval

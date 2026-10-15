@@ -500,6 +500,7 @@ fn look_up(
         door: config.door.clone(),
         routes: config.routes.clone(),
         intercept: config.intercept,
+        git_hosts: config.git_hosts.clone(),
         policy: config.policy.clone(),
         mode: config.mode,
         store: config.store.clone(),

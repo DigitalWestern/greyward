@@ -13,6 +13,7 @@ mod bundler;
 mod door;
 pub mod edit;
 mod gem_home;
+mod githosts;
 mod helper;
 mod locked;
 mod native;
@@ -585,9 +586,8 @@ pub struct RubyPlan {
     /// Gems the lock takes from a `GIT` source at a locked commit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git_gems: Vec<RubyGitGem>,
-    /// The Bundler `BUNDLED WITH` names, when it is newer than the store
-    /// Ruby's own and ward provisioned it (`bundler`). `bundler_version` is
-    /// then this version.
+    /// The Bundler `BUNDLED WITH` names, provisioned when newer than the
+    /// store Ruby's own (`bundler`); `bundler_version` is then its version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundler: Option<RubyBundler>,
 }

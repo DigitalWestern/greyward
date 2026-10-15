@@ -304,6 +304,7 @@ pub fn realize_uv(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
+    let _t = crate::kernel::ui::phase("provision uv");
     let sha256 = artifact_sha256(spec)?;
     let tarball = download_toolchain_artifact_held(
         store,
@@ -325,6 +326,7 @@ pub fn realize_uv(
     if !staged.join("uv").is_file() {
         return Err(io::Error::other("uv tarball extraction failed"));
     }
+    let _stage = crate::kernel::ui::phase("stage");
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -332,6 +334,60 @@ pub fn realize_uv(
             deps
         })
         .map(|(path, _)| path)
+}
+
+/// Download the uv and CPython tarballs `selected` names side by side, for
+/// a caller about to realize both ([`realize_uv`], then
+/// [`realize_runtime`]): the two are independent downloads, and each
+/// realize then finds its tarball in the cache and verifies it again. Only
+/// the artifacts whose objects are missing are fetched, and only when both
+/// are; one alone is fetched by its realize, as before. Consume each
+/// result immediately before its realize, so a CPython fetch error cannot
+/// hide an earlier uv extraction or publication error.
+pub fn prefetch_uv_and_runtime(
+    store: &Store,
+    activity: &StoreActivity,
+    platform: Platform,
+    selected: &Selected,
+) -> io::Result<[io::Result<()>; 2]> {
+    crate::kernel::platform::require_host(platform, "uv")?;
+    let uv = row(selected, platform, "uv", UV_RECIPE)?;
+    if store.has_with_activity(activity, &uv_identity_of(&uv, platform)?.object_id())? {
+        return Ok([Ok(()), Ok(())]);
+    }
+    // Even row/lookup failures for the second component belong after uv's
+    // entire realization, just as they did before prefetching.
+    let cpython = row(selected, platform, "cpython", CPYTHON_RECIPE).and_then(|spec| {
+        let id = cpython_identity_of(&spec, platform)?.object_id();
+        store
+            .has_with_activity(activity, &id)
+            .map(|has| (spec, has))
+    });
+    let cpython = match cpython {
+        Ok((_, true)) => return Ok([Ok(()), Ok(())]),
+        Ok((spec, false)) => spec,
+        Err(error) => return Ok([Ok(()), Err(error)]),
+    };
+    let mut fetched = crate::kernel::fetch::fetch_each(
+        &[uv, cpython],
+        |spec| artifact_sha256(spec).ok().map(str::to_string),
+        |spec| fetch_tarball(store, activity, spec),
+    )
+    .into_iter();
+    Ok([fetched.next().unwrap(), fetched.next().unwrap()])
+}
+
+/// Fetch and verify one toolchain row's tarball into the cache, for
+/// [`prefetch_uv_and_runtime`]; its realize reads it from there.
+fn fetch_tarball(store: &Store, activity: &StoreActivity, spec: &ArtifactSpec) -> io::Result<()> {
+    download_toolchain_artifact_held(
+        store,
+        activity,
+        &spec.provider,
+        &spec.url,
+        &Digest::sha256(artifact_sha256(spec)?)?,
+    )
+    .map(|_| ())
 }
 
 /// Realize the CPython this selection names. Returns the object path
@@ -354,6 +410,9 @@ pub fn realize_runtime(
         crate::kernel::policy::check_cached_with_activity(store, activity, &id)?;
         return Ok(store.object_path(&id));
     }
+    // Under --verbose: the download, the archive check and extraction, and
+    // the stage, as rows under this one.
+    let _t = crate::kernel::ui::phase("provision cpython");
 
     let sha256 = artifact_sha256(spec)?;
     let tarball = download_toolchain_artifact_held(
@@ -373,6 +432,8 @@ pub fn realize_runtime(
         crate::kernel::archive::Compression::Gzip,
     )
     .map_err(|e| io::Error::new(e.kind(), format!("extract CPython tarball: {e}")))?;
+    // Publication: the read-only walk, the durable sync, the rename.
+    let _stage = crate::kernel::ui::phase("stage");
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();

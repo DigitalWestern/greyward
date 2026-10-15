@@ -933,7 +933,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## .NET
 
-- **`global.json` is the one SDK source, read as the .NET host reads it.** `sdk.version`
+- **`global.json` is the first SDK source, read as the .NET host reads it.** `sdk.version`
   with `sdk.rollForward` is a range (`disable` exact; `patch`/`latestPatch` or no policy the
   same feature band; `feature`/`latestFeature` the same minor; `minor`/`latestMinor` the
   same major; `major`/`latestMajor` anything newer). Greyward locks the catalog default when
@@ -943,7 +943,15 @@ Selection covers every patch of each maintained CPython minor that python-build-
   range is the contract. `allowPrerelease` is not read and the catalog holds release SDKs
   only, so a project whose range admits only a preview SDK (11.0 today) is refused at
   toolchain selection. A `version` the host cannot parse (`9.0.*`) is ignored, as the host
-  ignores it. `sdk.paths` and `msbuild-sdks` (SDK redirection) are refused.
+  ignores it. `sdk.paths` and `msbuild-sdks` (SDK redirection) are refused. Without a
+  `global.json` version, the newest `netN.0` the members (or a `Directory.Build.props`
+  above them) target, when it is newer than the catalog default SDK builds, asks for SDK
+  N.0.100 or later (the newest catalog SDK), since an SDK cannot build a newer framework
+  than its own. The lock records it as a `TargetFramework.newest` row on the root solution
+  (or project), so retargeting stales the toolchain lock. A project the default builds
+  records no row, so its lock is unchanged. When a later catalog default catches up with a
+  project's target, its row goes away and the toolchain lock goes stale once (`ward update
+  --toolchain dotnet`). A target set through a property (`$(Tfm)`) is not evaluated.
 - **Strictest boundary of any tailor** (all loud): one SDK-style project at the root, or the
   root solution's (.sln/.slnx) SDK-style members, each with its own packages.lock.json.
   A listed project restore cannot read (C++, packages.config, an MSBuild SDK fetched from

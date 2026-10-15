@@ -568,11 +568,115 @@ pub(crate) fn solution_properties(root: &Path, solution: &Path) -> io::Result<Ve
     ])
 }
 
+/// The newest .NET the layout targets: the highest `netN.0` major named in
+/// a `<TargetFramework>` or `<TargetFrameworks>` of a member or of a
+/// `Directory.Build.props` in a member's directory or above it. An SDK
+/// builds its own major and every older one, so this is the oldest SDK
+/// major that can build the whole layout. `netstandard`, `netcoreapp`,
+/// .NET Framework (`net48`) and property references name no such major.
+pub(crate) fn newest_target_major(
+    project: &ProjectRoot,
+    layout: &Layout,
+) -> io::Result<Option<u64>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for member in &layout.members {
+        files.push(member.clone());
+        let mut dir = member.parent();
+        while let Some(current) = dir {
+            let props = current.join("Directory.Build.props");
+            if !files.contains(&props) {
+                files.push(props);
+            }
+            dir = current.parent();
+        }
+    }
+    let mut newest = None;
+    for file in files {
+        let Some(bytes) = project.read_file(&file)? else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let text = strip_comments_and_cdata(&text, &project.path().join(&file))?;
+        newest = newest.max(text_target_major(&text));
+    }
+    Ok(newest)
+}
+
+/// The highest `netN.0` major in one project file's target framework
+/// elements ([`newest_target_major`]).
+fn text_target_major(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let mut newest = None;
+    let mut rest = lower.as_str();
+    while let Some(start) = rest.find("<targetframework") {
+        rest = &rest[start..];
+        let Some(open_end) = rest.find('>') else {
+            break;
+        };
+        let body = &rest[open_end + 1..];
+        let end = body.find('<').unwrap_or(body.len());
+        for framework in body[..end].split(';') {
+            newest = newest.max(net_major(framework.trim()));
+        }
+        rest = &body[end..];
+    }
+    newest
+}
+
+/// `N` for `netN.0` with N of 5 or more (with or without a platform
+/// suffix, `net10.0-windows`).
+fn net_major(framework: &str) -> Option<u64> {
+    let digits = framework.strip_prefix("net")?;
+    let (major, _) = digits.split_once('.')?;
+    let major: u64 = major.parse().ok()?;
+    (major >= 5).then_some(major)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::fs;
+
+    #[test]
+    fn newest_target_major_reads_members_and_build_props() {
+        assert_eq!(
+            text_target_major(
+                "<TargetFrameworks>netstandard2.0;net8.0;net10.0-windows</TargetFrameworks>"
+            ),
+            Some(10)
+        );
+        for none in [
+            "<TargetFramework>net48</TargetFramework>",
+            "<TargetFramework>netcoreapp3.1</TargetFramework>",
+            "<TargetFramework>$(Tfm)</TargetFramework>",
+            "<TargetFrameworkVersion>v4.8</TargetFrameworkVersion>",
+            "",
+        ] {
+            assert_eq!(text_target_major(none), None, "{none}");
+        }
+        let temp = TempDir::named("dotnet-target-major");
+        fs::create_dir_all(temp.0.join("src/App")).unwrap();
+        fs::write(
+            temp.0.join("src/App/App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><!-- <TargetFramework>net11.0</TargetFramework> -->\
+             <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>",
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&temp.0).unwrap();
+        let layout = Layout {
+            solution: None,
+            members: vec![PathBuf::from("src/App/App.csproj")],
+            skipped: Vec::new(),
+        };
+        assert_eq!(newest_target_major(&root, &layout).unwrap(), Some(8));
+        fs::write(
+            temp.0.join("Directory.Build.props"),
+            "<Project><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>",
+        )
+        .unwrap();
+        assert_eq!(newest_target_major(&root, &layout).unwrap(), Some(10));
+    }
 
     const SLN: &str = r#"
 Microsoft Visual Studio Solution File, Format Version 12.00

@@ -515,7 +515,9 @@ are the strictest boundary: `ward run` refuses build-capable verbs
 `sdk.version` and `sdk.rollForward` are read as the range the .NET host
 reads (`dotnet/rollforward.rs`); the toolchain lock records the one catalog
 SDK selected inside it, and every sync checks that SDK is still in the
-range. A missing lock and
+range. Without a `global.json` version, the newest `netN.0` target
+framework of the members asks for SDK N.0.100 or later (`dotnet/tailor.rs`
+`target_row`). A missing lock and
 `ward attest` run restore confined through the resolution door
 (`dotnet/door.rs`), with a `nuget.config` whose one source is the
 session's NuGet mirror (`dotnet/registry.rs`).

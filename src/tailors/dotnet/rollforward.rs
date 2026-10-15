@@ -122,9 +122,25 @@ pub fn sdk_request(
     Ok(Some(VersionRequest::Specifiers(specifiers)))
 }
 
+/// The SDK request a project's newest target framework states when
+/// `global.json` states none: `netN.0` builds on SDK N.0.100 and every
+/// later one, so the catalog default stays selected while it is new enough
+/// and a newer target takes the newest SDK that builds it.
+pub fn target_request(major: u64) -> io::Result<VersionRequest> {
+    Ok(VersionRequest::Specifiers(vec![Specifier::new(
+        Op::Ge,
+        version(&[major, 0, 100])?,
+    )?]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_target_framework_is_its_lowest_sdk() {
+        assert_eq!(target_request(10).unwrap().to_string(), ">=10.0.100");
+    }
 
     fn shown(version: Option<&str>, policy: Option<&str>) -> String {
         sdk_request(version, policy)

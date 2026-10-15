@@ -346,6 +346,14 @@ impl Tailor for Elixir {
                 detail: string(&package["app"]),
             });
         }
+        for dep in plan["git"].as_array().unwrap_or(&empty) {
+            let rev = string(&dep["rev"]);
+            out.packages.push(PackageRow {
+                name: string(&dep["app"]),
+                version: rev.chars().take(12).collect(),
+                detail: format!("git {}", string(&dep["url"])),
+            });
+        }
         out
     }
 
@@ -395,6 +403,25 @@ impl Tailor for Elixir {
                 &required(eco, &p, "inner_sha256")?,
             );
             out.push(c);
+        }
+        // A git dependency is not Hex's package: the purl names the
+        // repository and commit it is (`vcs_url`, per the purl spec), and
+        // its version is that commit.
+        if let Some(git) = plan.get("git").filter(|git| !git.is_null()) {
+            let git: Vec<elixir::GitDep> = serde_json::from_value(git.clone()).map_err(|e| {
+                crate::kernel::cyclonedx::err(format!("{eco} closure: git: {e}"))
+            })?;
+            for dep in git {
+                let purl = format!(
+                    "pkg:hex/{}@{}?vcs_url={}",
+                    purl_encode(&dep.app),
+                    purl_encode(&dep.rev),
+                    purl_encode(&format!("git+{}@{}", dep.url, dep.rev))
+                );
+                let mut c = component(&dep.app, &dep.rev, purl, eco);
+                push_property(&mut c, "greyward:git:commit", &dep.rev);
+                out.push(c);
+            }
         }
         let beam_version = format!(
             "otp-{}-elixir-{}",

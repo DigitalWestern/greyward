@@ -804,9 +804,20 @@ Selection covers every patch of each maintained CPython minor that python-build-
   that leads out of the workspace is refused. A git dependency resolved through the proxy
   has no offline test yet (the fixture registry holds no upload-pack body), only the git
   row's unit test.
-- **Pinned Git dependencies work for standalone crates**; workspace-inherited manifests and
-  escaping symlinks fail closed, and workspace metadata is not rewritten into vendor
-  manifests. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
+- **Pinned Git dependencies work for standalone crates and workspace members** (#776). A
+  member that inherits from its repository's workspace (`version.workspace = true`,
+  `dep = { workspace = true }`, `[lints] workspace = true`, an inherited path dependency on
+  a sibling member) is vendored with those values written out from the root `Cargo.toml`
+  inside the same checkout, as `cargo package` does; the original manifest stays beside it
+  as `Cargo.toml.orig`, and an inherited `readme` or `license-file` is copied into the crate.
+  A crate that inherits nothing is copied unchanged. The workspace is the nearest
+  `[workspace]` manifest at or above the crate, or the one `package.workspace` names; one
+  outside the checkout, or a field the workspace does not define, is refused by name. A
+  symlink in the crate that points elsewhere in the checkout is vendored as the bytes it
+  points at (a directory whole, its own links followed the same way); one that would leave
+  the checkout or loop into a directory that contains it is refused, and a dangling one is
+  left out. A crate found more than four directories below the repository root is not
+  found. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
   Cross `targets` get their standard library from the release's signed channel manifest,
   but Greyward provides no linker or C sysroot for them, so a crate that links for another
   platform still needs one on the machine. A custom toolchain works as a local directory

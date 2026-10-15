@@ -563,6 +563,137 @@ pub(crate) fn validate_symlinks(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// How many entries materializing one crate's links may write. A link to a
+/// directory is copied whole, and a link inside that copy to another
+/// directory is copied again; this bounds a web of such links.
+const MAX_MATERIALIZED_ENTRIES: usize = 100_000;
+
+/// `copy` is a copy of the directory `source`, which lies inside the
+/// realized (already validated) git checkout `checkout`. Every symlink in
+/// `copy` whose target stays inside `copy` is kept. One whose target leaves
+/// `copy` but stays inside the checkout (a crate linking a file shared by
+/// the whole repository) is replaced by the bytes it points at, resolved in
+/// the checkout, as cargo reads them there. One that leaves the checkout or
+/// names a directory that contains it is refused; one that dangles is left
+/// out.
+pub(crate) fn materialize_escaping_symlinks(
+    checkout: &Path,
+    source: &Path,
+    copy: &Path,
+) -> io::Result<()> {
+    let checkout = checkout.canonicalize()?;
+    let source = source.canonicalize()?;
+    if !source.starts_with(&checkout) {
+        return Err(err("crate directory is outside its git checkout"));
+    }
+    let copy = copy.canonicalize()?;
+    let mut links = Vec::new();
+    collect_symlinks(&copy, &mut links)?;
+    // Sorted, so the same checkout always produces the same bytes.
+    links.sort();
+    let mut budget = MAX_MATERIALIZED_ENTRIES;
+    for link in links {
+        if resolve_symlink_path(&copy, &link, &mut std::collections::BTreeSet::new()).is_ok() {
+            continue;
+        }
+        let relative = link
+            .strip_prefix(&copy)
+            .map_err(|_| err("symlink outside the copied crate"))?;
+        let original = source.join(relative);
+        fs::remove_file(&link)?;
+        materialize_link(&checkout, &original, &link, &mut Vec::new(), &mut budget)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", relative.display())))?;
+        // Copied out of the read-only store: writable like the rest of
+        // the staged tree.
+        if fs::symlink_metadata(&link).is_ok() {
+            crate::kernel::store::restore_write_bits(&link)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write at `dest` (which does not exist) the content the checkout's link
+/// `original` resolves to. `active` holds the checkout directories being
+/// copied, so a link back into one of them is a cycle.
+fn materialize_link(
+    checkout: &Path,
+    original: &Path,
+    dest: &Path,
+    active: &mut Vec<PathBuf>,
+    budget: &mut usize,
+) -> io::Result<()> {
+    let target = fs::read_link(original)?;
+    let parent = original
+        .parent()
+        .ok_or_else(|| err("symlink has no parent"))?;
+    let mut seen = std::collections::BTreeSet::from([original.to_path_buf()]);
+    let resolved = resolve_target_components(checkout, parent, &target, &mut seen, &mut 0)
+        .map_err(|e| err(format!("{e} (it leaves the git checkout)")))?;
+    let metadata = match fs::symlink_metadata(&resolved) {
+        Ok(metadata) => metadata,
+        // A dangling link has no bytes to copy, and reading it fails in
+        // the checkout too: it is left out.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if metadata.is_file() {
+        fs::copy(&resolved, dest)?;
+        Ok(())
+    } else if metadata.is_dir() {
+        if original.starts_with(&resolved) || active.iter().any(|dir| dir.starts_with(&resolved)) {
+            return Err(err(format!(
+                "symlink cycle: {} links to a directory that contains it",
+                original.display()
+            )));
+        }
+        active.push(resolved.clone());
+        let copied = copy_dereferenced(checkout, &resolved, dest, active, budget);
+        active.pop();
+        copied
+    } else {
+        Err(err(format!(
+            "symlink target {} is not a file or directory",
+            target.display()
+        )))
+    }
+}
+
+/// Copy the checkout directory `src` to `dest`, replacing every link inside
+/// it by its content: a relative target no longer means the same thing once
+/// the directory sits elsewhere.
+fn copy_dereferenced(
+    checkout: &Path,
+    src: &Path,
+    dest: &Path,
+    active: &mut Vec<PathBuf>,
+    budget: &mut usize,
+) -> io::Result<()> {
+    fs::create_dir(dest)?;
+    let mut entries = fs::read_dir(src)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| err("linked directories expand past 100000 entries"))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            materialize_link(checkout, &from, &to, active, budget)?;
+        } else if file_type.is_dir() {
+            copy_dereferenced(checkout, &from, &to, active, budget)?;
+        } else if file_type.is_file() {
+            fs::copy(&from, &to)?;
+        } else {
+            return Err(err(format!(
+                "{} is not a file or directory",
+                from.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
@@ -2223,5 +2354,94 @@ mod refusal_tests {
         link("does-not-exist", &root.join("dangling"));
         link("./src/../src/lib", &root.join("dotted"));
         validate_symlinks(root).unwrap();
+    }
+
+    /// `cp -a` for a test tree: files and directories copied, links kept.
+    fn copy_keeping_links(src: &Path, dest: &Path) {
+        fs::create_dir(dest).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dest.join(entry.file_name());
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(entry.path()).unwrap(), &to).unwrap();
+            } else if file_type.is_dir() {
+                copy_keeping_links(&entry.path(), &to);
+            } else {
+                fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+
+    /// A crate copied out of its checkout: a link to a file or directory
+    /// elsewhere in the checkout becomes those bytes, a link inside the
+    /// crate stays a link, and a dangling one is left out (#776).
+    #[test]
+    fn links_leaving_a_copied_crate_take_their_checkout_bytes() {
+        let temp = TempDir::named("gitsrc-materialize");
+        let checkout = temp.0.join("checkout");
+        let krate = checkout.join("crates/one");
+        fs::create_dir_all(krate.join("src")).unwrap();
+        fs::create_dir_all(checkout.join("shared/nested")).unwrap();
+        fs::write(checkout.join("LICENSE"), b"license").unwrap();
+        fs::write(checkout.join("shared/a.h"), b"header").unwrap();
+        fs::write(checkout.join("shared/nested/b.h"), b"nested").unwrap();
+        // Relative to its old place: must be read where it was.
+        link("../../LICENSE", &checkout.join("shared/nested/license"));
+        fs::write(krate.join("src/lib.rs"), b"lib").unwrap();
+        link("../../LICENSE", &krate.join("LICENSE"));
+        link("../../shared", &krate.join("include"));
+        link("src/lib.rs", &krate.join("inside"));
+        link("../../missing", &krate.join("dangling"));
+        validate_symlinks(&checkout).unwrap();
+
+        let copy = temp.0.join("copy");
+        copy_keeping_links(&krate, &copy);
+        materialize_escaping_symlinks(&checkout, &krate, &copy).unwrap();
+        validate_symlinks(&copy).unwrap();
+        let file_type = |p: &str| fs::symlink_metadata(copy.join(p)).unwrap().file_type();
+        assert!(file_type("LICENSE").is_file());
+        assert_eq!(fs::read(copy.join("LICENSE")).unwrap(), b"license");
+        assert!(file_type("include").is_dir());
+        assert_eq!(fs::read(copy.join("include/a.h")).unwrap(), b"header");
+        assert_eq!(
+            fs::read(copy.join("include/nested/b.h")).unwrap(),
+            b"nested"
+        );
+        assert!(file_type("include/nested/license").is_file());
+        assert_eq!(
+            fs::read(copy.join("include/nested/license")).unwrap(),
+            b"license"
+        );
+        assert!(file_type("inside").is_symlink());
+        assert!(fs::symlink_metadata(copy.join("dangling")).is_err());
+    }
+
+    #[test]
+    fn a_link_leaving_the_checkout_or_looping_is_refused() {
+        let temp = TempDir::named("gitsrc-materialize-refused");
+        let checkout = temp.0.join("checkout");
+        let krate = checkout.join("one");
+        fs::create_dir_all(&krate).unwrap();
+        fs::write(temp.0.join("secret"), b"s").unwrap();
+        link("../../secret", &krate.join("secret"));
+        let copy = temp.0.join("copy");
+        copy_keeping_links(&krate, &copy);
+        let error = materialize_escaping_symlinks(&checkout, &krate, &copy)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leaves the git checkout"), "{error}");
+        assert!(!copy.join("secret").exists());
+
+        // A link to the checkout root from inside the crate would copy the
+        // crate into itself forever.
+        fs::remove_file(krate.join("secret")).unwrap();
+        link("..", &krate.join("root"));
+        crate::kernel::store::remove_tree(&copy).unwrap();
+        copy_keeping_links(&krate, &copy);
+        let error = materialize_escaping_symlinks(&checkout, &krate, &copy)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("symlink cycle"), "{error}");
     }
 }

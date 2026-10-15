@@ -12,8 +12,8 @@ use greyward::kernel::platform::Platform;
 mod common;
 
 use common::{
-    add_git_dependency, assert_frozen_never_writes_the_lock, assert_ok, command, copy_tree,
-    fixture, ward, TempDir,
+    add_git_dependency, add_git_workspace_dependency, assert_frozen_never_writes_the_lock,
+    assert_ok, command, copy_tree, fixture, ward, TempDir,
 };
 
 /// The binary with a private `TMPDIR` and `HOME` under `tmp`, and the
@@ -254,6 +254,43 @@ fn git_dependency_exception_is_published_on_the_cargo_closure_only() {
     }
     // The loop above checked something: the Python closure is there.
     assert_eq!(others, ["python.json"], "the closures besides cargo.json");
+}
+
+/// A git dependency whose crates inherit from their repository's workspace
+/// (version, edition, lints, and a path dependency on a sibling member) and
+/// link a file shared at the repository root builds and runs (#776): the
+/// vendored manifests are the ones cargo accepts without the workspace.
+#[test]
+#[ignore]
+fn a_git_workspace_dependency_builds() {
+    let temp = TempDir::new("cargo-e2e");
+    let project = temp.0.join("cargo-hello");
+    copy_tree(&fixture("cargo-hello"), &project);
+    std::fs::write(
+        project.join("src/main.rs"),
+        "fn main() {\n    println!(\"value {} {}\", wsapp::value(), wsapp::LICENSE.trim());\n    let _ = itoa::Buffer::new();\n}\n",
+    )
+    .unwrap();
+    let tmp = temp.0.join("tmp");
+    std::fs::create_dir_all(tmp.join("home")).unwrap();
+    let store = temp.0.join("store");
+    add_git_workspace_dependency(&temp.0, &project);
+
+    assert_ok(
+        ward_with_tmp(&project, &store, &tmp, &["sync"]),
+        "sync with a git workspace dependency",
+    );
+    assert_ok(
+        ward_with_tmp(&project, &store, &tmp, &["build"]),
+        "build with a git workspace dependency",
+    );
+    let built = project.join("target/debug/cargo-hello");
+    let output = Command::new(&built).output().unwrap();
+    assert!(output.status.success(), "{}", built.display());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "value 42 shared license\n"
+    );
 }
 
 /// Components and targets a `rust-toolchain.toml` asks for are provisioned

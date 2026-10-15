@@ -548,6 +548,108 @@ pub fn add_git_dependency(root: &Path, project: &Path) -> String {
     url
 }
 
+/// A git repository laid out as a Cargo workspace: two members that take
+/// their version, edition, lints and dependencies from the root manifest
+/// (one depends on the other through an inherited path dependency), and a
+/// symlink from a member to a file shared at the repository root. Returns
+/// the `file://` URL and the commit.
+/// Add `wsapp` from [`cargo_workspace_repo`] to the cargo-hello `project`:
+/// the git dependency in Cargo.toml and both workspace members, which share
+/// the one git source, in Cargo.lock. Returns the repository URL.
+pub fn add_git_workspace_dependency(root: &Path, project: &Path) -> String {
+    let (url, commit) = cargo_workspace_repo(root);
+    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    let manifest = manifest.replace(
+        "[dependencies]\n",
+        &format!("[dependencies]\nwsapp = {{ git = \"{url}\", rev = \"{commit}\" }}\n"),
+    );
+    std::fs::write(project.join("Cargo.toml"), manifest).unwrap();
+    let mut lock = std::fs::read_to_string(project.join("Cargo.lock")).unwrap();
+    let root_entry = format!("[[package]]\nname = \"{}\"\n", manifest_name(project));
+    let at = lock.find(&root_entry).unwrap() + root_entry.len();
+    // Last in the root's list, where cargo's name order puts it (`--locked`
+    // compares the text).
+    let list = at + lock[at..].find("dependencies = [\n").unwrap();
+    let end = list + lock[list..].find("\n]\n").unwrap() + 1;
+    lock.insert_str(end, " \"wsapp\",\n");
+    let source = format!("git+{url}?rev={commit}#{commit}");
+    lock.push_str(&format!(
+        "\n[[package]]\nname = \"wsapp\"\nversion = \"0.3.0\"\nsource = \"{source}\"\n\
+         dependencies = [\n \"wsshared\",\n]\n\n\
+         [[package]]\nname = \"wsshared\"\nversion = \"0.3.0\"\nsource = \"{source}\"\n"
+    ));
+    std::fs::write(project.join("Cargo.lock"), lock).unwrap();
+    url
+}
+
+pub fn cargo_workspace_repo(root: &Path) -> (String, String) {
+    let repo = root.join("workspace-repo");
+    let git = |args: &[&str], cwd: &Path| {
+        let output = child("git", root)
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    std::fs::create_dir_all(repo.join("crates/app/src")).unwrap();
+    std::fs::create_dir_all(repo.join("crates/shared/src")).unwrap();
+    git(&["init", "-q", "-b", "main"], &repo);
+    git(&["config", "user.email", "t@example.invalid"], &repo);
+    git(&["config", "user.name", "t"], &repo);
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        r#"[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license-file = "LICENSE"
+
+[workspace.dependencies]
+wsshared = { path = "crates/shared", version = "0.3.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("LICENSE"), "shared license\n").unwrap();
+    std::fs::write(
+        repo.join("crates/shared/Cargo.toml"),
+        "[package]\nname = \"wsshared\"\nversion.workspace = true\nedition.workspace = true\nlicense-file.workspace = true\n\n[lints]\nworkspace = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/shared/src/lib.rs"),
+        "pub fn base() -> u32 { 40 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/app/Cargo.toml"),
+        "[package]\nname = \"wsapp\"\nversion.workspace = true\nedition = { workspace = true }\nlicense-file.workspace = true\n\n[dependencies]\nwsshared = { workspace = true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/app/src/lib.rs"),
+        "pub fn value() -> u32 { wsshared::base() + 2 }\n\
+         pub const LICENSE: &str = include_str!(\"../LICENSE\");\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../../LICENSE", repo.join("crates/app/LICENSE")).unwrap();
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-qm", "workspace"], &repo);
+    let commit = git(&["rev-parse", "HEAD"], &repo);
+    (format!("file://{}", repo.display()), commit)
+}
+
 pub fn manifest_name(project: &Path) -> String {
     let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
     let line = manifest

@@ -251,6 +251,26 @@ pub(super) fn realize_checkouts(
 /// The links a confined mix run gets: `deps/<app>` in its deps path to the
 /// app's checkout in the object, so Mix finds every git dependency checked
 /// out at its locked commit and fetches none of them.
+pub(super) fn copy_checkouts(
+    activity: &StoreActivity,
+    checkouts: Option<&Path>,
+    deps: &[GitDep],
+    destination: &Path,
+    platform: Platform,
+) -> io::Result<()> {
+    if let Some(checkouts) = checkouts {
+        for dep in deps {
+            crate::kernel::store::clone_tree_with_activity(
+                activity,
+                &checkouts.join(&dep.app),
+                &destination.join(&dep.app),
+                platform,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn deps_links(checkouts: Option<&Path>, deps: &[GitDep]) -> Vec<(PathBuf, PathBuf)> {
     let Some(object) = checkouts else {
         return Vec::new();

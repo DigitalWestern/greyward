@@ -1227,16 +1227,7 @@ pub fn realize_deps(
     // Git dependencies: each checkout, `.git` included, copied in beside
     // the Hex ones, so the projection is the deps path mix reads.
     let (checkouts, kept) = git::realize_checkouts(store, activity, platform, &plan.git)?;
-    if let Some(checkouts) = &checkouts {
-        for dep in &plan.git {
-            crate::kernel::store::clone_tree_with_activity(
-                activity,
-                &checkouts.join(&dep.app),
-                &staged.join(&dep.app),
-                platform,
-            )?;
-        }
-    }
+    git::copy_checkouts(activity, checkouts.as_deref(), &plan.git, &staged, platform)?;
     let mut deps = crate::kernel::store::ObjectDeps::new();
     deps.object_id(&crate::kernel::store::object_id_from_path(beam_obj)?)?;
     for dep in &plan.deps {

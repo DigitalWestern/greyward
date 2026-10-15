@@ -19,7 +19,7 @@ mod common;
 
 use common::{
     assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, copy_tree, fixture,
-    temp_entries, ward, ward_offline, TempDir,
+    home_store, temp_entries, ward, ward_offline, TempDir,
 };
 
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
@@ -282,4 +282,88 @@ fn elixir_sync_sandboxed_build_and_run() {
         .cloned()
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
+}
+
+/// A mix.lock git dependency outlives `ward gc` while the project uses it:
+/// the deps object holds the checkout object, which holds the git source,
+/// so a frozen sync with the repository gone and no network finds all of
+/// it in the store.
+#[test]
+#[ignore]
+fn elixir_git_dependency_survives_gc_for_an_offline_frozen_sync() {
+    let temp = TempDir::new("elixir-git-gc");
+    let repo = temp.0.join("lib");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join("mix.exs"),
+        "defmodule Lib.MixProject do\n  use Mix.Project\n  \
+         def project, do: [app: :lib, version: \"0.1.0\"]\nend\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", repo.canonicalize().unwrap().display());
+
+    let project = temp.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("mix.exs"),
+        format!(
+            "defmodule Demo.MixProject do\n  use Mix.Project\n  \
+             def project, do: [app: :demo, version: \"0.1.0\", deps: [{{:lib, git: {url:?}}}]]\n\
+             end\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("mix.lock"),
+        format!("%{{\n  \"lib\": {{:git, {url:?}, {rev:?}, []}},\n}}\n"),
+    )
+    .unwrap();
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
+    let deps = PathBuf::from(
+        closure_body(&project)["deps_object"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(deps.join("lib/.git/HEAD"))
+            .unwrap()
+            .trim(),
+        rev
+    );
+
+    // Collection keeps whatever was touched in the last ten minutes; age
+    // every object past that so only reachability keeps one.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 60);
+    let store = home_store(&project, &temp.0);
+    for entry in std::fs::read_dir(store.join("objects")).unwrap() {
+        std::fs::File::open(entry.unwrap().path())
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    assert_ok(ward(&project, &temp.0, &["gc", "--keep-days", "0"]), "gc");
+    remove_tree(&repo);
+    assert_ok(
+        ward_offline(&project, &temp.0, &["--frozen"]),
+        "frozen sync after gc, the repository gone",
+    );
 }

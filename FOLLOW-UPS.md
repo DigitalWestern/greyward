@@ -51,6 +51,11 @@ None open.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.
 - **#635: Python metadata retry evidence.** Add a replayable real allowed backend proving the accepted fetch ledger and policy facts survive retries and metadata cache reuse.
+- **Compatibility follow-ups (#770).** Each issue records the failing projects and proposed fix:
+  - #778 npm archive PAX keys and duplicate root members; #780 Go local replacements and workspaces; #785 missing Go module-metadata checksums.
+  - #787 older Linux OTP releases; #788 credentials in recorded git URLs; #789 git gem build and gemspec coverage.
+  - #790 held-root test failures; #791 git checkout line-ending rewrites; #792 archive names that differ only by case.
+  - #795 registry redirects must stay within the requesting registry's declared destinations.
 - **Performance (#751).** Downloads within one ecosystem and a toolchain's components already fetch side by side (#745, #748). Left:
   - #747 sync tailors in parallel. The design is DESIGNS §8. The next step is a cross-ecosystem toolchain prefetch in `sync_preflighted`, since toolchain downloads are the largest serial wait left on a cold polyglot sync.
   - #768 the fixed costs of `ward add`: the socket scan and the fsyncs on the add path.

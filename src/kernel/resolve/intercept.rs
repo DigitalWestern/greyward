@@ -296,7 +296,7 @@ fn serve(
             Upstream::Fetch(mapped) => mapped,
             Upstream::Local(answer) => &answer.url,
         };
-        if *mapped != url {
+        if !super::routes::same_resource(&url, mapped) {
             let why = format!(
                 "route {} serves this path from {}, not from {}",
                 route.protocol.route_id(),

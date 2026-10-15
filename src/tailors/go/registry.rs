@@ -110,16 +110,19 @@ impl RegistryProtocol for GoProxy {
 
     /// proxy.golang.org hands most module zips to Google Cloud Storage
     /// (`https://storage.googleapis.com/proxy-golang-org-prod/...`, a signed
-    /// URL). That one hop is followed for a `.zip` only: go checks every
-    /// zip against go.sum and the checksum database, so the storage host is
-    /// trusted with nothing. A `list`, `@latest`, `.info` or `.mod` answer
-    /// steers version selection or is checked less, and must come from
-    /// proxy.golang.org itself. Only the host is pinned, not the bucket,
-    /// which Google may rename; a hop anywhere else, or from
+    /// URL). That one hop is followed for a zip request only: go checks
+    /// every zip against go.sum and the checksum database, so the storage
+    /// host is trusted with nothing. Both the request go made (`requested`)
+    /// and the hop's source must be zips on proxy.golang.org: a `list`,
+    /// `@latest`, `.info` or `.mod` request steers version selection or is
+    /// checked less, and receives no storage-handoff exception, even when
+    /// it redirects through a zip URL first. Only the host is pinned, not
+    /// the bucket, which Google may rename; a hop anywhere else, or from
     /// sum.golang.org, is refused.
-    fn follows_redirect(&self, from: &Url, to: &Url) -> bool {
-        from.host_str() == Some(PROXY_HOST)
-            && from.path().ends_with(".zip")
+    fn follows_redirect(&self, requested: &Url, from: &Url, to: &Url) -> bool {
+        let zip = |url: &Url| url.host_str() == Some(PROXY_HOST) && url.path().ends_with(".zip");
+        zip(requested)
+            && zip(from)
             && to.scheme() == "https"
             && to.host_str() == Some(STORAGE_HOST)
             && to.port_or_known_default() == Some(443)
@@ -612,19 +615,31 @@ mod tests {
         let storage = url(
             "https://storage.googleapis.com/proxy-golang-org-prod/0900f5b99fe62352-github.com:klauspost:compress-v1.17.6.zip?Expires=1&GoogleAccessId=a&Signature=s",
         );
-        assert!(GO_PROXY.follows_redirect(&zip, &storage));
-        // Only a zip is handed off: list, @latest, .info and .mod answers
-        // come from proxy.golang.org itself.
+        assert!(GO_PROXY.follows_redirect(&zip, &zip, &storage));
+        // Only a zip request is handed off: a list, @latest, .info or .mod
+        // request is not, from its own URL or through a zip URL it redirects to.
         for from in [
             "https://proxy.golang.org/github.com/klauspost/compress/@v/list",
             "https://proxy.golang.org/github.com/klauspost/compress/@latest",
             "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.17.6.info",
             "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.17.6.mod",
         ] {
-            assert!(!GO_PROXY.follows_redirect(&url(from), &storage), "{from}");
+            assert!(
+                !GO_PROXY.follows_redirect(&url(from), &url(from), &storage),
+                "{from}"
+            );
+            assert!(
+                !GO_PROXY.follows_redirect(&url(from), &zip, &storage),
+                "{from}"
+            );
+            assert!(
+                !GO_PROXY.follows_redirect(&zip, &url(from), &storage),
+                "{from}"
+            );
         }
         let lookup = url("https://sum.golang.org/lookup/github.com/google/uuid@v1.6.0");
-        assert!(!GO_PROXY.follows_redirect(&lookup, &storage));
+        assert!(!GO_PROXY.follows_redirect(&lookup, &lookup, &storage));
+        assert!(!GO_PROXY.follows_redirect(&lookup, &zip, &storage));
         for to in [
             "https://storage.googleapis.com.evil.example/x.zip",
             "https://evil.example/x.zip",
@@ -634,11 +649,11 @@ mod tests {
             "https://user:pass@storage.googleapis.com/x.zip",
             "https://sum.golang.org/latest",
         ] {
-            assert!(!GO_PROXY.follows_redirect(&zip, &url(to)), "{to}");
+            assert!(!GO_PROXY.follows_redirect(&zip, &zip, &url(to)), "{to}");
         }
         // From the storage host onward: nothing (the kernel never asks,
         // and the protocol says no anyway).
-        assert!(!GO_PROXY.follows_redirect(&storage, &storage));
+        assert!(!GO_PROXY.follows_redirect(&zip, &storage, &storage));
     }
 
     #[test]
@@ -861,6 +876,83 @@ mod tests {
         );
         let text = format!("{entries:?} {:?}", report.diagnostics);
         assert!(!text.contains("SECRETSIGNATURE"), "{text}");
+    }
+
+    /// A list, `@latest`, `.info` or `.mod` request that redirects to a
+    /// zip URL on proxy.golang.org, which then hands off to Cloud Storage,
+    /// does not pick up the zip's exception: the handoff is judged on the
+    /// request go made, and is refused through the mirror and a tunnel.
+    #[test]
+    fn a_document_cannot_reach_cloud_storage_through_a_zip_url() {
+        use crate::kernel::policy::{self, Policy};
+        use crate::kernel::resolve::session::{Intercept, Mode};
+        use crate::kernel::resolve::testing::{
+            get, open_tunnel, tunnel_request, Harness, Reach, TEST_ORIGIN_PUBLIC,
+        };
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+
+        let harness = Harness::serving(
+            "go-storage-chain",
+            Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]),
+            &[PROXY_HOST, SUMDB_HOST, STORAGE_HOST],
+            "go",
+        );
+        let location =
+            |target: String| Behavior::Reply(Reply::new(302, b"").header("Location", &target));
+        let documents = [
+            "/github.com/chain/demo/@v/list",
+            "/github.com/chain/demo/@latest",
+            "/github.com/chain/demo/@v/v1.0.0.info",
+            "/github.com/chain/demo/@v/v1.0.0.mod",
+        ];
+        for (index, document) in documents.iter().enumerate() {
+            let zip = format!("/github.com/chain/demo/@v/v9.0.{index}.zip");
+            harness
+                .upstream
+                .set(document, location(format!("https://{PROXY_HOST}{zip}")));
+            harness.upstream.set(
+                &zip,
+                location(format!("https://{STORAGE_HOST}/bucket/chain-{index}")),
+            );
+            harness.upstream.set(
+                &format!("/bucket/chain-{index}"),
+                Behavior::Reply(Reply::new(200, b"steered")),
+            );
+        }
+        let policy = Policy {
+            deny: [policy::UNATTESTED_INDEX.to_string()].into(),
+            ..Policy::default()
+        };
+        let mut config = harness.config(policy, Mode::Online);
+        config.routes = vec![route().unwrap()];
+        config.permitted = crate::kernel::resolve::routes::Permitted::compiled();
+        config.intercept = Intercept::Tls;
+        let (session, address) = harness.open(config);
+
+        let authority = format!("{PROXY_HOST}:443");
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, PROXY_HOST, roots, &[]).unwrap();
+        for document in documents {
+            let mirrored = get(&address, &format!("/{}/go{document}", address.token()), "");
+            let tunneled = tunnel_request(
+                &mut tunnel,
+                &format!("GET {document} HTTP/1.1\r\nHost: {PROXY_HOST}\r\n"),
+                b"",
+            );
+            for (door, answer) in [("mirror", &mirrored), ("tunnel", &tunneled)] {
+                assert_eq!(answer.status, 403, "{door} {document}: {}", answer.text());
+                assert!(
+                    answer.text().contains("is not a permitted endpoint"),
+                    "{door} {document}: {}",
+                    answer.text()
+                );
+            }
+        }
+        drop(tunnel);
+        session.finish();
+        for index in 0..documents.len() {
+            assert_eq!(harness.upstream.hits(&format!("/bucket/chain-{index}")), 0);
+        }
     }
 
     #[test]

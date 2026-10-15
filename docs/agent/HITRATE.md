@@ -5,11 +5,14 @@ repositories. It is a measurement, not a gate, but run it before merging
 anything that touches npm projection or the store's real-directory checks.
 
 **Method.** `python3 tools/hitrate.py --repos tools/hitrate/hitrate-repos.lock`
-takes 30 top-starred Python and 30 top-starred npm repositories pinned to
-fixed commits, shallow-clones each, and runs `ward sync` (the bare form's hidden alias,
+takes 30 top-starred repositories per ecosystem (Python, npm, Cargo, Go,
+Ruby, Elixir, .NET) pinned to fixed commits, shallow-clones each, and runs `ward sync` (the bare form's hidden alias,
 so no help screen lands in the log) against a
 throwaway store with a 600 s cap. Each failure is classified by the
-`RULES` regexes in `tools/hitrate.py`. Raw results are dated CSVs under
+`CLASSES` regexes in `tools/hitrate.py`; a class prefixed `py_`, `npm_`,
+`rust_` or `dotnet_` classifies only that ecosystem's rows. The full output
+of each sync is kept under `WORK/logs/`. `--emit-lock` picks and pins a new
+sample (`--min-stars` lowers the star floor; Elixir uses 1000). Raw results are dated CSVs under
 `tools/hitrate/`; they are historical records and are never rewritten. A
 full 60-repo run takes about 95 minutes on the Linux box.
 
@@ -24,8 +27,49 @@ full 60-repo run takes about 95 minutes on the Linux box.
    security findings. `skipped_optional` was one too until 2026-10-05
    (#71); it is no longer an exception (see that section).
 
-Only Python and npm are measured. Earlier runs (2026-09-02 macOS,
+Python and npm have been measured since 2026-09; the other five since
+2026-10-14. Earlier runs (2026-09-02 macOS,
 2026-09-05/06 Linux) are in git history and in their CSVs.
+
+## Linux x86_64 — 2026-10-14: first run of Cargo, Go, Ruby, Elixir, .NET
+
+Release build of main e2ea9c07 (the CSV header names the harness commit it
+ran from, which changed only `tools/`). 150 repos, picked by
+`--emit-lock` on 2026-10-14; five picks were replaced after review (list,
+koan and setup repos, and a repo already in the npm sample) and measured
+the same day with the same binary. Raw data:
+`tools/hitrate/hitrate-linux-2026-10-14.csv`. Python and npm were not
+re-run.
+
+| ecosystem | permissive | company-policy after `ward attest` | company-policy | strict |
+|---|---|---|---|---|
+| cargo | **18/30** | 15/30 | 0/30 | 0/30 |
+| go | **2/30** | 2/30 | 0/30 | 0/30 |
+| ruby | **0/30** | 0/30 | 0/30 | 0/30 |
+| elixir | **11/30** | 11/30 | 0/30 | 0/30 |
+| dotnet | **0/30** | 0/30 | 0/30 | 0/30 |
+
+Every ok records `unrecorded-resolution`: none of these projects carries a
+signed resolution record, and the company template denies the kind, so
+the company-policy column is 0 everywhere until a project runs `ward
+attest`. The "after attest" column drops that one kind and is the number
+to compare with the Python and npm company-policy columns above.
+
+Misses by root cause, one issue each (umbrella #770):
+
+| cause | repos | issue |
+|---|---|---|
+| .NET `global.json` rollForward, solution files | 29 dotnet | #783 |
+| Go proxy: proxy.golang.org storage redirect, `!`-escaped paths | ~19 go | #774 |
+| toolchain version missing from a catalog | 4 cargo, 4 go, 3 ruby, 2 node-in-ruby, 7 elixir, polars nightly | #777 |
+| symlinks in resolution inputs (incl. ward's own `node_modules`, `.venv`) | 9 ruby, 2 elixir | #775 |
+| Ruby PATH and GIT lock sources | 9 ruby | #771 |
+| npm tarballs: `NODETAR.*` PAX keys, `./` duplicate members | tauri, caveman, gogs, rails, docuseal, phoenix, phoenix_live_view, activeadmin | #778 |
+| Cargo git crates inheriting workspace fields, in-checkout symlinks | typst, yazi, meilisearch, photocraft, rustdesk, lapce | #776 |
+| Elixir mix.lock judged out of sync, `v`-prefixed `.tool-versions` | 6 elixir | #784 |
+| Bundler newer than the store's, git sources in lock generation | 5 ruby | #779 |
+| Go local `replace`, `go.work` | traefik, new-api, prometheus | #780 |
+| Go `go.sum` without a `/go.mod` line | moby, rclone (after #774) | #785 |
 
 ## Linux x86_64 — 2026-10-05: strict without `skipped_optional` (#71)
 

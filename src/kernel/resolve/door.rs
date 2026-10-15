@@ -154,7 +154,8 @@ pub struct Wiring {
     /// Symlinks made in the scratch directory before the run: a plain path
     /// relative to it, and the absolute target, which must lie inside one
     /// of the run's read-only store objects (`ConfinedSpec::store_reads`).
-    /// Mix finds a git dependency checked out through one.
+    /// A tool finds something the store already holds (a checked-out
+    /// dependency, say) at the path it expects through one.
     pub links: Vec<(PathBuf, PathBuf)>,
     /// Further git settings (`http.proxy`, `url.<base>.insteadOf`); the
     /// forced ones still have the last word.
@@ -901,7 +902,10 @@ fn write_scratch_file(scratch: &Path, relative: &Path, bytes: &[u8]) -> io::Resu
 /// Make the symlink `scratch/relative` -> `target`. The link is a plain
 /// path inside the scratch directory, and the target an absolute, plain
 /// path inside one of `reads`, the store objects bound read-only into the
-/// run: a link can only show the tool what it may already read.
+/// run: a link can only show the tool what it may already read. Both checks
+/// hold on disk as well as in spelling: the target resolves (symlinks
+/// followed) inside the object it names, and the link's parent resolves
+/// inside the scratch directory.
 fn link_scratch_entry(
     scratch: &Path,
     relative: &Path,
@@ -940,12 +944,40 @@ fn link_scratch_entry(
             ),
         ));
     }
+    let refuse = |why: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the link {} -> {} {why}",
+                relative.display(),
+                target.display()
+            ),
+        )
+    };
+    let resolved = target
+        .canonicalize()
+        .map_err(|e| refuse(format!("names nothing the run reads: {e}")))?;
+    if !reads.iter().any(|root| {
+        target.starts_with(root)
+            && root
+                .canonicalize()
+                .is_ok_and(|root| resolved != root && resolved.starts_with(&root))
+    }) {
+        return Err(refuse(
+            "resolves outside the store object it names (a symlink on the way)".into(),
+        ));
+    }
     let path = scratch.join(relative);
     if let Some(parent) = path.parent() {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(parent)?;
+        if !parent.canonicalize()?.starts_with(scratch.canonicalize()?) {
+            return Err(refuse(
+                "would be made outside the scratch directory (a symlink on the way)".into(),
+            ));
+        }
     }
     std::os::unix::fs::symlink(target, &path)
 }
@@ -1297,6 +1329,30 @@ mod tests {
                 target.display()
             );
         }
+
+        // A target spelled inside the object that is a symlink out of it,
+        // or sits under one, is refused.
+        let outside = temp.0.join("outside");
+        fs::create_dir_all(outside.join("inner")).unwrap();
+        std::os::unix::fs::symlink(&outside, object.join("escape")).unwrap();
+        for target in [object.join("escape"), object.join("escape/inner")] {
+            let why = link_scratch_entry(&scratch, Path::new("deps/f"), &target, &reads)
+                .unwrap_err()
+                .to_string();
+            assert!(why.contains("resolves outside"), "{why}");
+        }
+        // A symlink to another place inside the object is fine.
+        std::os::unix::fs::symlink(object.join("app"), object.join("alias")).unwrap();
+        link_scratch_entry(&scratch, Path::new("deps/g"), &object.join("alias"), &reads).unwrap();
+
+        // A link whose parent in scratch is a symlink out of it is refused,
+        // and nothing is made at the far end.
+        std::os::unix::fs::symlink(&outside, scratch.join("away")).unwrap();
+        let why = link_scratch_entry(&scratch, Path::new("away/app"), &object.join("app"), &reads)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("outside the scratch directory"), "{why}");
+        assert!(fs::symlink_metadata(outside.join("app")).is_err());
     }
 
     struct Fixture {

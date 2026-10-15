@@ -6,7 +6,10 @@
 
 use super::check_locked::{check_locked_inputs, check_locked_passed, record_check_locked};
 use super::door::{elixir_tool, run_mix, run_mix_checked, MixPublish, MixRun, OUTPUTS, SCRATCH};
-use super::{err, read_mix_lock, require_lock, validate_plan, ElixirPlan, GitDep, HexDep, HELPER};
+use super::{
+    err, read_mix_lock, require_lock, validate_entries, validate_plan, ElixirPlan, GitDep, HexDep,
+    HELPER,
+};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
@@ -90,16 +93,76 @@ impl Checkouts {
         beam_obj: &Path,
         basis: &crate::comforter::join::Digests,
     ) -> io::Result<Self> {
-        let lock = read_mix_lock(project)?;
-        let (_, git) = parse_lock(
-            &mut door.reopen(DoorKind::Planner),
-            project,
-            beam_obj,
-            &lock,
-            basis,
-        )?;
+        let git = lock_git(door, project, beam_obj, basis)?;
         Checkouts::of(door, &git)
     }
+}
+
+/// The git dependencies of the project's mix.lock, parsed (and every entry
+/// validated) offline, nothing fetched.
+fn lock_git(
+    door: &mut ResolutionDoor<'_>,
+    project: &ProjectRoot,
+    beam_obj: &Path,
+    basis: &crate::comforter::join::Digests,
+) -> io::Result<Vec<GitDep>> {
+    let lock = read_mix_lock(project)?;
+    let (_, git) = parse_lock(
+        &mut door.reopen(DoorKind::Planner),
+        project,
+        beam_obj,
+        &lock,
+        basis,
+    )?;
+    Ok(git)
+}
+
+/// `mix deps.update` unlocks what it updates, and an unlocked git
+/// dependency is one mix fetches into its checkout: the checkouts ward
+/// links in are read-only and the git host is out of reach. So an update
+/// that names a git dependency, or `--all` with any in the lock, is
+/// refused with the command to run instead. `args` is the whole mix
+/// command line.
+fn refuse_git_update(args: &[&str], git: &[GitDep]) -> io::Result<()> {
+    if git.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = args
+        .iter()
+        .skip(2)
+        .copied()
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    let all = args.contains(&"--all");
+    let picked: Vec<&str> = git
+        .iter()
+        .map(|g| g.app.as_str())
+        .filter(|app| all || names.contains(app))
+        .collect();
+    if picked.is_empty() {
+        return Ok(());
+    }
+    let command = args
+        .iter()
+        .filter(|a| **a != NO_ARCHIVES_CHECK)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hint = if all {
+        "; or name only the Hex dependencies to update them here"
+    } else {
+        ""
+    };
+    Err(err(format!(
+        "mix.lock pins git {} {}: ward cannot update a git dependency yet. Run `{command}` \
+         outside ward, then run `ward`{hint}",
+        if picked.len() == 1 {
+            "dependency"
+        } else {
+            "dependencies"
+        },
+        picked.join(", ")
+    )))
 }
 
 /// `prepare` for a project that has a mix.lock: the `--check-locked` gate,
@@ -192,7 +255,9 @@ pub(crate) fn update(
 ) -> io::Result<()> {
     let basis = resolution_basis(project)?;
     let checkouts = if require_lock(project).is_ok() {
-        Checkouts::of_lock(door, project, beam_obj, &basis)?
+        let git = lock_git(door, project, beam_obj, &basis)?;
+        refuse_git_update(args, &git)?;
+        Checkouts::of(door, &git)?
     } else {
         Checkouts::default()
     };
@@ -379,6 +444,9 @@ fn parse_lock(
     }
     let parsed: HelperOut =
         serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
+    // Every caller fetches what the lock names next: check every entry
+    // (names, duplicates, git paths) first.
+    validate_entries(&parsed.entries, &parsed.git)?;
     Ok((parsed.entries, parsed.git))
 }
 
@@ -968,6 +1036,37 @@ mod tests {
         );
         assert!(deps.join("lib/mix.exs").is_file());
         done();
+    }
+
+    /// An update that names a git dependency, or `--all` with one in the
+    /// lock, is refused with the command to run; a Hex-only update is not.
+    #[test]
+    fn an_update_that_selects_a_git_dependency_is_refused() {
+        let git = vec![GitDep {
+            app: "lib".into(),
+            url: "https://example.invalid/lib.git".into(),
+            rev: "c".repeat(40),
+            branch: None,
+            r#ref: None,
+            tag: None,
+            sparse: None,
+            subdir: None,
+            depth: None,
+            submodules: false,
+        }];
+        let args = ["mix", "deps.update", "jason", NO_ARCHIVES_CHECK];
+        refuse_git_update(&args, &git).unwrap();
+        refuse_git_update(&["mix", "deps.update", "--all"], &[]).unwrap();
+        let why = refuse_git_update(&["mix", "deps.update", "lib", NO_ARCHIVES_CHECK], &git)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("git dependency lib"), "{why}");
+        assert!(why.contains("`mix deps.update lib`"), "{why}");
+        let why = refuse_git_update(&["mix", "deps.update", "--all"], &git)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("`mix deps.update --all`"), "{why}");
+        assert!(why.contains("name only the Hex"), "{why}");
     }
 
     #[test]

@@ -34,8 +34,8 @@ case mode do
       end
     end
     {:map, pairs} = lit.(lit, ast)
-    hexre = ~r/^[0-9a-f]{64}$/
-    namere = ~r/^[a-z][a-z0-9_]*$/
+    hexre = ~r/\A[0-9a-f]{64}\z/
+    namere = ~r/\A[a-z][a-z0-9_]{0,127}\z/
     entries = Enum.map(pairs, fn {k, v} ->
       app = case k do
         {:atom, a} -> a
@@ -47,7 +47,7 @@ case mode do
         {:tuple, [{:atom, "hex"}, {:atom, pkg}, {:string, ver}, {:string, inner},
                   {:list, managers}, {:list, _deps}, {:string, "hexpm"}, {:string, outer}]} ->
           unless pkg =~ namere, do: raise("unsafe package name #{inspect(pkg)}")
-          unless ver =~ ~r/^[A-Za-z0-9._+-]+$/, do: raise("unsafe version #{inspect(ver)}")
+          unless ver =~ ~r/\A[A-Za-z0-9._+-]+\z/, do: raise("unsafe version #{inspect(ver)}")
           unless inner =~ hexre and outer =~ hexre, do: raise("#{app}: checksums must be 64-hex (refresh the lock with current Hex)")
           mgrs = Enum.map(managers, fn {:atom, m} -> m; _ -> raise "bad manager" end)
           {:hex, %{"app" => app, "package" => pkg, "version" => ver,
@@ -55,8 +55,8 @@ case mode do
         {:tuple, [{:atom, "hex"} | rest]} ->
           raise "#{app}: unsupported hex lock entry shape (#{length(rest) + 1} fields); refresh the lock with the pinned Hex"
         {:tuple, [{:atom, "git"}, {:string, url}, {:string, rev}, {:list, opts}]} ->
-          unless url =~ ~r/^[!#-\[\]-~]{1,2048}$/, do: raise("#{app}: unsafe git URL #{inspect(url)}")
-          unless rev =~ ~r/^[0-9a-f]{40}$/, do: raise("#{app}: the git revision must be a full commit")
+          unless url =~ ~r/\A[!#-\[\]-~]{1,2048}\z/, do: raise("#{app}: unsafe git URL #{inspect(url)}")
+          unless rev =~ ~r/\A[0-9a-f]{40}\z/, do: raise("#{app}: the git revision must be a full commit")
           entry = Enum.reduce(opts, %{"app" => app, "url" => url, "rev" => rev}, fn opt, acc ->
             {key, value} = case opt do
               {:tuple, [{:atom, key}, {:string, value}]} when key in ["branch", "ref", "tag", "sparse", "subdir"] ->
@@ -69,6 +69,9 @@ case mode do
                 raise "#{app}: unsupported git lock option #{inspect(other)}"
             end
             if Map.has_key?(acc, key), do: raise("#{app}: git lock option #{key} given twice")
+            if key in ["sparse", "subdir"] and
+                 (String.starts_with?(value, "/") or ".." in String.split(value, "/")),
+               do: raise("#{app}: git #{key} must be a relative path inside the repository")
             Map.put(acc, key, value)
           end)
           {:git, entry}
@@ -78,6 +81,8 @@ case mode do
           raise "#{app}: unsupported lock entry"
       end
     end)
+    apps = Enum.map(entries, fn {_, entry} -> entry["app"] end)
+    if length(apps) != length(Enum.uniq(apps)), do: raise("mix.lock names an app twice")
     hex = for {:hex, entry} <- entries, do: entry
     git = for {:git, entry} <- entries, do: entry
     IO.puts(JSON.encode!(%{"entries" => hex, "git" => git}))

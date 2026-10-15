@@ -901,11 +901,14 @@ Selection covers every patch of each maintained CPython minor that python-build-
   fetched at its locked commit by the kernel's git code (recorded as `git-dependency`, plus
   `host-git-transport` for non-https URLs) and checked out with a synthetic `.git` (HEAD and
   origin only, no history), which is what mix's own lock check reads. `sparse:` and `subdir:`
-  get the whole tree; submodules are always checked out. Confined mix runs see the checkout
-  and never reach the git host, so **changing a git dep's ref in mix.exs, or a project with git
-  deps and no mix.lock, needs a lock written by `mix deps.get` outside ward**: inside, mix
-  cannot fetch the new ref and ward reports "mix could not check".
-- **A stale mix.lock is re-locked by `ward prepare`**, confined, with the disagreement
+  get the whole tree, and must be relative paths without `..`; submodules are always checked
+  out. Confined mix runs see the checkout read-only and never reach the git host, so
+  **changing a git dep's ref in mix.exs, or a project with git deps and no mix.lock, needs a
+  lock written by `mix deps.get` outside ward**: inside, mix cannot fetch the new ref and ward
+  reports "mix could not check". **`ward update` refuses git deps**: naming one, or an
+  untargeted `ward update` (mix's `--all`) on a lock that has any, is refused with the
+  `mix deps.update` command to run outside ward. An update naming only Hex deps works.
+- **A stale mix.lock is re-locked by `ward` (sync's prepare step)**, confined, with the disagreement
   recorded as `lock-disagreement`; `--frozen` and the planner refuse it instead. Mix's
   archive check is off (`--no-archives-check`): a project naming `archives:` (nerves) is
   checked without the archive installed.

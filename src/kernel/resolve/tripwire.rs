@@ -63,7 +63,7 @@ pub const RUBY_HELPER_SHA256: &str =
 /// `elixir ... hexmark` form may run. Pinned by the tailor's test, as for
 /// Ruby.
 pub const ELIXIR_HELPER_SHA256: &str =
-    "cbdc1f2bcb1d5bc879465ea81aff259f0cf877b5ea950a3ee0858daadbb16c3e";
+    "263d84fa9630a1a0f21f15ed89ee2c8ac9c603f74fcde6cca9e504d0853fcbfb";
 
 /// The Elixir tailor's environment scrub, which it uses for every BEAM run:
 /// every variable with one of these prefixes (compared case-insensitively)

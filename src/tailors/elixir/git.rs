@@ -71,6 +71,12 @@ fn git_text_ok(s: &str, max: usize) -> bool {
             .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
 }
 
+/// A `subdir:` or `sparse:` path that stays inside the checkout: relative,
+/// with no `..` component.
+fn inside_checkout(path: &str) -> bool {
+    !path.starts_with('/') && path.split('/').all(|part| part != "..")
+}
+
 /// The checks the helper makes on a git entry, made again on the plan, and
 /// the kernel's own on the source it fetches (scheme, option-looking host,
 /// full commit).
@@ -99,6 +105,21 @@ pub(super) fn validate_git_dep(g: &GitDep) -> io::Result<()> {
         if let Some(value) = value {
             if !git_text_ok(value, 1024) {
                 return Err(err(format!("{}: unsafe git {key} {value:?}", g.app)));
+            }
+        }
+    }
+    // Mix reads the dependency's mix.exs at `deps/<app>/<subdir>` (and a
+    // sparse checkout names a path the same way): a path that leaves the
+    // checkout would make mix read a sibling dependency, or anything, as
+    // this one.
+    for (key, value) in [("sparse", &g.sparse), ("subdir", &g.subdir)] {
+        if let Some(value) = value {
+            if !inside_checkout(value) {
+                return Err(err(format!(
+                    "{}: git {key} {value:?} must be a relative path inside the repository \
+                     (no leading `/`, no `..`)",
+                    g.app
+                )));
             }
         }
     }
@@ -326,6 +347,29 @@ mod tests {
         let mut bad = dep("a", "https://h/x");
         bad.branch = Some("main\nevil".into());
         assert!(validate_git_dep(&bad).is_err());
+    }
+
+    /// `subdir:` and `sparse:` name a path inside the checkout; one that
+    /// leaves it would have mix read another directory as the dependency.
+    #[test]
+    fn subdir_and_sparse_stay_inside_the_checkout() {
+        for path in ["apps/core", "core", "./lib/x", "a/b/c", "a..b/c"] {
+            let mut ok = dep("a", "https://h/x");
+            ok.subdir = Some(path.into());
+            validate_git_dep(&ok).unwrap();
+            let mut ok = dep("a", "https://h/x");
+            ok.sparse = Some(path.into());
+            validate_git_dep(&ok).unwrap();
+        }
+        for path in ["../other", "..", "/etc", "a/../../b", "a/..", "/"] {
+            let mut bad = dep("a", "https://h/x");
+            bad.subdir = Some(path.into());
+            let why = validate_git_dep(&bad).unwrap_err().to_string();
+            assert!(why.contains("inside the repository"), "{path}: {why}");
+            let mut bad = dep("a", "https://h/x");
+            bad.sparse = Some(path.into());
+            assert!(validate_git_dep(&bad).is_err(), "{path}");
+        }
     }
 
     #[test]

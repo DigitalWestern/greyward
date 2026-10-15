@@ -1082,6 +1082,13 @@ pub struct ElixirPlan {
 }
 
 fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
+    validate_entries(&plan.deps, &plan.git)
+}
+
+/// Every lock entry's names, versions, checksums and git fields, and no app
+/// twice across Hex and git. Run on each parse of the lock, before anything
+/// is fetched for it, and again on the plan.
+fn validate_entries(hex: &[HexDep], git: &[GitDep]) -> io::Result<()> {
     let name_ok = |s: &str| {
         !s.is_empty()
             && s.len() <= 128
@@ -1094,7 +1101,7 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
     };
     let hex_ok = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
     let mut seen = std::collections::BTreeSet::new();
-    for d in &plan.deps {
+    for d in hex {
         if !name_ok(&d.app) || !name_ok(&d.package) {
             return Err(err(format!("invalid dep name in plan: {d:?}")));
         }
@@ -1120,7 +1127,7 @@ fn validate_plan(plan: &ElixirPlan) -> io::Result<()> {
             }
         }
     }
-    for g in &plan.git {
+    for g in git {
         validate_git_dep(g)?;
         if !name_ok(&g.app) {
             return Err(err(format!("invalid git dep name in plan: {:?}", g.app)));
@@ -1234,6 +1241,12 @@ pub fn realize_deps(
     deps.object_id(&crate::kernel::store::object_id_from_path(beam_obj)?)?;
     for dep in &plan.deps {
         deps.cache_digest(Digest::sha256(&dep.outer_sha256)?);
+    }
+    // The checkout object keeps the git sources alive, and the next plan
+    // reads both: a collection that kept only this copy would leave a
+    // frozen, offline sync to refetch them.
+    if let Some(checkouts) = &checkouts {
+        deps.object_id(&crate::kernel::store::object_id_from_path(checkouts)?)?;
     }
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &kept, &deps)
@@ -2216,6 +2229,45 @@ exit 0
             ..ok.clone()
         })
         .is_err());
+    }
+
+    /// The checks every parse of the lock runs before anything is fetched:
+    /// an app named twice (git and git, git and Hex) and a name with a
+    /// trailing newline, or too long, are refused.
+    #[test]
+    fn lock_entries_refuse_duplicates_and_bad_names() {
+        let hex = HexDep {
+            app: "jason".into(),
+            package: "jason".into(),
+            version: "1.4.5".into(),
+            inner_sha256: "a".repeat(64),
+            outer_sha256: "b".repeat(64),
+            managers: vec!["mix".into()],
+        };
+        let git = |app: &str| GitDep {
+            app: app.into(),
+            url: "https://example.invalid/x.git".into(),
+            rev: "c".repeat(40),
+            branch: None,
+            r#ref: None,
+            tag: None,
+            sparse: None,
+            subdir: None,
+            depth: None,
+            submodules: false,
+        };
+        validate_entries(std::slice::from_ref(&hex), &[git("lib")]).unwrap();
+        let why = validate_entries(&[], &[git("lib"), git("lib")])
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("duplicate"), "{why}");
+        let why = validate_entries(std::slice::from_ref(&hex), &[git("jason")])
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("duplicate"), "{why}");
+        for name in ["lib\n", "Lib", "1lib", &"a".repeat(129)] {
+            assert!(validate_entries(&[], &[git(name)]).is_err(), "{name:?}");
+        }
     }
 
     #[test]

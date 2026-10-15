@@ -963,9 +963,17 @@ Selection covers every patch of each maintained CPython minor that python-build-
   (or project), so retargeting stales the toolchain lock. A project the default builds
   records no row, so its lock is unchanged. When a later catalog default catches up with a
   project's target, its row goes away and the toolchain lock goes stale once (`ward update
-  --toolchain dotnet`). A target set through a property (`$(Tfm)`) is not evaluated.
+  --toolchain dotnet`). Literal declarations use property order, the nearest
+  Directory.Build.props chain, and constant-false conditions. Project-state conditions
+  demanding a newer SDK than the effective target and catalog default are refused unless
+  global.json chooses the SDK. A target set through a property (`$(Tfm)`) or ordinary
+  custom imports is not evaluated. This is a conservative supported subset of MSBuild.
 - **Strictest boundary of any tailor** (all loud): one SDK-style project at the root, or the
-  root solution's (.sln/.slnx) SDK-style members, each with its own packages.lock.json.
+  root solution's (.sln/.slnx) members, plus their literal in-tree ProjectReference graph,
+  each with its own packages.lock.json. Projects without a local SDK declaration stay in
+  the member set because imports may supply SDKs or dependencies. Dynamic reference paths
+  and reference declarations outside member files are refused. A referenced project cannot
+  be skipped, and a retained build member cannot reference a skipped Windows member.
   A listed project restore cannot read (C++, packages.config, an MSBuild SDK fetched from
   NuGet such as Microsoft.Build.Traversal or Aspire, a path outside the checkout) is skipped
   with a `requirement-skipped` exception; the solution is refused only when no member is
@@ -973,10 +981,17 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `ward build` refuses two members with one file name (their artifacts directories would
   collide). Windows-targeting members (`net8.0-windows`, WPF, Windows Forms) sync, but
   `ward build` leaves them out: their targeting pack is fetched beside the lock, not pinned
-  by it. No PackageDownload, no UsingTask, no workloads, nuget.org only. Ancestor SDK inputs
+  by it. No PackageDownload, no UsingTask, no workloads, nuget.org only. Every visible
+  MSBuild document receives these restrictions, including ordinary imports with arbitrary
+  filenames and UTF-16/32 XML. This whole-tree scan can refuse unused or skipped project
+  content too. Shared-project entries are omitted without an exception because they are
+  compiled through their importing projects. Ancestor SDK inputs
   (global.json, Directory.Packages.props, Directory.Build.rsp, packages.config) fail closed.
   Output properties (OutputPath, OutDir, BaseOutputPath, PublishDir) must stay inside the
-  checkout; `ward build` puts output in scratch whatever they say. A
+  checkout. The output hook redirects declarations in SDK-style projects and
+  Directory.Build.props without explicit imports. Output declarations in other imported
+  files, in targets, or in files with explicit imports are refused because they may run
+  after the hook. Task-created output properties are refused too. A
   `CustomBeforeMicrosoftCommonTargets` the project sets is replaced during `ward build`.
 - **Build-capable dotnet verbs are refused at `ward run`**; everything compiling goes
   through `ward build dotnet`, which covers build only (no test/publish verbs). The guard

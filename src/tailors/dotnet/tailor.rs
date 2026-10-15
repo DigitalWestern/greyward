@@ -402,7 +402,7 @@ fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
 const TARGET_FIELD: &str = "TargetFramework.newest";
 
 /// The newest `netN.0` the layout targets
-/// ([`dotnet::solution::newest_target_major`]), as one row on the root
+/// ([`dotnet::targets::newest_target_major`]), as one row on the root
 /// solution (or the single project). Written only when that framework is
 /// newer than the catalog default SDK builds: the default already serves
 /// every older one, so a project that synced before this row existed keeps
@@ -414,7 +414,33 @@ fn target_row(root: &ProjectRoot) -> io::Result<Option<InputRow>> {
     let Ok(layout) = dotnet::solution::discover(root) else {
         return Ok(None);
     };
-    let Ok(Some(major)) = dotnet::solution::newest_target_major(root, &layout) else {
+    let targets = dotnet::targets::newest_target_major(root, &layout)?;
+    // A global.json constraint chooses the SDK. Otherwise an unresolved
+    // conditional declaration above the default cannot silently demand a
+    // framework that is inactive in this project.
+    let global = root.read_file(Path::new("global.json"))?;
+    let global_selects = global
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|value| {
+            value
+                .get("sdk")?
+                .get("version")?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .is_some_and(|version| {
+            super::rollforward::sdk_request(Some(&version), None)
+                .ok()
+                .flatten()
+                .is_some()
+        });
+    if let Some((major, file)) = targets.unsure {
+        if !global_selects && default_sdk_major().is_none_or(|default| major > default) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: target framework net{major}.0 depends on an unevaluated MSBuild condition; choose the SDK with global.json or use an unconditional effective target framework", file.display())));
+        }
+    }
+    let Some(major) = targets.newest else {
         return Ok(None);
     };
     if default_sdk_major().is_some_and(|default| major <= default) {
@@ -540,6 +566,27 @@ mod tests {
             )
             .unwrap_err();
         assert!(!error.to_string().contains("must run sandboxed"), "{error}");
+    }
+
+    #[test]
+    fn inactive_targets_do_not_request_unavailable_sdks() {
+        let temp = TempDir::named("dotnet-inactive-sdk");
+        std::fs::write(temp.0.join("Directory.Build.props"), "<Project><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
+        std::fs::write(temp.0.join("app.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><TargetFramework Condition=\"false\">net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
+        let root = ProjectRoot::open(&temp.0).unwrap();
+        assert!(!toolchain_rows(&root)
+            .unwrap()
+            .iter()
+            .any(|row| row.field == TARGET_FIELD));
+        std::fs::write(temp.0.join("app.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><TargetFramework Condition=\"'$(Optional)' == 'true'\">net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
+        let why = toolchain_rows(&root).unwrap_err().to_string();
+        assert!(why.contains("unevaluated MSBuild condition"), "{why}");
+        std::fs::write(
+            temp.0.join("global.json"),
+            r#"{"sdk":{"version":"9.0.317","rollForward":"disable"}}"#,
+        )
+        .unwrap();
+        toolchain_rows(&root).unwrap();
     }
 
     /// Without a global.json version, the newest target framework picks

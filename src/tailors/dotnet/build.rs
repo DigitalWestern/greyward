@@ -2,9 +2,8 @@
 //! `--no-restore` build, and the output published into the project.
 
 use super::{
-    add_dotnet_tmp_write_root, ensure_dotnet_tmp, err, forced_env, opens_element, preflight,
-    prepare_scratch, read_input_text, sdk_fingerprint_of, sdk_spec, solution,
-    strip_comments_and_cdata, Preflight,
+    add_dotnet_tmp_write_root, ensure_dotnet_tmp, err, forced_env, preflight, prepare_scratch,
+    sdk_fingerprint_of, sdk_spec, solution, Preflight,
 };
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
@@ -289,6 +288,19 @@ pub(super) fn buildable(checked: &Preflight) -> io::Result<solution::Layout> {
     if windows.is_empty() {
         return Ok(layout);
     }
+    // A Windows member can still execute through a retained member's
+    // ProjectReference. Refuse that graph instead of silently restoring it.
+    for member in layout
+        .members
+        .iter()
+        .filter(|member| !windows.contains(member))
+    {
+        for referenced in checked.references.get(member).into_iter().flatten() {
+            if windows.contains(referenced) {
+                return Err(err(format!("{} references Windows project {}; its targeting pack is not pinned, so this graph cannot build offline", member.display(), referenced.display())));
+            }
+        }
+    }
     layout.members.retain(|member| !windows.contains(member));
     let names = windows
         .iter()
@@ -399,14 +411,7 @@ fn build_in(
         scratch,
     } = *paths;
     let root_project = &layout.members[0];
-    let references = layout.solution.is_none() && {
-        let text = read_input_text(project, root_project)?;
-        opens_element(
-            &strip_comments_and_cdata(&text, root_project)?.to_ascii_lowercase(),
-            "projectreference",
-        )
-    };
-    let artifacts_mode = layout.solution.is_some() || references;
+    let artifacts_mode = layout.solution.is_some() || layout.members.len() > 1;
     if artifacts_mode {
         same_named_members(&layout.members)?;
     }

@@ -73,6 +73,10 @@ fn sdk_version(text: &str) -> Option<([u64; 3], bool)> {
             return None;
         }
         parts[count] = piece.parse().ok()?;
+        // hostfxr stores version components in signed 32-bit integers.
+        if parts[count] > i32::MAX as u64 {
+            return None;
+        }
         count += 1;
     }
     (count == 3).then_some((parts, prerelease))
@@ -214,6 +218,9 @@ mod tests {
             "11.0.100+a_b",
             " 9.0.100",
             "9.0.100 ",
+            "18446744073709551615.0.100",
+            "9.2147483648.100",
+            "9.0.2147483648",
         ] {
             assert_eq!(
                 shown(Some(ignored), Some("latestPatch")),

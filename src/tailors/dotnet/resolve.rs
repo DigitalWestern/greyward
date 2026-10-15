@@ -2,7 +2,7 @@
 //! proxy session's NuGet mirror, for a missing lock and for `ward attest`.
 
 use super::door::{dotnet_tool, run_restore, DotnetRun};
-use super::solution::{self, is_project_file, lock_beside, Layout};
+use super::solution::{self, lock_beside, Layout};
 use super::{err, require_lock, ParsedLock, LOCK_FILE};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
@@ -13,28 +13,12 @@ use sha2::{Digest as _, Sha256};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The resolution outputs of `layout` over the project's files: each
-/// member project file, then packages.lock.json beside each member and
-/// beside every other project file (restore writes one for every project
-/// a member references). A single project with no other project file in
-/// the tree has exactly `[app.csproj, packages.lock.json]`.
-pub(super) fn outputs_of<'a>(
-    layout: &Layout,
-    files: impl IntoIterator<Item = &'a Path>,
-) -> Vec<PathBuf> {
+/// Only the validated project's files and locks are restore outputs.
+/// A computed reference that escapes the checked graph cannot publish an
+/// unexpected lock beside an unselected project.
+pub(super) fn outputs_of(layout: &Layout) -> Vec<PathBuf> {
     let mut outputs = layout.members.clone();
-    let mut locks: Vec<PathBuf> = layout.member_locks();
-    locks.extend(
-        files
-            .into_iter()
-            .filter(|path| is_project_file(path))
-            .map(lock_beside),
-    );
-    for lock in locks {
-        if !outputs.contains(&lock) {
-            outputs.push(lock);
-        }
-    }
+    outputs.extend(layout.member_locks());
     outputs
 }
 
@@ -43,7 +27,7 @@ pub(super) fn outputs_of<'a>(
 fn files(project: &ProjectRoot) -> io::Result<(Layout, Vec<PathBuf>, Vec<PathBuf>)> {
     let layout = solution::discover(project)?;
     let all = crate::kernel::resolve::inputs::project_files(project, &super::door::EXCLUDE, &[])?;
-    let outputs = outputs_of(&layout, all.iter().map(PathBuf::as_path));
+    let outputs = outputs_of(&layout);
     let inputs = all
         .into_iter()
         .filter(|path| !outputs.contains(path))
@@ -134,6 +118,7 @@ pub struct Preflight {
     pub(super) layout: Layout,
     pub(super) locks: Vec<MemberLock>,
     pub(super) basis: crate::comforter::join::Digests,
+    pub(super) references: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     /// Does any member target Windows: a lock framework such as
     /// `net8.0-windows`, or project text that names one or WPF or
     /// Windows Forms? Its restore then needs `EnableWindowsTargeting`,
@@ -185,7 +170,7 @@ impl Preflight {
     /// For a solution, each member lock's path and sha256, which its
     /// closure records; empty for a single project.
     pub(super) fn lock_inputs(&self) -> Vec<(String, String)> {
-        if self.layout.solution.is_none() {
+        if self.layout.solution.is_none() && self.layout.members.len() == 1 {
             return Vec::new();
         }
         self.locks
@@ -213,19 +198,48 @@ impl Preflight {
     }
 }
 
-/// Is `path` an MSBuild file every project under its directory imports
-/// by name (`Directory.Build.props`, `Directory.Build.targets`,
-/// `Directory.Packages.props`)?
-fn is_directory_file(path: &str) -> bool {
-    let name = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "directory.build.props" | "directory.build.targets" | "directory.packages.props"
-    )
+/// All captured MSBuild documents receive the project restrictions, even
+/// when an import has a custom filename or an XML encoding other than UTF-8.
+/// This deliberately scans the visible tree conservatively, because import
+/// paths may be computed by project code.
+fn validate_msbuild_inputs(
+    project: &ProjectRoot,
+    basis: &crate::comforter::join::Digests,
+    layout: &Layout,
+) -> io::Result<()> {
+    for path in basis.keys().filter(|path| !is_lock_path(path)) {
+        let rel = Path::new(path);
+        let bytes = project
+            .read_input(rel)?
+            .ok_or_else(|| err("MSBuild input vanished"))?;
+        let ascii: Vec<u8> = bytes
+            .iter()
+            .copied()
+            .filter(|byte| *byte != 0)
+            .map(|byte| byte.to_ascii_lowercase())
+            .collect();
+        if !ascii.windows(8).any(|part| part == b"<project") {
+            continue;
+        }
+        super::validate_csproj(project, rel)?;
+        let markup = super::strip_comments_and_cdata(&super::decode_msbuild(&bytes)?, rel)?
+            .to_ascii_lowercase();
+        if !layout.members.contains(&rel.to_path_buf()) {
+            if super::opens_element(&markup, "projectreference") {
+                return Err(err(format!("{path}: ProjectReference in an imported or unselected file is unsupported; declare literal references in the member project so every reached project can be validated")));
+            }
+            if super::OUTPUT_PROPERTIES
+                .iter()
+                .any(|name| super::opens_element(&markup, &name.to_ascii_lowercase()))
+                && rel
+                    .file_name()
+                    .is_none_or(|name| name != "Directory.Build.props")
+            {
+                return Err(err(format!("{path}: output properties in an imported file can run after ward's output hook; move them to the SDK-style project or Directory.Build.props")));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Central v0 trust-boundary validation.
@@ -249,9 +263,7 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
         }
         super::validate_csproj(project, member)?;
     }
-    for path in basis.keys().filter(|path| is_directory_file(path)) {
-        super::validate_csproj(project, Path::new(path))?;
-    }
+    validate_msbuild_inputs(project, &basis, &layout)?;
     for lock in layout.member_locks() {
         super::regular_file_if_present(project, &lock, "packages.lock.json")?;
     }
@@ -317,6 +329,11 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
         let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
         windows = text.contains("<project") && windows_text(&text);
     }
+    let references = layout
+        .members
+        .iter()
+        .map(|member| Ok((member.clone(), solution::references(project, member)?)))
+        .collect::<io::Result<_>>()?;
     project.verify_observed_inputs()?;
     if resolution_basis(project)? != basis {
         return Err(err(
@@ -327,6 +344,7 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
         layout,
         locks,
         basis,
+        references,
         windows,
     })
 }
@@ -339,7 +357,7 @@ fn receipt_spec(
     selected: &Selected,
     args: &[String],
 ) -> io::Result<record::RecordSpec> {
-    let outputs = outputs_of(&checked.layout, checked.basis.keys().map(Path::new));
+    let outputs = outputs_of(&checked.layout);
     let inputs = checked
         .basis
         .keys()
@@ -551,6 +569,225 @@ mod tests {
     use crate::tailors::dotnet::registry::HOST;
     use std::fs;
     use std::io::Write as _;
+
+    fn write_project(root: &Path, file: &str, text: &str) {
+        let path = root.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn unlisted_references_contribute_private_packages_and_lock_inputs() {
+        let temp = TempDir::named("dotnet-reference-graph");
+        write_project(
+            &temp.0,
+            "App.slnx",
+            "<Solution><Project Path=\"App/App.csproj\" /></Solution>",
+        );
+        write_project(
+            &temp.0,
+            "App/App.csproj",
+            &csproj(
+                "<ItemGroup><ProjectReference Include=\"../Hidden/Hidden.csproj\" /></ItemGroup>",
+            ),
+        );
+        write_project(&temp.0, "Hidden/Hidden.csproj", &csproj("<ItemGroup><PackageReference Include=\"Example.Private\" Version=\"1.0.0\" PrivateAssets=\"all\" /></ItemGroup>"));
+        write_project(
+            &temp.0,
+            "App/packages.lock.json",
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        );
+        let hash = crate::kernel::base64::encode(&[7; 64]);
+        write_project(
+            &temp.0,
+            "Hidden/packages.lock.json",
+            &format!(
+                r#"{{"version":1,"dependencies":{{"net9.0":{{"Example.Private":{{"type":"Direct","resolved":"1.0.0","contentHash":"{hash}"}}}}}}}}"#
+            ),
+        );
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let selected = super::super::shipped_selection().unwrap();
+        let checked = preflight(&project, selected.version("dotnet-sdk").unwrap()).unwrap();
+        assert_eq!(
+            checked.layout.members,
+            [
+                PathBuf::from("App/App.csproj"),
+                PathBuf::from("Hidden/Hidden.csproj")
+            ]
+        );
+        assert_eq!(checked.lock_inputs().len(), 2);
+        let (plan, _) = super::super::plan_dotnet(&project, &selected, &checked).unwrap();
+        assert_eq!(plan.packages.len(), 1);
+        assert_eq!(plan.packages[0].id, "Example.Private");
+        // A single root project follows exactly the same reference graph.
+        fs::remove_file(temp.0.join("App.slnx")).unwrap();
+        write_project(
+            &temp.0,
+            "Root.csproj",
+            &csproj("<ItemGroup><ProjectReference Include=\"Hidden/Hidden.csproj\" /></ItemGroup>"),
+        );
+        write_project(
+            &temp.0,
+            "packages.lock.json",
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        );
+        // Unselected projects are still visible inputs, so remove the old
+        // referencing member from this single-project fixture.
+        fs::remove_file(temp.0.join("App/App.csproj")).unwrap();
+        let checked = preflight(&project, selected.version("dotnet-sdk").unwrap()).unwrap();
+        assert_eq!(checked.lock_inputs().len(), 2);
+        let (plan, _) = super::super::plan_dotnet(&project, &selected, &checked).unwrap();
+        assert_eq!(plan.packages.len(), 1);
+        assert_eq!(plan.members.len(), 2);
+    }
+
+    #[test]
+    fn references_cannot_reintroduce_skipped_projects_or_hide_collisions() {
+        let temp = TempDir::named("dotnet-reference-refusals");
+        write_project(
+            &temp.0,
+            "App.slnx",
+            "<Solution><Project Path=\"App/App.csproj\" /></Solution>",
+        );
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        for (reference, target, body, expected) in [
+            (
+                "../Hidden/Hidden.csproj",
+                "Hidden/Hidden.csproj",
+                "<Project Sdk=\"Other.Sdk/1.0\" />",
+                "cannot be validated",
+            ),
+            (
+                "../App/Other.csproj",
+                "App/Other.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />",
+                "share a directory",
+            ),
+            (
+                "$(Hidden)/Hidden.csproj",
+                "Hidden/Hidden.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />",
+                "dynamic ProjectReference",
+            ),
+            (
+                "../../Outside.csproj",
+                "Hidden/Hidden.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />",
+                "leaves the restore input tree",
+            ),
+        ] {
+            write_project(
+                &temp.0,
+                "App/App.csproj",
+                &csproj(&format!(
+                    "<ItemGroup><ProjectReference Include=\"{reference}\" /></ItemGroup>"
+                )),
+            );
+            write_project(&temp.0, target, body);
+            let why = preflight(&project, "9.0.317").unwrap_err().to_string();
+            assert!(why.contains(expected), "{why}");
+        }
+    }
+
+    #[test]
+    fn imported_features_are_checked_in_every_xml_encoding() {
+        let temp = TempDir::named("dotnet-import-validation");
+        write_project(
+            &temp.0,
+            "App.csproj",
+            &csproj("<Import Project=\"custom.data\" />"),
+        );
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        for feature in [
+            "<ItemGroup><PackageDownload Include=\"Example.Hidden\" Version=\"[1.0.0]\" /></ItemGroup>",
+            "<UsingTask TaskName=\"Hidden\" AssemblyFile=\"hidden.dll\" />",
+            "<PropertyGroup><RestoreSources>https://example.test</RestoreSources></PropertyGroup>",
+            "<Sdk Name=\"Other.Sdk\" Version=\"1.0.0\" />",
+            "<ItemGroup><ProjectReference Include=\"Hidden.csproj\" /></ItemGroup>",
+        ] {
+            let text = format!("<Project>{feature}</Project>");
+            let encodings = [
+                text.as_bytes().to_vec(),
+                std::iter::once(0xfeffu16).chain(text.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
+                std::iter::once(0xfeffu16).chain(text.encode_utf16()).flat_map(u16::to_be_bytes).collect(),
+                std::iter::once('\u{feff}').chain(text.chars()).flat_map(|c| (c as u32).to_le_bytes()).collect(),
+                std::iter::once('\u{feff}').chain(text.chars()).flat_map(|c| (c as u32).to_be_bytes()).collect(),
+            ];
+            for bytes in encodings {
+                fs::write(temp.0.join("custom.data"), bytes).unwrap();
+                let why = preflight(&project, "9.0.317").unwrap_err().to_string();
+                assert!(why.contains("custom.data"), "{feature}: {why}");
+            }
+        }
+        fs::write(
+            temp.0.join("custom.data"),
+            "<Project><PropertyGroup><Version>1.0</Version></PropertyGroup></Project>",
+        )
+        .unwrap();
+        preflight(&project, "9.0.317").unwrap();
+    }
+
+    #[test]
+    fn imported_sdk_projects_are_members_and_late_outputs_are_refused() {
+        let temp = TempDir::named("dotnet-imported-sdk");
+        write_project(
+            &temp.0,
+            "App.slnx",
+            "<Solution><Project Path=\"App/App.csproj\" /></Solution>",
+        );
+        write_project(
+            &temp.0,
+            "App/App.csproj",
+            "<Project><Import Project=\"../sdk.props\" /></Project>",
+        );
+        write_project(&temp.0, "sdk.props", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>");
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let checked = preflight(&project, "9.0.317").unwrap();
+        assert_eq!(checked.layout.members, [PathBuf::from("App/App.csproj")]);
+        assert!(checked.layout.skipped.is_empty());
+        for file in ["Directory.Build.targets", "late.props", "late.custom"] {
+            write_project(&temp.0, file, "<Project><PropertyGroup><OutDir>$(MSBuildProjectDirectory)/LateOutput/</OutDir></PropertyGroup></Project>");
+            let why = preflight(&project, "9.0.317").unwrap_err().to_string();
+            assert!(why.contains("output properties"), "{why}");
+            fs::remove_file(temp.0.join(file)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_retained_member_cannot_build_a_skipped_windows_reference() {
+        let temp = TempDir::named("dotnet-reference-windows");
+        write_project(
+            &temp.0,
+            "App.slnx",
+            "<Solution><Project Path=\"App/App.csproj\" /></Solution>",
+        );
+        write_project(
+            &temp.0,
+            "App/App.csproj",
+            &csproj(
+                "<ItemGroup><ProjectReference Include=\"../Windows/Windows.csproj\" /></ItemGroup>",
+            ),
+        );
+        write_project(&temp.0, "Windows/Windows.csproj", &csproj(""));
+        write_project(
+            &temp.0,
+            "App/packages.lock.json",
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        );
+        write_project(
+            &temp.0,
+            "Windows/packages.lock.json",
+            r#"{"version":1,"dependencies":{"net9.0-windows7.0":{}}}"#,
+        );
+        let checked = preflight(&ProjectRoot::open(&temp.0).unwrap(), "9.0.317").unwrap();
+        let why = super::super::build::buildable(&checked)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            why.contains("App/App.csproj references Windows project Windows/Windows.csproj"),
+            "{why}"
+        );
+    }
 
     #[test]
     fn msbuild_data_and_nested_imports_are_resolution_inputs() {

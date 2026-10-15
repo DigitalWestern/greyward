@@ -19,6 +19,7 @@ mod resolve;
 mod rollforward;
 mod solution;
 pub mod tailor;
+mod targets;
 mod unpack;
 mod verifier;
 
@@ -775,6 +776,69 @@ fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// XML can encode element names as UTF-8, UTF-16 or UTF-32. Decode before
+/// applying the same restrictions to every MSBuild input.
+fn decode_msbuild(bytes: &[u8]) -> io::Result<String> {
+    let utf32 = if bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
+        Some((true, &bytes[4..]))
+    } else if bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+        Some((false, &bytes[4..]))
+    } else if bytes.starts_with(&[b'<', 0, 0, 0]) {
+        Some((true, bytes))
+    } else if bytes.starts_with(&[0, 0, 0, b'<']) {
+        Some((false, bytes))
+    } else {
+        None
+    };
+    if let Some((little, bytes)) = utf32 {
+        if !bytes.len().is_multiple_of(4) {
+            return Err(err("invalid UTF-32 MSBuild input"));
+        }
+        return bytes
+            .chunks_exact(4)
+            .map(|chunk| {
+                let chunk: [u8; 4] = chunk.try_into().expect("four-byte chunk");
+                char::from_u32(if little {
+                    u32::from_le_bytes(chunk)
+                } else {
+                    u32::from_be_bytes(chunk)
+                })
+                .ok_or_else(|| err("invalid UTF-32 MSBuild input"))
+            })
+            .collect();
+    }
+    let utf16 = if bytes.starts_with(&[0xff, 0xfe]) {
+        Some((true, &bytes[2..]))
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        Some((false, &bytes[2..]))
+    } else if bytes.starts_with(&[b'<', 0]) {
+        Some((true, bytes))
+    } else if bytes.starts_with(&[0, b'<']) {
+        Some((false, bytes))
+    } else {
+        None
+    };
+    if let Some((little, bytes)) = utf16 {
+        if !bytes.len().is_multiple_of(2) {
+            return Err(err("invalid UTF-16 MSBuild input"));
+        }
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|chunk| {
+                let chunk = [chunk[0], chunk[1]];
+                if little {
+                    u16::from_le_bytes(chunk)
+                } else {
+                    u16::from_be_bytes(chunk)
+                }
+            })
+            .collect();
+        return String::from_utf16(&units).map_err(|_| err("invalid UTF-16 MSBuild input"));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| err("MSBuild input must use UTF-8, UTF-16 or UTF-32"))
+}
+
 /// Validate a project-relative project file or `Directory.*` MSBuild file,
 /// read through the held descriptor.
 ///
@@ -785,7 +849,10 @@ fn is_name_byte(b: u8) -> bool {
 /// is what holds the boundary when a build step does something the scan
 /// does not model.
 fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
-    let text = read_input_text(project, rel)?;
+    let bytes = project
+        .read_input(rel)?
+        .ok_or_else(|| err("MSBuild input vanished"))?;
+    let text = decode_msbuild(&bytes)?;
     let path = project.path().join(rel);
     let path = path.as_path();
     let markup = strip_comments_and_cdata(&text, path)?.to_ascii_lowercase();
@@ -841,6 +908,13 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
     for attribute in ["itemname", "propertyname"] {
         for value in attribute_values(&markup, attribute, path)? {
             let value = value.trim();
+            if value.eq_ignore_ascii_case("ProjectReference")
+                || OUTPUT_PROPERTIES
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(value))
+            {
+                return Err(err(format!("{}: task-created {value} is not supported; its project graph or output path cannot be checked before execution", path.display())));
+            }
             if let Some((name, why)) = BLOCKED_ELEMENTS
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case(value))
@@ -851,6 +925,23 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
                 )));
             }
         }
+    }
+    let has_output = OUTPUT_PROPERTIES
+        .iter()
+        .any(|name| opens_element(&markup, &name.to_ascii_lowercase()));
+    let early_output_file = solution::is_project_file(rel)
+        || rel
+            .file_name()
+            .is_some_and(|name| name == "Directory.Build.props");
+    if has_output
+        && (!early_output_file
+            || opens_element(&markup, "target")
+            || opens_element(&markup, "import"))
+    {
+        return Err(err(format!(
+            "{}: output properties in imported files, targets or projects with explicit imports may override ward's output hook; move them to an SDK-style project or Directory.Build.props without explicit imports",
+            path.display()
+        )));
     }
     for property in OUTPUT_PROPERTIES {
         for value in element_values(&markup, &property.to_ascii_lowercase()) {
@@ -1046,13 +1137,13 @@ pub fn plan_dotnet(
         project: named,
         targets,
         packages: packages.into_values().collect(),
-        members: match layout.solution {
-            Some(_) => layout
+        members: match (&layout.solution, layout.members.len()) {
+            (Some(_), _) | (_, 2..) => layout
                 .members
                 .iter()
                 .map(|member| member.to_string_lossy().into_owned())
                 .collect(),
-            None => Vec::new(),
+            _ => Vec::new(),
         },
     };
     validate_plan(&plan, &sdk_version)?;

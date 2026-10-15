@@ -13,7 +13,7 @@
 //! |---|---|
 //! | SDK-style `.csproj`/`.fsproj`/`.vbproj` on bundled SDKs | member |
 //! | legacy project with `<PackageReference>` | member |
-//! | legacy project with neither PackageReference nor packages.config | skipped silently (no NuGet dependencies) |
+//! | legacy project with neither PackageReference nor packages.config | member, since imports may supply SDK and dependencies |
 //! | shared project (`.shproj`) | skipped silently (compiled into the projects importing it) |
 //! | legacy project with packages.config | skipped, recorded |
 //! | a project on an MSBuild SDK NuGet fetches (`Sdk="X/1.0"`, Aspire) | skipped, recorded |
@@ -167,6 +167,111 @@ fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+/// ProjectReference includes, in source spelling, with literal local paths.
+/// Conditions are conservatively included. Dynamic items would need MSBuild
+/// evaluation to know which projects restore reaches, and are refused.
+pub(super) fn references(project: &ProjectRoot, member: &Path) -> io::Result<Vec<PathBuf>> {
+    let bytes = project
+        .read_input(member)?
+        .ok_or_else(|| err("project input vanished"))?;
+    let text = super::decode_msbuild(&bytes)?;
+    let markup = strip_comments_and_cdata(&text, member)?;
+    let lower = markup.to_ascii_lowercase();
+    let mut found = Vec::new();
+    for (at, _) in lower.match_indices("<projectreference") {
+        let after = at + "<projectreference".len();
+        if !lower
+            .as_bytes()
+            .get(after)
+            .is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+        {
+            continue;
+        }
+        let tag = &markup[after..];
+        let mut quote = None;
+        let end = tag
+            .bytes()
+            .position(|byte| {
+                match quote {
+                    Some(q) if byte == q => quote = None,
+                    Some(_) => {}
+                    None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
+                    None if byte == b'>' => return true,
+                    None => {}
+                }
+                false
+            })
+            .ok_or_else(|| {
+                err(format!(
+                    "{}: unterminated ProjectReference",
+                    member.display()
+                ))
+            })?;
+        let attributes = &tag[..end];
+        let lower_attributes = attributes.to_ascii_lowercase();
+        let includes = super::attribute_values(&lower_attributes, "include", member)?;
+        for include in includes {
+            let offset = include.as_ptr() as usize - lower_attributes.as_ptr() as usize;
+            let include = xml_unescape(&attributes[offset..offset + include.len()]);
+            for raw in include.split(';').filter(|raw| !raw.trim().is_empty()) {
+                if raw.contains(['$', '@', '%', '*', '?']) {
+                    return Err(err(format!("{}: dynamic ProjectReference {raw:?} is unsupported; use a literal project-relative path", member.display())));
+                }
+                let raw = raw.trim().replace('\\', "/");
+                let joined = member.parent().unwrap_or(Path::new("")).join(&raw);
+                let path = inside(&joined.to_string_lossy())
+                    .filter(|path| {
+                        !path.components().any(|part| {
+                            matches!(
+                                part.as_os_str().to_str(),
+                                Some("bin" | "obj" | ".greyward" | ".git")
+                            )
+                        })
+                    })
+                    .ok_or_else(|| {
+                        err(format!(
+                            "{}: ProjectReference {raw:?} leaves the restore input tree",
+                            member.display()
+                        ))
+                    })?;
+                if !found.contains(&path) {
+                    found.push(path);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Add every literal project reference recursively before SDK selection,
+/// lock planning or restore. A reference to a project that would have been
+/// skipped is refused: it must never execute as an unchecked dependency.
+fn complete_references(project: &ProjectRoot, layout: &mut Layout) -> io::Result<()> {
+    let mut index = 0;
+    while index < layout.members.len() {
+        let member = layout.members[index].clone();
+        index += 1;
+        for path in references(project, &member)? {
+            if layout.members.contains(&path) {
+                continue;
+            }
+            match classify(project, &path.to_string_lossy())? {
+                Listed::Member(path) => layout.members.push(path),
+                Listed::Skipped(skip) => return Err(err(format!("{} references {} which cannot be validated: {}; referenced projects cannot be skipped", member.display(), skip.path, skip.why))),
+            }
+        }
+    }
+    for (index, member) in layout.members.iter().enumerate() {
+        if let Some(other) = layout.members[..index]
+            .iter()
+            .find(|other| other.parent() == member.parent())
+        {
+            return Err(err(format!("{} and {} share a directory, so their packages.lock.json files collide; move one into its own directory", other.display(), member.display())));
+        }
+    }
+    Ok(())
+}
+
 /// A listed path inside the project, `..` resolved; `None` for an
 /// absolute path or one that leaves the project.
 fn inside(raw: &str) -> Option<PathBuf> {
@@ -281,7 +386,10 @@ fn classify(project: &ProjectRoot, raw: &str) -> io::Result<Listed> {
             ));
         }
     }
-    let text = super::read_input_text(project, &path)?;
+    let bytes = project
+        .read_input(&path)?
+        .ok_or_else(|| err("project input vanished"))?;
+    let text = super::decode_msbuild(&bytes)?;
     let markup = strip_comments_and_cdata(&text, &path)?.to_ascii_lowercase();
     let sdks = sdk_names(&markup, &path)?;
     if let Some(fetched) = sdks.iter().find(|name| !bundled_sdk(name)) {
@@ -308,13 +416,9 @@ fn classify(project: &ProjectRoot, raw: &str) -> io::Result<Listed> {
                 true,
             ));
         }
-        if !super::opens_element(&markup, "packagereference") {
-            return Ok(skipped(
-                &shown,
-                "a legacy project with no NuGet dependencies",
-                false,
-            ));
-        }
+        // SDK and dependency declarations may come from ordinary imports
+        // or Directory.Build.props. Keep the project in the validated set;
+        // restore must produce its lock rather than silently skip it.
     }
     Ok(Listed::Member(path))
 }
@@ -352,11 +456,15 @@ pub(crate) fn discover(project: &ProjectRoot) -> io::Result<Layout> {
     projects.sort();
     if solutions.is_empty() {
         return match projects.len() {
-            1 => Ok(Layout {
-                solution: None,
-                members: projects,
-                skipped: Vec::new(),
-            }),
+            1 => {
+                let mut layout = Layout {
+                    solution: None,
+                    members: projects,
+                    skipped: Vec::new(),
+                };
+                complete_references(project, &mut layout)?;
+                Ok(layout)
+            }
             0 => Err(err("no .csproj, .fsproj, .vbproj or solution file found")),
             _ => Err(err(format!(
                 "several project files ({}) and no solution: add a .sln or .slnx that lists them",
@@ -410,25 +518,13 @@ pub(crate) fn discover(project: &ProjectRoot) -> io::Result<Layout> {
             reasons.join("; ")
         )));
     }
-    for (index, member) in members.iter().enumerate() {
-        if let Some(other) = members[..index]
-            .iter()
-            .find(|other| other.parent() == member.parent())
-        {
-            return Err(err(format!(
-                "{} and {} share a directory, so restore would write both locks to one {}; \
-                 move one into its own directory",
-                other.display(),
-                member.display(),
-                lock_beside(member).display()
-            )));
-        }
-    }
-    Ok(Layout {
+    let mut layout = Layout {
         solution: Some(solution),
         members,
         skipped,
-    })
+    };
+    complete_references(project, &mut layout)?;
+    Ok(layout)
 }
 
 /// Characters MSBuild reads as syntax in a `-p:` value or a solution path.
@@ -569,115 +665,11 @@ pub(crate) fn solution_properties(root: &Path, solution: &Path) -> io::Result<Ve
     ])
 }
 
-/// The newest .NET the layout targets: the highest `netN.0` major named in
-/// a `<TargetFramework>` or `<TargetFrameworks>` of a member or of a
-/// `Directory.Build.props` in a member's directory or above it. An SDK
-/// builds its own major and every older one, so this is the oldest SDK
-/// major that can build the whole layout. `netstandard`, `netcoreapp`,
-/// .NET Framework (`net48`) and property references name no such major.
-pub(crate) fn newest_target_major(
-    project: &ProjectRoot,
-    layout: &Layout,
-) -> io::Result<Option<u64>> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    for member in &layout.members {
-        files.push(member.clone());
-        let mut dir = member.parent();
-        while let Some(current) = dir {
-            let props = current.join("Directory.Build.props");
-            if !files.contains(&props) {
-                files.push(props);
-            }
-            dir = current.parent();
-        }
-    }
-    let mut newest = None;
-    for file in files {
-        let Some(bytes) = project.read_file(&file)? else {
-            continue;
-        };
-        let text = String::from_utf8_lossy(&bytes);
-        let text = strip_comments_and_cdata(&text, &project.path().join(&file))?;
-        newest = newest.max(text_target_major(&text));
-    }
-    Ok(newest)
-}
-
-/// The highest `netN.0` major in one project file's target framework
-/// elements ([`newest_target_major`]).
-fn text_target_major(text: &str) -> Option<u64> {
-    let lower = text.to_ascii_lowercase();
-    let mut newest = None;
-    let mut rest = lower.as_str();
-    while let Some(start) = rest.find("<targetframework") {
-        rest = &rest[start..];
-        let Some(open_end) = rest.find('>') else {
-            break;
-        };
-        let body = &rest[open_end + 1..];
-        let end = body.find('<').unwrap_or(body.len());
-        for framework in body[..end].split(';') {
-            newest = newest.max(net_major(framework.trim()));
-        }
-        rest = &body[end..];
-    }
-    newest
-}
-
-/// `N` for `netN.0` with N of 5 or more (with or without a platform
-/// suffix, `net10.0-windows`).
-fn net_major(framework: &str) -> Option<u64> {
-    let digits = framework.strip_prefix("net")?;
-    let (major, _) = digits.split_once('.')?;
-    let major: u64 = major.parse().ok()?;
-    (major >= 5).then_some(major)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
     use std::fs;
-
-    #[test]
-    fn newest_target_major_reads_members_and_build_props() {
-        assert_eq!(
-            text_target_major(
-                "<TargetFrameworks>netstandard2.0;net8.0;net10.0-windows</TargetFrameworks>"
-            ),
-            Some(10)
-        );
-        for none in [
-            "<TargetFramework>net48</TargetFramework>",
-            "<TargetFramework>netcoreapp3.1</TargetFramework>",
-            "<TargetFramework>$(Tfm)</TargetFramework>",
-            "<TargetFrameworkVersion>v4.8</TargetFrameworkVersion>",
-            "",
-        ] {
-            assert_eq!(text_target_major(none), None, "{none}");
-        }
-        let temp = TempDir::named("dotnet-target-major");
-        fs::create_dir_all(temp.0.join("src/App")).unwrap();
-        fs::write(
-            temp.0.join("src/App/App.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><!-- <TargetFramework>net11.0</TargetFramework> -->\
-             <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>",
-        )
-        .unwrap();
-        let root = ProjectRoot::open(&temp.0).unwrap();
-        let layout = Layout {
-            solution: None,
-            members: vec![PathBuf::from("src/App/App.csproj")],
-            skipped: Vec::new(),
-        };
-        assert_eq!(newest_target_major(&root, &layout).unwrap(), Some(8));
-        fs::write(
-            temp.0.join("Directory.Build.props"),
-            "<Project><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>",
-        )
-        .unwrap();
-        assert_eq!(newest_target_major(&root, &layout).unwrap(), Some(10));
-    }
 
     const SLN: &str = r#"
 Microsoft Visual Studio Solution File, Format Version 12.00
@@ -790,6 +782,7 @@ EndProject
                 "web/Web.csproj".into(),
                 "fs/Lib.fsproj".into(),
                 "legacy-refs/L.csproj".into(),
+                "legacy-none/N.csproj".into(),
             ]
         );
         let skips: Vec<(&str, bool)> = layout
@@ -800,7 +793,6 @@ EndProject
         assert_eq!(
             skips,
             [
-                ("legacy-none/N.csproj", false),
                 ("legacy-config/C.csproj", true),
                 ("nuget-sdk/S.csproj", true),
                 ("aspire/A.csproj", true),
@@ -810,10 +802,10 @@ EndProject
                 ("../outside/O.csproj", true),
             ]
         );
-        assert!(layout.skipped[2]
+        assert!(layout.skipped[1]
             .why
             .contains("microsoft.build.notargets/3.7.0"));
-        assert!(layout.skipped[3].why.contains("aspire.apphost.sdk/9.0.0"));
+        assert!(layout.skipped[2].why.contains("aspire.apphost.sdk/9.0.0"));
         assert_eq!(
             layout.member_locks()[0],
             PathBuf::from("app/packages.lock.json")

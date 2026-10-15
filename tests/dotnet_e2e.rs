@@ -153,7 +153,8 @@ fn write_tree(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
-/// A solution of two projects, one referencing the other, with central
+/// A solution listing one of two projects, with a reference reaching the
+/// unlisted library, central
 /// package versions, an output path set by the project, and a C++ project
 /// restore cannot read. Sync restores both members through one generated
 /// solution and writes each its lock; the C++ project is skipped and
@@ -168,7 +169,7 @@ fn assert_solution_sync_and_build(temp: &TempDir) {
                 "app.slnx",
                 "<Solution>\n  <Folder Name=\"/src/\">\n    \
                  <Project Path=\"src/App/App.csproj\" />\n    \
-                 <Project Path=\"src\\Lib\\Lib.csproj\" />\n  </Folder>\n  \
+                 </Folder>\n  \
                  <Project Path=\"native/native.vcxproj\" />\n</Solution>\n",
             ),
             (
@@ -225,6 +226,36 @@ fn assert_solution_sync_and_build(temp: &TempDir) {
     let closure = std::fs::read_to_string(root.join(".greyward/closures/dotnet.json")).unwrap();
     assert!(closure.contains("native/native.vcxproj"), "{closure}");
 
+    // A missing member lock is generated without rewriting the existing
+    // member's lock. A stale existing member fails without publishing the
+    // new lock or replacing the last closure.
+    let app_lock = root.join("src/App/packages.lock.json");
+    let lib_lock = root.join("src/Lib/packages.lock.json");
+    let app_before = std::fs::read(&app_lock).unwrap();
+    let lib_before = std::fs::read(&lib_lock).unwrap();
+    std::fs::remove_file(&lib_lock).unwrap();
+    assert_ok(
+        ward(&root, &temp.0, &["sync"]),
+        "mixed-existing solution locks",
+    );
+    assert_eq!(std::fs::read(&app_lock).unwrap(), app_before);
+    let closure_path = root.join(".greyward/closures/dotnet.json");
+    let closure_before = std::fs::read(&closure_path).unwrap();
+    let packages = root.join("Directory.Packages.props");
+    let package_before = std::fs::read_to_string(&packages).unwrap();
+    std::fs::write(&packages, package_before.replace("13.0.4", "13.0.3")).unwrap();
+    std::fs::remove_file(&lib_lock).unwrap();
+    let stale = ward(&root, &temp.0, &["sync"]);
+    assert!(!stale.status.success(), "stale member lock was accepted");
+    assert_eq!(std::fs::read(&app_lock).unwrap(), app_before);
+    assert!(
+        !lib_lock.exists(),
+        "failed restore published the missing member lock"
+    );
+    assert_eq!(std::fs::read(&closure_path).unwrap(), closure_before);
+    std::fs::write(&packages, package_before).unwrap();
+    std::fs::write(&lib_lock, lib_before).unwrap();
+
     // A second sync reads the committed locks.
     assert_ok(ward(&root, &temp.0, &["sync"]), "solution re-sync");
     assert_ok(ward(&root, &temp.0, &["build"]), "solution build");
@@ -245,6 +276,17 @@ fn assert_solution_sync_and_build(temp: &TempDir) {
         "run the solution's app",
     );
     assert!(out.contains("{\"dotnet\":\"sln\"}"), "{out}");
+    let dll_before = std::fs::read(&app).unwrap();
+    std::fs::write(root.join("Directory.Build.targets"), "<Project><PropertyGroup><OutDir>$(MSBuildProjectDirectory)/LateOutput/</OutDir></PropertyGroup></Project>").unwrap();
+    let late = ward(&root, &temp.0, &["build"]);
+    assert!(!late.status.success(), "late output override was accepted");
+    assert!(
+        common::text(&late.stderr).contains("output properties"),
+        "{}",
+        common::text(&late.stderr)
+    );
+    assert!(!root.join("src/App/LateOutput").exists());
+    assert_eq!(std::fs::read(&app).unwrap(), dll_before);
 }
 
 #[test]

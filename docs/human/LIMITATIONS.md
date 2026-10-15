@@ -829,6 +829,10 @@ Selection covers every CPython patch, end-of-life minors included, that python-b
   `ward update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
   components, targets or a profile. A symlink in the tree is resolved against the tree
   itself, through any links it passes, and a tree with one that leads outside is refused.
+- **The catalog holds every stable Rust from 1.49.0** (the first with an
+  aarch64-apple-darwin build), **but ward drives cargo 1.68 or newer only.** ward reaches
+  crates.io through the sparse index and passes settings with `cargo --config`, which cargo
+  1.68 and 1.63 introduced. An older pin is selected and locked, then fails when cargo runs.
 - **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
   `minimal`), not rustup's configured default; ask for `profile = "default"` to get
   clippy, rustfmt and the docs. **No channel means the catalog's default release**

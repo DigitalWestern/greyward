@@ -1225,7 +1225,10 @@ RUST_KEY = os.path.join(REPO, "tools", "keys", "rust-release-signing-key.asc")
 # "Rust Language (Tag and Release Signing Key) <rust-key@rust-lang.org>", as
 # published at https://static.rust-lang.org/rust-key.gpg.ascii.
 RUST_FINGERPRINT = "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
-RUST_OLDEST = (1, 70, 0)
+# 1.49.0 is the first release that builds aarch64-apple-darwin hosts, so
+# the first one complete on both platforms. Older pins are refused at
+# selection, by name.
+RUST_OLDEST = (1, 49, 0)
 # (catalog component, manifest package, recipe). A package the manifest
 # renames is looked up under its new name.
 RUST_COMPONENTS = (

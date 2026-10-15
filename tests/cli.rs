@@ -883,7 +883,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     .unwrap();
     std::fs::write(
         project.0.join("rust-toolchain.toml"),
-        "[toolchain]\nchannel = \"1.69.0\"\n",
+        "[toolchain]\nchannel = \"1.48.0\"\n",
     )
     .unwrap();
 
@@ -891,7 +891,7 @@ fn fmt_eco_selects_the_ecosystem_and_never_delegates_to_the_script() {
     assert_eq!(out.status.code(), Some(5));
     let stderr = text(&out.stderr);
     assert!(
-        stderr.contains("rust toolchain") && stderr.contains("1.69.0"),
+        stderr.contains("rust toolchain") && stderr.contains("1.48.0"),
         "--eco rust did not reach the Rust path: {stderr}"
     );
     assert!(

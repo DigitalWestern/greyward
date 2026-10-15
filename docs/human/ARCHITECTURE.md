@@ -708,11 +708,14 @@ project with no pin gets, so what is available and what is the default
 are separate facts: adding a newer release never moves the default. The
 files are written only by `python3 tools/catalog.py [eco ...]`, which reads
 each upstream's release listing (go.dev's JSON, Node's signed
-`SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby,
-erlef and `greyward-toolchains` OTP builds with Hex and rebar3 from
-`builds.hex.pm`, .NET release metadata, and every stable Rust release from
-1.70.0 in static.rust-lang.org's channel manifests, each signature checked
-with `gpgv` before its rows are read), verifies every row against a
+`SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby
+from Homebrew's GitHub releases and from its ghcr.io registry (the image
+index names each platform's bottle digest, which must be the manifest's
+one layer), erlef and `greyward-toolchains` OTP builds with Hex and rebar3 from
+`builds.hex.pm`, .NET release metadata for every channel, and every stable
+Rust release from 1.49.0 in static.rust-lang.org's channel manifests, each
+signature checked with `gpgv` before its rows are read), takes every patch
+release that has a build for both platforms, verifies every row against a
 second published checksum where one exists, and reports each release it
 skips because a supported platform has no build. It is append-only: rows
 already shipped are re-verified against the choices they record and must be

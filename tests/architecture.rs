@@ -1828,6 +1828,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // authorizes the URL for the row's publisher, hit or miss.
     ("src/kernel/provider/cpython.rs", "realize_runtime", 1),
     ("src/kernel/provider/cpython.rs", "realize_uv", 1),
+    ("src/kernel/provider/cpython.rs", "fetch_tarball", 1),
     ("src/kernel/provider/rust.rs", "realize_runtime", 1),
     ("src/kernel/provider/rust_extras.rs", "load_manifest", 1),
     ("src/kernel/provider/rust_extras.rs", "realize_component", 1),
@@ -1851,7 +1852,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // of bytes, as cargo, npm and pip with hashes do. A pin the upstream URL
     // would not serve fails on a cold cache and installs the pinned bytes
     // on a warm one.
-    ("src/kernel/provider/crates.rs", "realize_vendor_inner", 1),
+    ("src/kernel/provider/crates.rs", "fetch_registry_crates", 1),
     ("src/tailors/elixir/mod.rs", "realize_deps", 1),
     // Twice: a registry tarball, and a `file:` package read from the cache
     // alone, both by the lock's integrity.

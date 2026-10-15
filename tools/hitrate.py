@@ -4,9 +4,10 @@ config, on a random popular real project?
 
     python3 tools/hitrate.py [--n 30] [--out hitrate.csv] [--timeout 600]
 
-Picks the top-starred non-archived GitHub repos per ecosystem that carry a
-manifest (python: requirements.txt/pyproject.toml/setup.cfg/setup.py; npm:
-package.json), shallow-clones each into a scratch dir, runs the release
+Picks the top-starred non-archived GitHub repos per ecosystem (python, npm,
+cargo, go, ruby, elixir, dotnet) that carry a root file the ecosystem's
+tailor claims (ECOSYSTEMS below), shallow-clones each into a scratch dir,
+runs the release
 binary's `sync` with a throwaway GREYWARD_STORE, and records outcome +
 failure class. Everything but the toolchain objects is pruned from the
 store between repos so the run fits in a few GB of disk.
@@ -17,11 +18,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # GREYWARD_BIN overrides the binary under test (e.g. a fix built into another
 # CARGO_TARGET_DIR while a long run still needs the original release binary).
 GREYWARD = os.environ.get("GREYWARD_BIN") or os.path.join(ROOT, "target/release/ward")
-TOOLCHAIN = ("-cpython-", "-nodejs-", "-uv-")
+# Store object kinds (meta identity.kind) kept between repos so each
+# toolchain downloads once per run; everything else is pruned.
+TOOLCHAIN_KINDS = {
+    "cpython", "uv", "nodejs", "rust", "rust-component", "rustfmt", "go",
+    "ruby", "beam", "dotnet-sdk", "native-libs",
+}
+# Per ecosystem: GitHub search languages, and the root files that make the
+# tailor claim a project (src/tailors/<eco>/tailor.rs `detect`). A picked
+# repo must carry one, so the run measures ward and not the picker. Names
+# ending in "*" are suffix patterns (dotnet's *.csproj and *.sln).
+ECOSYSTEMS = {
+    "python": (["python"], ["requirements.txt", "pyproject.toml", "setup.cfg", "setup.py"]),
+    "npm": (["typescript", "javascript"], ["package.json"]),
+    "cargo": (["rust"], ["Cargo.toml"]),
+    "go": (["go"], ["go.mod"]),
+    "ruby": (["ruby"], ["Gemfile"]),
+    "elixir": (["elixir"], ["mix.exs"]),
+    "dotnet": (["c#"], ["*.csproj", "*.sln", "*.slnx"]),
+}
+ECO_NAMES = tuple(ECOSYSTEMS)
 SKIP_NAMES = re.compile(
     r"awesome|interview|cheat|roadmap|tutorial|book|course|system-design|"
     r"public-apis|free-|handbook|guide|curriculum|challenge|30-|100-|"
-    r"algorithm|learn|examples|docs$|javascript-questions|clean-code",
+    r"algorithm|learn|examples|docs$|javascript-questions|clean-code|"
+    r"blogs|koans|rustlings|/setup$",
     re.I,
 )
 
@@ -38,6 +59,11 @@ CLASSES = [
     # --strict: any exception the permissive run would have recorded is a
     # refusal; the err column keeps the "policy denies <kind>" line.
     ("policy_denied", r"policy denies [a-z_-]+"),
+    # .NET v0 takes one project directory; a solution file is refused before
+    # any restore (src/tailors/dotnet/mod.rs find_project).
+    ("dotnet_solution_unsupported", r"\.sln|multiple \.csproj|no \.csproj found"),
+    ("dotnet_rollforward", r"rollForward"),
+    ("toolchain_not_in_catalog", r"no complete [a-z]+ release satisfies|not in the catalog"),
     ("platform_unsupported", r"\(unsupported platform\)|no pinned CPython satisfies"),
     ("rust_toolchain_unpinned", r"unsupported Rust toolchain"),
     # Both manifest rows carry two spellings: ward dropped the `no_manifest:`
@@ -68,6 +94,11 @@ CLASSES = [
     ("fetch_failed", r"fetch .*: |sha256 mismatch|hash mismatch"),
 ]
 
+# A class whose name starts with one of these prefixes only classifies that
+# ecosystem's rows: "gcc" or a target triple in a cargo or ruby error is not
+# a Python sdist or wheel failure.
+CLASS_SCOPE = {"py": "python", "npm": "npm", "dotnet": "dotnet", "rust": "cargo"}
+
 # Exception kinds a company policy would deny (docs/human/policy-company.toml).
 # An ok that carried only other kinds (file-collision, requirement-skipped,
 # built-from-source, ...) still counts as a company-policy ok; strict counts
@@ -95,7 +126,19 @@ def gh_json(path, **params):
 
 
 def has_file(full, names):
+    suffixes = [n[1:] for n in names if n.startswith("*")]
+    if suffixes:
+        r = subprocess.run(
+            ["gh", "api", f"repos/{full}/contents/"], capture_output=True, text=True
+        )
+        if r.returncode == 0 and any(
+            e.get("type") == "file" and e["name"].endswith(tuple(suffixes))
+            for e in json.loads(r.stdout)
+        ):
+            return True
     for n in names:
+        if n.startswith("*"):
+            continue
         r = subprocess.run(
             ["gh", "api", f"repos/{full}/contents/{n}"], capture_output=True, text=True
         )
@@ -104,15 +147,15 @@ def has_file(full, names):
     return False
 
 
-def pick(lang, n, manifests):
+def pick(lang, n, manifests, min_stars=5000):
     """Top-starred repos with a manifest at the root, skipping list-repos."""
-    langs = {"python": ["python"], "npm": ["typescript", "javascript"]}[lang]
+    langs = ECOSYSTEMS[lang][0]
     seen, out = set(), []
     for l in langs:
-        for page in (1, 2):
+        for page in (1, 2, 3):
             items = gh_json(
                 "search/repositories",
-                q=f"language:{l} archived:false stars:>5000",
+                q=f"language:{l} archived:false stars:>{min_stars}",
                 sort="stars", order="desc", per_page="50", page=str(page),
             )["items"]
             for it in items:
@@ -129,6 +172,9 @@ def pick(lang, n, manifests):
         if has_file(full, manifests):
             chosen.append((full, stars))
             print(f"  pick {lang}: {full} ({stars}★)", file=sys.stderr)
+    if len(chosen) < n:
+        print(f"  warning: only {len(chosen)} {lang} repos above {min_stars} stars; "
+              f"lower --min-stars", file=sys.stderr)
     return chosen
 
 
@@ -178,13 +224,21 @@ def rm_rf(path):
     shutil.rmtree(path, onerror=remove_readonly)
 
 
+def object_kind(store, name):
+    try:
+        with open(os.path.join(store, "meta", name + ".json")) as f:
+            return json.load(f).get("identity", {}).get("kind")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def prune_store(store):
     """Keep only toolchain objects (+ their meta); drop envs, cache, forests."""
     objs = os.path.join(store, "objects")
     keep = set()
     if os.path.isdir(objs):
         for name in os.listdir(objs):
-            if any(t in name for t in TOOLCHAIN):
+            if object_kind(store, name) in TOOLCHAIN_KINDS:
                 keep.add(name)
             else:
                 rm_rf(os.path.join(objs, name))
@@ -221,7 +275,7 @@ def read_repos(path):
             if not line or line.startswith("#"):
                 continue
             fields = line.split("\t")
-            if len(fields) != 3 or fields[0] not in ("python", "npm"):
+            if len(fields) != 3 or fields[0] not in ECO_NAMES:
                 raise ValueError(
                     f"{path}:{lineno}: expected ecosystem<TAB>owner/name<TAB>commit"
                 )
@@ -374,12 +428,15 @@ def dry_run(targets, work, strict=False):
         print(f"  GREYWARD_STORE={os.path.join(work, 'store')} {GREYWARD} sync{' --strict' if strict else ''}")
 
 
-def classify(rc, out):
+def classify(rc, out, lang=None):
     if rc == 0:
         return "ok"
     if rc == "timeout":
         return "timeout"
     for name, rx in CLASSES:
+        scope = CLASS_SCOPE.get(name.split("_", 1)[0])
+        if lang and scope and lang != scope:
+            continue
         if re.search(rx, out, re.I):
             return name
     return "other"
@@ -391,19 +448,32 @@ def main():
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--out", default="hitrate.csv")
     ap.add_argument("--work", default=os.environ.get("HITRATE_WORK", "/tmp/greyward-hitrate"))
-    ap.add_argument("--only", choices=["python", "npm"])
+    ap.add_argument("--only", choices=list(ECO_NAMES))
     ap.add_argument("--repos", help="tab-separated '<ecosystem>\t<owner/name>\t<commit>' file")
     ap.add_argument("--dry-run", action="store_true", help="print planned commands without touching disk or network")
     ap.add_argument("--keep", action="store_true", help="retain failed clones under WORK/failures")
     ap.add_argument("--strict", action="store_true",
                     help="run `ward --strict`: a repo that needs any policy exception fails as policy_denied")
+    ap.add_argument("--min-stars", type=int, default=5000,
+                    help="--emit-lock: smallest star count searched (Elixir has few repos above 5000)")
+    ap.add_argument("--emit-lock", action="store_true",
+                    help="pick repos by GitHub search, print '<eco>\t<owner/name>\t<HEAD commit>' lines, and exit")
     a = ap.parse_args()
 
-    manifests = {
-        "python": ["requirements.txt", "pyproject.toml", "setup.cfg", "setup.py"],
-        "npm": ["package.json"],
-    }
+    manifests = {eco: names for eco, (_langs, names) in ECOSYSTEMS.items()}
     targets = []
+    if a.emit_lock and (a.repos or a.dry_run):
+        ap.error("--emit-lock searches GitHub; it takes neither --repos nor --dry-run")
+    if a.n < 1:
+        ap.error("--n must be at least 1")
+    if a.emit_lock:
+        for lang in ECO_NAMES:
+            if a.only and lang != a.only:
+                continue
+            for full, _stars in pick(lang, a.n, manifests[lang], a.min_stars):
+                head = gh_json(f"repos/{full}/commits/HEAD")["sha"]
+                print(f"{lang}\t{full}\t{head}", flush=True)
+        return
     if a.repos:
         try:
             targets = read_repos(a.repos)
@@ -412,17 +482,17 @@ def main():
     else:
         if a.dry_run:
             ap.error("--dry-run requires --repos so it does not perform GitHub searches")
-        for lang in ("python", "npm"):
+        for lang in ECO_NAMES:
             if a.only and lang != a.only:
                 continue
-            targets += [(lang, full, stars, "HEAD") for full, stars in pick(lang, a.n, manifests[lang])]
+            targets += [(lang, full, stars, "HEAD") for full, stars in pick(lang, a.n, manifests[lang], a.min_stars)]
 
     if a.only:
         targets = [target for target in targets if target[0] == a.only]
     # --n is per ecosystem, matching the GitHub-search behavior. The lock
-    # file remains the complete 60-repo population when --n is omitted/default.
+    # file remains the complete population when --n is omitted/default.
     limited = []
-    for lang in ("python", "npm"):
+    for lang in ECO_NAMES:
         limited += [target for target in targets if target[0] == lang][:a.n]
     targets = limited
 
@@ -444,7 +514,7 @@ def main():
         old_columns = set(rows[0])
         if old_columns != set(CSV_COLUMNS):
             sys.exit(f"existing output {a.out} has an old header; choose a new --out path")
-        done = {r["repo"] for r in rows}
+        done = {(r["lang"], r["repo"]) for r in rows}
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     fout = open(a.out, "a", newline="")
     w = csv.writer(fout)
@@ -454,7 +524,7 @@ def main():
         w.writerow(CSV_COLUMNS)
 
     for lang, full, stars, commit in targets:
-        if full in done:
+        if (lang, full) in done:
             continue
         if free_gb(a.work) < 3:
             print(f"ABORT: <3GB free on disk before {full}", file=sys.stderr)
@@ -473,12 +543,23 @@ def main():
             else:
                 inputs = ",".join(
                     n for n in ["requirements.lock.txt", "requirements.txt", "pyproject.toml", "poetry.lock", "uv.lock", "setup.cfg", "setup.py", "requirements",
-                                "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]
+                                "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
+                                "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", "go.mod", "go.sum", "go.work",
+                                "Gemfile", "Gemfile.lock", ".ruby-version", "mix.exs", "mix.lock", ".tool-versions",
+                                "global.json", "packages.lock.json", "Directory.Packages.props"]
                     if os.path.exists(os.path.join(clone, n))
                 )
+                markers = [n for n in sorted(os.listdir(clone))
+                           if n.endswith((".csproj", ".sln", ".slnx"))]
+                inputs = ",".join(filter(None, [inputs] + markers))
                 sync = [GREYWARD, "sync"] + (["--strict"] if a.strict else [])
                 rc, out, secs = run_timed(sync, clone, env, a.timeout)
-                cls = classify(rc, out)
+                cls = classify(rc, out, lang)
+                logs = os.path.join(a.work, "logs")
+                os.makedirs(logs, exist_ok=True)
+                label = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{lang}-{full}")
+                with open(os.path.join(logs, label + ".log"), "w") as f:
+                    f.write(out)
                 err = ""
                 if cls != "ok":
                     lines = [l for l in out.strip().splitlines() if l.strip()]
@@ -509,7 +590,7 @@ def main():
     print(f"\nplatform: {run_platform}")
     print(f"ward_commit: {tool_commit}")
     print(f"mode: {'strict' if a.strict else 'permissive'}")
-    for lang in ("python", "npm"):
+    for lang in ECO_NAMES:
         rs = [r for r in rows if r["lang"] == lang]
         if not rs:
             continue
@@ -522,6 +603,9 @@ def main():
             and not (set(filter(None, r.get("exception_kinds", "").split(","))) & COMPANY_DENY)
             for r in rs
         )
+        target = sum(t[0] == lang for t in targets)
+        if len(rs) != target:
+            print(f"\n{lang}: PARTIAL, {len(rs)} rows for {target} targets")
         print(f"\n{lang}: {ok + ok_with_exceptions}/{len(rs)} syncs ok ({100 * (ok + ok_with_exceptions) // len(rs)}%)")
         print(f"  ok: {ok}")
         print(f"  ok_with_exceptions: {ok_with_exceptions}")

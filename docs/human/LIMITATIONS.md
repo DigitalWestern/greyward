@@ -915,7 +915,9 @@ Selection covers every CPython patch, end-of-life minors included, that python-b
 
 - **Only an exact `global.json` selects the SDK.** `sdk.rollForward` must be `"disable"`;
   there is no second source and no roll-forward, so a mismatch is a hard error rather than a
-  quiet upgrade.
+  quiet upgrade. Every SDK from 6.0.100 is pinned, out-of-support channels included, except
+  7.0.113, 7.0.310 and 7.0.403, whose `.sha512` beside the archive disagrees with the
+  release metadata.
 - **Strictest v0 boundary of any tailor** (all loud): one SDK-style .csproj only — no .sln, no
   ProjectReference lock entries, no Central Package Management, no
   packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.

@@ -1578,28 +1578,37 @@ class Dotnet(Base):
     def shipped(self, *versions):
         return written("dotnet", self.scratch.name, [self.expected(v) for v in versions])
 
-    def test_supported_channels_enter_and_previews_and_eol_channels_do_not(self):
+    def test_every_channel_enters_and_previews_do_not(self):
+        # 8.0 is end-of-life and still enters: a global.json pinned to one
+        # of its SDKs must find it.
         self.publish("10.0", "10.0.100", "10.0.100-rc.2.25502.107")
         self.publish("9.0", "9.0.300", old_style=True)
         self.publish("8.0", "8.0.400")
         self.publish("11.0", "11.0.100-preview.1.26101.1")
         out, report = self.generate([])
-        self.assertEqual(out, {"dotnet-sdk-9.0.300": self.expected("9.0.300"),
+        self.assertEqual(out, {"dotnet-sdk-8.0.400": self.expected("8.0.400"),
+                               "dotnet-sdk-9.0.300": self.expected("9.0.300"),
                                "dotnet-sdk-10.0.100": self.expected("10.0.100")})
         self.assertEqual((report.added, report.skipped, report.notes),
-                         (["dotnet-sdk-9.0.300", "dotnet-sdk-10.0.100"], [], []))
-        self.assertNotIn(f"{self.META}/8.0/releases.json", self.net.requests)
+                         (["dotnet-sdk-8.0.400", "dotnet-sdk-9.0.300", "dotnet-sdk-10.0.100"], [], []))
 
-    def test_shipped_rows_are_kept_even_in_an_eol_channel(self):
+    def test_a_runtime_only_release_with_no_sdk_is_passed_over(self):
+        self.publish("10.0", "10.0.100")
+        self.releases["8.0"].insert(0, {"release-version": "8.0.1"})
+        self.sync()
+        out, _ = self.generate([])
+        self.assertEqual(list(out), ["dotnet-sdk-10.0.100"])
+
+    def test_shipped_rows_are_kept_beside_newer_ones(self):
         self.publish("8.0", "8.0.400")
         self.publish("10.0", "10.0.100")
         existing = self.shipped("8.0.400")
-        # Read now that a shipped row may live there, but nothing new enters.
         self.publish("8.0", "8.0.401")
         out, report = self.generate(existing)
         self.assertEqual(out, {"dotnet-sdk-8.0.400": existing[0],
+                               "dotnet-sdk-8.0.401": self.expected("8.0.401"),
                                "dotnet-sdk-10.0.100": self.expected("10.0.100")})
-        self.assertEqual(report.added, ["dotnet-sdk-10.0.100"])
+        self.assertEqual(report.added, ["dotnet-sdk-8.0.401", "dotnet-sdk-10.0.100"])
 
     def test_a_shipped_release_no_longer_in_the_metadata_is_an_error(self):
         self.publish("10.0", "10.0.100")
@@ -1641,14 +1650,16 @@ class Dotnet(Base):
         self.assertEqual(str(cm.exception),
                          "dotnet 10.0.100: https://evil.example/dotnet-sdk.tar.gz is not on the shipped endpoint")
 
-    def test_a_sha512_beside_the_archive_that_disagrees_is_an_error(self):
+    def test_a_new_sdk_whose_sha512_beside_the_archive_disagrees_is_skipped(self):
         self.publish("10.0", "10.0.100")
         url = self.url("10.0.100", LINUX)
         self.net.bodies[url + ".sha512"] = "0" * 128
-        with self.assertRaises(catalog.Failure) as cm:
-            self.generate([])
-        self.assertEqual(str(cm.exception),
-                         f"dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())}")
+        out, report = self.generate([])
+        self.assertEqual((out, report.added), ({}, []))
+        self.assertEqual(report.skipped, [(
+            "dotnet-sdk-10.0.100",
+            "the release metadata and the .sha512 beside the archive disagree "
+            f"(dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())})")])
 
     def test_a_shipped_rows_sha512_that_disagrees_is_an_error(self):
         self.publish("10.0", "10.0.100")

@@ -1030,9 +1030,9 @@ def generate_elixir(existing, report):
 
 # --------------------------------------------------------------------------
 # .NET: Microsoft's release metadata (sha512), cross-checked with the
-# `.sha512` file served beside each archive. Supported channels are the
-# ones whose support phase is active or maintenance; previews are never
-# admitted.
+# `.sha512` file served beside each archive. Every channel's SDKs are
+# shipped, end-of-life channels included (a `global.json` pinned to an old
+# feature band must get exactly that SDK); previews are never admitted.
 
 
 def dotnet_release(sdk):
@@ -1067,26 +1067,24 @@ def dotnet_cross_check(rel):
 def generate_dotnet(existing, report):
     index = fetch_json("https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json")
     sdks = {}
-    for channel in index["releases-index"]:
-        supported = channel["support-phase"] in ("active", "maintenance")
-        meta = fetch_json(channel["releases.json"]) if supported or existing else None
-        if meta is None:
-            continue
+    metas = parallel(lambda channel: fetch_json(channel["releases.json"]), index["releases-index"])
+    for meta in metas:
         for r in meta["releases"]:
-            for sdk in r.get("sdks") or [r["sdk"]]:
+            # A runtime-only servicing release (some 1.x and 2.x ones) has no SDK.
+            for sdk in r.get("sdks") or ([r["sdk"]] if r.get("sdk") else []):
                 if re.fullmatch(r"\d+\.\d+\.\d+", sdk["version"]):
-                    sdks.setdefault(sdk["version"], (sdk, supported))
+                    sdks.setdefault(sdk["version"], sdk)
     out = {}
     for rel in existing:
         version = rel["components"][0]["version"]
         if version not in sdks:
             raise Failure(f"dotnet: {rel['key']}: no longer in the release metadata")
-        fresh, _ = dotnet_release(sdks[version][0])
+        fresh, _ = dotnet_release(sdks[version])
         check_row("dotnet", rel["key"], rel, fresh)
         out[rel["key"]] = rel
-    for version, (sdk, supported) in sorted(sdks.items(), key=lambda kv: version_key(kv[0])):
+    for version, sdk in sorted(sdks.items(), key=lambda kv: version_key(kv[0])):
         key = f"dotnet-sdk-{version}"
-        if key in out or not supported:
+        if key in out:
             continue
         fresh, missing = dotnet_release(sdk)
         if fresh is None:
@@ -1094,7 +1092,26 @@ def generate_dotnet(existing, report):
             continue
         out[key] = fresh
         report.added.append(key)
-    checked = sum(parallel(dotnet_cross_check, list(out.values()), workers=16))
+    def cross_check(rel):
+        try:
+            return dotnet_cross_check(rel), None
+        except Failure as failure:
+            return 0, str(failure)
+
+    # A shipped row the `.sha512` contradicts is an error. A new one is
+    # left out and named: Microsoft's two checksums for it disagree (some
+    # end-of-life SDKs), so neither can vouch for it.
+    releases = list(out.values())
+    checked = 0
+    for rel, (count, why) in zip(releases, parallel(cross_check, releases, workers=16)):
+        if why is None:
+            checked += count
+        elif rel["key"] not in report.added:
+            raise Failure(why)
+        else:
+            del out[rel["key"]]
+            report.added.remove(rel["key"])
+            report.skip(rel["key"], f"the release metadata and the .sha512 beside the archive disagree ({why})")
     total = sum(len(r["artifacts"]) for r in out.values())
     if checked < total:
         report.note(f"{total - checked} of {total} rows have no .sha512 beside the archive; "

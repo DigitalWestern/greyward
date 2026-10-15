@@ -582,8 +582,9 @@ def generate_node(existing, report):
 
 # --------------------------------------------------------------------------
 # Python: python-build-standalone's per-release SHA256SUMS, cross-checked
-# with GitHub's asset digests. Supported minors are the CPython lines whose
-# status is bugfix or security. A new version takes the newest PBS release
+# with GitHub's asset digests. Every CPython version PBS builds is shipped,
+# end-of-life lines included: a project pinned to `3.8.20` must get exactly
+# that patch. A new version takes the newest PBS release
 # that publishes its install_only build for both platforms; an existing row
 # keeps the PBS release it was minted from. Every bundle carries the uv
 # the default release carries.
@@ -607,8 +608,6 @@ def pbs_sums(tag):
 
 
 def generate_python(existing, report, default_key):
-    cycle = fetch_json("https://peps.python.org/api/release-cycle.json")
-    minors = {line for line, info in cycle.items() if info["status"] in ("bugfix", "security")}
     tags = sorted((t for t in github_tags(PBS) if re.fullmatch(r"\d{8}", t)), reverse=True)
     sums = dict(zip(tags, parallel(pbs_sums, tags)))
     no_sums = [t for t in tags if sums[t] is None]
@@ -660,7 +659,7 @@ def generate_python(existing, report, default_key):
                 seen.setdefault(m.group(1), set()).add(tag)
     for version in sorted(seen, key=version_key):
         key = f"cpython-{version}"
-        if key in out or ".".join(version.split(".")[:2]) not in minors:
+        if key in out:
             continue
         for tag in sorted(seen[version], reverse=True):
             fresh = bundle(version, tag)
@@ -672,9 +671,10 @@ def generate_python(existing, report, default_key):
             report.skip(key, "no PBS release publishes install_only builds for both platforms")
     # CPython patches PBS never built (or built only before it published
     # SHA256SUMS): named, so a gap in the catalog is never silent.
+    minors = {".".join(v.split(".")[:2]) for v in seen}
     for minor in sorted(minors, key=version_key):
         patches = [version_key(v)[2] for v in seen if v.startswith(minor + ".")]
-        for patch in range(0, max(patches, default=-1) + 1):
+        for patch in range(0, max(patches) + 1):
             key = f"cpython-{minor}.{patch}"
             if key not in out and not any(what == key for what, _ in report.skipped):
                 report.skip(key, "no PBS release with a SHA256SUMS publishes it for both platforms")

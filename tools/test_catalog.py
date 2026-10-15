@@ -1223,10 +1223,6 @@ class Python(Base):
 
     def setUp(self):
         super().setUp()
-        self.net.json("https://peps.python.org/api/release-cycle.json", {
-            "3.13": {"status": "bugfix"}, "3.12": {"status": "security"},
-            "3.9": {"status": "end-of-life"},
-        })
         self.sums = {}      # tag -> {asset name: digest}
         self.tags = ["20260101", "20210101"]  # no SHA256SUMS: skipped, named
         for platform in (DARWIN, LINUX):
@@ -1304,8 +1300,11 @@ class Python(Base):
         self.publish("20260801", ["3.13.0"])
         self.publish("20260910", ["3.12.1", "3.12.2", "3.13.0", "3.13.1", "3.9.25"])
         out, report = self.generate(existing)
+        # 3.9 is end-of-life and still enters: a pin to its last patch
+        # must find it.
         self.assertEqual(out, {
             "cpython-3.12.1": existing[0],
+            "cpython-3.9.25": self.expected("3.9.25", "20260910"),
             "cpython-3.12.2": self.expected("3.12.2", "20260910"),
             "cpython-3.13.0": self.expected("3.13.0", "20260910"),
             "cpython-3.13.1": self.expected("3.13.1", "20260910"),
@@ -1315,12 +1314,13 @@ class Python(Base):
             out["cpython-3.13.1"]["artifacts"][1]["url"],
             "https://github.com/astral-sh/python-build-standalone/releases/download/20260910/"
             "cpython-3.13.1%2B20260910-x86_64-unknown-linux-gnu-install_only.tar.gz")
-        self.assertEqual(report.added, ["cpython-3.12.2", "cpython-3.13.0", "cpython-3.13.1"])
+        self.assertEqual(report.added, ["cpython-3.9.25", "cpython-3.12.2", "cpython-3.13.0", "cpython-3.13.1"])
+        never_built = "no PBS release with a SHA256SUMS publishes it for both platforms"
         self.assertEqual(report.skipped, [
             ("PBS releases 20260101, 1 releases before 20220227",
              "no SHA256SUMS published, so nothing to verify a row against"),
-            ("cpython-3.12.0", "no PBS release with a SHA256SUMS publishes it for both platforms"),
-        ])
+        ] + [(f"cpython-3.9.{patch}", never_built) for patch in range(25)]
+          + [("cpython-3.12.0", never_built)])
         again, report = self.generate(list(out.values()))
         self.assertEqual((again, report.added), (out, []))
 

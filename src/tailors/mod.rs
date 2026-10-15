@@ -1840,8 +1840,8 @@ mod tests {
             version(&rows(None, Some(">=3.9"))),
             crate::tailors::python::pyselect::DEFAULT_VERSION
         );
-        assert_eq!(version(&rows(None, Some(">=3.13"))), "3.14.7");
-        assert_eq!(version(&rows(Some("3.13"), None)), "3.13.15");
+        assert_eq!(version(&rows(None, Some(">=3.13"))), "3.15.0");
+        assert_eq!(version(&rows(Some("3.13"), None)), "3.13.16");
         assert_eq!(version(&rows(Some("3.11.16"), Some(">=3.9"))), "3.11.16");
     }
 

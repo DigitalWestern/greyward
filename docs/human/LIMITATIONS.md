@@ -490,9 +490,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Python
 
-Selection covers every patch of each maintained CPython minor that python-build-standalone
-  published a checksummed build of for both platforms. A few patches never got one (3.10.0,
-  3.10.1, 3.10.10, 3.11.0, 3.11.2; `tools/catalog.py python` reports them) and are refused. A
+Selection covers every CPython patch, end-of-life minors included, that python-build-standalone
+  published a checksummed build of for both platforms: 3.8.12 and up. Patches with no such
+  build (3.8 before 3.8.12, 3.9 before 3.9.10, 3.10.0, 3.10.1, 3.10.10, 3.11.0, 3.11.2;
+  `tools/catalog.py python` reports them) are refused. A
   two-part `.python-version` picks the default (3.12.14) on its minor, else the newest pinned
   patch; a three-part request must match a pin exactly.
 - **python-build-standalone builds are TOFU.** Their digests come from the release's

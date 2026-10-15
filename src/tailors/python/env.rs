@@ -11,7 +11,7 @@ use crate::comforter::{
     ClosureRefs, InputRecord,
 };
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_registry_held;
+use crate::kernel::fetch::{download_registry_held, fetch_all, fetch_each};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::hostfallback::{self, FallbackRecords, RUNTIME_ONLY_VIEW};
 use crate::kernel::registries::config::Ecosystem;
@@ -501,21 +501,28 @@ pub(crate) fn realize_env_at_depth(
 /// Sdist realization may recursively fetch toolchains. Re-verify all wheel
 /// inputs only after that work, pointing each at its verified cache file,
 /// and return their leases for the caller to hold through wheel extraction
-/// and publication.
+/// and publication. Each re-verification is a hash of a cache hit (or a
+/// fresh download), so they run on the fetch pool; the first failure in
+/// package order is the one reported, as in a loop.
 fn hold_wheels(
     store: &crate::kernel::store::Store,
     activity: &StoreActivity,
     artifacts: &mut [(&crate::kernel::types::LockedPackage, PathBuf)],
 ) -> io::Result<Vec<crate::kernel::fetch::CacheLease>> {
     let _t = crate::kernel::ui::phase("wheel re-verify");
-    let mut leases = Vec::new();
-    for (p, path) in artifacts {
-        if p.kind == ArtifactKind::Wheel {
-            let lease =
-                download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
-            *path = lease.to_path_buf();
-            leases.push(lease);
-        }
+    let wheels: Vec<usize> = (0..artifacts.len())
+        .filter(|&i| artifacts[i].0.kind == ArtifactKind::Wheel)
+        .collect();
+    let leases = fetch_all(
+        &wheels,
+        |&i| artifacts[i].0.sha256.to_ascii_lowercase(),
+        |&i| {
+            let p = artifacts[i].0;
+            download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)
+        },
+    )?;
+    for (&i, lease) in wheels.iter().zip(&leases) {
+        artifacts[i].1 = lease.to_path_buf();
     }
     Ok(leases)
 }
@@ -562,15 +569,30 @@ fn realize_artifacts<'p>(
     let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
     let mut fell_back = Vec::new();
     let mut host_inputs = None;
+    // The wheels are independent downloads: fetch them on the pool first,
+    // then walk the packages in order as before, taking each wheel's result
+    // where its download used to be. An sdist that fails ahead of a wheel
+    // that failed is still the error reported.
+    let wheels: Vec<&crate::kernel::types::LockedPackage> = packages
+        .iter()
+        .copied()
+        .filter(|p| p.kind == ArtifactKind::Wheel)
+        .collect();
+    let mut fetched = fetch_each(
+        &wheels,
+        |p| p.sha256.to_ascii_lowercase(),
+        |p| {
+            let lease =
+                download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
+            Ok(lease.to_path_buf())
+        },
+    )
+    .into_iter();
     for &p in packages {
         let wheel_file = match p.kind {
-            ArtifactKind::Wheel => {
-                let lease =
-                    download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
-                let path = lease.to_path_buf();
-                drop(lease);
-                path
-            }
+            ArtifactKind::Wheel => fetched
+                .next()
+                .ok_or_else(|| io::Error::other("internal: a wheel was not fetched"))??,
             // sdist -> wheel via sandboxed derivation (network denied).
             ArtifactKind::Sdist => {
                 let owned;

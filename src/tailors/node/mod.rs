@@ -381,6 +381,7 @@ pub fn realize_runtime(
         .map_err(|e| io::Error::new(e.kind(), format!("stage: {e}")))?;
     unpack::extract_node_dist(activity, &tarball, &staged)?;
     validate_node_layout(&staged)?;
+    let _stage = crate::kernel::ui::phase("stage");
     store
         .commit_with_activity_and_deps(activity, &identity, &staged, &[], &{
             let mut deps = crate::kernel::store::ObjectDeps::new();

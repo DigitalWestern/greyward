@@ -1,11 +1,12 @@
 //! The Elixir resolution doors: the store mix confined through the proxy
 //! session's Hex mirror for a missing lock, the planner's
 //! `--check-locked` gate and `ward attest`, and the helper's mix.lock parse
-//! confined with no route at all.
+//! confined with no route at all. Every run that evaluates mix.exs finds
+//! the lock's git dependencies already checked out (`Checkouts`).
 
 use super::check_locked::{check_locked_inputs, check_locked_passed, record_check_locked};
 use super::door::{elixir_tool, run_mix, run_mix_checked, MixPublish, MixRun, OUTPUTS, SCRATCH};
-use super::{err, read_mix_lock, require_lock, validate_plan, ElixirPlan, HexDep, HELPER};
+use super::{err, read_mix_lock, require_lock, validate_plan, ElixirPlan, GitDep, HexDep, HELPER};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
@@ -58,7 +59,47 @@ pub fn generate_lock(
         return Err(err("mix.exs not found"));
     }
     ui::note("no mix.lock; resolving with the store mix...");
-    deps_get(door, project, beam_obj, selected)
+    deps_get(door, project, beam_obj, selected, &Checkouts::default())
+}
+
+/// The lock's git dependencies, checked out for a confined mix run:
+/// `deps/<app>` in the run's deps path linked into the checkout object
+/// (`git::realize_checkouts`), which the run reads. Mix finds each one at
+/// its lock and fetches none, so no run needs the git host.
+#[derive(Debug, Default)]
+struct Checkouts {
+    links: Vec<(PathBuf, PathBuf)>,
+    reads: Vec<PathBuf>,
+}
+
+impl Checkouts {
+    /// Realize `git`'s checkouts (recording `git-dependency` for each).
+    fn of(door: &ResolutionDoor<'_>, git: &[GitDep]) -> io::Result<Self> {
+        let object =
+            super::git::realize_checkouts(door.store(), door.lease(), door.platform(), git)?;
+        Ok(Checkouts {
+            links: super::git::deps_links(object.as_deref(), git),
+            reads: object.into_iter().collect(),
+        })
+    }
+
+    /// The checkouts of the project's mix.lock, parsed offline first.
+    fn of_lock(
+        door: &mut ResolutionDoor<'_>,
+        project: &ProjectRoot,
+        beam_obj: &Path,
+        basis: &crate::comforter::join::Digests,
+    ) -> io::Result<Self> {
+        let lock = read_mix_lock(project)?;
+        let (_, git) = parse_lock(
+            &mut door.reopen(DoorKind::Planner),
+            project,
+            beam_obj,
+            &lock,
+            basis,
+        )?;
+        Checkouts::of(door, &git)
+    }
 }
 
 /// `prepare` for a project that has a mix.lock: the `--check-locked` gate,
@@ -80,12 +121,14 @@ pub fn relock_if_stale(
     let observed = project.observing_inputs()?;
     let basis = resolution_basis(&observed)?;
     let lock = read_mix_lock(&observed)?;
+    let checkouts = Checkouts::of_lock(door, &observed, beam_obj, &basis)?;
     let verdict = gate(
         &mut door.reopen(DoorKind::Planner),
         &observed,
         beam_obj,
         &lock,
         &basis,
+        &checkouts,
     )?;
     let Gate::Stale(why) = verdict else {
         return Ok(());
@@ -99,7 +142,7 @@ pub fn relock_if_stale(
         ),
     )?;
     ui::note("mix.lock is out of date with mix.exs; resolving with the store mix...");
-    deps_get(door, project, beam_obj, selected)
+    deps_get(door, project, beam_obj, selected, &checkouts)
 }
 
 /// `mix deps.get` confined through `door`, publishing mix.lock with its
@@ -109,6 +152,7 @@ fn deps_get(
     project: &ProjectRoot,
     beam_obj: &Path,
     selected: &Selected,
+    checkouts: &Checkouts,
 ) -> io::Result<()> {
     let basis = resolution_basis(project)?;
     let args = ["mix", "deps.get", NO_ARCHIVES_CHECK];
@@ -127,6 +171,8 @@ fn deps_get(
             online: true,
             inputs: Some(&basis),
             files: Vec::new(),
+            links: checkouts.links.clone(),
+            reads: checkouts.reads.clone(),
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
             },
@@ -145,6 +191,11 @@ pub(crate) fn update(
     args: &[&str],
 ) -> io::Result<()> {
     let basis = resolution_basis(project)?;
+    let checkouts = if require_lock(project).is_ok() {
+        Checkouts::of_lock(door, project, beam_obj, &basis)?
+    } else {
+        Checkouts::default()
+    };
     let mut args = args.to_vec();
     args.push(NO_ARCHIVES_CHECK);
     let args = &args[..];
@@ -163,6 +214,8 @@ pub(crate) fn update(
             online: true,
             inputs: Some(&basis),
             files: Vec::new(),
+            links: checkouts.links,
+            reads: checkouts.reads,
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, Default::default())),
             },
@@ -191,6 +244,7 @@ fn check_locked(
     project: &ProjectRoot,
     beam_obj: &Path,
     basis: &crate::comforter::join::Digests,
+    checkouts: &Checkouts,
 ) -> io::Result<Gate> {
     let out = run_mix(
         door,
@@ -201,6 +255,8 @@ fn check_locked(
             online: true,
             inputs: Some(basis),
             files: Vec::new(),
+            links: checkouts.links.clone(),
+            reads: checkouts.reads.clone(),
             publish: MixPublish::Detached,
         },
     )?;
@@ -235,6 +291,7 @@ fn gate(
     beam_obj: &Path,
     lock: &str,
     basis: &crate::comforter::join::Digests,
+    checkouts: &Checkouts,
 ) -> io::Result<Gate> {
     let bind = |input: String, basis: &crate::comforter::join::Digests| {
         format!(
@@ -251,7 +308,7 @@ fn gate(
             return Ok(Gate::InSync);
         }
     }
-    let verdict = check_locked(door, project, beam_obj, basis)?;
+    let verdict = check_locked(door, project, beam_obj, basis, checkouts)?;
     if matches!(verdict, Gate::InSync) {
         let after_basis = resolution_basis(project)?;
         let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?
@@ -288,7 +345,7 @@ fn parse_lock(
     beam_obj: &Path,
     lock: &str,
     basis: &crate::comforter::join::Digests,
-) -> io::Result<Vec<HexDep>> {
+) -> io::Result<(Vec<HexDep>, Vec<GitDep>)> {
     let helper = format!("{SCRATCH}/helper.exs");
     let lock_copy = format!("{SCRATCH}/mix.lock");
     let out = run_mix(
@@ -303,6 +360,8 @@ fn parse_lock(
                 (PathBuf::from("helper.exs"), HELPER.as_bytes().to_vec()),
                 (PathBuf::from("mix.lock"), lock.as_bytes().to_vec()),
             ],
+            links: Vec::new(),
+            reads: Vec::new(),
             publish: MixPublish::Detached,
         },
     )?;
@@ -315,10 +374,12 @@ fn parse_lock(
     #[derive(Deserialize)]
     struct HelperOut {
         entries: Vec<HexDep>,
+        #[serde(default)]
+        git: Vec<GitDep>,
     }
     let parsed: HelperOut =
         serde_json::from_slice(&out.stdout).map_err(|e| err(format!("helper output: {e}")))?;
-    Ok(parsed.entries)
+    Ok((parsed.entries, parsed.git))
 }
 
 /// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
@@ -341,17 +402,20 @@ pub fn plan_elixir(
     let lock = read_mix_lock(project)?;
     // The lock is read first, offline: an entry ward cannot realize is
     // refused by name before mix evaluates anything.
-    let mut deps = parse_lock(door, project, beam_obj, &lock, &basis)?;
-    if let Gate::Stale(why) = gate(door, project, beam_obj, &lock, &basis)? {
+    let (mut deps, mut git) = parse_lock(door, project, beam_obj, &lock, &basis)?;
+    let checkouts = Checkouts::of(door, &git)?;
+    if let Gate::Stale(why) = gate(door, project, beam_obj, &lock, &basis, &checkouts)? {
         return Err(stale_lock(project, &why));
     }
     deps.sort_by(|a, b| a.app.cmp(&b.app));
+    git.sort_by(|a, b| a.app.cmp(&b.app));
     let plan = ElixirPlan {
         // The toolchain this plan was made under is the selected one, so
         // the plan records the selection's versions, never the shipped pins.
         otp_version: selected.version("otp")?.to_string(),
         elixir_version: selected.version("elixir")?.to_string(),
         deps,
+        git,
     };
     validate_plan(&plan)?;
     if read_mix_lock(project)? != lock {
@@ -383,6 +447,7 @@ pub fn attest_project(
     }
     require_lock(project)?;
     let basis = resolution_basis(project)?;
+    let checkouts = Checkouts::of_lock(door, project, beam_obj, &basis)?;
     let args = ["mix", "deps.get", "--check-locked", NO_ARCHIVES_CHECK];
     let mut spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
@@ -402,6 +467,8 @@ pub fn attest_project(
             online: true,
             inputs: Some(&basis),
             files: Vec::new(),
+            links: checkouts.links,
+            reads: checkouts.reads,
             publish: MixPublish::Project {
                 receipt: Some(record::producer(spec, slot.clone())),
             },

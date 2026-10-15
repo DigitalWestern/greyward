@@ -151,6 +151,11 @@ pub struct Wiring {
     /// Config files written into the scratch directory before the run:
     /// paths relative to it, created 0600.
     pub files: Vec<(PathBuf, Vec<u8>)>,
+    /// Symlinks made in the scratch directory before the run: a plain path
+    /// relative to it, and the absolute target, which must lie inside one
+    /// of the run's read-only store objects (`ConfinedSpec::store_reads`).
+    /// Mix finds a git dependency checked out through one.
+    pub links: Vec<(PathBuf, PathBuf)>,
     /// Further git settings (`http.proxy`, `url.<base>.insteadOf`); the
     /// forced ones still have the last word.
     pub extra_git: Vec<(String, String)>,
@@ -784,6 +789,9 @@ fn invocation(
     for (relative, bytes) in &wiring.files {
         write_scratch_file(snapshot.scratch(), relative, bytes)?;
     }
+    for (relative, target) in &wiring.links {
+        link_scratch_entry(snapshot.scratch(), relative, target, &confined.store_reads)?;
+    }
     // An intercepting door points every git the tool starts at the proxy:
     // the git row first, the wiring's own settings after it, and the
     // forced ones last.
@@ -888,6 +896,58 @@ fn write_scratch_file(scratch: &Path, relative: &Path, bytes: &[u8]) -> io::Resu
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)?;
     io::Write::write_all(&mut file, bytes)
+}
+
+/// Make the symlink `scratch/relative` -> `target`. The link is a plain
+/// path inside the scratch directory, and the target an absolute, plain
+/// path inside one of `reads`, the store objects bound read-only into the
+/// run: a link can only show the tool what it may already read.
+fn link_scratch_entry(
+    scratch: &Path,
+    relative: &Path,
+    target: &Path,
+    reads: &[PathBuf],
+) -> io::Result<()> {
+    let plain = |path: &Path| {
+        path.components()
+            .all(|part| matches!(part, Component::Normal(_) | Component::RootDir))
+    };
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the link {} must be a plain path inside the scratch directory",
+                relative.display()
+            ),
+        ));
+    }
+    if !target.is_absolute()
+        || !plain(target)
+        || !reads
+            .iter()
+            .any(|root| target != root.as_path() && target.starts_with(root))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the link {} -> {} must point inside a store object the run reads",
+                relative.display(),
+                target.display()
+            ),
+        ));
+    }
+    let path = scratch.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    std::os::unix::fs::symlink(target, &path)
 }
 
 /// Step 5: the diff holds only declared outputs and scratch, and no output
@@ -1206,6 +1266,38 @@ mod tests {
     use crate::kernel::resolve::testing::{podman_relay, relay, Harness};
     use crate::kernel::testutil::TempDir;
     use std::collections::BTreeMap;
+
+    /// A scratch link is made only as a plain path to a target inside a
+    /// store object the run reads.
+    #[test]
+    fn scratch_links_point_only_into_the_runs_store_reads() {
+        let temp = TempDir::named("door-links");
+        let scratch = temp.0.join("scratch");
+        let object = temp.0.join("objects/abc");
+        fs::create_dir_all(object.join("app")).unwrap();
+        fs::create_dir_all(&scratch).unwrap();
+        let reads = vec![object.clone()];
+        link_scratch_entry(&scratch, Path::new("deps/app"), &object.join("app"), &reads).unwrap();
+        assert_eq!(
+            fs::read_link(scratch.join("deps/app")).unwrap(),
+            object.join("app")
+        );
+        for (relative, target) in [
+            ("../out", object.join("app")),
+            ("/abs", object.join("app")),
+            ("", object.join("app")),
+            ("deps/b", temp.0.join("objects/other")),
+            ("deps/c", object.clone()),
+            ("deps/d", object.join("../other")),
+            ("deps/e", PathBuf::from("objects/abc/app")),
+        ] {
+            assert!(
+                link_scratch_entry(&scratch, Path::new(relative), &target, &reads).is_err(),
+                "{relative} -> {}",
+                target.display()
+            );
+        }
+    }
 
     struct Fixture {
         harness: Harness,

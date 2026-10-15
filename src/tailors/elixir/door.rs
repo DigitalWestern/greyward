@@ -56,6 +56,11 @@ pub(crate) struct MixRun<'a> {
     /// Files written into the scratch directory before the run, relative
     /// to it.
     pub files: Vec<(PathBuf, Vec<u8>)>,
+    /// Git dependency checkouts: `deps/<app>` links into `reads`, the
+    /// checkout object, so mix finds each one at its lock and fetches none.
+    pub links: Vec<(PathBuf, PathBuf)>,
+    /// Further store objects the run reads (the git checkout object).
+    pub reads: Vec<PathBuf>,
     pub publish: MixPublish<'a>,
 }
 
@@ -107,6 +112,7 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
+    confined.store_reads.extend(run.reads.iter().cloned());
     confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
@@ -118,6 +124,7 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     };
     let online = run.online;
     let files = std::mem::take(&mut run.files);
+    let links = std::mem::take(&mut run.links);
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         let at = |sub: &str| OsString::from(wire.scratch.join(sub));
         let mut env: Vec<(OsString, OsString)> = vec![
@@ -143,6 +150,7 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
             args,
             env,
             files,
+            links,
             ..Wiring::default()
         })
     }));
@@ -226,6 +234,8 @@ mod tests {
             online,
             inputs: None,
             files: Vec::new(),
+            links: Vec::new(),
+            reads: Vec::new(),
             publish: MixPublish::Detached,
         }
     }

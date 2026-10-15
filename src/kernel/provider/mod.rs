@@ -13,6 +13,7 @@
 
 pub mod artifacts;
 pub mod cargo_door;
+pub(crate) mod cargo_inherit;
 pub mod cargo_settings;
 pub mod cpython;
 pub mod crates;

@@ -1,0 +1,614 @@
+//! Cargo workspace inheritance for git crates (kernel provider layer).
+//!
+//! A crate inside a multi-crate git repository usually takes some of its
+//! manifest from the repository's root `Cargo.toml`: `version.workspace =
+//! true`, `serde = { workspace = true }`, `[lints] workspace = true`. Once
+//! the crate is copied alone into a vendor directory there is no workspace
+//! around it, so those references must be filled in first. This module does
+//! what `cargo package` does: it reads the workspace root inside the same
+//! checkout and writes a manifest with every inherited value spelled out.
+
+use std::io;
+use std::path::{Component, Path, PathBuf};
+
+fn err(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// The dependency tables cargo reads, in both spellings it accepts.
+const DEPENDENCY_TABLES: [&str; 5] = [
+    "dependencies",
+    "dev-dependencies",
+    "dev_dependencies",
+    "build-dependencies",
+    "build_dependencies",
+];
+
+/// `[package]` keys whose inherited value is a path relative to the
+/// workspace root, so it must be re-expressed relative to the crate.
+const PATH_KEYS: [&str; 2] = ["readme", "license-file"];
+
+/// Read and parse one manifest.
+pub(crate) fn read_manifest(path: &Path) -> io::Result<toml::Table> {
+    let text = std::fs::read_to_string(path)?;
+    toml::from_str(&text).map_err(|e| err(format!("parse {}: {e}", path.display())))
+}
+
+fn inherits(value: &toml::Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(toml::Value::as_bool)
+        == Some(true)
+}
+
+/// Every place in `manifest` that inherits from the workspace, by the name
+/// a message shows (`package.version`, `dependencies.serde`, `lints`).
+fn inherited_fields(manifest: &toml::Table) -> Vec<String> {
+    let mut fields = Vec::new();
+    if let Some(package) = manifest.get("package").and_then(toml::Value::as_table) {
+        for (key, value) in package {
+            if inherits(value) {
+                fields.push(format!("package.{key}"));
+            }
+        }
+    }
+    for key in ["lints", "badges"] {
+        if manifest.get(key).is_some_and(inherits) {
+            fields.push(key.to_string());
+        }
+    }
+    let mut dependency_tables = Vec::new();
+    for table in DEPENDENCY_TABLES {
+        if let Some(deps) = manifest.get(table).and_then(toml::Value::as_table) {
+            dependency_tables.push((table.to_string(), deps));
+        }
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for (cfg, target) in targets {
+            for table in DEPENDENCY_TABLES {
+                if let Some(deps) = target.get(table).and_then(toml::Value::as_table) {
+                    dependency_tables.push((format!("target.{cfg}.{table}"), deps));
+                }
+            }
+        }
+    }
+    for (prefix, deps) in dependency_tables {
+        for (name, value) in deps {
+            if inherits(value) {
+                fields.push(format!("{prefix}.{name}"));
+            }
+        }
+    }
+    fields
+}
+
+/// Fold `.` and `..` out of an absolute path without touching the disk.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// `to` written relative to the directory `from` (both absolute, lexical),
+/// with `/` separators as a manifest spells it.
+fn relative(from: &Path, to: &Path) -> String {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec![String::from(".."); from.len() - common];
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned()),
+    );
+    if parts.is_empty() {
+        String::from(".")
+    } else {
+        parts.join("/")
+    }
+}
+
+/// A path value written relative to `workspace_root`, re-expressed relative
+/// to `crate_dir`.
+fn rebase(value: &str, workspace_root: &Path, crate_dir: &Path) -> String {
+    relative(crate_dir, &lexical(&workspace_root.join(value)))
+}
+
+/// The workspace root manifest for the crate in `crate_dir`, inside the git
+/// checkout `checkout` (both canonical): `package.workspace` when the crate
+/// names its root, otherwise the nearest `Cargo.toml` with a `[workspace]`
+/// table, starting at the crate itself, the way cargo looks for it. `None`
+/// when the crate belongs to no workspace inside the checkout.
+pub(crate) fn workspace_root(
+    crate_dir: &Path,
+    checkout: &Path,
+    manifest: &toml::Table,
+) -> io::Result<Option<(PathBuf, toml::Table)>> {
+    let explicit = manifest
+        .get("package")
+        .and_then(|package| package.get("workspace"))
+        .and_then(toml::Value::as_str);
+    if let Some(path) = explicit {
+        let root = lexical(&crate_dir.join(path));
+        if !root.starts_with(checkout) {
+            return Err(err(format!(
+                "package.workspace = {path:?} in {} leaves the git checkout",
+                crate_dir.display()
+            )));
+        }
+        let root_manifest = read_manifest(&root.join("Cargo.toml"))?;
+        if !root_manifest.contains_key("workspace") {
+            return Err(err(format!(
+                "package.workspace = {path:?} in {} names a manifest with no [workspace]",
+                crate_dir.display()
+            )));
+        }
+        return Ok(Some((root, root_manifest)));
+    }
+    let mut dir = crate_dir.to_path_buf();
+    loop {
+        let candidate = dir.join("Cargo.toml");
+        if candidate.is_file() {
+            let parsed = if dir == crate_dir {
+                manifest.clone()
+            } else {
+                read_manifest(&candidate)?
+            };
+            if parsed.contains_key("workspace") {
+                return Ok(Some((dir, parsed)));
+            }
+        }
+        if dir == checkout || !dir.pop() || !dir.starts_with(checkout) {
+            return Ok(None);
+        }
+    }
+}
+
+/// The value the workspace defines at `workspace.<section>.<key>`, or a
+/// message naming what the crate asked for and the workspace lacks.
+fn workspace_value<'a>(
+    workspace: &'a toml::Table,
+    section: Option<&str>,
+    key: &str,
+    field: &str,
+    root: &Path,
+) -> io::Result<&'a toml::Value> {
+    let table = workspace.get("workspace").and_then(toml::Value::as_table);
+    let table = match section {
+        Some(section) => table
+            .and_then(|table| table.get(section))
+            .and_then(toml::Value::as_table),
+        None => table,
+    };
+    table.and_then(|table| table.get(key)).ok_or_else(|| {
+        let at = section.map_or_else(|| key.to_string(), |s| format!("{s}.{key}"));
+        err(format!(
+            "{field} inherits from the workspace, but {} defines no workspace.{at}",
+            root.join("Cargo.toml").display()
+        ))
+    })
+}
+
+/// The crate's own package version: written out, inherited from the
+/// workspace, or cargo's `0.0.0` when the manifest leaves it out.
+pub(crate) fn package_version(
+    crate_dir: &Path,
+    checkout: &Path,
+    manifest: &toml::Table,
+) -> io::Result<Option<String>> {
+    let Some(package) = manifest.get("package").and_then(toml::Value::as_table) else {
+        return Ok(None);
+    };
+    match package.get("version") {
+        None => Ok(Some(String::from("0.0.0"))),
+        Some(toml::Value::String(version)) => Ok(Some(version.clone())),
+        Some(value) if inherits(value) => {
+            let Some((root, workspace)) = workspace_root(crate_dir, checkout, manifest)? else {
+                return Err(err(format!(
+                    "package.version in {} inherits from a workspace, and none encloses it in the git checkout",
+                    crate_dir.display()
+                )));
+            };
+            let version = workspace_value(
+                &workspace,
+                Some("package"),
+                "version",
+                "package.version",
+                &root,
+            )?;
+            Ok(version.as_str().map(str::to_string))
+        }
+        Some(_) => Ok(None),
+    }
+}
+
+/// One inherited dependency: the workspace's entry (a bare version string
+/// becomes `{ version }`, a `path` is rebased onto the crate), with the
+/// member's own keys laid over it and its `features` added to the
+/// workspace's, as cargo merges them.
+fn merge_dependency(
+    base: &toml::Value,
+    member: &toml::Table,
+    workspace_root: &Path,
+    crate_dir: &Path,
+    field: &str,
+) -> io::Result<toml::Value> {
+    let mut merged = match base {
+        toml::Value::String(version) => {
+            let mut table = toml::Table::new();
+            table.insert("version".into(), toml::Value::String(version.clone()));
+            table
+        }
+        toml::Value::Table(table) => table.clone(),
+        _ => {
+            return Err(err(format!(
+                "{field}: the workspace dependency is neither a version nor a table"
+            )))
+        }
+    };
+    if let Some(path) = merged.get("path").and_then(toml::Value::as_str) {
+        let rebased = rebase(path, workspace_root, crate_dir);
+        merged.insert("path".into(), toml::Value::String(rebased));
+    }
+    for (key, value) in member {
+        match key.as_str() {
+            "workspace" => {}
+            "features" => {
+                let mut features = merged
+                    .get("features")
+                    .and_then(toml::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for feature in value.as_array().into_iter().flatten() {
+                    if !features.contains(feature) {
+                        features.push(feature.clone());
+                    }
+                }
+                merged.insert("features".into(), toml::Value::Array(features));
+            }
+            // The workspace's choice stands when it made one; cargo only
+            // warns about a member that disagrees.
+            "default-features" | "default_features" => {
+                if !merged.contains_key("default-features")
+                    && !merged.contains_key("default_features")
+                {
+                    merged.insert(key.clone(), value.clone());
+                }
+            }
+            _ => {
+                merged.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(toml::Value::Table(merged))
+}
+
+fn normalize_dependencies(
+    deps: &mut toml::Table,
+    prefix: &str,
+    workspace: &toml::Table,
+    workspace_root: &Path,
+    crate_dir: &Path,
+) -> io::Result<()> {
+    for (name, value) in deps.iter_mut() {
+        if !inherits(value) {
+            continue;
+        }
+        let field = format!("{prefix}.{name}");
+        let base = workspace_value(
+            workspace,
+            Some("dependencies"),
+            name,
+            &field,
+            workspace_root,
+        )?;
+        let member = value.as_table().cloned().unwrap_or_default();
+        *value = merge_dependency(base, &member, workspace_root, crate_dir, &field)?;
+    }
+    Ok(())
+}
+
+/// The crate's manifest with every workspace reference filled in, or `None`
+/// when it inherits nothing (and is copied unchanged). `crate_dir` and
+/// `checkout` are canonical; the workspace root must lie inside the checkout.
+pub(crate) fn normalize(
+    crate_dir: &Path,
+    checkout: &Path,
+    manifest: &toml::Table,
+) -> io::Result<Option<toml::Table>> {
+    let fields = inherited_fields(manifest);
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let Some((root, workspace)) = workspace_root(crate_dir, checkout, manifest)? else {
+        return Err(err(format!(
+            "{} inherits {} from a workspace, and none encloses it in the git checkout",
+            crate_dir.display(),
+            fields.join(", ")
+        )));
+    };
+    let mut out = manifest.clone();
+    if let Some(package) = out.get_mut("package").and_then(toml::Value::as_table_mut) {
+        package.remove("workspace");
+        for (key, value) in package.iter_mut() {
+            if !inherits(value) {
+                continue;
+            }
+            let field = format!("package.{key}");
+            let mut inherited =
+                workspace_value(&workspace, Some("package"), key, &field, &root)?.clone();
+            if PATH_KEYS.contains(&key.as_str()) {
+                if let Some(path) = inherited.as_str() {
+                    inherited = toml::Value::String(rebase(path, &root, crate_dir));
+                }
+            }
+            *value = inherited;
+        }
+    }
+    if out.get("lints").is_some_and(inherits) {
+        let lints = workspace_value(&workspace, None, "lints", "lints", &root)?.clone();
+        out.insert("lints".into(), lints);
+    }
+    if out.get("badges").is_some_and(inherits) {
+        // Badges are registry decoration; a workspace without them leaves
+        // the crate without them.
+        match workspace_value(&workspace, Some("package"), "badges", "badges", &root) {
+            Ok(badges) => {
+                let badges = badges.clone();
+                out.insert("badges".into(), badges);
+            }
+            Err(_) => {
+                out.remove("badges");
+            }
+        }
+    }
+    for table in DEPENDENCY_TABLES {
+        if let Some(deps) = out.get_mut(table).and_then(toml::Value::as_table_mut) {
+            normalize_dependencies(deps, table, &workspace, &root, crate_dir)?;
+        }
+    }
+    if let Some(targets) = out.get_mut("target").and_then(toml::Value::as_table_mut) {
+        for (cfg, target) in targets.iter_mut() {
+            for table in DEPENDENCY_TABLES {
+                if let Some(deps) = target.get_mut(table).and_then(toml::Value::as_table_mut) {
+                    let prefix = format!("target.{cfg}.{table}");
+                    normalize_dependencies(deps, &prefix, &workspace, &root, crate_dir)?;
+                }
+            }
+        }
+    }
+    let left = inherited_fields(&out);
+    if !left.is_empty() {
+        return Err(err(format!(
+            "{} still inherits {} after normalization",
+            crate_dir.display(),
+            left.join(", ")
+        )));
+    }
+    Ok(Some(out))
+}
+
+/// A `readme` or `license-file` that lies outside the crate (usually one
+/// inherited from the workspace root) is copied into the crate's top
+/// directory and named there, as `cargo package` does, so the vendored
+/// manifest names a file it carries. When the crate already has an entry of
+/// that name the path is left pointing outside, where cargo never reads it
+/// for a dependency.
+fn bring_in_package_files(
+    manifest: &mut toml::Table,
+    source_dir: &Path,
+    checkout: &Path,
+    dest: &Path,
+) -> io::Result<()> {
+    let Some(package) = manifest
+        .get_mut("package")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return Ok(());
+    };
+    for key in PATH_KEYS {
+        let Some(path) = package.get(key).and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let file = lexical(&source_dir.join(path));
+        if file.starts_with(source_dir) || !file.starts_with(checkout) || !file.is_file() {
+            continue;
+        }
+        let Some(name) = file.file_name() else {
+            continue;
+        };
+        let local = dest.join(name);
+        if std::fs::symlink_metadata(&local).is_ok() {
+            continue;
+        }
+        std::fs::copy(&file, &local)?;
+        crate::kernel::store::restore_write_bits(&local)?;
+        package.insert(
+            key.to_string(),
+            toml::Value::String(name.to_string_lossy().into_owned()),
+        );
+    }
+    Ok(())
+}
+
+/// Write the normalized manifest into the copied crate `dest`, keeping the
+/// original beside it as `Cargo.toml.orig` the way `cargo package` does.
+/// Returns whether anything was rewritten.
+pub(crate) fn write_normalized(
+    source_dir: &Path,
+    checkout: &Path,
+    dest: &Path,
+) -> io::Result<bool> {
+    let manifest_path = source_dir.join("Cargo.toml");
+    let manifest = read_manifest(&manifest_path)?;
+    let Some(mut normalized) = normalize(source_dir, checkout, &manifest)? else {
+        return Ok(false);
+    };
+    bring_in_package_files(&mut normalized, source_dir, checkout, dest)?;
+    let text = toml::to_string(&normalized)
+        .map_err(|e| err(format!("serialize normalized Cargo.toml: {e}")))?;
+    let original = std::fs::read(&manifest_path)?;
+    let target = dest.join("Cargo.toml");
+    // The copy may hold a link here (a materialized one is a plain file);
+    // replace the entry rather than write through it.
+    std::fs::remove_file(&target)?;
+    std::fs::write(&target, text)?;
+    let orig = dest.join("Cargo.toml.orig");
+    if std::fs::symlink_metadata(&orig).is_ok() {
+        std::fs::remove_file(&orig)?;
+    }
+    std::fs::write(orig, original)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::testutil::TempDir;
+
+    fn table(text: &str) -> toml::Table {
+        toml::from_str(text).unwrap()
+    }
+
+    fn workspace(scratch: &TempDir) -> PathBuf {
+        let root = scratch.0.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("crates/member")).unwrap();
+        std::fs::create_dir_all(root.join("crates/sibling")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["crates/*"]
+[workspace.package]
+version = "1.2.3"
+edition = "2021"
+license-file = "LICENSE"
+readme = "README.md"
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"], default-features = false }
+itoa = "1.0"
+sibling = { path = "crates/sibling", version = "1.2.3" }
+[workspace.lints.rust]
+unsafe_code = "forbid"
+"#,
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn inherited_package_fields_dependencies_and_lints_are_written_out() {
+        let scratch = TempDir::named("cargo-inherit");
+        let root = workspace(&scratch);
+        let member = root.join("crates/member");
+        let manifest = table(
+            r#"
+[package]
+name = "member"
+version.workspace = true
+edition = { workspace = true }
+license-file.workspace = true
+readme.workspace = true
+[dependencies]
+serde = { workspace = true, features = ["rc"], optional = true }
+sibling.workspace = true
+[target.'cfg(unix)'.dev-dependencies]
+itoa = { workspace = true }
+[lints]
+workspace = true
+"#,
+        );
+        assert_eq!(
+            package_version(&member, &root, &manifest)
+                .unwrap()
+                .as_deref(),
+            Some("1.2.3")
+        );
+        let out = normalize(&member, &root, &manifest).unwrap().unwrap();
+        let expected = table(
+            r#"
+[package]
+name = "member"
+version = "1.2.3"
+edition = "2021"
+license-file = "../../LICENSE"
+readme = "../../README.md"
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"], default-features = false, optional = true }
+sibling = { path = "../sibling", version = "1.2.3" }
+[target.'cfg(unix)'.dev-dependencies]
+itoa = { version = "1.0" }
+[lints.rust]
+unsafe_code = "forbid"
+"#,
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn a_crate_inheriting_nothing_is_left_alone() {
+        let scratch = TempDir::named("cargo-inherit-none");
+        let root = workspace(&scratch);
+        let manifest = table("[package]\nname = \"plain\"\nversion = \"0.1.0\"\n");
+        assert_eq!(
+            normalize(&root.join("crates/member"), &root, &manifest).unwrap(),
+            None
+        );
+        // A missing version is cargo's 0.0.0.
+        let bare = table("[package]\nname = \"bare\"\n");
+        assert_eq!(
+            package_version(&root, &root, &bare).unwrap().as_deref(),
+            Some("0.0.0")
+        );
+    }
+
+    #[test]
+    fn a_field_the_workspace_lacks_is_named() {
+        let scratch = TempDir::named("cargo-inherit-missing");
+        let root = workspace(&scratch);
+        let manifest = table(
+            "[package]\nname = \"m\"\nversion = \"1.0.0\"\n[dependencies]\nrand = { workspace = true }\n",
+        );
+        let error = normalize(&root.join("crates/member"), &root, &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("dependencies.rand inherits"), "{error}");
+        assert!(error.contains("workspace.dependencies.rand"), "{error}");
+    }
+
+    #[test]
+    fn inheritance_without_an_enclosing_workspace_is_refused() {
+        let scratch = TempDir::named("cargo-inherit-orphan");
+        let root = scratch.0.canonicalize().unwrap();
+        let manifest = table("[package]\nname = \"m\"\nversion.workspace = true\n");
+        let error = normalize(&root, &root, &manifest).unwrap_err().to_string();
+        assert!(error.contains("none encloses it"), "{error}");
+    }
+
+    #[test]
+    fn an_explicit_workspace_path_is_followed_and_bounded() {
+        let scratch = TempDir::named("cargo-inherit-explicit");
+        let root = workspace(&scratch);
+        let member = root.join("crates/member");
+        let manifest =
+            table("[package]\nname = \"m\"\nworkspace = \"../..\"\nversion.workspace = true\n");
+        let out = normalize(&member, &root, &manifest).unwrap().unwrap();
+        assert_eq!(out["package"].get("workspace"), None);
+        assert_eq!(out["package"]["version"].as_str(), Some("1.2.3"));
+        let escaping =
+            table("[package]\nname = \"m\"\nworkspace = \"../../..\"\nversion.workspace = true\n");
+        let error = normalize(&member, &root, &escaping)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leaves the git checkout"), "{error}");
+    }
+}

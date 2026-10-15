@@ -564,3 +564,68 @@ fn cargo_git_dependency_is_vendored_from_its_commit() {
     warm.discard();
     assert!(error.contains(policy::HOST_GIT_TRANSPORT), "{error}");
 }
+
+/// Workspace members of a git dependency are vendored with their inherited
+/// fields written out, and a link to a file elsewhere in the checkout is
+/// copied as that file (#776).
+#[test]
+fn cargo_git_workspace_members_are_vendored_normalized() {
+    let _serial = serial();
+    let root = TempDir::new("gitdep-cargo-workspace");
+    let (url, commit) = common::cargo_workspace_repo(&root.0);
+    let store = store_at(&root.0);
+    let activity = &store
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let _attribution = policy::Attribution::open("cargo").expect("test attribution");
+
+    let source = format!("git+{url}?rev={commit}#{commit}");
+    let lock = format!(
+        "version = 3\n\n\
+         [[package]]\nname = \"wsapp\"\nversion = \"0.3.0\"\nsource = \"{source}\"\ndependencies = [\n \"wsshared\",\n]\n\n\
+         [[package]]\nname = \"wsshared\"\nversion = \"0.3.0\"\nsource = \"{source}\"\n"
+    );
+    let plan = greyward::tailors::cargo::plan_cargo(&lock, "1.96.1").expect("plan");
+    let vendor = greyward::tailors::cargo::realize_vendor(&store, activity, &plan).expect("vendor");
+
+    let manifest = |dir: &str| -> toml::Table {
+        toml::from_str(&std::fs::read_to_string(vendor.join(dir).join("Cargo.toml")).unwrap())
+            .unwrap()
+    };
+    let app = manifest("wsapp-0.3.0");
+    let expected: toml::Table = toml::from_str(
+        "[package]\nname = \"wsapp\"\nversion = \"0.3.0\"\nedition = \"2021\"\nlicense-file = \"../../LICENSE\"\n\n\
+         [dependencies]\nwsshared = { path = \"../shared\", version = \"0.3.0\" }\n",
+    )
+    .unwrap();
+    assert_eq!(app, expected);
+    let shared = manifest("wsshared-0.3.0");
+    assert_eq!(shared["package"]["version"].as_str(), Some("0.3.0"));
+    // A license file from the workspace root is brought into the crate
+    // that has none, as `cargo package` does.
+    assert_eq!(shared["package"]["license-file"].as_str(), Some("LICENSE"));
+    assert_eq!(
+        std::fs::read_to_string(vendor.join("wsshared-0.3.0/LICENSE")).unwrap(),
+        "shared license\n"
+    );
+    assert_eq!(
+        shared["lints"]["rust"]["unsafe_code"].as_str(),
+        Some("forbid")
+    );
+    // The original stays beside it, as `cargo package` keeps it.
+    assert!(
+        std::fs::read_to_string(vendor.join("wsapp-0.3.0/Cargo.toml.orig"))
+            .unwrap()
+            .contains("version.workspace = true")
+    );
+    // The link to the repository's LICENSE is the file now.
+    let license = vendor.join("wsapp-0.3.0/LICENSE");
+    assert!(std::fs::symlink_metadata(&license)
+        .unwrap()
+        .file_type()
+        .is_file());
+    assert_eq!(
+        std::fs::read_to_string(&license).unwrap(),
+        "shared license\n"
+    );
+}

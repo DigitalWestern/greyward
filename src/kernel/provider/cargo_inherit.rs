@@ -53,10 +53,8 @@ fn inherited_fields(manifest: &toml::Table) -> Vec<String> {
             }
         }
     }
-    for key in ["lints", "badges"] {
-        if manifest.get(key).is_some_and(inherits) {
-            fields.push(key.to_string());
-        }
+    if manifest.get("lints").is_some_and(inherits) {
+        fields.push(String::from("lints"));
     }
     let mut dependency_tables = Vec::new();
     for table in DEPENDENCY_TABLES {
@@ -123,11 +121,34 @@ fn rebase(value: &str, workspace_root: &Path, crate_dir: &Path) -> String {
     relative(crate_dir, &lexical(&workspace_root.join(value)))
 }
 
+/// Whether the workspace rooted at `root` leaves `crate_dir` out, by cargo's
+/// rule (`WorkspaceRootConfig::is_excluded`): the crate's manifest lies
+/// under an `exclude` entry and under no `members` entry, both compared as
+/// written (a `members` glob is not expanded for this test).
+fn excludes(root: &Path, workspace: &toml::Table, crate_dir: &Path) -> bool {
+    let manifest = crate_dir.join("Cargo.toml");
+    let under = |key: &str| {
+        workspace
+            .get("workspace")
+            .and_then(|table| table.get(key))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .any(|entry| manifest.starts_with(lexical(&root.join(entry))))
+    };
+    under("exclude") && !under("members")
+}
+
 /// The workspace root manifest for the crate in `crate_dir`, inside the git
 /// checkout `checkout` (both canonical): `package.workspace` when the crate
 /// names its root, otherwise the nearest `Cargo.toml` with a `[workspace]`
-/// table, starting at the crate itself, the way cargo looks for it. `None`
-/// when the crate belongs to no workspace inside the checkout.
+/// table, starting at the crate itself, that does not exclude the crate:
+/// cargo's `find_root`. As there, a root that excludes the crate is passed
+/// over for one further up, and a root whose `members` do not list the
+/// crate still serves it: cargo reads a git dependency's manifest this way
+/// and checks membership only for a workspace it builds. `None` when no
+/// workspace inside the checkout takes the crate.
 pub(crate) fn workspace_root(
     crate_dir: &Path,
     checkout: &Path,
@@ -163,7 +184,9 @@ pub(crate) fn workspace_root(
             } else {
                 read_manifest(&candidate)?
             };
-            if parsed.contains_key("workspace") {
+            if parsed.contains_key("workspace")
+                && (dir == crate_dir || !excludes(&dir, &parsed, crate_dir))
+            {
                 return Ok(Some((dir, parsed)));
             }
         }
@@ -231,10 +254,14 @@ pub(crate) fn package_version(
     }
 }
 
-/// One inherited dependency: the workspace's entry (a bare version string
-/// becomes `{ version }`, a `path` is rebased onto the crate), with the
-/// member's own keys laid over it and its `features` added to the
-/// workspace's, as cargo merges them.
+/// One inherited dependency, merged the way cargo merges it: the
+/// workspace's entry (a bare version string becomes `{ version }`, a `path`
+/// is rebased onto the crate), the member's `features` added to the
+/// workspace's, the member's `optional` and `public` taken as written, and
+/// the member's `default-features = true` overriding a workspace `false`
+/// (a member `false` against a workspace default is only a warning in cargo
+/// and changes nothing). Every other key on the member entry (`version`,
+/// `path`, `git`, `package`, ...) is ignored, as cargo ignores it.
 fn merge_dependency(
     base: &toml::Value,
     member: &toml::Table,
@@ -259,33 +286,36 @@ fn merge_dependency(
         let rebased = rebase(path, workspace_root, crate_dir);
         merged.insert("path".into(), toml::Value::String(rebased));
     }
-    for (key, value) in member {
-        match key.as_str() {
-            "workspace" => {}
-            "features" => {
-                let mut features = merged
-                    .get("features")
-                    .and_then(toml::Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                for feature in value.as_array().into_iter().flatten() {
-                    if !features.contains(feature) {
-                        features.push(feature.clone());
-                    }
-                }
-                merged.insert("features".into(), toml::Value::Array(features));
+    if let Some(member_features) = member.get("features").and_then(toml::Value::as_array) {
+        let mut features = merged
+            .get("features")
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for feature in member_features {
+            if !features.contains(feature) {
+                features.push(feature.clone());
             }
-            // The workspace's choice stands when it made one; cargo only
-            // warns about a member that disagrees.
-            "default-features" | "default_features" => {
-                if !merged.contains_key("default-features")
-                    && !merged.contains_key("default_features")
-                {
-                    merged.insert(key.clone(), value.clone());
-                }
+        }
+        merged.insert("features".into(), toml::Value::Array(features));
+    }
+    let default_features = |table: &toml::Table| {
+        table
+            .get("default-features")
+            .or_else(|| table.get("default_features"))
+            .and_then(toml::Value::as_bool)
+    };
+    if default_features(member) == Some(true) && default_features(&merged) == Some(false) {
+        merged.remove("default_features");
+        merged.insert("default-features".into(), toml::Value::Boolean(true));
+    }
+    for key in ["optional", "public"] {
+        match member.get(key) {
+            Some(value) => {
+                merged.insert(key.into(), value.clone());
             }
-            _ => {
-                merged.insert(key.clone(), value.clone());
+            None => {
+                merged.remove(key);
             }
         }
     }
@@ -354,22 +384,27 @@ pub(crate) fn normalize(
             *value = inherited;
         }
     }
-    if out.get("lints").is_some_and(inherits) {
+    if let Some(lints) = out.get("lints").filter(|lints| inherits(lints)) {
+        // Cargo takes the workspace's lints whole: a member table that
+        // inherits and also sets its own is an error there.
+        let own: Vec<&String> = lints
+            .as_table()
+            .into_iter()
+            .flat_map(|table| table.keys())
+            .filter(|key| key.as_str() != "workspace")
+            .collect();
+        if !own.is_empty() {
+            return Err(err(format!(
+                "{}: [lints] inherits from the workspace and also sets {}; cargo refuses that",
+                crate_dir.display(),
+                own.iter()
+                    .map(|key| format!("lints.{key}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
         let lints = workspace_value(&workspace, None, "lints", "lints", &root)?.clone();
         out.insert("lints".into(), lints);
-    }
-    if out.get("badges").is_some_and(inherits) {
-        // Badges are registry decoration; a workspace without them leaves
-        // the crate without them.
-        match workspace_value(&workspace, Some("package"), "badges", "badges", &root) {
-            Ok(badges) => {
-                let badges = badges.clone();
-                out.insert("badges".into(), badges);
-            }
-            Err(_) => {
-                out.remove("badges");
-            }
-        }
     }
     for table in DEPENDENCY_TABLES {
         if let Some(deps) = out.get_mut(table).and_then(toml::Value::as_table_mut) {
@@ -552,6 +587,130 @@ unsafe_code = "forbid"
 "#,
         );
         assert_eq!(out, expected);
+    }
+
+    /// Cargo's merge, checked against `cargo vendor` 1.98: a member's
+    /// `default-features = true` beats a workspace `false`, a member `false`
+    /// against the workspace default changes nothing, `optional` and
+    /// `public` come from the member, and every other member key
+    /// (`version`, `path`, `package`, `git`, `rev`) is ignored.
+    #[test]
+    fn dependency_merge_follows_cargo() {
+        let scratch = TempDir::named("cargo-inherit-merge");
+        let root = scratch.0.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+[workspace.dependencies]
+off = { path = "off", default_features = false, features = ["x"] }
+on = { path = "on" }
+plain = "1.0"
+"#,
+        )
+        .unwrap();
+        let member = root.join("m");
+        let manifest = table(
+            r#"
+[package]
+name = "m"
+version = "1.0.0"
+[dependencies]
+off = { workspace = true, default-features = true, features = ["y", "x"], optional = true, version = "9.9", package = "zzz" }
+on = { workspace = true, default-features = false, path = "elsewhere", git = "https://example.invalid/r", rev = "abc" }
+plain = { workspace = true, default_features = false, public = true, version = "2" }
+"#,
+        );
+        let out = normalize(&member, &root, &manifest).unwrap().unwrap();
+        let expected = table(
+            r#"
+off = { path = "../off", default-features = true, features = ["x", "y"], optional = true }
+on = { path = "../on" }
+plain = { version = "1.0", public = true }
+"#,
+        );
+        assert_eq!(out["dependencies"].as_table().unwrap(), &expected);
+
+        // Both explicit and agreeing: nothing to override.
+        let agree = table(
+            "[package]\nname = \"m\"\nversion = \"1.0.0\"\n[dependencies]\noff = { workspace = true, default-features = false }\n",
+        );
+        let out = normalize(&member, &root, &agree).unwrap().unwrap();
+        assert_eq!(
+            out["dependencies"]["off"].get("default_features"),
+            Some(&toml::Value::Boolean(false))
+        );
+        assert_eq!(out["dependencies"]["off"].get("default-features"), None);
+    }
+
+    /// A workspace whose `exclude` covers the crate, and whose `members` do
+    /// not name it, is passed over for one further up (none here, so the
+    /// inheritance is refused); one that lists it as a member despite the
+    /// `exclude` serves it; a root that simply does not list it serves it
+    /// too, as cargo reads a git dependency.
+    #[test]
+    fn excluded_crates_do_not_inherit_from_that_root() {
+        let scratch = TempDir::named("cargo-inherit-exclude");
+        let root = scratch.0.canonicalize().unwrap();
+        for dir in ["ex", "nm"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let write_root = |members: &str| {
+            std::fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[workspace]\nmembers = [{members}]\nexclude = [\"ex\"]\n[workspace.package]\nversion = \"0.5.0\"\n"
+                ),
+            )
+            .unwrap();
+        };
+        let manifest = table("[package]\nname = \"c\"\nversion.workspace = true\n");
+        write_root("\"a\"");
+        let error = package_version(&root.join("ex"), &root, &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("none encloses it"), "{error}");
+        assert_eq!(
+            package_version(&root.join("nm"), &root, &manifest)
+                .unwrap()
+                .as_deref(),
+            Some("0.5.0")
+        );
+        write_root("\"a\", \"ex\"");
+        assert_eq!(
+            package_version(&root.join("ex"), &root, &manifest)
+                .unwrap()
+                .as_deref(),
+            Some("0.5.0")
+        );
+
+        // An outer workspace takes over from an inner one that excludes it.
+        std::fs::create_dir_all(root.join("inner/ex")).unwrap();
+        std::fs::write(
+            root.join("inner/Cargo.toml"),
+            "[workspace]\nexclude = [\"ex\"]\n[workspace.package]\nversion = \"9.9.9\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            package_version(&root.join("inner/ex"), &root, &manifest)
+                .unwrap()
+                .as_deref(),
+            Some("0.5.0")
+        );
+    }
+
+    #[test]
+    fn inherited_lints_with_own_overrides_are_refused() {
+        let scratch = TempDir::named("cargo-inherit-lints");
+        let root = workspace(&scratch);
+        let manifest = table(
+            "[package]\nname = \"m\"\nversion = \"1.0.0\"\n[lints]\nworkspace = true\n[lints.clippy]\nall = \"warn\"\n",
+        );
+        let error = normalize(&root.join("crates/member"), &root, &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("also sets lints.clippy"), "{error}");
     }
 
     #[test]

@@ -563,10 +563,41 @@ pub(crate) fn validate_symlinks(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// How many entries materializing one crate's links may write. A link to a
-/// directory is copied whole, and a link inside that copy to another
-/// directory is copied again; this bounds a web of such links.
-const MAX_MATERIALIZED_ENTRIES: usize = 100_000;
+/// What materializing one crate's links may write. A link to a directory
+/// is copied whole, a link inside that copy to another directory is copied
+/// again, and many links may name one large file: every entry written and
+/// every byte copied is charged, so no web of links expands without bound.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MaterializeBudget {
+    pub entries: u64,
+    pub bytes: u64,
+}
+
+impl MaterializeBudget {
+    /// 100,000 entries and 2 GiB: far beyond any real crate (the largest
+    /// published crates are a few hundred MB unpacked), small enough that a
+    /// hostile checkout cannot fill the disk.
+    pub(crate) const DEFAULT: Self = Self {
+        entries: 100_000,
+        bytes: 2 << 30,
+    };
+
+    fn charge(&mut self, limit: &Self, bytes: u64) -> io::Result<()> {
+        self.entries = self.entries.checked_sub(1).ok_or_else(|| {
+            err(format!(
+                "symlinks in the crate expand past {} entries; refusing to copy more",
+                limit.entries
+            ))
+        })?;
+        self.bytes = self.bytes.checked_sub(bytes).ok_or_else(|| {
+            err(format!(
+                "symlinks in the crate expand past {} bytes; refusing to copy more",
+                limit.bytes
+            ))
+        })?;
+        Ok(())
+    }
+}
 
 /// `copy` is a copy of the directory `source`, which lies inside the
 /// realized (already validated) git checkout `checkout`. Every symlink in
@@ -575,11 +606,20 @@ const MAX_MATERIALIZED_ENTRIES: usize = 100_000;
 /// the whole repository) is replaced by the bytes it points at, resolved in
 /// the checkout, as cargo reads them there. One that leaves the checkout or
 /// names a directory that contains it is refused; one that dangles is left
-/// out.
+/// out. What the links expand to is bounded by [`MaterializeBudget::DEFAULT`].
 pub(crate) fn materialize_escaping_symlinks(
     checkout: &Path,
     source: &Path,
     copy: &Path,
+) -> io::Result<()> {
+    materialize_escaping_symlinks_within(checkout, source, copy, MaterializeBudget::DEFAULT)
+}
+
+fn materialize_escaping_symlinks_within(
+    checkout: &Path,
+    source: &Path,
+    copy: &Path,
+    limit: MaterializeBudget,
 ) -> io::Result<()> {
     let checkout = checkout.canonicalize()?;
     let source = source.canonicalize()?;
@@ -591,7 +631,12 @@ pub(crate) fn materialize_escaping_symlinks(
     collect_symlinks(&copy, &mut links)?;
     // Sorted, so the same checkout always produces the same bytes.
     links.sort();
-    let mut budget = MAX_MATERIALIZED_ENTRIES;
+    let mut walk = Materialize {
+        checkout: &checkout,
+        active: Vec::new(),
+        left: limit,
+        limit,
+    };
     for link in links {
         if resolve_symlink_path(&copy, &link, &mut std::collections::BTreeSet::new()).is_ok() {
             continue;
@@ -601,7 +646,7 @@ pub(crate) fn materialize_escaping_symlinks(
             .map_err(|_| err("symlink outside the copied crate"))?;
         let original = source.join(relative);
         fs::remove_file(&link)?;
-        materialize_link(&checkout, &original, &link, &mut Vec::new(), &mut budget)
+        walk.link(&original, &link)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", relative.display())))?;
         // Copied out of the read-only store: writable like the rest of
         // the staged tree.
@@ -612,86 +657,90 @@ pub(crate) fn materialize_escaping_symlinks(
     Ok(())
 }
 
-/// Write at `dest` (which does not exist) the content the checkout's link
-/// `original` resolves to. `active` holds the checkout directories being
-/// copied, so a link back into one of them is a cycle.
-fn materialize_link(
-    checkout: &Path,
-    original: &Path,
-    dest: &Path,
-    active: &mut Vec<PathBuf>,
-    budget: &mut usize,
-) -> io::Result<()> {
-    let target = fs::read_link(original)?;
-    let parent = original
-        .parent()
-        .ok_or_else(|| err("symlink has no parent"))?;
-    let mut seen = std::collections::BTreeSet::from([original.to_path_buf()]);
-    let resolved = resolve_target_components(checkout, parent, &target, &mut seen, &mut 0)
-        .map_err(|e| err(format!("{e} (it leaves the git checkout)")))?;
-    let metadata = match fs::symlink_metadata(&resolved) {
-        Ok(metadata) => metadata,
-        // A dangling link has no bytes to copy, and reading it fails in
-        // the checkout too: it is left out.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    if metadata.is_file() {
-        fs::copy(&resolved, dest)?;
-        Ok(())
-    } else if metadata.is_dir() {
-        if original.starts_with(&resolved) || active.iter().any(|dir| dir.starts_with(&resolved)) {
-            return Err(err(format!(
-                "symlink cycle: {} links to a directory that contains it",
-                original.display()
-            )));
-        }
-        active.push(resolved.clone());
-        let copied = copy_dereferenced(checkout, &resolved, dest, active, budget);
-        active.pop();
-        copied
-    } else {
-        Err(err(format!(
-            "symlink target {} is not a file or directory",
-            target.display()
-        )))
-    }
+/// One crate's materialization: the checkout, the checkout directories
+/// being copied (so a link back into one of them is a cycle), and what is
+/// left of the budget.
+struct Materialize<'a> {
+    checkout: &'a Path,
+    active: Vec<PathBuf>,
+    left: MaterializeBudget,
+    limit: MaterializeBudget,
 }
 
-/// Copy the checkout directory `src` to `dest`, replacing every link inside
-/// it by its content: a relative target no longer means the same thing once
-/// the directory sits elsewhere.
-fn copy_dereferenced(
-    checkout: &Path,
-    src: &Path,
-    dest: &Path,
-    active: &mut Vec<PathBuf>,
-    budget: &mut usize,
-) -> io::Result<()> {
-    fs::create_dir(dest)?;
-    let mut entries = fs::read_dir(src)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        *budget = budget
-            .checked_sub(1)
-            .ok_or_else(|| err("linked directories expand past 100000 entries"))?;
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            materialize_link(checkout, &from, &to, active, budget)?;
-        } else if file_type.is_dir() {
-            copy_dereferenced(checkout, &from, &to, active, budget)?;
-        } else if file_type.is_file() {
-            fs::copy(&from, &to)?;
+impl Materialize<'_> {
+    /// Write at `dest` (which does not exist) the content the checkout's
+    /// link `original` resolves to.
+    fn link(&mut self, original: &Path, dest: &Path) -> io::Result<()> {
+        let target = fs::read_link(original)?;
+        let parent = original
+            .parent()
+            .ok_or_else(|| err("symlink has no parent"))?;
+        let mut seen = std::collections::BTreeSet::from([original.to_path_buf()]);
+        let resolved = resolve_target_components(self.checkout, parent, &target, &mut seen, &mut 0)
+            .map_err(|e| err(format!("{e} (it leaves the git checkout)")))?;
+        let metadata = match fs::symlink_metadata(&resolved) {
+            Ok(metadata) => metadata,
+            // A dangling link has no bytes to copy, and reading it fails in
+            // the checkout too: it is left out.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if metadata.is_file() {
+            self.file(&resolved, metadata.len(), dest)
+        } else if metadata.is_dir() {
+            if original.starts_with(&resolved)
+                || self.active.iter().any(|dir| dir.starts_with(&resolved))
+            {
+                return Err(err(format!(
+                    "symlink cycle: {} links to a directory that contains it",
+                    original.display()
+                )));
+            }
+            self.active.push(resolved.clone());
+            let copied = self.directory(&resolved, dest);
+            self.active.pop();
+            copied
         } else {
-            return Err(err(format!(
-                "{} is not a file or directory",
-                from.display()
-            )));
+            Err(err(format!(
+                "symlink target {} is not a file or directory",
+                target.display()
+            )))
         }
     }
-    Ok(())
+
+    fn file(&mut self, from: &Path, len: u64, dest: &Path) -> io::Result<()> {
+        self.left.charge(&self.limit, len)?;
+        fs::copy(from, dest)?;
+        Ok(())
+    }
+
+    /// Copy the checkout directory `src` to `dest`, replacing every link
+    /// inside it by its content: a relative target no longer means the same
+    /// thing once the directory sits elsewhere.
+    fn directory(&mut self, src: &Path, dest: &Path) -> io::Result<()> {
+        self.left.charge(&self.limit, 0)?;
+        fs::create_dir(dest)?;
+        let mut entries = fs::read_dir(src)?.collect::<io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let from = entry.path();
+            let to = dest.join(entry.file_name());
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                self.link(&from, &to)?;
+            } else if file_type.is_dir() {
+                self.directory(&from, &to)?;
+            } else if file_type.is_file() {
+                self.file(&from, entry.metadata()?.len(), &to)?;
+            } else {
+                return Err(err(format!(
+                    "{} is not a file or directory",
+                    from.display()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn collect_symlinks(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -2415,6 +2464,79 @@ mod refusal_tests {
         );
         assert!(file_type("inside").is_symlink());
         assert!(fs::symlink_metadata(copy.join("dangling")).is_err());
+    }
+
+    /// Many links to one file, or to one directory, are each charged: the
+    /// copy stops at the byte or entry cap instead of filling the disk.
+    #[test]
+    fn links_that_expand_past_the_budget_are_refused() {
+        let temp = TempDir::named("gitsrc-materialize-budget");
+        let checkout = temp.0.join("checkout");
+        let krate = checkout.join("one");
+        fs::create_dir_all(&krate).unwrap();
+        fs::create_dir_all(checkout.join("dir")).unwrap();
+        fs::write(checkout.join("blob"), vec![0u8; 1000]).unwrap();
+        fs::write(checkout.join("dir/a"), b"a").unwrap();
+        fs::write(checkout.join("dir/b"), b"b").unwrap();
+        for i in 0..10 {
+            link("../blob", &krate.join(format!("blob{i}")));
+        }
+        let fresh_copy = |name: &str| {
+            let copy = temp.0.join(name);
+            copy_keeping_links(&krate, &copy);
+            copy
+        };
+        // Ten links to a 1,000-byte file need 10,000 bytes.
+        let roomy = MaterializeBudget {
+            entries: 100,
+            bytes: 10_000,
+        };
+        materialize_escaping_symlinks_within(&checkout, &krate, &fresh_copy("fits"), roomy)
+            .unwrap();
+        let tight = MaterializeBudget {
+            entries: 100,
+            bytes: 9_999,
+        };
+        let error = materialize_escaping_symlinks_within(
+            &checkout,
+            &krate,
+            &fresh_copy("too-many-bytes"),
+            tight,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("past 9999 bytes"), "{error}");
+
+        // Each file link is an entry too, as is a directory and its files.
+        let few = MaterializeBudget {
+            entries: 9,
+            bytes: 1 << 20,
+        };
+        let error =
+            materialize_escaping_symlinks_within(&checkout, &krate, &fresh_copy("too-many"), few)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("past 9 entries"), "{error}");
+        for i in 0..10 {
+            fs::remove_file(krate.join(format!("blob{i}"))).unwrap();
+        }
+        link("../dir", &krate.join("d1"));
+        link("../dir", &krate.join("d2"));
+        let five = MaterializeBudget {
+            entries: 5,
+            bytes: 1 << 20,
+        };
+        let error =
+            materialize_escaping_symlinks_within(&checkout, &krate, &fresh_copy("dirs"), five)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("past 5 entries"), "{error}");
+        let six = MaterializeBudget {
+            entries: 6,
+            bytes: 1 << 20,
+        };
+        materialize_escaping_symlinks_within(&checkout, &krate, &fresh_copy("dirs-fit"), six)
+            .unwrap();
     }
 
     #[test]

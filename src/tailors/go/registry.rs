@@ -9,6 +9,11 @@
 //!   `/<module>/@latest` go to `https://proxy.golang.org` unchanged. The
 //!   import-path prefixes `go get` probes (`/github.com/@v/list`) are the
 //!   same grammar, and proxy.golang.org's 404 for them is passed through.
+//!   go sends the `!` of an escaped uppercase letter (`!azure`) as `%21`;
+//!   the path is percent-decoded once before the grammar sees it, and goes
+//!   upstream decoded. proxy.golang.org redirects most `.zip` downloads to
+//!   `https://storage.googleapis.com`, and that one hop is followed
+//!   ([`GoProxy::follows_redirect`]).
 //! - `/sumdb/sum.golang.org/supported` is answered by the proxy itself with
 //!   200. Both upstream hosts answer it 404, which would send go straight
 //!   to sum.golang.org outside the proxy.
@@ -38,6 +43,9 @@ pub const ROUTE_ID: &str = "go";
 /// The module proxy and the checksum database go is pointed at.
 pub const PROXY_HOST: &str = "proxy.golang.org";
 pub const SUMDB_HOST: &str = "sum.golang.org";
+/// Where proxy.golang.org redirects module zips; reached only by that
+/// redirect ([`GoProxy::follows_redirect`]), never as an endpoint.
+pub const STORAGE_HOST: &str = "storage.googleapis.com";
 /// The only checksum database the route serves; `GOSUMDB` names it.
 pub const SUMDB_NAME: &str = "sum.golang.org";
 
@@ -54,10 +62,19 @@ impl RegistryProtocol for GoProxy {
         ROUTE_ID
     }
 
-    fn upstream(&self, endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
-        if path.contains('?') {
-            return Err(refused(path, "a Go proxy request carries no query"));
+    fn upstream(&self, endpoints: &[Endpoint], raw: &str) -> io::Result<Upstream> {
+        if raw.contains('?') {
+            return Err(refused(raw, "a Go proxy request carries no query"));
         }
+        // go's HTTP client sends the `!` of the escaped spelling as `%21`.
+        // The path is decoded once, then held to go's own grammar, which
+        // has no `%`: a double encoding (`%2521`) decodes to `%21` and is
+        // refused, and an encoded letter (`%41`) decodes to one the
+        // grammar refuses. Upstream gets the decoded spelling, the one
+        // go.sum and the checksum database use.
+        let decoded = crate::kernel::gitsrc::percent_decode(raw);
+        let path = decoded.as_str();
+        let refuse = |why: &str| refused(raw, why);
         let sumdb_prefix = format!("/sumdb/{SUMDB_NAME}/");
         if let Some(rest) = path.strip_prefix(&sumdb_prefix) {
             let sumdb = endpoint(endpoints, SUMDB_HOST)?;
@@ -69,17 +86,31 @@ impl RegistryProtocol for GoProxy {
                     body: Vec::new(),
                 }));
             }
-            check_sumdb_path(rest).map_err(|why| refused(path, &why))?;
+            check_sumdb_path(rest).map_err(|why| refuse(&why))?;
             return Ok(Upstream::Fetch(sumdb.url(&format!("/{rest}"))?));
         }
         if path.starts_with("/sumdb/") {
-            return Err(refused(
-                path,
-                &format!("the only checksum database is {SUMDB_NAME}"),
-            ));
+            return Err(refuse(&format!(
+                "the only checksum database is {SUMDB_NAME}"
+            )));
         }
-        check_module_path(path).map_err(|why| refused(path, &why))?;
+        check_module_path(path).map_err(|why| refuse(&why))?;
         Ok(Upstream::Fetch(endpoint(endpoints, PROXY_HOST)?.url(path)?))
+    }
+
+    /// proxy.golang.org hands most module zips to Google Cloud Storage
+    /// (`https://storage.googleapis.com/proxy-golang-org-prod/...`, a signed
+    /// URL). That one hop is followed: go checks every zip against go.sum
+    /// and the checksum database, so the storage host is trusted with
+    /// nothing. Only the host is pinned, not the bucket, which Google may
+    /// rename; a hop anywhere else, or from sum.golang.org, is refused.
+    fn follows_redirect(&self, from: &Url, to: &Url) -> bool {
+        from.host_str() == Some(PROXY_HOST)
+            && to.scheme() == "https"
+            && to.host_str() == Some(STORAGE_HOST)
+            && to.port_or_known_default() == Some(443)
+            && to.username().is_empty()
+            && to.password().is_none()
     }
 
     fn classify(&self, url: &Url) -> RequestClass {
@@ -468,6 +499,86 @@ mod tests {
         ] {
             assert_eq!(fetch(path), format!("https://proxy.golang.org{path}"));
         }
+    }
+
+    /// go's HTTP client sends the `!` escape as `%21`: decoded once, it is
+    /// go's escaped spelling and goes upstream with a literal `!`, the
+    /// spelling go.sum, the checksum database, and `package_key` use.
+    #[test]
+    fn percent_encoded_bang_escapes_are_decoded_once() {
+        for (raw, upstream) in [
+            (
+                "/github.com/%21google%21cloud%21platform/opentelemetry-operations-go/@v/list",
+                "https://proxy.golang.org/github.com/!google!cloud!platform/opentelemetry-operations-go/@v/list",
+            ),
+            (
+                "/github.com/%21johannes%21kaufmann/html-to-markdown/@v/v1.6.0.zip",
+                "https://proxy.golang.org/github.com/!johannes!kaufmann/html-to-markdown/@v/v1.6.0.zip",
+            ),
+            (
+                "/github.com/%21burnt%21sushi/toml/@v/v1.4.0-%21r%21c.mod",
+                "https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/v1.4.0-!r!c.mod",
+            ),
+            (
+                "/sumdb/sum.golang.org/lookup/github.com/%21azure/azure-sdk-for-go@v68.0.0+incompatible",
+                "https://sum.golang.org/lookup/github.com/!azure/azure-sdk-for-go@v68.0.0+incompatible",
+            ),
+        ] {
+            assert_eq!(fetch(raw), upstream, "{raw}");
+        }
+        // The decoded lookup URL names the same module the lock's spelling
+        // escapes to, so its record number keys the version.
+        let lookup = Url::parse(&fetch(
+            "/sumdb/sum.golang.org/lookup/github.com/%21azure/azure-sdk-for-go@v68.0.0+incompatible",
+        ))
+        .unwrap();
+        assert_eq!(
+            lookup_target(&lookup),
+            Some(GO_PROXY.package_key("github.com/Azure/azure-sdk-for-go", "v68.0.0+incompatible"))
+        );
+        // One decoding only, and nothing outside the grammar survives it.
+        for (raw, needle) in [
+            ("/github.com/%2521google/x/@v/list", "escaped spelling"),
+            ("/github.com/%47oogle/x/@v/list", "escaped spelling"),
+            ("/github.com/x/@v/v1.0.0-%21r%43.mod", "escaped spelling"),
+            ("/github.com/%21/x/@v/list", "bad ! escape"),
+            ("/github.com/a%20b/@v/list", "escaped spelling"),
+            ("/github.com/x/@v/list%3fgo-get=1", "not list"),
+            ("/github.com/x/@v/v1.0.0%ff.zip", "escaped spelling"),
+            ("/%73umdb/sum.example.org/latest", "only checksum database"),
+        ] {
+            let error = refusal(raw);
+            assert!(error.contains(needle), "{raw}: {error}");
+            assert!(error.contains(raw), "names the path as sent: {error}");
+        }
+    }
+
+    /// proxy.golang.org's handoff of a module zip to Cloud Storage is the
+    /// one redirect the Go route follows off its own hosts.
+    #[test]
+    fn only_the_module_proxy_hands_off_to_cloud_storage() {
+        let url = |text: &str| Url::parse(text).unwrap();
+        let zip = url("https://proxy.golang.org/github.com/klauspost/compress/@v/v1.17.6.zip");
+        let storage = url(
+            "https://storage.googleapis.com/proxy-golang-org-prod/0900f5b99fe62352-github.com:klauspost:compress-v1.17.6.zip?Expires=1&GoogleAccessId=a&Signature=s",
+        );
+        assert!(GO_PROXY.follows_redirect(&zip, &storage));
+        let lookup = url("https://sum.golang.org/lookup/github.com/google/uuid@v1.6.0");
+        assert!(!GO_PROXY.follows_redirect(&lookup, &storage));
+        for to in [
+            "https://storage.googleapis.com.evil.example/x.zip",
+            "https://evil.example/x.zip",
+            "https://googleapis.com/x.zip",
+            "http://storage.googleapis.com/x.zip",
+            "https://storage.googleapis.com:8443/x.zip",
+            "https://user:pass@storage.googleapis.com/x.zip",
+            "https://sum.golang.org/latest",
+        ] {
+            assert!(!GO_PROXY.follows_redirect(&zip, &url(to)), "{to}");
+        }
+        // From the storage host onward: nothing (the kernel never asks,
+        // and the protocol says no anyway).
+        assert!(!GO_PROXY.follows_redirect(&storage, &storage));
     }
 
     #[test]

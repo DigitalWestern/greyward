@@ -497,6 +497,20 @@ pub trait RegistryProtocol: Send + Sync {
         false
     }
 
+    /// Whether a redirect from `from` (a URL on one of the route's
+    /// endpoints) to `to`, an origin the session's permitted set does not
+    /// name, is followed anyway: a registry that hands its downloads to a
+    /// storage host of its own (proxy.golang.org's module zips on
+    /// storage.googleapis.com). Say yes only where the tool checks the
+    /// bytes against digests it got elsewhere, so the storage host is
+    /// trusted with nothing. The kernel asks only for one hop off a route
+    /// endpoint, never for a hop from the storage host onward, and still
+    /// requires https without userinfo, the validating resolver, and no
+    /// credential across origins.
+    fn follows_redirect(&self, _from: &Url, _to: &Url) -> bool {
+        false
+    }
+
     /// When each package version the metadata `body`, fetched from `url`,
     /// describes was published: `(name, version, unix seconds)`, as the
     /// registry spells them ([`Self::package_key`] compares them). A body
@@ -661,6 +675,9 @@ impl RegistryProtocol for Fixed {
     }
     fn encoded_slash(&self) -> bool {
         self.0.encoded_slash()
+    }
+    fn follows_redirect(&self, from: &Url, to: &Url) -> bool {
+        self.0.follows_redirect(from, to)
     }
     fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
         self.0.published(url, body)
@@ -1154,6 +1171,9 @@ mod tests {
             fn encoded_slash(&self) -> bool {
                 true
             }
+            fn follows_redirect(&self, _from: &Url, to: &Url) -> bool {
+                to.path() == "/sentinel"
+            }
             fn published(&self, _url: &Url, _body: &[u8]) -> Vec<(String, String, i64)> {
                 vec![("n".into(), "1".into(), 7)]
             }
@@ -1203,6 +1223,9 @@ mod tests {
             b"rewritten"
         );
         assert!(wrapped.encoded_slash());
+        let sentinel = Url::parse("https://pypi.org/sentinel").unwrap();
+        assert!(wrapped.follows_redirect(&url, &sentinel));
+        assert!(!wrapped.follows_redirect(&sentinel, &url));
         assert_eq!(wrapped.published(&url, b""), SENTINEL.published(&url, b""));
         assert_eq!(
             wrapped.lookup(&endpoints, "n", "1"),

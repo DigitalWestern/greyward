@@ -467,8 +467,12 @@ impl State {
                     route.endpoint_for(&url).is_some()
                         && (resolved
                             || match route.resolve(&target) {
-                                Ok(Upstream::Fetch(mapped)) => mapped == bare,
-                                Ok(Upstream::Local(answer)) => answer.url == bare,
+                                Ok(Upstream::Fetch(mapped)) => {
+                                    super::routes::same_resource(&bare, &mapped)
+                                }
+                                Ok(Upstream::Local(answer)) => {
+                                    super::routes::same_resource(&bare, &answer.url)
+                                }
                                 Err(_) => false,
                             })
                 });

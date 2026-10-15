@@ -530,6 +530,8 @@ impl Exchange<'_> {
         let mut url = start.clone();
         let mut method = method.to_string();
         let mut hops = Vec::new();
+        // The last hop was a storage handoff (`storage_hop`).
+        let mut handed_off = false;
         for _ in 0..=MAX_REDIRECTS {
             // `extra` (a cached copy's validators) goes to the requested URL
             // only: another location's 304 would answer for a different
@@ -582,7 +584,17 @@ impl Exchange<'_> {
                     return Err((Failure::Redirect(why), hops));
                 }
             }
-            if !self.permitted.allows(&next) && !self.storage_hop(&url, &next) {
+            // The storage host answers with the download or not at all:
+            // whatever it redirects to, a route host included, is refused.
+            if handed_off {
+                let why = format!(
+                    "redirect to {} after the registry's storage handoff is not followed",
+                    next.origin().ascii_serialization()
+                );
+                return Err((Failure::Redirect(why), hops));
+            }
+            let storage = !self.permitted.allows(&next) && self.storage_hop(&url, &next);
+            if !self.permitted.allows(&next) && !storage {
                 let why = format!(
                     "redirect to {} is not a permitted endpoint",
                     next.origin().ascii_serialization()
@@ -592,11 +604,15 @@ impl Exchange<'_> {
             if response.status == 303 && method != "HEAD" {
                 method = "GET".into();
             }
-            if let Some(check) = self.hop {
+            // The handoff was decided here, for the route the request
+            // already answered to: the intercept's class check would judge
+            // the storage host as an unattested registry, which it is not.
+            if let Some(check) = self.hop.filter(|_| !storage) {
                 if let Err(why) = check(&next, &method) {
                     return Err((Failure::Redirect(why), hops));
                 }
             }
+            handed_off = storage;
             url = next;
         }
         let why = format!("more than {MAX_REDIRECTS} redirects");
@@ -605,10 +621,10 @@ impl Exchange<'_> {
 
     /// Whether the hop from `from` to `next`, which the permitted set does
     /// not name, is a registry's handoff to its own storage host
-    /// ([`super::routes::RegistryProtocol::follows_redirect`]): one hop, straight off one
-    /// of the route's endpoints, to https without userinfo. A hop from the
-    /// storage host onward has no route endpoint as its source, so it is
-    /// refused whatever the protocol says.
+    /// ([`super::routes::RegistryProtocol::follows_redirect`]): straight
+    /// off one of the route's endpoints, to https without userinfo. It is
+    /// the last hop: [`Self::fetch`] refuses any redirect after it, to a
+    /// permitted host too.
     fn storage_hop(&self, from: &Url, next: &Url) -> bool {
         next.scheme() == "https"
             && next.username().is_empty()
@@ -1578,9 +1594,11 @@ mod tests {
     }
 
     /// A protocol's storage handoff is one hop off a route endpoint: the
-    /// hop is followed without the endpoint's credential; a hop the
-    /// protocol does not name, a plain-http one, and any hop onward from
-    /// the storage host are refused before they are requested.
+    /// hop is followed without the endpoint's credential, and its signed
+    /// query is recorded redacted. A hop the protocol does not name, a
+    /// plain-http one, one with userinfo, and any redirect after the
+    /// handoff (to the storage host again, or back to a route endpoint)
+    /// are refused before they are requested.
     #[test]
     fn a_protocol_storage_handoff_is_one_hop_off_a_route_endpoint() {
         let harness = Harness::new("mirror-handoff");
@@ -1594,13 +1612,14 @@ mod tests {
         )
         .unwrap()];
         let (session, address) = harness.open(config);
+        let signed = "/meta/landed?Expires=1792116856&GoogleAccessId=signer%40example.iam&Signature=SECRETSIGNATURE";
         harness.upstream.set(
             "/meta/hop",
-            redirect(&format!("https://third.test:{port}/meta/landed")),
+            redirect(&format!("https://third.test:{port}{signed}")),
         );
         harness
             .upstream
-            .set("/meta/landed", Behavior::Reply(Reply::new(200, b"landed")));
+            .set(signed, Behavior::Reply(Reply::new(200, b"landed")));
         let answer = fetch(&address, "/meta/hop");
         assert_eq!(answer.status, 200, "{}", answer.text());
         assert_eq!(answer.body, b"landed");
@@ -1615,10 +1634,15 @@ mod tests {
             None,
             "no credential follows the handoff"
         );
+        assert_eq!(
+            harness.lookup.hosts(),
+            ["registry.test", "third.test"],
+            "the storage host is resolved and validated like any hop"
+        );
 
-        // `/meta/onward` hands off to the storage host, which redirects
-        // again (to a path the protocol would name): that second hop does
-        // not leave a route endpoint, so it is refused.
+        // After the handoff nothing is followed: `/meta/onward` lands on
+        // the storage host, which redirects to itself; `/meta/bounce`
+        // lands there and is sent back to the route endpoint.
         harness.upstream.set(
             "/meta/onward",
             redirect(&format!("https://third.test:{port}/meta/again")),
@@ -1628,6 +1652,34 @@ mod tests {
             redirect(&format!("https://third.test:{port}/meta/pkg.json")),
         );
         harness.upstream.set(
+            "/meta/bounce",
+            redirect(&format!("https://third.test:{port}/meta/back")),
+        );
+        harness.upstream.set(
+            "/meta/back",
+            redirect(&format!("https://registry.test:{port}/meta/home")),
+        );
+        harness.upstream.set(
+            "/meta/home",
+            redirect(&format!("https://third.test:{port}/meta/pkg.json")),
+        );
+        for path in ["/meta/onward", "/meta/bounce"] {
+            let refused = fetch(&address, path);
+            assert_eq!(refused.status, 403, "{path}: {}", refused.text());
+            assert!(
+                refused
+                    .text()
+                    .contains("after the registry's storage handoff"),
+                "{path}: {}",
+                refused.text()
+            );
+        }
+        assert_eq!(harness.upstream.hits("/meta/again"), 1);
+        assert_eq!(harness.upstream.hits("/meta/back"), 1);
+        assert_eq!(harness.upstream.hits("/meta/home"), 0);
+
+        // The kernel's own checks, whatever the protocol says.
+        harness.upstream.set(
             "/meta/unnamed",
             redirect(&format!("https://third.test:{port}/art/x.tgz")),
         );
@@ -1635,7 +1687,13 @@ mod tests {
             "/meta/plain",
             redirect(&format!("http://third.test:{port}/meta/pkg.json")),
         );
-        for path in ["/meta/onward", "/meta/unnamed", "/meta/plain"] {
+        harness.upstream.set(
+            "/meta/userinfo",
+            redirect(&format!(
+                "https://user:pass@third.test:{port}/meta/pkg.json"
+            )),
+        );
+        for path in ["/meta/unnamed", "/meta/plain", "/meta/userinfo"] {
             let refused = fetch(&address, path);
             assert_eq!(refused.status, 403, "{path}: {}", refused.text());
             assert!(
@@ -1644,10 +1702,23 @@ mod tests {
                 refused.text()
             );
         }
-        assert_eq!(harness.upstream.hits("/meta/again"), 1);
         assert_eq!(harness.upstream.hits("/meta/pkg.json"), 0);
         assert_eq!(harness.upstream.hits("/art/x.tgz"), 0);
-        session.finish();
+
+        // The signed query is a bearer credential until it expires: the
+        // ledger and the diagnostics hold it redacted.
+        let report = session.finish();
+        let entry = &entries_for(&report, &harness.upstream_url("/meta/hop"))[0];
+        let landed = entry.redirected_to.as_deref().unwrap();
+        assert!(landed.contains("Signature=REDACTED"), "{landed}");
+        assert!(landed.contains("GoogleAccessId=REDACTED"), "{landed}");
+        let ledger = format!("{:?}", report.ledger.entries().collect::<Vec<_>>());
+        let diagnostics = format!("{:?}", report.diagnostics);
+        for text in [&ledger, &diagnostics] {
+            assert!(!text.contains("SECRETSIGNATURE"), "{text}");
+            assert!(!text.contains("signer%40example"), "{text}");
+        }
+        assert!(diagnostics.contains("Signature=REDACTED"), "{diagnostics}");
     }
 
     #[test]

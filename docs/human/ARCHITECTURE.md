@@ -749,9 +749,9 @@ or `=` partial is its whole line (`24` is `>=24,<25`, only three
 components are exact), a zero-bearing X-range keeps every stated
 component (`24.0.x` is `>=24.0,<24.1`), and `>`, `<=`, `^`, `~` and
 hyphen ranges bound the stated line (`<=22` is `<23`, `1.2 - 2.3` is
-`>=1.2,<2.4`). The Node catalog holds every release of the LTS lines
-Node's release schedule lists as active, so an exact `.node-version` on
-one of them selects it. `SourcePolicy` is the typed endpoint policy every toolchain
+`>=1.2,<2.4`). The Node catalog holds every Node release from 16.0.0,
+the first with an arm64 macOS build, so an exact `.node-version` selects
+it. `SourcePolicy` is the typed endpoint policy every toolchain
 download checks (shipped `https://` defaults per publisher, credential references only,
 never a secret, and not part of lock validity; the defaults are data the
 kernel owns, so a new tailor's publisher is added there). A toolchain row's

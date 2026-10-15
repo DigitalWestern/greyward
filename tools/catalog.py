@@ -47,7 +47,6 @@ Standard library only. Offline tests: `python3 tools/test_catalog.py`.
 import argparse
 import base64
 import concurrent.futures
-import datetime
 import hashlib
 import json
 import os
@@ -65,7 +64,6 @@ REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 DARWIN = "aarch64-apple-darwin"
 LINUX = "x86_64-unknown-linux-gnu"
 PLATFORMS = (DARWIN, LINUX)
-TODAY = datetime.date.today()
 
 FILES = {
     "python": "src/kernel/provider/cpython.catalog.toml",
@@ -464,8 +462,12 @@ def generate_go(existing, report):
 # Node: nodejs.org's index, and each release's SHASUMS256.txt, whose
 # detached signature is checked against the nodejs/release-keys keyring and
 # must chain to a releaser pinned in tools/keys/node-releasers.txt.
-# Supported lines are the ones the nodejs/Release schedule has started and
-# not yet ended.
+# Every release nodejs.org still serves both tarballs for is shipped,
+# whether or not its line is still supported: a project pinned to an old
+# patch (`.nvmrc` 18.17.1) must get exactly that patch. index.json's
+# `files` list says which builds a release has, so releases without a
+# darwin-arm64 tarball (before 16.0.0) are named and skipped without
+# fetching their SHASUMS256.txt.
 
 
 SCRATCH = None
@@ -528,6 +530,10 @@ def node_shasums(version, keyring, pins):
     return {name: digest for digest, name in checksum_lines(f"node {version}: SHASUMS256.txt", text.decode())}
 
 
+# The index.json `files` names of the two tarballs a release must have.
+NODE_FILES = {"osx-arm64-tar", "linux-x64"}
+
+
 def node_release(version, sums):
     rows = []
     for platform, slug in ((DARWIN, "darwin-arm64"), (LINUX, "linux-x64")):
@@ -541,13 +547,17 @@ def node_release(version, sums):
 
 def generate_node(existing, report):
     index = fetch_json("https://nodejs.org/dist/index.json")
-    schedule = fetch_json("https://raw.githubusercontent.com/nodejs/Release/main/schedule.json")
-    lines = {
-        line[1:]
-        for line, span in schedule.items()
-        if datetime.date.fromisoformat(span["start"]) <= TODAY < datetime.date.fromisoformat(span["end"])
-    }
-    wanted = [r["version"][1:] for r in index if r["version"][1:].split(".")[0] in lines]
+    wanted, unbuilt = [], []
+    for r in index:
+        version = r["version"][1:]
+        if NODE_FILES <= set(r.get("files", [])):
+            wanted.append(version)
+        else:
+            unbuilt.append(version)
+    if unbuilt:
+        unbuilt.sort(key=version_key)
+        report.skip(f"{len(unbuilt)} node releases ({unbuilt[0]} to {unbuilt[-1]})",
+                    "index.json lists no darwin-arm64 or no linux-x64 tarball for them")
     keyring, pins = node_keyring(), node_fingerprints()
     versions = sorted({rel["components"][0]["version"] for rel in existing} | set(wanted), key=version_key)
     sums = dict(zip(versions, parallel(lambda v: node_shasums(v, keyring, pins), versions)))

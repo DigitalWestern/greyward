@@ -282,15 +282,14 @@ fn elixir_sync_sandboxed_build_and_run() {
         .cloned()
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
+    assert_git_dependency_survives_gc_for_an_offline_frozen_sync();
 }
 
 /// A mix.lock git dependency outlives `ward gc` while the project uses it:
 /// the deps object holds the checkout object, which holds the git source,
 /// so a frozen sync with the repository gone and no network finds all of
 /// it in the store.
-#[test]
-#[ignore]
-fn elixir_git_dependency_survives_gc_for_an_offline_frozen_sync() {
+fn assert_git_dependency_survives_gc_for_an_offline_frozen_sync() {
     let temp = TempDir::new("elixir-git-gc");
     let repo = temp.0.join("lib");
     std::fs::create_dir_all(&repo).unwrap();

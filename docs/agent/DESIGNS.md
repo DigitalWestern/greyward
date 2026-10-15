@@ -5655,6 +5655,9 @@ Independent downloads (a lock's wheels, npm tarballs, registry crates,
 Rust's components, uv beside CPython) now run on a pool of four threads
 (`fetch::fetch_each`, `FETCH_WORKERS`), with one shared progress line
 (`ui::Batch`). The tailors still run one after the other.
+An npm batch that allows multiple strongest SRI digests stays sequential:
+its cache lookup can reuse an earlier package's newly published candidate,
+so fetching it early could change the installed bytes for the same lock.
 
 ### 1. Store write concurrency: the critical section
 
@@ -5668,8 +5671,9 @@ process:
   this way.
 - **Cache publication** (`fetch::cache_or_download_narrated`). Each
   attempt streams into its own random `tmp/dl-<suffix>-<hex>` and is
-  published by rename; a second publisher of the same digest loses the
-  rename and drops its copy. Proven across threads by
+  published by rename. On Linux a second publisher of the same digest
+  atomically replaces the first file with the same verified bytes. Proven
+  across threads by
   `concurrent_downloads_of_one_digest_publish_one_entry`.
 - **Staging** (`Store::stage_with_activity`). Each stage is a fresh
   random directory under `tmp/`.
@@ -5696,20 +5700,28 @@ What is not safe for two threads today, and must be named before (a):
   and the strict-mode scopes (`policy/strict.rs`) are already
   thread-local, so each tailor thread would also need the sync's scopes
   installed on it.
+- **Signing.** The signing scope in `comforter` is thread-local too. The
+  current download workers never sign or publish closures, so they need
+  no key. Any future tailor worker that writes a closure must receive an
+  explicit snapshot of the caller's signing key.
 - **The project side.** Each tailor writes its own
   `.greyward/closures/<ecosystem>.json` and its own projection link
   (`.venv`, `node_modules`) through the held project descriptor, with
   `write_closure_with_project_lock` sequencing a projection switch and
   its envelope. Two ecosystems never write the same name, but they share
-  the project lock and the toolchain-input lock that
-  `sync_preflighted` holds for the whole run. The project-side critical
+  the project lock held by the command and the toolchain-input lock that
+  `sync_preflighted` holds for the whole run. Sharing the already-held
+  project lock descriptor does not serialize threads within that command.
+  The project-side critical
   section is therefore "projection switch plus closure envelope, per
   ecosystem, under the project lock", and it must stay one at a time.
 
-So the critical section for (a) is two spans, both already locked: the
+So the critical section for (a) is two spans: the
 store publication under `publish_lock`, and the projection plus closure
-write under the project lock. Everything before them (fetch, unpack,
-build in a stage) is per-thread already.
+write under the project lock. The second span needs explicit in-process
+serialization, such as a mutex or publication on the caller's thread.
+Fetch, unpack and build can use separate stages before these spans once
+their ambient state and subprocess handling have been addressed below.
 
 ### 2. Error attribution
 

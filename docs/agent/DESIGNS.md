@@ -214,8 +214,8 @@ provider.
 (`src/policy.rs`), which tightens through ancestors and never loosens silently:
 
 - The trusted-publisher set is **configuration**, expressed through shared
-  project/home/protected-machine policy loading. **The foundation PR owns
-  the protected loading prerequisite** (see "Order" below); later WP5 PRs
+  project/home/protected-machine policy loading. **Protected loading is
+  #757**, which lands before WP3 PR 1 (see "Order" below); later WP5 PRs
   extend it. It is not a constant in `src/*.rs`. The shipped upstream publishers are the *default
   contents* of that list, not a privileged category.
 - **Adding a publisher is an explicit, recorded configuration change at an
@@ -227,8 +227,8 @@ provider.
   verification exceptions.
 - **A project can never widen the set beyond what home or machine policy
   allows.** A company can pin the set to its own internal publisher and a
-  checked-out repo cannot add to it. The foundation PR owns unconditional
-  protected machine-policy loading; environment overrides cannot suppress it.
+  checked-out repo cannot add to it. #757 builds unconditional protected
+  machine-policy loading; environment overrides cannot suppress it.
 - **An invalid signature is a hard failure under every configuration.** Making
   the publisher list configurable must not create a spelling of "trust
   anything"; an empty or unparseable list fails closed.
@@ -446,8 +446,12 @@ signatures.
   foundation" is the foundation PR, and "WP3 owns the shared
   implementation" now reads "the foundation PR builds the shared
   implementation". WP5 still owns the ecosystem credential adapters and
-  enforcement coverage. §4 is left as written until the foundation PR
-  updates it.
+  enforcement coverage. The foundation PR built the typed endpoint and
+  credential configuration (`src/kernel/registries/`) with the
+  machine-declares, project-narrows rule. Unconditional protected loading
+  moved to its own issue, #757, which lands before WP3 PR 1; until then
+  the machine scope is still whatever `GREYWARD_POLICY` or `HOME`
+  selects. §4 now says the same.
 
 #### Key and credential policy (owner decision, 2026-10-03, #72)
 
@@ -869,7 +873,7 @@ run because the binaries are per-platform artifacts.
 `.greyward/policy.toml` and the machine-wide policy. Permissive stays the
 default; nothing is ever loosened silently.
 
-**Prerequisites.** WP1, WP2, the authenticated WP3 foundation, GC safety,
+**Prerequisites.** WP1, WP2, the foundation PR (§2 "Order"), GC safety,
 and the selected daily-driver WP4 milestones. Open-ended WP4 breadth (for
 example Yarn classic kept as a refusal) is not an impossible completion gate.
 WP3 has already delivered mandatory source-policy loading. Remaining company
@@ -881,30 +885,731 @@ must be a daily driver first.
   `src/policy.rs:42`) and strict rejects even `built_from_source`. Add
   name/version allow and deny lists, with a defined story for what the user
   sees when each fires.
-- **Protected machine-wide policy — foundation delivered by WP3 PR 1.**
+- **Protected machine-wide policy (#757).**
   The current `GREYWARD_POLICY` override can replace home-policy selection
-  (`policy::load`); WP3 must correct the source/trust path before activation.
+  (`policy::load`); #757 corrects the source/trust path before WP3 PR 1.
   WP5 extends the same unconditional loader to package/category rules and
   adds tests proving neither project nor environment can weaken them.
 - **Enforcement must cover every door:** delegated planners (uv/npm/cargo/go/
   bundler/mix run unsandboxed with network), toolchain acquisition, cache
   hits, `run`, and `x`. State in `docs/human/ARCHITECTURE.md` which doors are covered and
   which are not.
-- **Private registry configuration and authentication — before any allowlist
-  claim.** **Design this jointly with WP3's trusted-publisher list** (owner
-  direction, 2026-09-09). WP3 owns the shared implementation; WP5 extends it
-  with ecosystem-specific credentials while keeping endpoint permission and
-  publisher authentication separate. Python forces public PyPI (`--index-url https://pypi.org/simple` with the
-  user's index environment removed, `src/main.rs:843-850`) and Go forces the
-  public proxy while clearing private-module settings (`GOPRIVATE`/`GOFLAGS`/
-  `GONOSUMDB` blanked at `src/golang.rs:190-193`, `GOPROXY` pinned at
-  `src/golang.rs:198-207`).
-  Cover delegates, redirects, Git sources, and cached decisions.
+- **Private registry configuration and authentication.** Designed below,
+  "Private registries (#405)". It builds the shared source configuration
+  WP3 reuses (owner direction 2026-10-14: this goes first, ahead of #404).
 - **Age and license rules only once package records carry publication dates
   and licenses.** They carry neither today (`types::LockedPackage`, `src/types.rs:46`;
   `npm::NpmPackage`, `src/npm.rs:217`). Define the metadata source and the missing-data
   behaviour first.
 - **Shared store / binary cache across machines: only on real demand.**
+
+### Private registries (#405)
+
+Designed 2026-10-14, revised after Muse review round 1 (fourteen
+findings, all taken; "Review round 1" at the end of this subsection).
+Nothing here is built yet. The code facts this design stands on were read
+from the tree on that date: the proxy already carries a per-origin
+credential slot (`resolve/routes.rs` `Endpoint`, attached in
+`resolve/mirror.rs` `upstream_headers`, hashed into the metadata cache
+key) that only tests can fill; the toolchain source policy
+(`kernel/toolchain/source.rs`) has a `CredentialRef` that no shipped
+endpoint names and path-prefix endpoint matching (`Endpoint::covers`);
+everything else assumes the public registries.
+
+#### In plain words
+
+A company often runs one server (Artifactory, Nexus, Cloudsmith,
+CodeArtifact, GitHub Packages) that every package download must go
+through. Today ward only talks to the public registries. This design lets
+the person who owns a machine's policy file say "Python packages come
+from this server, log in with this token", and ward then uses that server
+for every step: the resolver in its sandbox, ward's own downloads at sync,
+the `ward add` existence check, `ward x`. The token never reaches the
+resolver, a lock, a closure or a log. Once a registry list is set, a
+package from anywhere else is an error, never a quiet fallback to the
+public registry. Each closure records which registry served each package,
+so `ward audit` can prove it.
+
+#### The three checks stay separate
+
+1. **Endpoint permission**: may ward connect to this URL for this
+   ecosystem? Answered by the registry list (`[[registry]]` and
+   `[sources]` below).
+2. **Authentication to the endpoint**: which `Authorization` header ward
+   sends to that URL. Answered by `[credentials]` and the registry's
+   `root`. A successful login proves nothing about who published a
+   package.
+3. **Publisher trust**: who vouched for the bytes. Package integrity stays
+   what it is today (lock hashes, registry-published digests checked by
+   the proxy, Go's checksum database, Hex's registry signature). The one
+   new trust input is a Hex registry's public key (Elixir, below), held in
+   the same machine-scope policy as `[signing] trusted`. WP3 (§2) adds
+   signed toolchain catalogs on the same configuration.
+
+#### Configuration
+
+Three new tables in the policy file format (`src/kernel/policy.rs`
+`Policy`, which is `deny_unknown_fields`: a ward older than this change
+refuses a file that uses them and names the unknown field, which is the
+fail-closed answer).
+
+```toml
+[credentials.corp]
+env = "CORP_REGISTRY_TOKEN"   # exactly one of env, file, netrc
+scheme = "bearer"             # bearer (default for env/file) | basic | raw
+# username = "ci-bot"         # basic with env/file: the secret is the password
+
+[[registry]]
+name = "corp-pypi"            # [a-z0-9-], unique, never "public"
+ecosystem = "python"          # python node go cargo ruby dotnet elixir
+url = "https://nexus.corp.example/repository/pypi-proxy/simple/"
+credential = "corp"           # optional: a [credentials] name
+root = "https://nexus.corp.example/repository/pypi-proxy/"
+                              # optional, default url: a prefix of url;
+                              # every URL of this registry on its origin
+                              # lives under it, and only it gets the credential
+files = ["https://cdn.corp.example/"]  # optional: download-only origins
+network = "private"           # optional, default "public"
+ca = "/etc/pki/corp-root.pem" # optional extra trust root
+# scopes = ["@corp"]          # node only
+# mirror_of = "public"        # cargo, ruby, elixir only
+# nosumdb = ["corp.example/*"]  # go only
+# sumdb = "registry"          # go only: "direct" (default) | "registry"
+# hex_public_key = "/etc/greyward/corp-hex.pem"  # elixir only
+
+[sources]
+python = ["corp-pypi"]        # ordered; "public" names the shipped registry
+node = ["corp-npm", "github-npm"]
+```
+
+**The `url` of each ecosystem** (validated at load; `https://` always, no
+userinfo, query or fragment; host lowercased, default port dropped):
+
+| ecosystem | `url` is | example |
+|---|---|---|
+| python | the simple index base, ends in `/` | `.../api/pypi/pypi/simple/` |
+| node | the registry base, ends in `/` | `https://npm.pkg.github.com/` |
+| go | the GOPROXY base, ends in `/` | `.../api/go/go/` |
+| cargo | the sparse index, written `sparse+https://...`, ends in `/`; git indexes refused | `sparse+https://.../api/cargo/cargo/index/` |
+| ruby | the gem source, ends in `/` | `https://gems.corp.example/` |
+| dotnet | the NuGet v3 service index, kept as written | `.../api/nuget/v3/nuget/index.json` |
+| elixir | the Hex repository base, ends in `/` | `.../api/hex/hex/` |
+
+**Who may say what.** The machine scope (today the home policy
+`~/.greyward/policy.toml`, or the file `GREYWARD_POLICY` names: the same
+scope that alone may introduce `[signing] trusted`) declares
+`[credentials]`, `[[registry]]` and `[sources]`.
+
+- **The machine list.** For each ecosystem, the machine scope's
+  `[sources].<eco>` if present; otherwise `["public"]`. Declaring a
+  `[[registry]]` without listing it in `[sources]` uses nothing.
+- **Narrowing.** A project policy or an audit `--policy` file may carry
+  only `[sources]`. Its list for an ecosystem must be a subset of the
+  machine list, `"public"` included: any name outside the machine list is
+  a load error, never silently dropped or added. The effective list is
+  the machine list restricted to the names the narrowing layer gives,
+  machine order kept. A lower layer that declares `[[registry]]` or
+  `[credentials]` is a load error:
+
+```
+error: .greyward/policy.toml declares [[registry]] corp-pypi; registries and credentials are declared only in machine policy
+fix: move the table to ~/.greyward/policy.toml (or the file GREYWARD_POLICY names), and keep only [sources] here
+```
+
+- **Enforced ecosystems.** An ecosystem that no layer names in
+  `[sources]` behaves exactly as today: public registry only, an index or
+  host outside it recorded as `unattested-index`, which a policy may deny.
+  A test pins that tool flags, routes and the permitted set are unchanged.
+  An ecosystem that any layer names is **enforced**: its effective list is
+  the only set of registries ward uses for it, and anything else is a hard
+  error under every policy, not a deniable kind. An enforced ecosystem
+  whose effective list is empty fails every command that needs a
+  registry, naming the layers that emptied it.
+- **Ecosystems not built yet.** Each PR accepts `[[registry]]` and a
+  non-default `[sources]` list only for the ecosystems it wires. Any other
+  ecosystem is a load error ("private registries for go are not supported
+  by this ward; fix: remove go from [sources], or upgrade"), so no
+  ecosystem is ever enforced on paper while still using the public
+  registry. The full schema (every field above) lands in PR A, so PR B
+  adds wiring, not grammar.
+
+A protected system-wide policy file that the environment cannot replace
+is #757, which lands before WP3 PR 1. Until it lands, `GREYWARD_POLICY` can still
+replace the machine scope, as it can for `[signing]`; the LIMITATIONS row
+for that gap covers registries too.
+
+**A registry URL is not a secret.** It is written into locks the tools
+own (`uv.lock` sources, `package-lock.json` `resolved`), which are
+committed, and ward records it in closures, ledgers, plans and SBOMs as
+it does any public registry URL. Some services can put an access token
+in the URL path (Gemfury, Cloudsmith entitlement URLs); each of them also
+accepts the token as a basic or bearer credential, which is the only
+supported form. CLI.md says so, and the policy reference repeats it next
+to `url`. Ward cannot detect an arbitrary token in a path, but it does
+catch the one case it can: when a credential resolves, ward refuses it
+if its secret appears anywhere in its registry's `url`, `root` or
+`files` (the operator pasted an entitlement URL and configured the same
+token), naming the registry and never the value.
+
+**Validation at load** (pure, no I/O): the URL rules above for `url`,
+`root` (same origin as `url`, a path prefix of it at a segment
+boundary) and `files` (origins only: `https://host[:port]/`, each
+listed by at most one registry, so a download from it belongs to exactly
+one registry); names unique; `credential` names a declared credential; field-per-ecosystem
+rules (`scopes` node only, each `@name`, and a scope listed by at most one
+registry; `mirror_of` cargo, ruby, elixir; `nosumdb`, `sumdb` go;
+`hex_public_key` elixir); `ca` and `file` absolute paths. Two registries
+whose roots nest (one a prefix of the other) are allowed: the longest
+root that covers a URL wins. Two registries with the same root are
+refused unless their credential, `network` and `ca` are all identical. A credential no registry names is
+allowed (WP3 will reference credentials from toolchain endpoints).
+`Policy` holds only references; resolved secrets live elsewhere (below)
+and never enter `Policy`, which `ward audit --json` serializes.
+
+#### Credentials
+
+- **Sources.** `env = "NAME"`: the variable's value. `file = "/abs/path"`:
+  the contents with one trailing newline removed. `netrc = true`: the
+  `machine <host>` entry (port ignored, the `default` entry refused) of
+  `$NETRC`, or of `~/.netrc` through the shared home resolver; its `login`
+  and `password` give a basic credential. A `file` or netrc file must be a
+  regular file opened without following a symlink, owned by the current
+  user, with no group or other permission bits, or ward refuses it naming
+  the mode. Short-lived tokens (CodeArtifact, cloud access tokens) are
+  minted into a variable before ward runs, as their providers document;
+  a command source that mints them is a follow-up.
+- **Schemes.** `bearer` sends `Authorization: Bearer <secret>`. `basic`
+  sends `Authorization: Basic base64(username:secret)`. `raw` sends
+  `Authorization: <secret>` (Cargo registries expect the token verbatim).
+  The value must be a valid header value (`resolve/http.rs`
+  `is_field_value`) or it is refused without echoing it.
+- **When it is read: lazily, per process.** An endpoint holds a reference
+  and a once-cell, resolved the first time a request inside its root is
+  actually sent upstream. A cached or offline sync, or an unused scoped
+  registry, never asks for it. A missing variable, an empty value or an
+  unreadable file fails that request with an error naming the registry,
+  the credential and the source, never the value, and a fix line. The
+  once-cell keeps the failure too: every later request in the process
+  that needs the credential fails the same way, without re-reading. In
+  the proxy that failure is a recorded hard failure of the door, its own
+  class, never a transport failure, so it can never be answered from
+  last-good cached metadata. Ward never falls back to an
+  anonymous request when a credential is configured, and never reads a
+  credential the policy does not name: not `~/.npmrc`, `pip.conf`,
+  `~/.cargo/credentials.toml`, `~/.config/NuGet`, keyrings, or the tool's
+  own environment.
+- **Where it goes.** Only into the `Authorization` header of requests ward
+  makes to URLs inside the registry's `root` (path prefix on the
+  `url` origin): the proxy's upstream requests and ward's own fetches.
+  Never to `files` origins, never to another path of the same host,
+  never across a redirect that leaves the scope, never to the confined
+  tool (its environment is built from empty, and the proxy strips any
+  `Authorization` the tool sends), and never into a lock, closure,
+  receipt, ledger, SBOM, error, `-v` line or audit JSON. The resolved
+  value lives in a type whose `Debug` prints `…`.
+- **The metadata cache key.** Today it includes a hash of the (origin,
+  credential value) pairs, which would force a credential read on every
+  cache lookup, offline included. It becomes a hash of the root and the
+  whole credential reference: the credential's name, its source spelling
+  (`env:NAME`, `file:/path`, `netrc:<resolved netrc path>:host`), its
+  scheme and username, plus the registry's `ca` digest and `network`
+  mode. A lookup needs no secret, and a response fetched under one
+  configuration is never served under another. **Accepted risk:** two
+  different secrets behind the same reference (a variable whose value
+  changes between runs, such as a per-repository CI token on a shared
+  runner store) share cached metadata. Only metadata is shared, never
+  artifacts (served only as verified bytes), and only within one OS
+  user's store; a fresh fetch still sends the current secret. CI runners
+  that serve several tenants under one OS user should give each job its
+  own store, which LIMITATIONS says.
+
+#### Network and TLS
+
+- **https only**, as today. A registry served over plain HTTP is fronted
+  by a TLS terminator; the real-server check below does exactly that.
+- **`network = "private"`** lets the registry's `url` origin and `files`
+  origins resolve to private addresses: RFC 1918, `100.64.0.0/10`,
+  `fc00::/7`, and loopback. A DNS answer is accepted only when every
+  address in it is allowed: all public, or all inside those ranges;
+  a mixed answer is refused, as any refused address refuses the lookup
+  today (`resolve/ssrf.rs`). Still refused under every setting: link-local
+  (`169.254.0.0/16`, `fe80::/10`), multicast, unspecified, broadcast,
+  every IPv4-embedding IPv6 form `resolve/iana.rs` refuses (mapped,
+  NAT64, 6to4, Teredo), and the known metadata addresses inside the
+  allowed ranges (`100.100.100.200`, `fd00:ec2::254`). Machine scope
+  only; every other origin keeps the globally-routable-only rule.
+- **`ca`** adds the PEM certificates in that file to the trust roots for
+  this registry's origins only. Read lazily like a credential; an
+  unreadable or certificate-less file is an error. Other origins keep the
+  built-in webpki roots. Client certificates (mTLS) are a follow-up.
+- **Forward proxies.** The resolution proxy connects upstream directly,
+  and ward's fetches to a configured registry do too: an `https_proxy` in
+  the environment is not used for them. A registry reachable only through
+  a company forward proxy is a follow-up and a LIMITATIONS row. The
+  public path keeps today's `https_proxy` behaviour.
+
+**One transport for both paths.** The proxy today holds one process-wide
+`PinnedClient` with one root store and one validating resolver
+(`resolve/proxy.rs`). It becomes a small cache of clients keyed by
+(extra roots digest, network mode), each immutable once built: the key
+fully determines the client, so sessions under different machine
+policies in one process can share entries safely, and no allowance is
+ever global or mutable. Each upstream request picks its client from the
+endpoint that serves it, and only a configured registry's endpoints (its
+`url` origin and its `files` origins) ever select a private-mode or
+extra-root client. Public routes, git fetches and unattested intercepted
+hosts always use the public client, in every session, so a git host that
+resolves to a private address stays refused next to a private registry. Ward's own registry fetches use the same
+`PinnedClient` and the same selection (SSRF-validated DNS, pinned
+addresses, no automatic redirects), not the plain ureq agent of
+`open_url`/`open_authorized`.
+
+#### The proxy
+
+- **One `covers(root, url)` test, used everywhere.** Routing, the uv and
+  npm sync checks, ward's fetches, every redirect hop, closure
+  attribution and the pnpm packument-derived tarball all ask the same
+  question with the same function (generalized from
+  `toolchain/source.rs` `Endpoint::covers`, moved to a shared module). It
+  has no per-ecosystem exception, and it runs on the **raw spelling** of
+  the URL as the tool, the lock or the redirect gave it, before any
+  parsing, because the `url` crate removes dot segments and turns `\`
+  into `/` while parsing:
+  - same scheme, host and port as the root (compared after parsing);
+  - the raw path starts with the root's raw path at a segment boundary;
+  - the raw path is split into pieces at every `/` **and** every `%2f` or
+    `%2F`, and no piece is empty (after the first), `.`, `..`, or holds a
+    backslash or a percent-escape that decodes to `\`, `.` or `%`
+    (`%5c`, `%2e`, `%25`, any case);
+  - the URL ward then sends is the parsed and re-serialized form, and it
+    must have the same path as the raw spelling, or the request is
+    refused.
+
+  `%2f` is therefore allowed anywhere but is a separator for the dot and
+  empty checks, so npm's `@scope%2fname` passes and
+  `/root/@s%2f..%2f..%2fother/x.tgz` does not, whether or not the server
+  decodes `%2f`. Roots and `files` entries are validated with the same
+  pieces rule at load. A `files` origin covers every path on its origin
+  under the same rules.
+- **Endpoints carry a root and are matched by longest prefix.**
+  `Endpoint` gains a constructor from a configured registry (the
+  compiled-in check stays for public hosts), carrying its base URL, its
+  root with the lazy credential, its network mode and its trust roots.
+  Route choice for an intercepted request is the longest root that
+  covers the URL, across every route of the session; a `files` origin is
+  chosen only when no root covers the URL. Load refuses a `files` origin
+  that is the `url` origin of any registry, so a root and a `files`
+  origin never compete on one origin. Two npm registries
+  on one Artifactory host, or an index and its files on one origin,
+  route correctly.
+- **Protocols become instances.** `Route.protocol` is `&'static dyn
+  RegistryProtocol` with a fixed `route_id`, and each protocol finds its
+  endpoint by a host constant. The registry protocols become values
+  carrying their base and an instance route id (`pypi`, and
+  `pypi-<name>` for a configured one), held as `Arc<dyn
+  RegistryProtocol>`. Several routes of one protocol may share a session.
+- **Metadata by grammar, artifacts by claim, where the URL is the
+  registry's choice.** Real registries choose their own artifact URLs:
+  Nexus simple pages link `../../packages/...` outside `/simple/`, GitHub
+  Packages npm tarballs are
+  `https://npm.pkg.github.com/download/@scope/name/<version>/<sha>` with
+  a 302 to a blob host, CodeArtifact links pre-signed S3 URLs with a
+  query, and Cargo's `dl` template is arbitrary. So for a configured
+  route of those protocols the protocol's grammar decides **metadata
+  only**, relative to the base. Every other URL the route covers (under
+  its root or on its `files` origins) is a **candidate artifact**, whatever
+  its shape, query included, and is classified as an artifact, never as
+  metadata. Before any upstream request for it, the session looks it up
+  among the claims **that same route's** metadata made in this session;
+  without one the request is refused, so an unclaimed URL is never fetched
+  at all. **Mapping:** in the intercepted (TLS) dialect a candidate
+  artifact maps onto the tunnel's own URL unchanged (the request already
+  names its host), and the endpoint, so the credential and the client,
+  is the one whose root or `files` origin covers that URL; the protocol's
+  `upstream()` is not asked to invent a host from a path. In the mirror
+  dialect a path maps onto the registry's `url` origin under its root;
+  `files` origins are reached there only by redirect. Each claim records the
+  route that made it (today's claim map is session-wide and keyed by URL
+  alone, `resolve/session.rs`; it gains the route id). A URL claimed only
+  by another route is refused, so one registry's metadata can never
+  steer a request, or another registry's credential, to a URL it does not
+  own. A claim carries the digest the metadata gave; the bytes must match
+  it, as today. A claim weaker than sha256 (npm's sha1-only `shasum` on
+  old versions) is still a claim and is recorded as today's deniable
+  `weak-integrity`. A listed file with **no** digest is not a claim: in an
+  enforced ecosystem fetching it is refused naming the file and the
+  registry; a default ecosystem keeps today's behavior (served and
+  recorded as `weak-integrity`). Per protocol:
+
+  | protocol | metadata (grammar) | artifact |
+  |---|---|---|
+  | Python simple | `<url><project>/` | by claim: the file href with its `#sha256=` fragment or PEP 691 `hashes`; its `<href>.metadata` (PEP 658) with the `data-core-metadata` / `core-metadata` hash |
+  | npm | `<url><name>`, `<url>@scope%2fname` (either case), `<url>@scope/name` (pnpm's spelling) | by claim: `dist.tarball` with `dist.integrity` (sha512), or `dist.shasum` alone as a weak claim |
+  | Cargo sparse (PR B) | `config.json`, index files under `url` | by claim: the `dl` expansion with the index `cksum`; the `dl` template itself must expand under the root or on a `files` origin, checked when `config.json` is served |
+  | rubygems compact (PR B) | `versions`, `info/<gem>` | by claim: `gems/<name>-<ver>.gem` with the `/info` checksum |
+  | Go (PR B) | grammar, as today, relative to `url` | grammar: `@v/<ver>.zip`, `.mod`; checked by go against `go.sum` and the checksum database, as today |
+  | Hex (PR B) | grammar, as today, relative to `url` | grammar: `tarballs/<name>-<ver>.tar`; checked against the signed registry and `mix.lock`, as today |
+  | NuGet (PR B) | the service index and the resources it names, each resource base checked to be under the root or on a `files` origin when the service index is served | grammar under the service index's `PackageBaseAddress`; checked by restore against `packages.lock.json`, as today |
+
+  Public routes keep today's grammar for both.
+- **`files` origins belong to their route.** They are artifact-only
+  endpoints of the one registry that lists them: reachable as a first hop
+  only for a URL that registry's own metadata claimed, and as a redirect target only from that
+  registry's own requests. Redirect permission is per route, not per
+  door, so a `files` origin is never reachable from another route, a
+  public registry or a git fetch. A registry whose download hosts are
+  not stable enough to list is unsupported, and the error says so.
+- **Redirects stay with the route that started them.** Followed by the
+  proxy as today, at most ten. Every hop is judged against the route of
+  the first request only: it must be under that registry's root or on
+  one of its `files` origins, never another route's root, even on the
+  same host. The credential is that registry's own, sent only while the
+  hop is still under its root; the client is chosen among that
+  registry's own endpoints. So an artifact of registry A redirecting into
+  registry B's root is refused, and B's credential is never sent on A's
+  behalf.
+- **Enforced ecosystems refuse unlisted hosts hard.** In an enforced
+  ecosystem an intercepted request to a non-git host that no route serves
+  is refused (403, a hard failure of the door) with the registry list in
+  the message, instead of being forwarded as `unattested-index`.
+- **What portable output records.** A configured route's URLs are kept
+  whole in the ledger, like a public one, so the portable ledger stays a
+  pure function of the fetches (§6 "The ledger"). Query values stay
+  `REDACTED` as today. A registry URL is not a secret (Configuration,
+  above).
+
+#### Ward's own fetches
+
+`kernel::fetch` gains one registry entry point on the shared transport
+above: given the ecosystem's effective sources, it finds the registry
+whose root or `files` origin covers the URL (longest root wins),
+attaches the credential when the URL is under its root, uses that
+endpoint's client, and follows redirects itself under the same rule as
+the proxy: at most ten, https only, every hop bound to the first
+registry's root and `files` origins, its credential only while under its
+root. In
+an enforced ecosystem a URL no listed registry covers is an error before
+any request; in a default ecosystem a public URL takes today's path
+unchanged. Error text redacts query values. URLs with userinfo are refused for Python
+as they already are for npm. Every new verified-download call site is
+listed in `tests/architecture.rs` `DIGEST_SOURCES`.
+
+#### Per ecosystem
+
+The **default registry** of an ecosystem is the first entry of its
+effective list (for node, the first without `scopes`).
+
+**Python (PR A).**
+- uv gets the default registry's URL for `--index-url` /
+  `--default-index` (`tailors/python/door.rs`). One index, as #495
+  requires: uv never searches a second one. Other listed Python
+  registries are accepted only as sources a lock already names, which
+  covers moving a project from one registry to another.
+- `uv.lock`: each package's `source = { registry = ... }` must equal a
+  listed registry's `url` after URL normalization (parse, lowercase host,
+  drop the default port, compare decoded path segments, ignore one
+  trailing slash), and its file URLs must be under that registry's root
+  or on its `files` origins. In an enforced ecosystem anything else is an
+  error naming the package, the registry and the list; in a default one
+  it is today's `unattested-index`. The same holds for `--index-url`
+  lines in `requirements*.txt`, `[[tool.uv.index]]` and Poetry sources: a
+  listed registry is approved and recorded as no exception.
+- `requirements.lock.txt`, Poetry, build requirements and `ward x` read
+  candidates from `https://pypi.org/pypi/<name>/<ver>/json`, which
+  Artifactory and Nexus do not serve. For a configured registry they read
+  the simple API instead: `<url><normalized-name>/` with `Accept:
+  application/vnd.pypi.simple.v1+json, text/html;q=0.1` (PEP 691 JSON,
+  else the PEP 503 HTML page, relative hrefs resolved against the page
+  URL), and keep the files whose sha256 matches a pin, as the JSON path
+  does. The public path keeps the JSON API, so nothing changes for
+  default users.
+- The pinned build bootstrap wheels (pip, setuptools, wheel in
+  `tailors/python/build.rs` `BUILD_TOOLCHAIN`) are on
+  `files.pythonhosted.org`. When `public` is not in the effective Python
+  list they are fetched by file name from the default registry's simple
+  page and checked against the same pinned sha256, so every build's
+  identity is unchanged.
+- `ward add`'s existence check reads the default registry's simple page
+  (200 or 404); the newest version is the PEP 691 `versions` list when
+  present, else derived from the file names.
+
+**npm and pnpm (PR A).**
+- `--registry=<default node registry>` and, for each listed node
+  registry with `scopes`, `--@scope:registry=<url>` (pnpm:
+  `--config.@scope:registry=`), both on the command line so they beat the
+  project's `.npmrc`. In an enforced ecosystem a project `.npmrc` scoped
+  registry that is not listed fails the door before the tool starts;
+  otherwise it stays today's `unattested-index`.
+- Sync: each `resolved` URL in the lock must be covered by a listed
+  registry's root or one of its `files` origins (`covers`, above), which
+  names exactly one registry. Another repository on the same host is not
+  the registry, and a scoped package must come from its scope's registry
+  when one is listed.
+- pnpm's lock import (`lock_import/mod.rs` `package_url`) builds a
+  tarball URL in npmjs's shape when the lock names none. For a configured
+  registry that shape is a guess (GitHub Packages serves
+  `/download/...`), so ward reads the version's packument from the
+  package's registry (its scope's, else the default) at sync, takes
+  `dist.tarball` from it, and holds that URL to the same checks as a lock
+  `resolved` URL before fetching: covered by that same registry's root
+  or `files` origins, and the scope's registry for a scoped package. The
+  bytes are still checked against the lock's integrity. Ward keeps no
+  packument cache for this: a package already in the store needs no URL,
+  and an offline sync that must download one fails naming the package
+  and the fix (sync once online). The public registry keeps today's
+  constructed URL.
+- `ward add`'s check reads `<registry><name>` from the scope's registry.
+
+**Go (PR B).** One Go registry: the route's upstream is its `url`
+(`GOPROXY` still points at the proxy route, with no `direct`). `nosumdb`
+patterns become `GONOSUMDB`, exactly those, never `GOPRIVATE` (which also
+means `direct`) and never from the environment. Every other module is
+still checked against `sum.golang.org`, which the proxy reaches directly,
+or through `<url>sumdb/sum.golang.org/` when `sumdb = "registry"` (for
+networks that cannot reach sum.golang.org; go verifies the note
+signature either way). `go.sum` keeps verifying everything it lists.
+
+**Elixir (PR B).** A registry with `mirror_of = "public"` replaces
+`repo.hex.pm` as the `hexpm` repository: the route's upstream is its
+`url` and sync downloads tarballs from it. Hex verifies the registry
+signature. A static mirror that serves hexpm's signed bytes unchanged
+needs nothing more. Artifactory re-signs Hex registry content with an
+operator key, so its registries set `hex_public_key`, and ward writes it
+into the run's private Hex home as the `hexpm` repository's public key;
+the project cannot change it, because the Hex home is ward's scratch.
+Locks are unchanged (`hexpm`). Nexus has no Hex format. Hex organizations
+and other repositories stay refused (follow-up, with #638).
+
+**Ruby (PR B).** A registry with `mirror_of = "public"` becomes
+`BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/` (the lock keeps
+`remote: https://rubygems.org/`). A registry without it is a source in
+its own right: a Gemfile `source "<url>"` matching it gets a mirror
+variable of its own, and the Ruby helper's source allowlist is the
+listed URLs. Digests come from the lock's CHECKSUMS or the compact
+index's `/info/<gem>` checksums, never the rubygems.org v2 API.
+
+**Cargo (PR B).** `mirror_of = "public"`: crates-io is replaced by the
+registry's sparse index in ward's forced config and in sync's vendor
+config (the lock keeps the crates.io source). Otherwise an alternative
+registry: `Cargo.lock` records `sparse+<url>`, which must match a listed
+registry. When the proxy serves the index's `config.json` it parses
+`dl` and refuses a template that does not expand under the registry's
+root or on one of its `files` origins (`covers`); claims and sync's download URLs
+come from that template, not `static.crates.io`. A download origin that
+needs a credential must therefore be inside the registry's root; a
+separately authenticated download host is unsupported (follow-up).
+Cargo refuses an `auth-required` registry without its own token, so the
+proxy removes `auth-required` from the `config.json` it serves (the ledger
+keeps the upstream bytes) and authenticates upstream itself; cargo never
+holds the token.
+
+**.NET (PR B).** One feed: the default registry's service index (`url`).
+The service-index rewrite (`tailors/dotnet/registry.rs`) maps resources
+under the feed's root or on its `files` origins (any other resource is
+dropped, as today's rewrite drops non-nuget.org ones), not only
+`https://api.nuget.org/`; sync reads the
+`PackageBaseAddress` resource to build `.nupkg` URLs, because the lock
+records no source. Several feeds need `packageSourceMapping`, a follow-up
+(#641).
+
+#### Receipt and audit
+
+- Each closure gains a new, always-present per-package field `registry`:
+  `{ "name": "<registry name, or public>", "url": "<normalized url>" }`,
+  the registry that served the package, attributed at sync from the URL
+  ward downloaded (under its root, or on its `files` origin). Never a
+  credential. Packages that come from no registry (git, direct URL, local
+  path, workspace) have none and are judged by the existing kinds
+  (`git-dependency`, `unattested-index`, ...). Python's `index` field
+  stays as it is; `registry` is separate, because `index` is absent for
+  the default index whatever that is. Go, Cargo, Ruby, .NET and Elixir
+  closures gain the field in PR B.
+- `ward audit` (no store, no network) checks every closure of an enforced
+  ecosystem: each registry package's `registry.name` must be in the
+  effective list (machine policy plus any `--policy` narrowing) and its
+  `url` must equal that registry's configured `url` after normalization.
+  So a repository on the same host, or another machine's registry reusing
+  the name for a different URL, fails. Anything else fails the closure
+  with the verdict reason `unapproved-registry`, naming the package and
+  the registry. A closure of an enforced ecosystem with a registry
+  package that lacks the field is `outdated` (sync again). A default
+  ecosystem is not checked, so every existing closure stays valid. Names
+  are the machine policy's, so a company deploys one policy to its
+  developers and its CI; a CI policy with other names or URLs fails
+  audit visibly, never silently.
+- **Only as strong as the signature.** Audit already judges unsigned
+  closures on their contents when no `[signing]` table is configured
+  (`commands/audit.rs`), and an unsigned closure can be hand-edited to
+  name any registry. A CI gate on an enforced ecosystem must run
+  `ward audit --signed` under a machine policy with `[signing] trusted`;
+  CLI.md says so next to the registry check, and the company policy
+  template (`docs/human/`) sets both.
+
+#### Errors
+
+Every refusal names the ecosystem, the registry (its name and URL, never
+a credential), the effective list and where each layer of it came from,
+and ends with a `fix:` line: add the registry to machine policy, add it to
+`[sources]`, set the credential's variable, or re-lock against a listed
+registry.
+
+#### Test plan
+
+- **`covers`** (unit, and through ward's fetches, npm sync and the pnpm
+  derived tarball, not only the proxy): segment boundary; `.`/`..`
+  pieces split at `/` and at `%2f`; `%2e`, `%5c`, `%25` refused;
+  `/root/@s%2f..%2f..%2fother/x.tgz` refused; `@scope%2fname` allowed;
+  a raw path the parser would change refused; the same answers from
+  every caller.
+- **Policy** (unit): the machine list with and without `[sources]`; a
+  project or `--policy` narrowing; a lower layer naming `"public"` or any
+  name outside the machine list refused; a project `[[registry]]` or
+  `[credentials]` refused; field-per-ecosystem rules; an unbuilt ecosystem
+  refused; the URL forms per ecosystem; an older-format file still
+  parses; the company template parses.
+- **Cache key** (unit): different scheme, username, netrc file, `ca` or
+  `network` give different keys; no lookup reads a secret.
+- **Credentials** (unit): env, file and netrc (mode, owner, symlink,
+  `default` entry); missing values fail with no value in the text;
+  `Debug` redacted; never resolved when no request needs it.
+- **Transport** (unit): private mode accepts all-private and loopback
+  answers, refuses mixed answers, link-local, embeddings and the metadata
+  addresses; a per-registry CA is trusted for that origin only; client
+  cache keys.
+- **Proxy** (unit, `FixtureUpstream` with `Behavior::Require` on the
+  header): the credential reaches its root only, not another path
+  on the same host; two registries on one origin route by longest prefix
+  and each gets its own credential; a claimed artifact on a `files`
+  origin is served directly (no redirect) with no credential; a claimed
+  URL with a query is served; an unclaimed artifact URL is refused; a
+  redirect to a `files` origin drops the credential; a redirect elsewhere
+  is refused; a `files` origin is unreachable from another route; an
+  enforced ecosystem refuses an unlisted intercepted host; the default
+  permitted set and flags are unchanged; a URL claimed by registry A's
+  metadata on registry B's root (same host) is refused and gets no
+  credential; a listed file with no digest at all is refused in an
+  enforced ecosystem; a missing credential is a hard failure even
+  with last-good metadata cached; a git host resolving to a private
+  address stays refused in a session with a private-mode registry; an
+  artifact of registry A that redirects into registry B's root on the same
+  host is refused and B's credential is never sent; an unclaimed
+  candidate artifact causes no upstream request; a Python `.metadata`
+  file is served by its claim; an npm sha1-only version is served and
+  recorded `weak-integrity`; a credential whose value appears in its
+  registry's `url` is refused.
+- **Ward's fetches** (unit): the same cases through the kernel entry
+  point, plus a userinfo URL refused.
+- **Response-shape fixtures, first.** Recorded before the grammar is
+  written: a Nexus PyPI proxy simple page (relative `../../packages/`
+  hrefs), an Artifactory PyPI page, a CodeArtifact-style page linking
+  pre-signed URLs, a GitHub Packages npm packument and tarball redirect,
+  an Artifactory npm packument. Shapes only, no credentials.
+- **End to end** (ignored suites, fixture registries under
+  `tests/fixtures/proxy/registry/`, served by an authenticated
+  `FixtureUpstream`): a Python project locks (uv) and syncs through a
+  configured authenticated index; a `requirements.lock.txt` project
+  syncs through the simple API; an npm project with a default and a
+  scoped registry locks and syncs; each closure records `registry`; an
+  offline re-sync with the credential variable unset succeeds from the
+  store; `ward audit --signed` passes, then fails with
+  `unapproved-registry` after `--policy` narrows the list, and for a lock
+  that resolved from another repository on the same host; an unlisted registry fails with a fix line
+  and makes no request to the public registry; the token is absent from
+  every lock, closure, ledger, record, `-v` output, tool argument and
+  `ward audit --json` output.
+- **Real server, by hand** (written down in the PR): Sonatype Nexus OSS
+  in a local podman container with a PyPI proxy and an npm proxy
+  repository, behind a TLS terminator using a throwaway CA, configured
+  with `network = "private"`, `ca` and a basic credential; sync a real
+  Python and a real npm project through it.
+- **Real server in CI** (PR B): an npm package published to GitHub
+  Packages under the DigitalWestern org (GitHub Packages has no PyPI),
+  read with the workflow's `GITHUB_TOKEN` and `packages: read`.
+
+#### PR split
+
+- **PR A**: the full configuration schema, credentials, the network and
+  TLS options, the shared transport (client cache, private mode), the
+  proxy changes (instance protocols, longest-prefix routing, claimed
+  artifacts bound to their route, per-route files origins), ward's
+  fetch entry point, Python, npm and pnpm, the closure `registry` field
+  for both, the audit check, the docs (ARCHITECTURE, CLI, LIMITATIONS,
+  STATUS). Ecosystems other than Python and Node refused at load.
+- **PR B**: Go, Elixir, Ruby, Cargo, .NET in that order (cheapest first),
+  their closure fields, lifting each from the load refusal, and the
+  GitHub Packages CI lane.
+- Left after both, each to its own issue: a credential command source
+  (CodeArtifact, cloud tokens), registries behind a forward proxy, mTLS
+  client certificates, a separately authenticated download host, Hex
+  organizations and other Hex repositories, several NuGet feeds with
+  `packageSourceMapping`, several Python indexes per #495, and the
+  protected system policy file (#757).
+- **Where PR A differs from the above.** A pnpm lock entry with no
+  tarball URL is fetched from `<registry><name>/-/<name>-<version>.tgz`
+  under its scope's registry (or the default one), built from the lock
+  alone instead of read from the packument; registries with another
+  tarball layout (GitHub Packages) need the packument read, which PR B
+  adds with that lane. Poetry's dependency-level `source = "..."` is not
+  matched to a listed registry and stays `unattested-index`; the
+  pyproject and lock `[[tool.poetry.source]]` URLs are matched.
+
+#### Review round 1
+
+Muse (2026-10-14), fourteen findings, all taken: artifact URLs served by
+claim instead of grammar (1); unbuilt ecosystems refused at load and the
+full schema and `url` forms defined up front (2); the machine list
+defined when `[sources]` is absent and any wider lower-layer name refused
+(3); base URLs kept out of ward's portable output because a path can be a
+token (4, replaced in round 2); per-origin client selection instead of one process client (5);
+private mode's DNS and metadata-address rules (6); longest-prefix routing
+and path-scoped credentials (`root`) (7); `files` origins scoped to
+their route and reachable directly for claimed URLs (8); ward's fetches
+on the pinned transport, forward proxies a stated gap (9); lazy
+credentials and netrc rules (10); a separate always-present `registry`
+field, non-registry packages exempt, scope-aware pnpm import, full URL
+normalization (11); Cargo `dl` validated (12); Hex re-signing keys (13);
+test holes and follow-ups (14).
+
+#### Review round 2
+
+Muse (2026-10-14), eight findings, all taken: claims bound to the route
+whose metadata made them (1); round 1's base-path reduction dropped:
+a registry URL is not a secret, tokens go in `[credentials]`, and the
+ledger stays a pure function of the fetches (2, 6); registry identity is
+the normalized `url`, sync admits URLs under the registry's root or its
+own `files` origins, and the closure records `{name, url}` (3); lazy
+credential failures are a hard, never-last-good class, cached per
+process, and the metadata cache is keyed by credential reference, not
+value (4); a per-protocol claim table and digest-less files refused in an
+enforced ecosystem (5); the registry audit check needs `--signed` (7);
+only configured endpoints ever select a private or extra-root client (8).
+
+#### Review round 3
+
+Muse (2026-10-14), eight findings, all taken: redirects bound to the
+route that started them (1); one shared `covers` test on raw parsed
+paths, npm's `%2f` carved out in the packument segment only, equal roots
+must agree (2); grammar decides metadata, everything else a route covers
+is a candidate artifact checked against that route's claims before any
+request, Python `.metadata` row (3); a credential whose value appears in
+its registry's URLs is refused (4); the cache key carries the whole
+credential reference, `ca` and `network`, with the shared-reference risk
+stated (5); weak digests stay deniable `weak-integrity`, only digest-less
+files are refused (6); pnpm reads `dist.tarball` from the packument
+instead of guessing a private URL shape (7); Cargo `dl` and NuGet
+resource bases checked by `covers` (8).
+
+#### Review round 4
+
+Muse (2026-10-14), seven findings, all taken: `covers` has no npm
+exception and treats `%2f` as a separator for the dot and empty checks
+(1); it runs on the raw spelling, and the re-serialized URL must keep the
+same path (2); a `files` origin may not be any registry's `url` origin,
+and a root always wins (3); a candidate artifact maps onto the tunnel's
+own URL, the endpoint chosen by `covers` (4); pnpm's `@scope/name`
+packument spelling is metadata (5); the packument-derived pnpm tarball
+gets the same checks as a lock URL, and no packument cache is kept (6);
+the test plan's digest wording matches the rule (7).
 
 **Mac before merge.** Policy loading, registry configuration, and
 authentication are pure logic and need only `cargo test` on the Mac, except
@@ -2470,9 +3175,10 @@ Cargo takes `static.crates.io` from `config.json`, with no `crates.io`
 redirect. Hex's update check redirects `repo.hex.pm/installs/hex-1.x.csv`
 to `builds.hex.pm`, which stays outside the set. The door refuses it
 visibly and Hex continues. Git hosts are not endpoints: any public https host is
-allowed for git, and every git fetch is `git-dependency`. WP3 PR 1 turns
-the set into the typed endpoint configuration (machine policy may add,
-project policy may only intersect). The proxy is where WP5 credential
+allowed for git, and every git fetch is `git-dependency`. The foundation
+PR (§2 "Order") adds each listed registry's origin and `files` origins
+to the set from the typed registry configuration (machine policy may
+add, project policy may only intersect). The proxy is where WP5 credential
 references are used: attached upstream per endpoint, never forwarded
 across a redirect to another origin, never visible to the tool. The
 proxy strips `Authorization`, `Proxy-Authorization` (after checking the

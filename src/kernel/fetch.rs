@@ -21,6 +21,7 @@ use std::{ffi::OsStr, ops::Deref};
 pub mod pinned;
 mod pool;
 pub(crate) use pool::{fetch_all, fetch_each};
+pub mod registry;
 
 /// A verified cache path with the GC lock held shared until the caller
 /// drops it.
@@ -768,6 +769,46 @@ pub(crate) fn download_verified_held(
     download_verified_digest_held(store, activity, url, &Digest::sha256(sha256)?)
 }
 
+/// [`download_verified_held`] for a package a lock names: the URL is
+/// served by the registry `ecosystem`'s effective `[sources]` list assigns
+/// it (`registry::source_for`), checked before the cache so a refused URL
+/// is refused online and offline alike. The digest sources are the
+/// single form's.
+pub(crate) fn download_registry_held(
+    store: &Store,
+    activity: &StoreActivity,
+    ecosystem: crate::kernel::registries::config::Ecosystem,
+    url: &str,
+    sha256: &str,
+) -> io::Result<CacheLease> {
+    let policy = crate::kernel::policy::effective();
+    registry::source_for(&policy.registries, ecosystem, url)?;
+    let digest = Digest::sha256(sha256)?;
+    cache_or_download(store, activity, url, &digest, || {
+        registry::open(&policy.registries, ecosystem, url)
+    })
+}
+
+/// [`download_registry_held`] for a digest list that allows several
+/// hashes (an SRI list with more than one entry of its strongest algorithm,
+/// see [`crate::kernel::digest::sri_candidates`]): the bytes are admitted
+/// when they match any candidate, and the one they matched comes back,
+/// since that is the cache entry the lease holds. Every candidate must
+/// share one algorithm.
+pub(crate) fn download_registry_any_held(
+    store: &Store,
+    activity: &StoreActivity,
+    ecosystem: crate::kernel::registries::config::Ecosystem,
+    url: &str,
+    candidates: &[Digest],
+) -> io::Result<(CacheLease, Digest)> {
+    let policy = crate::kernel::policy::effective();
+    registry::source_for(&policy.registries, ecosystem, url)?;
+    cache_or_download_narrated(store, activity, url, candidates, true, MAX_ARTIFACT, || {
+        registry::open(&policy.registries, ecosystem, url)
+    })
+}
+
 /// Insert a local file into the verified artifact cache by its computed
 /// sha256 (for artifacts obtained through delegated tools and then verified
 /// by ward — e.g. Go module zips h1-checked by dirhash). Returns
@@ -904,7 +945,10 @@ pub(crate) fn download_verified_digest_held(
 /// [`crate::kernel::digest::sri_candidates`]): the bytes are admitted when
 /// they match any candidate, and the one they matched comes back, since
 /// that is the cache entry the lease holds. Every candidate must share one
-/// algorithm. The digest sources are the same as the single form's.
+/// algorithm. The digest sources are the same as the single form's. A
+/// package a lock names goes through [`download_registry_any_held`]; this
+/// form is the tests' direct path.
+#[cfg(test)]
 pub(crate) fn download_verified_any_held(
     store: &Store,
     activity: &StoreActivity,

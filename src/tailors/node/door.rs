@@ -13,7 +13,9 @@
 //!
 //! - npm: `--proxy` and `--https-proxy` with the session token as
 //!   credentials, `--noproxy=` so no host bypasses it, `--registry` the
-//!   public registry, `--strict-ssl=true` with `--cafile` the session CA
+//!   default registry of the effective `[sources]` list (npmjs unless the
+//!   machine policy names one) and `--@scope:registry` for each listed
+//!   scoped registry ([`node_sources`]), `--strict-ssl=true` with `--cafile` the session CA
 //!   (which replaces npm's roots, PR 0), `--update-notifier=false`,
 //!   `--audit=false` and `--fund=false` (each otherwise a request that is
 //!   not resolution), and `--cache` in the run's scratch.
@@ -35,15 +37,19 @@
 
 use super::locked::{locked_list, NodeLock};
 use super::registry;
+use crate::kernel::policy::{self, Policy};
+use crate::kernel::registries::{self, config::Ecosystem, effective::Source};
 use crate::kernel::resolve::confine;
 use crate::kernel::resolve::door::{self, ConfinedSpec, Publish, Wire, Wiring};
 use crate::kernel::resolve::record;
+use crate::kernel::resolve::routes::{Permitted, Route};
 use crate::kernel::resolve::session::Intercept;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 /// Why npm runs isolated, for the missing-capability message.
 pub(crate) const WHY_NPM: &str = "runs the git and script-shell programs a project's .npmrc \
@@ -121,6 +127,8 @@ pub(crate) struct NodeRun<'a> {
     /// Capture the tool's output into the report instead of letting the
     /// user watch it.
     pub capture: bool,
+    /// `None` is the policy in force (tests set one).
+    pub policy: Option<Policy>,
 }
 
 /// The pinned pnpm as `ward x` realized it: the store environment object
@@ -223,6 +231,104 @@ fn node_spec(run: &NodeRun<'_>) -> DelegateSpec {
     spec
 }
 
+/// The effective `[sources]` list for node: the registry the tools are
+/// pointed at, one per listed scope, a route for every listed registry, and the origins they add to
+/// the permitted set. An empty list, or one with only scoped registries,
+/// is an error, never a fallback to npmjs.
+pub(crate) struct NodeSources {
+    pub registry: RegistryFlags,
+    pub routes: Vec<Route>,
+    pub permitted: Permitted,
+}
+
+/// The registry settings the tools get on the command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegistryFlags {
+    /// The default registry's URL.
+    pub default: String,
+    /// `(@scope, url)` for every listed registry with `scopes`.
+    pub scoped: Vec<(String, String)>,
+}
+
+impl RegistryFlags {
+    /// `registry=<url>` and `@scope:registry=<url>`, each after `prefix`.
+    fn settings(&self, prefix: &str) -> Vec<String> {
+        std::iter::once(format!("{prefix}registry={}", self.default))
+            .chain(
+                self.scoped
+                    .iter()
+                    .map(|(scope, url)| format!("{prefix}{scope}:registry={url}")),
+            )
+            .collect()
+    }
+}
+
+pub(crate) fn node_sources(policy: &Policy) -> io::Result<NodeSources> {
+    let refused =
+        |error: String| crate::kernel::error::refused(io::ErrorKind::PermissionDenied, error);
+    let sources = policy.registries.ecosystem(Ecosystem::Node);
+    sources.require_nonempty().map_err(refused)?;
+    let default = match sources.default_source() {
+        Some(Source::Public) => registry::REGISTRY_URL.to_string(),
+        Some(Source::Registry(configured)) => configured.url.clone(),
+        None => {
+            return Err(refused(format!(
+                "no registry serves node packages outside a scope: every registry in [{}] has scopes ({})\nfix: list public or a node registry without scopes in the machine policy's [sources].node",
+                sources.names(),
+                sources.provenance()
+            )))
+        }
+    };
+    let mut out = NodeSources {
+        registry: RegistryFlags {
+            default,
+            scoped: Vec::new(),
+        },
+        routes: Vec::new(),
+        permitted: Permitted::compiled(),
+    };
+    let all_scopes: Vec<(&str, &String)> = sources
+        .list
+        .iter()
+        .filter_map(|source| match source {
+            Source::Registry(configured) => Some(configured),
+            Source::Public => None,
+        })
+        .flat_map(|configured| {
+            configured
+                .scopes
+                .iter()
+                .map(|scope| (configured.name.as_str(), scope))
+        })
+        .collect();
+    for source in &sources.list {
+        match source {
+            Source::Public => out.routes.push(registry::route()?),
+            Source::Registry(configured) => {
+                let elsewhere = all_scopes
+                    .iter()
+                    .filter(|(name, _)| *name != configured.name)
+                    .map(|(_, scope)| (*scope).clone())
+                    .collect();
+                for scope in &configured.scopes {
+                    out.registry
+                        .scoped
+                        .push((scope.clone(), configured.url.clone()));
+                }
+                out.routes.push(registries::route::route(
+                    Arc::new(
+                        registry::ConfiguredNpm::new(configured).with_scopes_elsewhere(elsewhere),
+                    ),
+                    configured,
+                    &policy.registries,
+                )?);
+                out.permitted = registries::route::permit(out.permitted.clone(), configured);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The `ConfinedSpec` of `run`, through the process proxy with TLS
 /// interception on the npm route. Tests replace the proxy and the
 /// permitted set.
@@ -248,24 +354,88 @@ pub(crate) fn node_confined<'a>(
     // install ignores it, and pnpm's modules state is pointed into the
     // scratch. Greyward's projection is a symlink into the store anyway.
     confined.exclude = vec![PathGlob::new("**/node_modules")?];
-    confined.routes = vec![registry::route()?];
+    let policy = run.policy.clone().unwrap_or_else(policy::effective);
+    let sources = node_sources(&policy)?;
+    let project = match &run.cwd {
+        Some(cwd) => run.lock_root.join(cwd),
+        None => run.lock_root.to_path_buf(),
+    };
+    for dir in [run.lock_root, project.as_path()] {
+        check_npmrc_scopes(&policy, &sources.registry, &dir.join(".npmrc"))?;
+    }
+    confined.routes = sources.routes;
+    confined.permitted = sources.permitted;
     confined.intercept = Intercept::Tls;
     confined.cwd = run.cwd.clone();
     let (kind, lock) = match &run.tool {
         NodeTool::Npm { .. } => (Kind::Npm, NodeLock::Npm),
         NodeTool::Pnpm { .. } => (Kind::Pnpm, NodeLock::Pnpm),
     };
-    confined.locked = Some(locked_list(lock));
-    let project = match &run.cwd {
-        Some(cwd) => run.lock_root.join(cwd),
-        None => run.lock_root.to_path_buf(),
-    };
+    confined.locked = Some(locked_list(lock, policy.registries.clone()));
     let lock_root = run.lock_root.to_path_buf();
+    let flags = sources.registry;
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
-        wiring(kind, wire, &lock_root, &project)
+        wiring(kind, wire, &flags, &lock_root, &project)
     }));
+    confined.policy = Some(policy);
     confined.publish(publish);
     Ok(confined)
+}
+
+/// In an enforced node list, refuse a `.npmrc` that points a scope ward's
+/// flags leave alone at a registry the list does not hold: the tool would
+/// ask that host, which the proxy refuses with less to go on. A listed
+/// scope's flag overrides the file, so its line is not read.
+fn check_npmrc_scopes(policy: &Policy, flags: &RegistryFlags, npmrc: &Path) -> io::Result<()> {
+    let sources = policy.registries.ecosystem(Ecosystem::Node);
+    if !sources.enforced {
+        return Ok(());
+    }
+    let text = match std::fs::read_to_string(npmrc) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for line in text.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let Some(scope) = key
+            .len()
+            .checked_sub(":registry".len())
+            .filter(|&at| key.is_char_boundary(at) && key[at..].eq_ignore_ascii_case(":registry"))
+            .map(|at| &key[..at])
+        else {
+            continue;
+        };
+        if !scope.starts_with('@') || flags.scoped.iter().any(|(listed, _)| listed == scope) {
+            continue;
+        }
+        let url = value.trim().trim_matches('"');
+        let listed = sources
+            .registries()
+            .any(|registry| registries::lock::same_url(&registry.url, url))
+            || (sources.includes_public()
+                && registries::lock::same_url(registry::REGISTRY_URL, url));
+        if !listed {
+            return Err(crate::kernel::error::refused(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{}: {scope}:registry names {}, which is not a listed node registry; node allows [{}] ({})\nfix: remove the line, or have the machine policy list that registry with scopes = [\"{scope}\"]",
+                    npmrc.display(),
+                    crate::kernel::fetch::shown_url(url),
+                    sources.names(),
+                    sources.provenance()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -276,7 +446,13 @@ enum Kind {
 
 /// The session settings before the verb, the forced ones among them, and
 /// the environment any other Node code reads.
-fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::Result<Wiring> {
+fn wiring(
+    kind: Kind,
+    wire: &Wire<'_>,
+    flags: &RegistryFlags,
+    lock_root: &Path,
+    project: &Path,
+) -> io::Result<Wiring> {
     let ca_file = wire.ca_file.ok_or_else(|| {
         io::Error::other("npm and pnpm resolve only through TLS interception, which this run lacks")
     })?;
@@ -296,15 +472,17 @@ fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::
                     format!("--proxy={proxy}"),
                     format!("--https-proxy={proxy}"),
                     "--noproxy=".to_string(),
-                    format!("--registry={}", registry::REGISTRY_URL),
+                ]
+                .into_iter()
+                .chain(flags.settings("--"))
+                .chain([
                     "--strict-ssl=true".to_string(),
                     format!("--cafile={ca}"),
                     "--update-notifier=false".to_string(),
                     "--audit=false".to_string(),
                     "--fund=false".to_string(),
                     format!("--cache={}", wire.scratch.join("npm-cache").display()),
-                ]
-                .into_iter()
+                ])
                 .map(OsString::from),
             );
         }
@@ -315,7 +493,10 @@ fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::
                     format!("--config.proxy={proxy}"),
                     format!("--config.https-proxy={proxy}"),
                     "--config.noproxy=".to_string(),
-                    format!("--config.registry={}", registry::REGISTRY_URL),
+                ]
+                .into_iter()
+                .chain(flags.settings("--config."))
+                .chain([
                     "--config.strict-ssl=true".to_string(),
                     format!("--config.cafile={ca}"),
                     "--config.update-notifier=false".to_string(),
@@ -325,8 +506,7 @@ fn wiring(kind: Kind, wire: &Wire<'_>, lock_root: &Path, project: &Path) -> io::
                     format!("--config.virtual-store-dir={}", scratch.virtual_store_dir),
                     format!("--config.store-dir={}", scratch.store_dir),
                     format!("--config.cache-dir={}", scratch.cache_dir),
-                ]
-                .into_iter()
+                ])
                 .map(OsString::from),
             );
         }
@@ -710,6 +890,7 @@ mod tests {
         )
         .unwrap();
         let mut run = run;
+        run.policy = Some(policy);
         let publish = std::mem::replace(
             &mut run.publish,
             Publish::Detached {
@@ -718,7 +899,6 @@ mod tests {
         );
         let mut confined = node_confined(&run, publish).unwrap();
         confined.proxy = Some(&harness.proxy);
-        confined.policy = Some(policy);
         adjust(&mut confined);
         let spec = node_spec(&run);
         let report = door.run_confined(spec, confined);
@@ -730,6 +910,7 @@ mod tests {
 
     fn lock_only_run<'a>(node_obj: &'a Path, project: &'a Path) -> NodeRun<'a> {
         NodeRun {
+            policy: None,
             tool: NodeTool::Npm { node_obj },
             lock_root: project,
             cwd: None,
@@ -1109,6 +1290,194 @@ mod tests {
             seen.sni.as_deref() == Some(registry::REGISTRY_HOST)
                 && seen.headers.get("proxy-authorization").is_none()
         }));
+    }
+
+    /// npm resolves against two configured registries that each require
+    /// their own token: the default one and one for the `@team` scope. Each
+    /// packument goes to its registry with that registry's token, which is
+    /// in neither the lock nor the ledger, and npmjs is never asked. A
+    /// `.npmrc` that sends another scope elsewhere is refused before npm
+    /// starts.
+    #[test]
+    #[ignore = "realizes the store Node over the network"]
+    fn npm_resolves_against_authenticated_configured_registries() {
+        use sha2::{Digest as _, Sha512};
+        const CORP: &str = "corp-secret-token-0451";
+        const TEAM: &str = "team-secret-token-0452";
+        let _serial = policy::attribution_test_lock();
+        let label = "npm_resolves_against_authenticated_configured_registries";
+        let Some(relay) = relay(label) else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
+        let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
+        reach.request_timeout = std::time::Duration::from_secs(10);
+        let harness: &'static Harness = Box::leak(Box::new(Harness::with(label, reach)));
+        PROXY_FOR_TEST.with(|slot| slot.set(Some(&harness.proxy)));
+        let port = harness.upstream.port();
+        let base = format!("https://registry.test:{port}");
+        let packument = |name: &str, version: &str, tarball: &str, bytes: &[u8]| {
+            serde_json::json!({
+                "name": name,
+                "dist-tags": {"latest": version},
+                // The full packument's publish times, which the age check
+                // reads from each registry.
+                "time": {version: "2020-01-02T03:04:05.000Z"},
+                "versions": {version: {
+                    "name": name,
+                    "version": version,
+                    "dist": {
+                        "tarball": tarball,
+                        "integrity": format!(
+                            "sha512-{}",
+                            crate::kernel::base64::encode(&Sha512::digest(bytes))
+                        ),
+                    },
+                }},
+            })
+            .to_string()
+        };
+        let authorized = |token: &str, body: &[u8]| Behavior::Authorized {
+            value: format!("Bearer {token}"),
+            reply: Reply::new(200, body).header("Content-Type", "application/json"),
+        };
+        let widget_url = format!("{base}/repo/npm/widget/-/widget-1.0.0.tgz");
+        let gadget_url = format!("{base}/repo/team-npm/@team/gadget/-/gadget-2.0.0.tgz");
+        let up = &harness.upstream;
+        up.set(
+            "/repo/npm/widget",
+            authorized(
+                CORP,
+                packument("widget", "1.0.0", &widget_url, b"widget").as_bytes(),
+            ),
+        );
+        up.set(
+            "/repo/npm/widget/-/widget-1.0.0.tgz",
+            authorized(CORP, b"widget"),
+        );
+        up.set(
+            "/repo/team-npm/@team%2fgadget",
+            authorized(
+                TEAM,
+                packument("@team/gadget", "2.0.0", &gadget_url, b"gadget").as_bytes(),
+            ),
+        );
+        up.set(
+            "/repo/team-npm/@team/gadget/-/gadget-2.0.0.tgz",
+            authorized(TEAM, b"gadget"),
+        );
+        let temp = TempDir::named("npm-configured-registries");
+        let token = |name: &str, value: &str| {
+            let path = temp.0.join(name);
+            fs::write(&path, value).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            path.display().to_string()
+        };
+        let text = format!(
+            r#"
+[credentials.corp]
+file = "{}"
+
+[credentials.team]
+file = "{}"
+
+[[registry]]
+name = "corp"
+ecosystem = "node"
+url = "{base}/repo/npm/"
+credential = "corp"
+
+[[registry]]
+name = "team"
+ecosystem = "node"
+url = "{base}/repo/team-npm/"
+credential = "team"
+scopes = ["@team"]
+
+[sources]
+node = ["team", "corp"]
+"#,
+            token("corp", CORP),
+            token("team", TEAM)
+        );
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, &text).unwrap();
+        let mut machine = Policy::default();
+        policy::merge_file(&mut machine, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+
+        let node_obj = store_node(harness);
+        let project_dir = project(
+            &temp.0.join("project"),
+            "\"widget\": \"1.0.0\", \"@team/gadget\": \"2.0.0\"",
+        );
+        fs::write(
+            project_dir.join(".npmrc"),
+            "registry=https://evil.test/\n@team:registry=https://evil.test/\n",
+        )
+        .unwrap();
+        let (report, recorded) = through_door(
+            harness,
+            DoorKind::MissingLock,
+            machine.clone(),
+            lock_only_run(&node_obj, &project_dir),
+        );
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let lock = fs::read_to_string(project_dir.join("package-lock.json")).unwrap();
+        assert!(lock.contains(&widget_url), "{lock}");
+        assert!(lock.contains(&gadget_url), "{lock}");
+        assert!(!lock.contains(CORP) && !lock.contains(TEAM), "{lock}");
+        let entries = ledger_entries(harness, &report);
+        assert!(!entries.is_empty());
+        for entry in &entries {
+            assert!(
+                entry.url.starts_with(&format!("{base}/repo/npm/"))
+                    || entry.url.starts_with(&format!("{base}/repo/team-npm/")),
+                "{entries:?}"
+            );
+        }
+        let shown = format!("{entries:?}{}", stderr(&report));
+        assert!(!shown.contains(CORP) && !shown.contains(TEAM));
+        let seen = harness.upstream.seen();
+        assert!(
+            seen.iter().any(|r| r.target == "/repo/npm/widget"),
+            "{seen:?}"
+        );
+        for request in &seen {
+            let token = if request.target.starts_with("/repo/team-npm/") {
+                TEAM
+            } else {
+                assert!(request.target.starts_with("/repo/npm/"), "{seen:?}");
+                CORP
+            };
+            assert_eq!(
+                request.headers.get("authorization"),
+                Some(format!("Bearer {token}").as_str()),
+                "{seen:?}"
+            );
+        }
+
+        fs::write(
+            project_dir.join(".npmrc"),
+            "@other:registry=https://evil.test/\n",
+        )
+        .unwrap();
+        let mut run = lock_only_run(&node_obj, &project_dir);
+        run.policy = Some(machine);
+        let refused = match node_confined(
+            &run,
+            Publish::Detached {
+                outputs: Vec::new(),
+            },
+        ) {
+            Ok(_) => panic!("an unlisted .npmrc scope registry was accepted"),
+            Err(error) => error.to_string(),
+        };
+        done();
+        assert!(refused.contains("@other:registry"), "{refused}");
+        assert!(refused.contains("fix:"), "{refused}");
     }
 
     /// The child npm pacote starts for a git dependency (`npm install
@@ -1647,6 +2016,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             DoorKind::Edit,
             Policy::default(),
             NodeRun {
+                policy: None,
                 tool: NodeTool::Pnpm {
                     node_obj: &node_obj,
                     program: &pinned.program,
@@ -1826,6 +2196,7 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             DoorKind::MissingLock,
             Policy::default(),
             NodeRun {
+                policy: None,
                 tool: NodeTool::Pnpm {
                     node_obj: &node_obj,
                     program: &pinned.program,
@@ -1873,5 +2244,118 @@ main().catch(error => {{ console.error(error); process.exit(1); }});
             lock_before
         );
         done();
+    }
+
+    fn with_sources(sources: &str) -> Policy {
+        let text = format!(
+            r#"
+[[registry]]
+name = "corp-npm"
+ecosystem = "node"
+url = "https://nexus.corp.example/repository/npm/"
+
+[[registry]]
+name = "corp-scoped"
+ecosystem = "node"
+url = "https://npm.pkg.github.com/"
+scopes = ["@corp"]
+
+[sources]
+node = {sources}
+"#
+        );
+        let path = Path::new("/machine/policy.toml");
+        let other = policy::parse_file(path, &text).unwrap();
+        let mut merged = Policy::default();
+        policy::merge_file(&mut merged, &other, policy::SourceOrigin::Machine, path).unwrap();
+        merged
+    }
+
+    /// In an enforced list a `.npmrc` scope line must name a listed
+    /// registry, unless ward's own flag for that scope overrides it.
+    #[test]
+    fn npmrc_scope_lines_must_name_a_listed_registry() {
+        let dir = crate::kernel::testutil::TempDir::new();
+        let npmrc = dir.0.join(".npmrc");
+        let check = |policy: &Policy, text: &str| {
+            fs::write(&npmrc, text).unwrap();
+            let sources = node_sources(policy).unwrap();
+            check_npmrc_scopes(policy, &sources.registry, &npmrc)
+        };
+        let corp = with_sources(r#"["corp-scoped", "corp-npm"]"#);
+        let error = check(&corp, "@other:registry=https://evil.example/npm/\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("@other:registry"), "{error}");
+        assert!(error.contains("fix:"), "{error}");
+        for text in [
+            "@corp:registry=https://elsewhere.example/\n",
+            "@other:registry=https://NEXUS.corp.example/repository/npm\n",
+            "# @other:registry=https://evil.example/\nfund=false\n",
+        ] {
+            check(&corp, text).unwrap();
+        }
+        for text in [
+            "\u{feff}@other:registry=https://evil.example/\n",
+            "@other:Registry=https://evil.example/\n",
+            "@other:registry=${EVIL_REGISTRY}\n",
+            "@other:registry=https://NEXUS.corp.example/repository/npm\n@other:registry=https://evil.example/\n",
+        ] {
+            assert!(check(&corp, text).is_err(), "{text:?}");
+        }
+        let error = check(&corp, "@other:registry=https://registry.npmjs.org/\n").unwrap_err();
+        assert!(error.to_string().contains("not a listed node registry"));
+        let public = with_sources(r#"["corp-npm", "public"]"#);
+        check(&public, "@other:registry=https://registry.npmjs.org/\n").unwrap();
+        check(
+            &Policy::default(),
+            "@other:registry=https://evil.example/npm/\n",
+        )
+        .unwrap();
+    }
+
+    /// The default registry is the first unscoped entry, each scope gets
+    /// its own setting, npmjs is reached only when `public` is listed, and
+    /// a list with no unscoped registry is refused.
+    #[test]
+    fn node_sources_follow_the_effective_list() {
+        let default = node_sources(&Policy::default()).unwrap();
+        assert_eq!(
+            default.registry.settings("--"),
+            ["--registry=https://registry.npmjs.org/"]
+        );
+        assert_eq!(default.routes.len(), 1);
+
+        let corp = node_sources(&with_sources(r#"["corp-scoped", "corp-npm"]"#)).unwrap();
+        assert_eq!(
+            corp.registry.settings("--config."),
+            [
+                "--config.registry=https://nexus.corp.example/repository/npm/",
+                "--config.@corp:registry=https://npm.pkg.github.com/",
+            ]
+        );
+        assert_eq!(corp.routes.len(), 2);
+        for origin in [
+            "https://nexus.corp.example/x",
+            "https://npm.pkg.github.com/x",
+        ] {
+            assert!(corp.permitted.allows(&url::Url::parse(origin).unwrap()));
+        }
+
+        let mixed = node_sources(&with_sources(r#"["corp-scoped", "public"]"#)).unwrap();
+        assert_eq!(
+            mixed.registry.settings("--"),
+            [
+                "--registry=https://registry.npmjs.org/",
+                "--@corp:registry=https://npm.pkg.github.com/",
+            ]
+        );
+
+        for list in [r#"["corp-scoped"]"#, "[]"] {
+            let Err(error) = node_sources(&with_sources(list)) else {
+                panic!("{list} was accepted");
+            };
+            assert!(error.to_string().contains("fix:"), "{error}");
+        }
     }
 }

@@ -22,6 +22,7 @@
 //! carries an endpoint credential only on that endpoint's own origin.
 
 use super::cache::{self, Cached};
+use super::clients::Clients;
 use super::http::{self, Headers};
 use super::ledger::{DiagRequest, Entry, Freshness};
 use super::redact;
@@ -245,6 +246,10 @@ enum Failure {
     /// The request could not be sent as built: never "unreachable", so
     /// never last-good.
     Invalid(&'static str),
+    /// A configured registry's credential or client could not be set up
+    /// (an unset variable, an unreadable `ca`): a hard failure of the door,
+    /// never answered from last-good.
+    Setup(String),
 }
 
 struct Fetched {
@@ -280,7 +285,9 @@ impl Read for Hashing {
 /// One tool request on one route.
 pub(crate) struct Exchange<'a> {
     pub state: &'a State,
-    pub client: &'a PinnedClient,
+    /// The process's upstream clients; each request takes the one its
+    /// endpoint selects.
+    pub clients: &'a Clients,
     /// The process's in-flight byte budget, which every buffered response
     /// body is read under.
     pub budget: &'a http::Budget,
@@ -476,7 +483,11 @@ impl Exchange<'_> {
     /// `extra`, and the endpoint's own credential when `url` is on it. A
     /// request with a body also keeps its `Content-Encoding` (git gzips a
     /// large negotiation).
-    fn upstream_headers(&self, url: &Url, extra: &[(String, String)]) -> Vec<(String, String)> {
+    fn upstream_headers(
+        &self,
+        url: &Url,
+        extra: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, String> {
         let mut headers: Vec<(String, String)> = self
             .request
             .iter()
@@ -488,10 +499,24 @@ impl Exchange<'_> {
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
         headers.extend(extra.iter().cloned());
-        if let Some(credential) = self.route.endpoint_for(url).and_then(|e| e.authorization()) {
-            headers.push(("Authorization".into(), credential.to_string()));
+        if let Some(endpoint) = self.route.endpoint_for(url) {
+            if let Some(credential) = endpoint.authorization(url.as_str())? {
+                headers.push(("Authorization".into(), credential.expose().to_string()));
+            }
         }
-        headers
+        Ok(headers)
+    }
+
+    /// The client for `url`: its endpoint's, else the public one.
+    fn client(&self, url: &Url) -> Result<Arc<PinnedClient>, String> {
+        match self
+            .route
+            .endpoint_for(url)
+            .and_then(|endpoint| endpoint.client())
+        {
+            Some(spec) => self.clients.for_spec(spec),
+            None => Ok(self.clients.public().clone()),
+        }
     }
 
     /// Fetch `start`, following redirects inside the permitted set. The
@@ -509,11 +534,17 @@ impl Exchange<'_> {
             // `extra` (a cached copy's validators) goes to the requested URL
             // only: another location's 304 would answer for a different
             // document than the one cached.
-            let headers = self.upstream_headers(&url, if hops.is_empty() { extra } else { &[] });
+            let setup = self
+                .upstream_headers(&url, if hops.is_empty() { extra } else { &[] })
+                .and_then(|headers| Ok((headers, self.client(&url)?)));
+            let (headers, client) = match setup {
+                Ok(setup) => setup,
+                Err(why) => return Err((Failure::Setup(why), hops)),
+            };
             // The body follows the request while its method does (a 303
             // turns it into a GET, which has none).
             let body = self.body.filter(|_| method == self.method);
-            let sent = self.client.send(&PinnedRequest {
+            let sent = client.send(&PinnedRequest {
                 method: &method,
                 url: url.as_str(),
                 headers: &headers,
@@ -537,6 +568,20 @@ impl Exchange<'_> {
                 }
             };
             hops.push(self.redacted(&next));
+            // A configured registry's redirect stays with that registry:
+            // under its root or on its own files origins, never another
+            // registry's root on the same host.
+            if let Some(scope) = self.route.scope() {
+                if !scope.owns(next.as_str()) {
+                    let why = format!(
+                        "redirect to {} leaves registry {} (its root {} and its files origins)",
+                        self.redacted(&next),
+                        scope.registry,
+                        scope.root
+                    );
+                    return Err((Failure::Redirect(why), hops));
+                }
+            }
             if !self.permitted.allows(&next) {
                 let why = format!(
                     "redirect to {} is not a permitted endpoint",
@@ -572,6 +617,10 @@ impl Exchange<'_> {
                 self.refuse(out, record, 403, &why)
             }
             Failure::Redirect(why) => self.refuse(out, record, 403, &why),
+            Failure::Setup(why) => {
+                self.state.hard_failure(format!("{}: {why}", record.url));
+                self.fail(out, record, 502, why)
+            }
             Failure::Invalid(why) => self.fail(out, record, 400, why.to_string()),
             Failure::Transport(why) => {
                 self.fail(out, record, 504, format!("upstream unreachable: {why}"))
@@ -753,7 +802,7 @@ impl Exchange<'_> {
         if !self.supplemental || self.wanted.is_empty() || self.head_only() {
             return false;
         }
-        let protocol = self.route.protocol;
+        let protocol = &self.route.protocol;
         let known: std::collections::HashSet<(String, String)> = protocol
             .published(url, &cached.body)
             .into_iter()
@@ -779,7 +828,7 @@ impl Exchange<'_> {
         freshness: Freshness,
         record: &mut Record,
     ) -> Result<(), String> {
-        let protocol = self.route.protocol;
+        let protocol = &self.route.protocol;
         let (Some(log), Some(head)) = (protocol.log(), protocol.tree_size(url, body)) else {
             return Ok(());
         };
@@ -877,7 +926,7 @@ impl Exchange<'_> {
         mut record: Record,
         held: &mut http::Reservation<'_>,
     ) -> io::Result<()> {
-        let protocol = self.route.protocol;
+        let protocol = &self.route.protocol;
         let success = (200..300).contains(&status);
         let Cached {
             headers: cached_headers,
@@ -894,7 +943,8 @@ impl Exchange<'_> {
                 .add_published(self.route, protocol.published(url, &upstream));
         }
         let body = if success && !self.head_only() && !self.supplemental {
-            self.state.add_claims(protocol.claims(url, &upstream));
+            self.state
+                .add_claims(self.route.claim_scope(), protocol.claims(url, &upstream));
             let before = upstream.len();
             match protocol.rewrite(url, upstream, self.address) {
                 Ok(body) => {
@@ -939,12 +989,23 @@ impl Exchange<'_> {
         let record = Record::new(class.as_str(), self.method, self.redacted(url))
             .keeping(self.keys())
             .resolved();
-        match self.state.claimed(url) {
+        match self.state.claimed(self.route.claim_scope(), url) {
             Claimed::Conflict(why) => {
                 self.state.hard_failure(why.clone());
                 self.fail(out, record, 502, why)
             }
             Claimed::One(claim) => self.claimed_artifact(url, claim, record, out),
+            // A configured registry chooses its own artifact URLs, so only
+            // its own metadata can name one: nothing unclaimed is fetched.
+            Claimed::None if self.route.scope().is_some() => {
+                let scope = self.route.scope().expect("checked");
+                let why = format!(
+                    "{} is not listed with a digest by registry {}'s metadata in this run; ward \
+                     fetches only files a registry page or packument names with a digest",
+                    record.url, scope.registry
+                );
+                self.refuse(out, record, 403, &why)
+            }
             Claimed::None => self.unclaimed_artifact(url, record, out),
         }
     }

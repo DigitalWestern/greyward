@@ -6,7 +6,8 @@
 use super::unpack::tarball_has_binding_gyp;
 use super::*;
 use crate::kernel::digest::sri_candidates;
-use crate::kernel::fetch::download_verified_any_held;
+use crate::kernel::fetch::download_registry_any_held;
+use crate::kernel::registries::config::Ecosystem;
 
 pub(super) const ARCHIVE_CLASSIFICATION_SCHEMA: &str = "npm-archive-classification/1";
 
@@ -287,20 +288,67 @@ pub(super) fn confirm_classified_sources(
 /// candidate the bytes matched.
 pub(super) type FetchedTarball<'a> = (&'a NpmPackage, crate::kernel::fetch::CacheLease, Digest);
 
+/// The registry check of one locked package: the lock's URL must be the
+/// registry the effective node list assigns the package (its scope's, when
+/// one is listed). Git and `file:` directory packages come from no
+/// registry and are not checked.
+pub(super) fn check_registry(package: &NpmPackage) -> io::Result<()> {
+    if package.git.is_some() || super::local_package::source_dir(package).is_some() {
+        return Ok(());
+    }
+    crate::kernel::registries::lock::check(
+        &crate::kernel::policy::effective().registries,
+        Ecosystem::Node,
+        &crate::kernel::registries::lock::Entry {
+            name: &package.name,
+            index: None,
+            file: &package.url,
+        },
+    )
+    .map(|_| ())
+}
+
 /// Download `package`'s tarball, admitting bytes that match any hash of its
-/// integrity's strongest algorithm.
+/// integrity's strongest algorithm, from the registry that serves it.
 pub(super) fn fetch_tarball(
     store: &Store,
     activity: &StoreActivity,
     package: &NpmPackage,
 ) -> io::Result<(crate::kernel::fetch::CacheLease, Digest)> {
     let candidates = sri_candidates(&package.integrity)?;
-    download_verified_any_held(store, activity, &package.url, &candidates).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("{}: fetch {}: {e}", package.path, package.url),
-        )
-    })
+    // A `file:` directory package was packed from the project into the
+    // cache by its integrity: no registry serves it, so it is read from
+    // the cache alone. A `file://` tarball is read from its path, as any
+    // URL is.
+    let local = super::local_package::source_dir(package).is_some_and(|dir| !dir.starts_with("//"));
+    if local {
+        let mut last = None;
+        for digest in &candidates {
+            match crate::kernel::fetch::cache_verified_digest_held(store, activity, digest) {
+                Ok(lease) => return Ok((lease, digest.clone())),
+                Err(error) => last = Some(error),
+            }
+        }
+        let why = last.map_or_else(|| "no integrity".to_string(), |error| error.to_string());
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{}: {} is not in the cache as packed from the project ({why})",
+                package.path, package.url
+            ),
+        ));
+    }
+    if super::local_package::source_dir(package).is_none() {
+        check_registry(package)?;
+    }
+    download_registry_any_held(store, activity, Ecosystem::Node, &package.url, &candidates).map_err(
+        |e| {
+            io::Error::new(
+                e.kind(),
+                format!("{}: fetch {}: {e}", package.path, package.url),
+            )
+        },
+    )
 }
 
 pub(super) fn fetch_npm_tarballs<'a>(

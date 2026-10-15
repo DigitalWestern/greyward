@@ -1,6 +1,6 @@
 # STATUS — where Greyward is, and what is next
 
-Updated 2026-10-12.
+Updated 2026-10-14.
 
 ## What Greyward is
 
@@ -24,7 +24,8 @@ Cargo, Go, Ruby, Elixir, .NET.
 | Policy admission gate (`ward audit`, company policy template) | Shipped and independently reviewed on Linux. Every record is compared (2026-09-17); `ward fmt` writes no record since #386 (2026-10-03). Closure records are signed (`ward keygen`, `GREYWARD_SIGNING_KEY`) and `audit` verifies them against the machine policy's `[signing]` table; unsigned or pre-field records are `outdated`, a missing primary closure fails (2026-09-18, PRs #77 and #78) |
 | `ward sync` preflight | Refused syncs no longer touch the store (2026-09-16, PR #40) |
 | Toolchain lock (WP2) | Shipped on Linux 2026-09-21. A committed `greyward-toolchain.toml` names the exact toolchain per ecosystem: the first writable sync writes it, every later sync honors it, a source that disagrees stops the sync, `ward --frozen` validates without writing, `ward update --toolchain [<eco>]` is the one writer that replaces it, `ward status` reports the verdict, and `ward x` keys its cache on the selected bundle. Described in `docs/human/ARCHITECTURE.md` "Toolchain lock"; the parts still open are in `docs/agent/DESIGNS.md` §1. Run on two machines once, by hand, on 2026-09-25 (Fedora and the Mac, see the macOS row); later changes are proven by test (LIMITATIONS.md) |
-| Release catalog and trust (WP3), company layer (WP5) | Designed, not built (`docs/agent/DESIGNS.md` §2, §4) |
+| Release catalog and trust (WP3) | Designed, not built (`docs/agent/DESIGNS.md` §2) |
+| Private registries (WP5, #405) | Python and npm built on Linux (2026-10-14): machine-policy `[credentials]`, `[[registry]]` and `[sources]`, enforced through resolution, the lock check, downloads, the receipt and `ward audit` (`docs/human/ARCHITECTURE.md` "Private registries"). Go, Cargo, Ruby, .NET and Elixir are next (`docs/agent/DESIGNS.md` §4) |
 | Toolchain catalogs (2026-09-24) | Every ecosystem's releases are generated, verified data files (`catalog.toml`, `tools/catalog.py --check`), append-only, with an explicit default (#195). Rust ships 43 releases, 1.70.0 to 1.98.1; `rust-toolchain.toml` targets, components, profile and `path` are lock rows, and Greyward provisions every component from the signed channel manifest (#213) |
 | Resolution proxy (#68) | Designed and reviewed over four rounds (`docs/agent/DESIGNS.md` §6, #196); PR 0 evidence shipped (#209). PRs 1 to 10 shipped on Linux (#198 to #208): every ecosystem's delegated tools (`add`/`remove`/`update`, missing-lock generation) resolve confined through the proxy, and the unsandboxed mode is gone (#208). Left: the other isolation backends (#201) and the macOS door, in the order FOLLOW-UPS.md "Next up, in order" gives |
 | Linux sandbox on Ubuntu 24.04 | AppArmor-restricted user namespaces are detected; `doctor` agrees with bwrap and CI runs a 24.04 job (#173, #194) |

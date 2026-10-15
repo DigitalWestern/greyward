@@ -115,6 +115,12 @@ pub(crate) enum Behavior {
     /// when none does: git protocol v2 sends `ls-refs` and `fetch` to one
     /// URL.
     ByBody(Vec<(Vec<u8>, Reply)>),
+    /// Answer `reply` only to a request whose `Authorization` is exactly
+    /// `value`, and 401 otherwise: a private registry.
+    Authorized {
+        value: String,
+        reply: Reply,
+    },
 }
 
 /// One request the server received.
@@ -346,6 +352,13 @@ fn serve(
                 match replies.into_iter().find(|(marker, _)| holds(marker)) {
                     Some((_, reply)) => reply,
                     None => Reply::new(400, b"no fixture answers this request body"),
+                }
+            }
+            Some(Behavior::Authorized { value, reply }) => {
+                if request.headers.get("authorization") == Some(value.as_str()) {
+                    reply
+                } else {
+                    Reply::new(401, b"authentication required")
                 }
             }
             Some(Behavior::Drop) => return,

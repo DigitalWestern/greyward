@@ -231,9 +231,40 @@ fn package_url(
         .or_else(|| {
             let basename = name.rsplit('/').next().unwrap_or(name);
             Some(format!(
-                "https://registry.npmjs.org/{name}/-/{basename}-{version}.tgz"
+                "{}{name}/-/{basename}-{version}.tgz",
+                package_registry(name)?
             ))
         })
+}
+
+/// The registry a pnpm lock's package comes from when its resolution names
+/// no tarball: its scope's registry when the effective node `[sources]`
+/// list has one, else the default registry (npmjs unless the machine
+/// policy names another). The tarball URL is built in npm's own shape
+/// under it, which Nexus, Artifactory and Verdaccio serve. `None` when the
+/// list holds no registry for it: the sync's registry check refuses it.
+fn package_registry(name: &str) -> Option<String> {
+    use crate::kernel::registries::{config::Ecosystem, effective::Source};
+    let policy = crate::kernel::policy::effective();
+    let list = policy.registries.ecosystem(Ecosystem::Node);
+    let scope = name
+        .starts_with('@')
+        .then(|| name.split_once('/').map(|(scope, _)| scope))
+        .flatten();
+    let scoped = scope.and_then(|scope| {
+        list.registries().find(|registry| {
+            registry
+                .scopes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(scope))
+        })
+    });
+    match scoped.map(Source::Registry).or(list.default_source()) {
+        Some(Source::Registry(registry)) => Some(registry.url.clone()),
+        Some(Source::Public) => Some("https://registry.npmjs.org/".to_string()),
+        None if list.enforced => None,
+        None => Some("https://registry.npmjs.org/".to_string()),
+    }
 }
 
 /// The git source a pnpm resolution names, when it is pinned to a full commit.

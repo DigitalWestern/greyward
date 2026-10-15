@@ -77,4 +77,13 @@ too_many_arguments = "allow"
 type_complexity = "allow"
 
 [profile.release]
+# Measured in #750: fat LTO with one codegen unit makes the binary 11%
+# smaller and the no-op commands a little faster, for about a minute more
+# on a clean release build (release.yml, and every `cargo install` from
+# source, which builds this profile). opt-level 3 is the release
+# default, stated so the profile reads whole. Never panic = "abort": the
+# supervision and sandbox paths rely on unwinding to shut down cleanly.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 strip = true

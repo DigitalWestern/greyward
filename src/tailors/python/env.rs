@@ -11,9 +11,10 @@ use crate::comforter::{
     ClosureRefs, InputRecord,
 };
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::{download_verified_held, fetch_all, fetch_each};
+use crate::kernel::fetch::{download_registry_held, fetch_all, fetch_each};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::hostfallback::{self, FallbackRecords, RUNTIME_ONLY_VIEW};
+use crate::kernel::registries::config::Ecosystem;
 use crate::kernel::resolve::ledger::LedgerObjects;
 use crate::kernel::resolve::ResolutionDoor;
 use crate::kernel::toolchain::Selected;
@@ -340,6 +341,32 @@ pub(crate) fn planned_env_object_id(
     Ok(environment_identity(door, plan, &cpython_id, selected, rust)?.object_id())
 }
 
+/// What [`realize_env_at_depth`] checks before any cache is consulted: the
+/// host, the plan against `selected`, and every registry package of `plan`
+/// against the effective python source list, so a warm environment built
+/// under another policy is not reused for a lock the list now refuses.
+fn preflight(
+    plan: &Plan,
+    selected: &Selected,
+    platform: crate::kernel::platform::Platform,
+) -> io::Result<()> {
+    crate::kernel::platform::require_host(platform, "Python environment")?;
+    agreeing(plan, selected)?;
+    let policy = crate::kernel::policy::effective();
+    for package in plan.packages.iter().filter(|package| package.git.is_none()) {
+        crate::kernel::registries::lock::check(
+            &policy.registries,
+            crate::kernel::registries::config::Ecosystem::Python,
+            &crate::kernel::registries::lock::Entry {
+                name: &package.name,
+                index: package.index.as_deref(),
+                file: &package.url,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Internal realization entry point used by sdist build environments. The
 /// depth is carried through nested build-requirement sdists so a malicious or
 /// pathological chain cannot recurse forever.
@@ -352,8 +379,7 @@ pub(crate) fn realize_env_at_depth(
 ) -> io::Result<PathBuf> {
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     crate::tailors::install_kinds();
-    crate::kernel::platform::require_host(platform, "Python environment")?;
-    agreeing(plan, selected)?;
+    preflight(plan, selected, platform)?;
     let python_obj = python::realize_runtime(store, activity, platform, selected)?;
 
     // Identity planning and realization use exactly the same input builder.
@@ -387,7 +413,7 @@ pub(crate) fn realize_env_at_depth(
         host_inputs,
     } = realize_artifacts(door, &packages, selected, rust, plan, sdist_depth)?;
     // Keep verified cache leases alive until every wheel has been extracted.
-    let _cache_leases = reverify_wheels(store, activity, &mut artifacts)?;
+    let _cache_leases = hold_wheels(store, activity, &mut artifacts)?;
 
     let minor = plan
         .python_version
@@ -426,19 +452,7 @@ pub(crate) fn realize_env_at_depth(
     let final_python = store
         .object_path(&commit_identity.object_id())
         .join("bin/python");
-    let mut installed = BTreeMap::new();
-    for (package, wheel_file) in &artifacts {
-        // The wheel's own metadata must name the locked package (#688).
-        wheel::check_wheel_package(wheel_file, package)?;
-        wheel::install_wheel(
-            wheel_file,
-            &site,
-            &bin,
-            &minor,
-            &final_python,
-            &mut installed,
-        )?;
-    }
+    install_wheels(&artifacts, &site, &bin, &minor, &final_python)?;
 
     let candidate = crate::kernel::policy::object_exceptions();
     let mut deps = crate::kernel::store::ObjectDeps::new();
@@ -465,6 +479,7 @@ pub(crate) fn realize_env_at_depth(
             }
         }
     }
+    let _t = crate::kernel::ui::phase("commit object");
     let (object, applied) = store.commit_with_activity_and_deps(
         activity,
         &commit_identity,
@@ -484,27 +499,46 @@ pub(crate) fn realize_env_at_depth(
 }
 
 /// Sdist realization may recursively fetch toolchains. Re-verify all wheel
-/// inputs only after that work, point each at its verified cache entry, and
-/// return the leases for the caller to hold through wheel extraction and
-/// publication. Each re-verification is a hash of a cache hit (or a fresh
-/// download), so they run on the fetch pool; the first failure in package
-/// order is the one reported, as in a loop.
-fn reverify_wheels(
+/// inputs only after that work, pointing each at its verified cache file,
+/// and return their leases for the caller to hold through wheel extraction
+/// and publication. Each re-verification is a hash of a cache hit (or a
+/// fresh download), so they run on the fetch pool; the first failure in
+/// package order is the one reported, as in a loop.
+fn hold_wheels(
     store: &crate::kernel::store::Store,
     activity: &StoreActivity,
     artifacts: &mut [(&crate::kernel::types::LockedPackage, PathBuf)],
 ) -> io::Result<Vec<crate::kernel::fetch::CacheLease>> {
+    let _t = crate::kernel::ui::phase("wheel re-verify");
     let wheels: Vec<usize> = (0..artifacts.len())
         .filter(|&i| artifacts[i].0.kind == ArtifactKind::Wheel)
         .collect();
     let leases = fetch_all(&wheels, |&i| {
         let p = artifacts[i].0;
-        download_verified_held(store, activity, &p.url, &p.sha256)
+        download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)
     })?;
     for (&i, lease) in wheels.iter().zip(&leases) {
         artifacts[i].1 = lease.to_path_buf();
     }
     Ok(leases)
+}
+
+/// Install every wheel into the staged environment, in `artifacts` order.
+fn install_wheels(
+    artifacts: &[(&crate::kernel::types::LockedPackage, PathBuf)],
+    site: &Path,
+    bin: &Path,
+    minor: &str,
+    final_python: &Path,
+) -> io::Result<()> {
+    let _t = crate::kernel::ui::phase("install wheels");
+    let mut installed = BTreeMap::new();
+    for (package, wheel_file) in artifacts {
+        // The wheel's own metadata must name the locked package (#688).
+        wheel::check_wheel_package(wheel_file, package)?;
+        wheel::install_wheel(wheel_file, site, bin, minor, final_python, &mut installed)?;
+    }
+    Ok(())
 }
 
 /// Every package of an environment as a wheel file, in `packages` order:
@@ -526,6 +560,7 @@ fn realize_artifacts<'p>(
     plan: &Plan,
     sdist_depth: usize,
 ) -> io::Result<Artifacts<'p>> {
+    let _t = crate::kernel::ui::phase("artifact fetch");
     let (store, activity, platform) = (door.store(), door.lease(), door.platform());
     let mut artifacts: Vec<(&crate::kernel::types::LockedPackage, PathBuf)> = Vec::new();
     let mut fell_back = Vec::new();
@@ -540,7 +575,7 @@ fn realize_artifacts<'p>(
         .filter(|p| p.kind == ArtifactKind::Wheel)
         .collect();
     let mut fetched = fetch_each(&wheels, |p| {
-        let lease = download_verified_held(store, activity, &p.url, &p.sha256)?;
+        let lease = download_registry_held(store, activity, Ecosystem::Python, &p.url, &p.sha256)?;
         Ok(lease.to_path_buf())
     })
     .into_iter();
@@ -620,6 +655,22 @@ fn python_closure_body(
         "python": python,
         "inputs": inputs,
     });
+    // The configured registry that served each file, for the receipt and
+    // `ward audit`.
+    let sources = crate::kernel::policy::effective().registries;
+    if let Some(packages) = body["plan"]["packages"].as_array_mut() {
+        for package in packages {
+            if !package["git"].is_null() {
+                continue;
+            }
+            let url = package["url"].as_str().unwrap_or_default();
+            if let Some(registry) =
+                crate::kernel::registries::lock::served_by(&sources, Ecosystem::Python, url)
+            {
+                package["registry"] = registry;
+            }
+        }
+    }
     if let Some(record) = runtime_record {
         crate::comforter::merge_record(&mut body, record);
     }

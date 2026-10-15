@@ -9,11 +9,15 @@
 //! permitted set, and the request path must parse in the route grammar
 //! before the protocol ever sees it.
 
+use super::clients::ClientSpec;
 use crate::kernel::fetch::Digest;
+use crate::kernel::registries::covers;
+use crate::kernel::registries::credential::{Credential, Secret};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use url::Url;
 
 /// The upstream hosts the proxy may reach: the public registries ward
@@ -163,9 +167,9 @@ impl Permitted {
         }
     }
 
-    /// Tests only: a fixture host on its ephemeral port.
-    #[cfg(test)]
-    pub(crate) fn with_origin(mut self, host: &str, port: u16) -> Self {
+    /// The set with one more origin: a configured registry's (from
+    /// machine policy), or in tests a fixture host on its ephemeral port.
+    pub fn with_origin(mut self, host: &str, port: u16) -> Self {
         self.origins.insert((host.to_string(), port));
         self
     }
@@ -178,7 +182,23 @@ impl Permitted {
 pub struct Endpoint {
     host: String,
     port: u16,
-    authorization: Option<String>,
+    authorization: Option<Authorization>,
+    /// A configured registry's endpoint: its client settings.
+    client: Option<ClientSpec>,
+}
+
+/// The credential an endpoint attaches.
+#[derive(Clone, PartialEq, Eq)]
+enum Authorization {
+    /// Tests only: a fixed value for the whole origin.
+    #[cfg(test)]
+    Fixed(String),
+    /// A configured registry's credential, read on first use and sent only
+    /// to URLs under `root` (`covers`).
+    Registry {
+        root: String,
+        credential: Arc<Credential>,
+    },
 }
 
 impl fmt::Debug for Endpoint {
@@ -187,6 +207,7 @@ impl fmt::Debug for Endpoint {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("authorization", &self.authorization.as_ref().map(|_| "…"))
+            .field("client", &self.client)
             .finish()
     }
 }
@@ -205,6 +226,40 @@ impl Endpoint {
             host,
             port: 443,
             authorization: None,
+            client: None,
+        })
+    }
+
+    /// A configured registry's origin (its `url` origin, or one of its
+    /// `files` origins), outside the compiled set: the permitted set of a
+    /// session that routes it must name it. `root` and `credential`, when
+    /// given, attach the credential to URLs under the root only.
+    pub fn configured(
+        origin: &str,
+        credential: Option<(String, Arc<Credential>)>,
+        client: ClientSpec,
+    ) -> io::Result<Endpoint> {
+        let url = Url::parse(origin).map_err(|error| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("{origin}: {error}"))
+        })?;
+        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{origin} has no host"),
+            ));
+        };
+        if url.scheme() != "https" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{origin} is not https"),
+            ));
+        }
+        Ok(Endpoint {
+            host: host.to_ascii_lowercase(),
+            port,
+            authorization: credential
+                .map(|(root, credential)| Authorization::Registry { root, credential }),
+            client: Some(client),
         })
     }
 
@@ -217,6 +272,7 @@ impl Endpoint {
             host: host.to_ascii_lowercase(),
             port,
             authorization: None,
+            client: None,
         }
     }
 
@@ -228,6 +284,7 @@ impl Endpoint {
             host: host.to_string(),
             port,
             authorization: None,
+            client: None,
         }
     }
 
@@ -246,7 +303,7 @@ impl Endpoint {
                 ),
             ));
         }
-        self.authorization = Some(value.to_string());
+        self.authorization = Some(Authorization::Fixed(value.to_string()));
         Ok(self)
     }
 
@@ -287,8 +344,39 @@ impl Endpoint {
             && url.port_or_known_default() == Some(self.port)
     }
 
-    pub(crate) fn authorization(&self) -> Option<&str> {
-        self.authorization.as_deref()
+    /// The `Authorization` value for a request to `raw` (the URL as it
+    /// will be sent), read on first use: `None` when this endpoint sends no
+    /// credential there, an error when the credential cannot be read.
+    pub(crate) fn authorization(&self, raw: &str) -> Result<Option<Secret>, String> {
+        match &self.authorization {
+            None => Ok(None),
+            #[cfg(test)]
+            Some(Authorization::Fixed(value)) => Ok(Some(Secret::fixed(value))),
+            Some(Authorization::Registry { root, credential }) => {
+                if !covers::covers(root, raw) {
+                    return Ok(None);
+                }
+                credential.authorization().map(Some)
+            }
+        }
+    }
+
+    /// The identity of this endpoint's credential for cache keys: never the
+    /// value, and never a read of it.
+    fn credential_reference(&self) -> Option<String> {
+        match self.authorization.as_ref()? {
+            #[cfg(test)]
+            Authorization::Fixed(value) => Some(format!("fixed|{value}")),
+            Authorization::Registry { root, credential } => {
+                Some(format!("{root}|{}", credential.reference()))
+            }
+        }
+    }
+
+    /// The client settings of a configured registry's endpoint; `None`
+    /// takes the public client.
+    pub(crate) fn client(&self) -> Option<&ClientSpec> {
+        self.client.as_ref()
     }
 
     pub(crate) fn permitted_by(&self, permitted: &Permitted) -> bool {
@@ -353,10 +441,10 @@ pub struct LocalAnswer {
 
 /// One registry's protocol, implemented in its tailor folder. Every method
 /// is pure: no I/O, no network.
-pub trait RegistryProtocol: Sync {
+pub trait RegistryProtocol: Send + Sync {
     /// The route segment in mirror URLs (`/<token>/<route_id>/...`):
     /// lowercase letters, digits, and `-`.
-    fn route_id(&self) -> &'static str;
+    fn route_id(&self) -> &str;
 
     /// Map a mirror path (starting with `/`, query included) to where it
     /// is served from. `endpoints` are the route's; the answer's origin must
@@ -468,8 +556,127 @@ pub struct Lookup {
 /// A mirror route: a protocol and the endpoints it may reach.
 #[derive(Clone)]
 pub struct Route {
-    pub protocol: &'static dyn RegistryProtocol,
+    pub protocol: Arc<dyn RegistryProtocol>,
     pub endpoints: Vec<Endpoint>,
+    /// A configured registry's route: the URLs it owns.
+    scope: Option<RouteScope>,
+}
+
+/// The URLs a configured registry's route owns: those under its root, and
+/// those on its own `files` origins. Every check that asks which registry
+/// a URL belongs to asks [`covers`] against these, on the raw spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteScope {
+    /// The registry's name, for error text.
+    pub registry: String,
+    /// The registry's `url`, normalized.
+    pub url: String,
+    pub root: String,
+    /// `https://host[:port]/` download-only origins.
+    pub files: Vec<String>,
+}
+
+impl RouteScope {
+    /// Whether `raw` is under the root.
+    pub fn under_root(&self, raw: &str) -> bool {
+        covers::covers(&self.root, raw)
+    }
+
+    /// Whether `raw` is on one of the `files` origins.
+    pub fn on_files(&self, raw: &str) -> bool {
+        self.files.iter().any(|files| covers::covers(files, raw))
+    }
+
+    /// Whether the route owns `raw`: under its root or on its `files`.
+    pub fn owns(&self, raw: &str) -> bool {
+        self.under_root(raw) || self.on_files(raw)
+    }
+}
+
+/// The route that serves `raw` (a URL as the tool or a redirect spelled
+/// it): the configured route with the longest root that covers it, else a
+/// configured route whose `files` origin covers it, else a public route on
+/// its origin. A URL on a configured registry's host but outside every root
+/// is no configured route's.
+pub fn route_for<'a>(routes: &'a [Route], raw: &str) -> Option<&'a Route> {
+    let configured = routes
+        .iter()
+        .filter_map(|route| {
+            let scope = route.scope.as_ref()?;
+            scope
+                .under_root(raw)
+                .then(|| (covers::root_len(&scope.root), route))
+        })
+        // The longest root wins; on a tie the earlier route does, as in
+        // ward's own fetches.
+        .fold(None::<(usize, &Route)>, |best, (len, route)| match best {
+            Some((best_len, _)) if best_len >= len => best,
+            _ => Some((len, route)),
+        })
+        .map(|(_, route)| route);
+    if configured.is_some() {
+        return configured;
+    }
+    if let Some(route) = routes.iter().find(|route| {
+        route
+            .scope
+            .as_ref()
+            .is_some_and(|scope| scope.on_files(raw))
+    }) {
+        return Some(route);
+    }
+    let url = Url::parse(raw).ok()?;
+    routes.iter().find(|route| {
+        route.scope.is_none() && route.endpoints.iter().any(|endpoint| endpoint.serves(&url))
+    })
+}
+
+/// A compiled-in protocol, shared as an instance.
+struct Fixed(&'static dyn RegistryProtocol);
+
+impl RegistryProtocol for Fixed {
+    fn route_id(&self) -> &str {
+        self.0.route_id()
+    }
+    fn upstream(&self, endpoints: &[Endpoint], path: &str) -> io::Result<Upstream> {
+        self.0.upstream(endpoints, path)
+    }
+    fn classify(&self, url: &Url) -> RequestClass {
+        self.0.classify(url)
+    }
+    fn claims(&self, url: &Url, body: &[u8]) -> Vec<(Url, Claim)> {
+        self.0.claims(url, body)
+    }
+    fn expects_claim(&self, url: &Url) -> bool {
+        self.0.expects_claim(url)
+    }
+    fn request_body_cap(&self) -> u64 {
+        self.0.request_body_cap()
+    }
+    fn content_query_keys(&self) -> &'static [&'static str] {
+        self.0.content_query_keys()
+    }
+    fn rewrite(&self, url: &Url, body: Vec<u8>, base: &ProxyAddress) -> io::Result<Vec<u8>> {
+        self.0.rewrite(url, body, base)
+    }
+    fn encoded_slash(&self) -> bool {
+        self.0.encoded_slash()
+    }
+    fn published(&self, url: &Url, body: &[u8]) -> Vec<(String, String, i64)> {
+        self.0.published(url, body)
+    }
+    fn lookup(&self, endpoints: &[Endpoint], name: &str, version: &str) -> Option<Lookup> {
+        self.0.lookup(endpoints, name, version)
+    }
+    fn package_key(&self, name: &str, version: &str) -> (String, String) {
+        self.0.package_key(name, version)
+    }
+    fn log(&self) -> Option<super::tlog::Log> {
+        self.0.log()
+    }
+    fn tree_size(&self, url: &Url, body: &[u8]) -> Option<Result<super::tlog::Head, String>> {
+        self.0.tree_size(url, body)
+    }
 }
 
 impl fmt::Debug for Route {
@@ -482,8 +689,17 @@ impl fmt::Debug for Route {
 }
 
 impl Route {
+    /// A route of a compiled-in protocol.
     pub fn new(
         protocol: &'static dyn RegistryProtocol,
+        endpoints: Vec<Endpoint>,
+    ) -> io::Result<Route> {
+        Route::instance(Arc::new(Fixed(protocol)), endpoints)
+    }
+
+    /// A route of a protocol instance (a configured registry's).
+    pub fn instance(
+        protocol: Arc<dyn RegistryProtocol>,
         endpoints: Vec<Endpoint>,
     ) -> io::Result<Route> {
         let id = protocol.route_id();
@@ -506,7 +722,48 @@ impl Route {
         Ok(Route {
             protocol,
             endpoints,
+            scope: None,
         })
+    }
+
+    /// A configured registry's route: `endpoints` must include the root's
+    /// origin and every `files` origin, and nothing else.
+    pub fn configured(
+        protocol: Arc<dyn RegistryProtocol>,
+        scope: RouteScope,
+        endpoints: Vec<Endpoint>,
+    ) -> io::Result<Route> {
+        let mut route = Route::instance(protocol, endpoints)?;
+        let origins: BTreeSet<String> = route.endpoints.iter().map(Endpoint::origin).collect();
+        let mut wanted = BTreeSet::from([origin_of(&scope.root)]);
+        wanted.extend(scope.files.iter().map(|files| origin_of(files)));
+        if origins != wanted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "route {} for registry {} has endpoints {origins:?}, not its root and files origins {wanted:?}",
+                    route.protocol.route_id(),
+                    scope.registry
+                ),
+            ));
+        }
+        route.scope = Some(scope);
+        Ok(route)
+    }
+
+    /// The configured registry this route serves, if any.
+    pub fn scope(&self) -> Option<&RouteScope> {
+        self.scope.as_ref()
+    }
+
+    /// The scope claims are learned and looked up in: a configured route's
+    /// claims are its own, so one registry's metadata never admits a URL
+    /// for another; the public routes share one scope, as before.
+    pub(crate) fn claim_scope(&self) -> &str {
+        match &self.scope {
+            Some(_) => self.protocol.route_id(),
+            None => "",
+        }
     }
 
     /// Where `path` goes, after the kernel's grammar check and the origin
@@ -516,7 +773,7 @@ impl Route {
         let upstream = self
             .protocol
             .upstream(&self.endpoints, path)
-            .map_err(|error| scrub_echo(&error.to_string(), path, self.protocol))?;
+            .map_err(|error| scrub_echo(&error.to_string(), path, &*self.protocol))?;
         let url = match &upstream {
             Upstream::Fetch(url) => url,
             Upstream::Local(answer) => &answer.url,
@@ -544,10 +801,32 @@ impl Route {
     /// credentials. The value itself never leaves this hash.
     pub(crate) fn credential_identity(&self) -> String {
         use sha2::{Digest as _, Sha256};
-        let mut pairs: Vec<(String, &str)> = self
+        let mut pairs: Vec<(String, String)> = self
             .endpoints
             .iter()
-            .filter_map(|endpoint| Some((endpoint.origin(), endpoint.authorization()?)))
+            .filter_map(|endpoint| {
+                let credential = endpoint.credential_reference();
+                let client = endpoint.client().map(|client| {
+                    // The trust roots by content, so a replaced file is a
+                    // different configuration; an unreadable one fails the
+                    // request itself, so its path stands in here.
+                    let ca = client.ca.as_ref().map(|path| {
+                        super::clients::ca_file(path)
+                            .map(|ca| hex::encode(ca.digest))
+                            .unwrap_or_else(|_| path.display().to_string())
+                    });
+                    format!("{}|{}", client.network.as_str(), ca.unwrap_or_default())
+                });
+                if credential.is_none() && client.is_none() {
+                    return None;
+                }
+                let identity = format!(
+                    "{}|{}",
+                    credential.unwrap_or_default(),
+                    client.unwrap_or_default()
+                );
+                Some((endpoint.origin(), identity))
+            })
             .collect();
         if pairs.is_empty() {
             return String::new();
@@ -567,6 +846,12 @@ impl Route {
     pub(crate) fn endpoint_for(&self, url: &Url) -> Option<&Endpoint> {
         self.endpoints.iter().find(|endpoint| endpoint.serves(url))
     }
+}
+
+/// `https://host[:port]` of a normalized URL, as [`Endpoint::origin`]
+/// spells it.
+fn origin_of(url: &str) -> String {
+    crate::kernel::registries::config::origin_of(url).to_string()
 }
 
 /// A protocol's error text with any echo of the raw mirror path (or its
@@ -807,6 +1092,132 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::TEST_PROTOCOL;
     use super::*;
+
+    /// The wrapper of compiled-in protocols names every method the trait
+    /// has: a method added to the trait with a default body, and not
+    /// forwarded, would leave every compiled-in route on the default.
+    #[test]
+    fn the_compiled_in_wrapper_names_every_trait_method() {
+        let source = include_str!("routes.rs");
+        let methods = |header: &str| -> BTreeSet<String> {
+            let start = source.find(header).expect(header) + header.len();
+            let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+            body.lines()
+                .filter_map(|line| line.strip_prefix("    fn "))
+                .map(|rest| rest.split(['(', '<']).next().unwrap().to_string())
+                .collect()
+        };
+        let trait_methods = methods("pub trait RegistryProtocol: Send + Sync {");
+        assert!(trait_methods.contains("tree_size"), "{trait_methods:?}");
+        assert_eq!(methods("impl RegistryProtocol for Fixed {"), trait_methods);
+    }
+
+    /// A compiled-in protocol answers through its route exactly as it
+    /// answers itself: every method the trait has is passed through, so a
+    /// method added later and not forwarded fails here, not silently.
+    #[test]
+    fn a_compiled_in_route_forwards_every_protocol_method() {
+        struct Sentinel;
+        impl RegistryProtocol for Sentinel {
+            fn route_id(&self) -> &str {
+                "sentinel"
+            }
+            fn upstream(&self, endpoints: &[Endpoint], _path: &str) -> io::Result<Upstream> {
+                Ok(Upstream::Fetch(endpoints[0].url("/upstream")?))
+            }
+            fn classify(&self, _url: &Url) -> RequestClass {
+                RequestClass::Sumdb
+            }
+            fn claims(&self, url: &Url, _body: &[u8]) -> Vec<(Url, Claim)> {
+                vec![(
+                    url.clone(),
+                    Claim::one(Digest::sha256(&"7".repeat(64)).unwrap()),
+                )]
+            }
+            fn expects_claim(&self, _url: &Url) -> bool {
+                true
+            }
+            fn request_body_cap(&self) -> u64 {
+                77
+            }
+            fn content_query_keys(&self) -> &'static [&'static str] {
+                &["sentinel"]
+            }
+            fn rewrite(
+                &self,
+                _url: &Url,
+                _body: Vec<u8>,
+                _base: &ProxyAddress,
+            ) -> io::Result<Vec<u8>> {
+                Ok(b"rewritten".to_vec())
+            }
+            fn encoded_slash(&self) -> bool {
+                true
+            }
+            fn published(&self, _url: &Url, _body: &[u8]) -> Vec<(String, String, i64)> {
+                vec![("n".into(), "1".into(), 7)]
+            }
+            fn lookup(
+                &self,
+                endpoints: &[Endpoint],
+                _name: &str,
+                _version: &str,
+            ) -> Option<Lookup> {
+                Some(Lookup {
+                    url: endpoints[0].url("/lookup").ok()?,
+                    accept: "sentinel",
+                })
+            }
+            fn package_key(&self, name: &str, version: &str) -> (String, String) {
+                (format!("key-{name}"), format!("key-{version}"))
+            }
+            fn log(&self) -> Option<super::super::tlog::Log> {
+                Some(crate::tailors::go::sumdb::log())
+            }
+            fn tree_size(
+                &self,
+                _url: &Url,
+                _body: &[u8],
+            ) -> Option<Result<super::super::tlog::Head, String>> {
+                Some(Err("sentinel".into()))
+            }
+        }
+        static SENTINEL: Sentinel = Sentinel;
+        let endpoints = vec![Endpoint::https("pypi.org").unwrap()];
+        let route = Route::new(&SENTINEL, endpoints.clone()).unwrap();
+        let wrapped = &route.protocol;
+        let url = Url::parse("https://pypi.org/x").unwrap();
+        let base = ProxyAddress::new(std::net::SocketAddr::from(([127, 0, 0, 1], 1)), "t");
+        assert_eq!(wrapped.route_id(), "sentinel");
+        assert_eq!(
+            wrapped.upstream(&endpoints, "/x").unwrap(),
+            SENTINEL.upstream(&endpoints, "/x").unwrap()
+        );
+        assert_eq!(wrapped.classify(&url), RequestClass::Sumdb);
+        assert_eq!(wrapped.claims(&url, b""), SENTINEL.claims(&url, b""));
+        assert!(wrapped.expects_claim(&url));
+        assert_eq!(wrapped.request_body_cap(), 77);
+        assert_eq!(wrapped.content_query_keys(), ["sentinel"]);
+        assert_eq!(
+            wrapped.rewrite(&url, Vec::new(), &base).unwrap(),
+            b"rewritten"
+        );
+        assert!(wrapped.encoded_slash());
+        assert_eq!(wrapped.published(&url, b""), SENTINEL.published(&url, b""));
+        assert_eq!(
+            wrapped.lookup(&endpoints, "n", "1"),
+            SENTINEL.lookup(&endpoints, "n", "1")
+        );
+        assert_eq!(
+            wrapped.package_key("n", "1"),
+            ("key-n".into(), "key-1".into())
+        );
+        assert_eq!(wrapped.log().map(|log| log.name), Some("sum.golang.org"));
+        assert_eq!(
+            wrapped.tree_size(&url, b"").unwrap().unwrap_err(),
+            "sentinel"
+        );
+    }
 
     #[test]
     fn route_paths_follow_the_grammar() {

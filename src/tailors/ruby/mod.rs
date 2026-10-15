@@ -1201,15 +1201,22 @@ fn install_gems(
                 )
             })?;
         let installed = sandboxed.install_git(&checkout, &tree)?;
+        // The report names exactly this checkout's gems
+        // (`read_git_install_report`).
         for gem in checkout.gems() {
-            if let Some(exes) = installed.executables.get(&gem.name) {
-                claim_executables(&mut executables, &gem.name, exes.iter().cloned())?;
-            }
+            let exes = installed.executables.get(&gem.name).into_iter().flatten();
+            claim_executables(&mut executables, &gem.name, exes.cloned())?;
         }
         if let Some(built_against) = installed.built_against {
             same_host_state(&mut host_inputs, checkout.name, built_against)?;
             fell_back.push(checkout.name.to_string());
         }
+    }
+    // Each install checked its own checkout, but a later checkout's
+    // sandboxed install can write to an earlier one: every checkout is
+    // checked again once all have installed, before the commit.
+    for checkout in sources::checkouts(&plan.git_gems) {
+        gem_home::refuse_git_data(&staged, checkout.name)?;
     }
     let mut deps = crate::kernel::store::ObjectDeps::new();
     deps.object_id(&crate::kernel::store::object_id_from_path(ruby_obj)?)?;

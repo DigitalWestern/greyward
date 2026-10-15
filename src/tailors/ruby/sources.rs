@@ -290,10 +290,17 @@ pub fn check_git_gem(gem: &RubyGitGem) -> io::Result<()> {
             gem.checkout
         )));
     }
-    // `..` anywhere, `{..,x}` included, and an absolute or home-relative
-    // glob: Bundler globs relative to the checkout, and nothing it reads
-    // may come from outside it.
-    if gem.glob.starts_with('/') || gem.glob.starts_with('~') || gem.glob.contains("..") {
+    // Bundler globs relative to the checkout, and nothing it reads may come
+    // from outside it. Ruby's `Dir.glob` expands braces before it matches,
+    // so `{.}{.}/x` reads as `../x` and `{/abs,y}` as an absolute path: a
+    // glob with braces, a character class or an escape is refused rather
+    // than expanded here, and what is left must not climb, start at the
+    // root, or start at a home directory.
+    if gem.glob.starts_with('/')
+        || gem.glob.starts_with('~')
+        || gem.glob.contains("..")
+        || gem.glob.contains(['{', '}', '[', ']', '\\'])
+    {
         return Err(refuse(format!(
             "the lock's glob {:?} could leave the checkout",
             gem.glob
@@ -384,12 +391,25 @@ mod tests {
             "a/{x,..}/*.gemspec",
             "a..b/*.gemspec",
             "~/*.gemspec",
+            // Ruby expands braces before matching: these read as
+            // `../*.gemspec` and `/x/*.gemspec`.
+            "{.}{.}/*.gemspec",
+            "{/x/*.gemspec,y}",
+            "{,*,*/*}.gemspec",
+            "[.][.]/*.gemspec",
+            "\\../*.gemspec",
+            "gems/\\x/*.gemspec",
         ] {
             gem.glob = bad.into();
             let error = check_git_gem(&gem).unwrap_err().to_string();
             assert!(error.contains("could leave the checkout"), "{bad}: {error}");
         }
-        for good in ["gems/*/*.gemspec", "{,*,*/*}.gemspec", "a/~b/*.gemspec"] {
+        for good in [
+            "gems/*/*.gemspec",
+            "*/*.gemspec",
+            "a/~b/*.gemspec",
+            "g?ms/*.gemspec",
+        ] {
             gem.glob = good.into();
             check_git_gem(&gem).unwrap();
         }

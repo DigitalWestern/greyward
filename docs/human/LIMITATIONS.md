@@ -882,8 +882,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   one checkout, as in Bundler. A gemspec may list its files with `git ls-files`: ward
   indexes the fetched tree in a throwaway repository while Bundler evaluates it, then
   removes it, so the object holds no git data. A remote that is an absolute path is read
-  as a local repository (`file://`); a relative one is refused, as is a glob containing
-  `..`. A git gem's executables are checked against every other gem's, as rubygems.org
+  as a local repository (`file://`); a relative one is refused. A `glob:` may use `*`, `?`
+  and plain path segments only: one with braces, a character class (`[...]`) or a
+  backslash is refused, since Ruby expands those before matching (`{.}{.}` reads as `..`),
+  and so is one containing `..` or starting with `/` or `~`. A git gem's executables are checked against every other gem's, as rubygems.org
   gems' are. Like after `bundle install`, a git gem's executables run through `bundle
   exec` (`ward run bundle exec <exe>`); RubyGems alone does not know the gem.
 - **Sources other than rubygems.org, path and git fail closed.** So do gems whose

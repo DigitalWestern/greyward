@@ -183,12 +183,7 @@ impl GemInstall<'_> {
         let built_against = self.attempts(name, true, args, place, discard)?;
         // The helper removed the throwaway repository it indexed the tree
         // with; the object holds none.
-        gem_home::refuse_symlinks(staged, &relative.join(".git"))?;
-        if fs::symlink_metadata(dest.join(".git")).is_ok() {
-            return Err(err(format!(
-                "{name}: git data was left in the checkout after its install"
-            )));
-        }
+        gem_home::refuse_git_data(staged, name)?;
         let home = last_home
             .into_inner()
             .ok_or_else(|| err(format!("{name}: no install attempt ran")))?;
@@ -308,12 +303,37 @@ fn read_git_install_report(
     }
     let report: Report =
         serde_json::from_slice(&fs::read(path)?).map_err(|_| refuse("is not valid"))?;
-    for gem in report.executables.keys() {
-        if !checkout.gems().any(|g| &g.name == gem) {
-            return Err(refuse(&format!("names {gem:?}, which the lock does not")));
+    check_git_install_report(&report.executables, checkout).map_err(|why| refuse(&why))?;
+    Ok(report.executables)
+}
+
+/// Why a report's executables cannot be taken: the gems it names must be
+/// exactly the checkout's, and each executable one safe path component
+/// (its wrapper's name in the bin dir).
+fn check_git_install_report(
+    executables: &BTreeMap<String, Vec<String>>,
+    checkout: &super::sources::Checkout<'_>,
+) -> Result<(), String> {
+    let reported: std::collections::BTreeSet<&str> =
+        executables.keys().map(String::as_str).collect();
+    let locked: std::collections::BTreeSet<&str> =
+        checkout.gems().map(|g| g.name.as_str()).collect();
+    if reported != locked {
+        return Err(format!(
+            "names the gems {reported:?}, not the lock's {locked:?}"
+        ));
+    }
+    for (gem, exes) in executables {
+        if let Some(bad) = exes
+            .iter()
+            .find(|e| !crate::kernel::gitsrc::is_safe_component(e))
+        {
+            return Err(format!(
+                "gives {gem} the executable {bad:?}, not a file name"
+            ));
         }
     }
-    Ok(report.executables)
+    Ok(())
 }
 
 fn gem_install_error(gem: &str, error: io::Error) -> io::Error {
@@ -428,6 +448,41 @@ mod tests {
     use super::super::tests::linux_test_plan;
     use super::*;
     use crate::kernel::testutil::TempDir;
+
+    /// The sandbox's report must name exactly the checkout's gems, so an
+    /// omitted gem cannot skip the executable check, and each executable
+    /// must be a plain file name.
+    #[test]
+    fn a_git_install_report_names_exactly_the_checkouts_gems() {
+        let gem = |name: &str| RubyGitGem {
+            name: name.into(),
+            version: "1.0.0".into(),
+            url: "https://example.invalid/repo.git".into(),
+            revision: "0123456789abcdef0123456789abcdef01234567".into(),
+            checkout: "repo-0123456789ab".into(),
+            glob: String::new(),
+        };
+        let gems = vec![gem("one"), gem("two")];
+        let checkouts = super::super::sources::checkouts(&gems);
+        let checkout = &checkouts[0];
+        let report = |entries: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+            entries
+                .iter()
+                .map(|(g, exes)| (g.to_string(), exes.iter().map(|e| e.to_string()).collect()))
+                .collect()
+        };
+        check_git_install_report(&report(&[("one", &["one"]), ("two", &[])]), checkout).unwrap();
+        let omitted = check_git_install_report(&report(&[("one", &["one"])]), checkout);
+        assert!(omitted.unwrap_err().contains("not the lock's"));
+        let extra = report(&[("one", &[]), ("two", &[]), ("three", &[])]);
+        assert!(check_git_install_report(&extra, checkout).is_err());
+        for bad in ["../x", "a/b", "", "-x", ".."] {
+            let error =
+                check_git_install_report(&report(&[("one", &[bad]), ("two", &[])]), checkout)
+                    .unwrap_err();
+            assert!(error.contains("not a file name"), "{bad}: {error}");
+        }
+    }
 
     #[test]
     fn a_refused_fingerprint_keeps_its_class_through_the_gem_install_error() {

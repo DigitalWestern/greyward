@@ -138,6 +138,22 @@ pub(super) fn refuse_symlinks(root: &Path, relative: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuse when the git checkout `checkout` in `gem_home` holds git data
+/// (`.git`, as a directory, file or symlink), or is reached through a
+/// symlink. The helper indexes a checkout in a throwaway repository and
+/// removes it; the gems object must hold none.
+pub(super) fn refuse_git_data(gem_home: &Path, checkout: &str) -> io::Result<()> {
+    let git = Path::new(super::GIT_CHECKOUTS).join(checkout).join(".git");
+    let parent = git.parent().expect("has a parent");
+    refuse_symlinks(gem_home, parent)?;
+    if fs::symlink_metadata(gem_home.join(&git)).is_ok() {
+        return Err(io::Error::other(format!(
+            "{checkout}: git data was left in the checkout after its install"
+        )));
+    }
+    Ok(())
+}
+
 /// Whether `relative` under `gem_home` is a directory reached through no
 /// symlink (`refuse_symlinks`).
 fn real_dir(gem_home: &Path, relative: &Path) -> io::Result<bool> {
@@ -498,6 +514,25 @@ mod tests {
         let error = discard_failed_attempt(&home.0, "failext-1.0", &before).unwrap_err();
         assert!(error.to_string().contains("symlink"), "{error}");
         assert!(outside.0.join("x86_64-linux/3.4.0/failext-1.0").is_dir());
+    }
+
+    /// Git data in any checkout, in any form, stops the commit: a later
+    /// checkout's install could have planted it in an earlier one.
+    #[test]
+    fn git_data_left_in_a_checkout_is_refused() {
+        let home = gem_home("git-data");
+        let checkout = "gitgem-repo-0123456789ab";
+        let copy = home.0.join("bundler/gems").join(checkout);
+        fs::create_dir_all(&copy).unwrap();
+        refuse_git_data(&home.0, checkout).unwrap();
+        fs::create_dir(copy.join(".git")).unwrap();
+        assert!(refuse_git_data(&home.0, checkout).is_err());
+        fs::remove_dir(copy.join(".git")).unwrap();
+        fs::write(copy.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(refuse_git_data(&home.0, checkout).is_err());
+        fs::remove_file(copy.join(".git")).unwrap();
+        std::os::unix::fs::symlink("/", copy.join(".git")).unwrap();
+        assert!(refuse_git_data(&home.0, checkout).is_err());
     }
 
     #[test]

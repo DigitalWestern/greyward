@@ -116,7 +116,9 @@ if mode == "git-install"
   end
   executables = {}
   begin
-    git.call("init", "-q")
+    # No template: a host template's hooks would run at the commit
+    # (`--no-verify` does not stop post-commit), as gitsrc's init does.
+    git.call("init", "-q", "--template=")
     git.call("add", "-A", "-f")
     git.call("commit", "-q", "--allow-empty", "--no-verify", "-m", revision)
     JSON.parse(sources).each do |source|

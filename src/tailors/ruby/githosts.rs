@@ -227,8 +227,8 @@ impl Lexer {
                 if line.trim_end() == "__END__" {
                     break;
                 }
-                if line.starts_with("=begin") {
-                    while self.peek(0).is_some() && !self.line().starts_with("=end") {
+                if comment_marker(&line, "=begin") {
+                    while self.peek(0).is_some() && !comment_marker(&self.line(), "=end") {
                         self.skip_line();
                     }
                     self.skip_line();
@@ -466,6 +466,11 @@ fn is_word(c: char) -> bool {
     c.is_alphabetic() || c == '_' || !c.is_ascii()
 }
 
+fn comment_marker(line: &str, marker: &str) -> bool {
+    line.strip_prefix(marker)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 /// The host `remote` fetches from over https, as the git row reaches it:
 /// an `https://` URL's host, with its port when that is not 443, or an ssh
 /// remote's (`ssh://` or `git@host:path`), which the git row rewrites to
@@ -601,6 +606,8 @@ OPTIONS = { git: "https://hash.example/x.git" }
 config(git: "https://argument.example/x.git")
 =begin
 gem "blocked", git: "https://begin.example/x.git"
+=endless
+gem "still-blocked", git: "https://endless.example/x.git"
 git "https://begin-block.example/x.git" do end
 =end
 README = <<~TEXT

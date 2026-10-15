@@ -67,11 +67,21 @@ impl RegistryProtocol for GoProxy {
             return Err(refused(raw, "a Go proxy request carries no query"));
         }
         // go's HTTP client sends the `!` of the escaped spelling as `%21`.
-        // The path is decoded once, then held to go's own grammar, which
-        // has no `%`: a double encoding (`%2521`) decodes to `%21` and is
-        // refused, and an encoded letter (`%41`) decodes to one the
-        // grammar refuses. Upstream gets the decoded spelling, the one
-        // go.sum and the checksum database use.
+        // Every escape in the path (not only `%21`) is decoded once, then
+        // held to go's own grammar, which has no `%`: a double encoding
+        // (`%2521`) decodes to `%21` and is refused, and an encoded
+        // uppercase letter (`%41`) decodes to one the grammar refuses. An
+        // escape of an allowed byte (`%73umdb`) is the same request as the
+        // byte itself. Upstream gets the decoded spelling, the one go.sum
+        // and the checksum database use.
+        //
+        // `Route::resolve` has already refused an encoded `/`, `\` or NUL;
+        // they are refused here too, so this protocol is safe called
+        // directly: a decoded `/` would otherwise be a segment boundary.
+        let lower = raw.to_ascii_lowercase();
+        if ["%2f", "%5c", "%00"].iter().any(|bad| lower.contains(bad)) {
+            return Err(refused(raw, "a percent-encoded /, \\, or NUL"));
+        }
         let decoded = crate::kernel::gitsrc::percent_decode(raw);
         let path = decoded.as_str();
         let refuse = |why: &str| refused(raw, why);
@@ -100,12 +110,16 @@ impl RegistryProtocol for GoProxy {
 
     /// proxy.golang.org hands most module zips to Google Cloud Storage
     /// (`https://storage.googleapis.com/proxy-golang-org-prod/...`, a signed
-    /// URL). That one hop is followed: go checks every zip against go.sum
-    /// and the checksum database, so the storage host is trusted with
-    /// nothing. Only the host is pinned, not the bucket, which Google may
-    /// rename; a hop anywhere else, or from sum.golang.org, is refused.
+    /// URL). That one hop is followed for a `.zip` only: go checks every
+    /// zip against go.sum and the checksum database, so the storage host is
+    /// trusted with nothing. A `list`, `@latest`, `.info` or `.mod` answer
+    /// steers version selection or is checked less, and must come from
+    /// proxy.golang.org itself. Only the host is pinned, not the bucket,
+    /// which Google may rename; a hop anywhere else, or from
+    /// sum.golang.org, is refused.
     fn follows_redirect(&self, from: &Url, to: &Url) -> bool {
         from.host_str() == Some(PROXY_HOST)
+            && from.path().ends_with(".zip")
             && to.scheme() == "https"
             && to.host_str() == Some(STORAGE_HOST)
             && to.port_or_known_default() == Some(443)
@@ -553,6 +567,42 @@ mod tests {
         }
     }
 
+    /// Through the route, as the proxy calls it: the kernel grammar runs
+    /// first, then go's; an escaped module resolves to its decoded URL.
+    #[test]
+    fn the_go_route_resolves_escaped_paths_under_the_kernel_grammar() {
+        let route = route().unwrap();
+        match route
+            .resolve("/github.com/%21azure/azure-sdk-for-go/@v/v68.0.0+incompatible.zip")
+            .unwrap()
+        {
+            Upstream::Fetch(url) => assert_eq!(
+                url.as_str(),
+                "https://proxy.golang.org/github.com/!azure/azure-sdk-for-go/@v/v68.0.0+incompatible.zip"
+            ),
+            other => panic!("{other:?}"),
+        }
+        for (path, needle) in [
+            ("/github.com%2fx/y/@v/list", "percent-encoded"),
+            ("/github.com/x%5cy/@v/list", "percent-encoded"),
+            ("/github.com/x%00/@v/list", "percent-encoded"),
+            ("/github.com/%2e%2e/x/@v/list", ". or .."),
+            ("/github.com/%2/x/@v/list", "malformed percent-escape"),
+            ("/github.com/%zz/x/@v/list", "malformed percent-escape"),
+        ] {
+            let error = route.resolve(path).unwrap_err();
+            assert!(error.contains(needle), "{path}: {error}");
+        }
+        // The protocol alone refuses the encoded separators too.
+        for path in [
+            "/github.com%2Fx/y/@v/list",
+            "/github.com/x%5Cy/@v/list",
+            "/x%00/@v/list",
+        ] {
+            assert!(refusal(path).contains("percent-encoded"), "{path}");
+        }
+    }
+
     /// proxy.golang.org's handoff of a module zip to Cloud Storage is the
     /// one redirect the Go route follows off its own hosts.
     #[test]
@@ -563,6 +613,16 @@ mod tests {
             "https://storage.googleapis.com/proxy-golang-org-prod/0900f5b99fe62352-github.com:klauspost:compress-v1.17.6.zip?Expires=1&GoogleAccessId=a&Signature=s",
         );
         assert!(GO_PROXY.follows_redirect(&zip, &storage));
+        // Only a zip is handed off: list, @latest, .info and .mod answers
+        // come from proxy.golang.org itself.
+        for from in [
+            "https://proxy.golang.org/github.com/klauspost/compress/@v/list",
+            "https://proxy.golang.org/github.com/klauspost/compress/@latest",
+            "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.17.6.info",
+            "https://proxy.golang.org/github.com/klauspost/compress/@v/v1.17.6.mod",
+        ] {
+            assert!(!GO_PROXY.follows_redirect(&url(from), &storage), "{from}");
+        }
         let lookup = url("https://sum.golang.org/lookup/github.com/google/uuid@v1.6.0");
         assert!(!GO_PROXY.follows_redirect(&lookup, &storage));
         for to in [
@@ -678,6 +738,129 @@ mod tests {
                 b"module x"
             )
             .is_empty());
+    }
+
+    /// The real Go route through the proxy, on port 443 with every address
+    /// landing on the fixture: an `%21`-escaped zip is fetched decoded and
+    /// handed off to Cloud Storage, through the mirror and through a
+    /// tunnel to proxy.golang.org alike. Under a policy that denies
+    /// `unattested-index`, the handoff records no such fact; a `.mod` is
+    /// not handed off; a refused `%21` request keeps its path in the
+    /// portable ledger.
+    #[test]
+    fn an_escaped_zip_is_handed_off_to_cloud_storage_on_both_doors() {
+        use crate::kernel::policy::{self, Policy};
+        use crate::kernel::resolve::session::{Intercept, Mode};
+        use crate::kernel::resolve::testing::{
+            get, open_tunnel, tunnel_request, Harness, Reach, TEST_ORIGIN_PUBLIC,
+        };
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+
+        let harness = Harness::serving(
+            "go-storage-handoff",
+            Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]),
+            &[PROXY_HOST, SUMDB_HOST, STORAGE_HOST],
+            "go",
+        );
+        let zip = "/github.com/!azure/demo/@v/v1.0.0.zip";
+        let signed = "/proxy-golang-org-prod/0a-github.com:!azure:demo-v1.0.0.zip\
+                      ?Expires=1&GoogleAccessId=signer%40example&Signature=SECRETSIGNATURE";
+        let to_storage = |target: &str| {
+            Behavior::Reply(
+                Reply::new(302, b"").header("Location", &format!("https://{STORAGE_HOST}{target}")),
+            )
+        };
+        harness.upstream.set(zip, to_storage(signed));
+        harness
+            .upstream
+            .set(signed, Behavior::Reply(Reply::new(200, b"zip bytes")));
+        let module = "/github.com/!azure/demo/@v/v1.0.0.mod";
+        harness.upstream.set(module, to_storage("/bucket/demo.mod"));
+        let policy = Policy {
+            deny: [policy::UNATTESTED_INDEX.to_string()].into(),
+            ..Policy::default()
+        };
+        let mut config = harness.config(policy, Mode::Online);
+        config.routes = vec![route().unwrap()];
+        config.permitted = crate::kernel::resolve::routes::Permitted::compiled();
+        config.intercept = Intercept::Tls;
+        let (session, address) = harness.open(config);
+
+        let mirrored = get(
+            &address,
+            &format!(
+                "/{}/go/github.com/%21azure/demo/@v/v1.0.0.zip",
+                address.token()
+            ),
+            "",
+        );
+        assert_eq!(mirrored.status, 200, "{}", mirrored.text());
+        assert_eq!(mirrored.body, b"zip bytes");
+
+        let authority = format!("{PROXY_HOST}:443");
+        let roots = harness.proxy.authority().roots();
+        let mut tunnel = open_tunnel(&address, &authority, PROXY_HOST, roots, &[]).unwrap();
+        let request = |method: &str, path: &str| {
+            format!("{method} {path} HTTP/1.1\r\nHost: {PROXY_HOST}\r\n")
+        };
+        let tunneled = tunnel_request(
+            &mut tunnel,
+            &request("GET", "/github.com/%21azure/demo/@v/v1.0.0.zip"),
+            b"",
+        );
+        assert_eq!(tunneled.status, 200, "{}", tunneled.text());
+        assert_eq!(tunneled.body, b"zip bytes");
+        let not_zip = tunnel_request(
+            &mut tunnel,
+            &request("GET", "/github.com/%21azure/demo/@v/v1.0.0.mod"),
+            b"",
+        );
+        assert_eq!(not_zip.status, 403, "{}", not_zip.text());
+        assert!(
+            not_zip.text().contains("is not a permitted endpoint"),
+            "{}",
+            not_zip.text()
+        );
+        let pushed = tunnel_request(
+            &mut tunnel,
+            &request("DELETE", "/github.com/%21azure/demo/@v/v1.0.0.zip"),
+            b"",
+        );
+        assert_eq!(pushed.status, 405, "{}", pushed.text());
+        drop(tunnel);
+
+        let report = session.finish();
+        assert_eq!(harness.upstream.hits(signed), 2);
+        assert_eq!(harness.upstream.hits("/bucket/demo.mod"), 0);
+        assert!(
+            !report
+                .facts
+                .exceptions
+                .iter()
+                .any(|fact| fact.kind == policy::UNATTESTED_INDEX),
+            "{:?}",
+            report.facts
+        );
+        assert!(report.facts.refusals.is_empty(), "{:?}", report.facts);
+        let entries: Vec<_> = report.ledger.entries().cloned().collect();
+        let fetched = format!("https://{PROXY_HOST}{zip}");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.url == fetched && entry.status == 200),
+            "{entries:?}"
+        );
+        // The refused DELETE was never resolved, but its path is one the
+        // route maps to the decoded URL: it is kept whole, as sent.
+        let refused = format!("https://{PROXY_HOST}/github.com/%21azure/demo/@v/v1.0.0.zip");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.url == refused && entry.method == "DELETE"),
+            "{entries:?}"
+        );
+        let text = format!("{entries:?} {:?}", report.diagnostics);
+        assert!(!text.contains("SECRETSIGNATURE"), "{text}");
     }
 
     #[test]

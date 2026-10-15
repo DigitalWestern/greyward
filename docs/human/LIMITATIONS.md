@@ -853,12 +853,16 @@ Selection covers every patch of each maintained CPython minor that python-build-
   **Fail-closed rows**: go.work workspaces (including ancestor detection);
   local-path replace directives. Loud.
 - **Module zips come from Google Cloud Storage.** proxy.golang.org redirects most `.zip`
-  downloads to `storage.googleapis.com`. The resolution proxy follows that one hop, only from
-  proxy.golang.org and only to that host over https, and nothing else off the Go hosts: a
-  further redirect from the storage host is refused. The storage host is trusted with
-  nothing, since go checks every zip against go.sum and the checksum database as before.
-  Module paths with uppercase letters (`!azure`, sent by go as `%21azure`) are
-  percent-decoded once and then held to go's escaped spelling.
+  downloads to `storage.googleapis.com`, which is not a registry host. The one exception
+  the Go route adds is that hop: only for a `.zip` request, only from proxy.golang.org,
+  only to that host over https on port 443, and it is the last hop (any redirect after
+  it, back to a registry host included, is refused). A `list`, `@latest`, `.info` or
+  `.mod` answer must come from proxy.golang.org itself. The storage host is trusted with
+  nothing, since go checks every zip against go.sum and the checksum database as before;
+  it sees go's user agent, and its signed URL is recorded redacted. The hop is judged the
+  same through the mirror and through interception. Module paths with uppercase letters
+  (`!azure`, sent by go as `%21azure`) are percent-decoded once and then held to go's
+  escaped spelling.
 - **Graph-only modules are excluded from the closure**, so modgraph introspection can hit
   GOPROXY=off errors. **Private modules are unsupported**: GOPROXY forced to proxy.golang.org,
   GOVCS off, GOPRIVATE scrubbed.

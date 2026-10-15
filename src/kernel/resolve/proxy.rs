@@ -34,13 +34,14 @@
 //!   [`super::mirror`].
 
 use super::ca::Authority;
+use super::clients::{ClientBase, Clients};
 use super::http::{self, Headers, ParseError, Request};
 use super::mirror::{self, Exchange, Record};
 use super::redact::{self, REDACTED};
 use super::routes::{Lookup as PublishLookup, ProxyAddress, Upstream};
 use super::session::{Intercept, SessionConfig, SessionReport, State};
-use super::ssrf::{Lookup, SystemLookup, ValidatingResolver};
-use crate::kernel::fetch::pinned::{self, PinnedClient, PinnedConfig};
+use super::ssrf::{Lookup, SystemLookup};
+use crate::kernel::fetch::pinned;
 use crate::kernel::policy;
 use std::collections::{HashMap, VecDeque};
 use std::io::BufRead;
@@ -235,7 +236,9 @@ impl Proxy {
 }
 
 pub(super) struct Shared {
-    pub(super) client: PinnedClient,
+    /// The upstream clients: the public one and each configured
+    /// registry's.
+    pub(super) clients: Clients,
     /// The process's certificate authority, which signs the leaf of every
     /// intercepted tunnel.
     pub(super) authority: Authority,
@@ -274,22 +277,19 @@ impl Proxy {
                 "the proxy needs at least one worker",
             ));
         }
-        #[allow(unused_mut)]
-        let mut resolver = ValidatingResolver::new(config.lookup);
-        #[cfg(test)]
-        {
-            resolver.allow_loopback = config.allow_loopback;
-            resolver.connect_to = config.connect_to;
-        }
-        let client = PinnedClient::new(PinnedConfig {
+        let clients = Clients::new(ClientBase {
             roots: config.roots,
-            resolver: Arc::new(resolver),
+            lookup: config.lookup,
             connect_timeout: config.connect_timeout,
             io_timeout: config.io_timeout,
+            #[cfg(test)]
+            allow_loopback: config.allow_loopback,
+            #[cfg(test)]
+            connect_to: config.connect_to,
         })?;
         Ok(Proxy {
             shared: Arc::new(Shared {
-                client,
+                clients,
                 authority: Authority::new()?,
                 budget: http::Budget::new(config.buffer_budget),
                 pool: Arc::new(Pool::new(config.workers)),
@@ -435,7 +435,7 @@ impl Session {
         let address = ProxyAddress::new(SocketAddr::from(([127, 0, 0, 1], 0)), state.token());
         let exchange = Exchange {
             state,
-            client: &self.shared.client,
+            clients: &self.shared.clients,
             budget: &self.shared.budget,
             route,
             address: &address,
@@ -1194,7 +1194,7 @@ fn mirror_request(context: &Context, request: &Request, out: &mut dyn Write) -> 
     };
     let exchange = Exchange {
         state,
-        client: &context.shared.client,
+        clients: &context.shared.clients,
         budget: &context.shared.budget,
         route,
         address: &context.address,

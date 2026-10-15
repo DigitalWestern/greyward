@@ -10,10 +10,11 @@
 
 use super::build_requires::{self, ArchiveInfo};
 use crate::kernel::activity::StoreActivity;
-use crate::kernel::fetch::download_verified_held;
+use crate::kernel::fetch::download_registry_held;
 use crate::kernel::hostfallback::{
     self, Attempt, CachedObject, FallbackRecords, RUNTIME_ONLY_VIEW,
 };
+use crate::kernel::registries::config::Ecosystem;
 use crate::kernel::sandbox::HostView;
 use crate::kernel::store::Store;
 use crate::kernel::types::{Identity, LockedPackage};
@@ -154,7 +155,8 @@ pub(super) fn discard_failed_attempt(
     if source.is_some() {
         let unpacked = work.join("source");
         removed(&unpacked)?;
-        let sdist = download_verified_held(store, activity, &pkg.url, &pkg.sha256)?;
+        let sdist =
+            download_registry_held(store, activity, Ecosystem::Python, &pkg.url, &pkg.sha256)?;
         let root = build_requires::extract_sdist_for(activity, &sdist, &unpacked, info)?;
         if source != Some(root.as_path()) {
             return Err(io::Error::new(

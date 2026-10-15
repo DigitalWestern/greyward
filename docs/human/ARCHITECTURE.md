@@ -554,6 +554,54 @@ uses the projected runtime and dependencies but executes on the host,
 without a sandbox or network restriction. Run untrusted tests only in a
 separate disposable job that holds no signing key or other secrets.
 
+## Private registries
+
+The machine policy may declare registries other than the public ones:
+`[credentials.<name>]` (a reference to a secret: an environment variable,
+a file, or `~/.netrc`), `[[registry]]` (a name, an ecosystem, a URL, an
+optional credential, root, download-only `files` origins, CA and network
+mode) and `[sources]` (per ecosystem, the ordered list of registries
+allowed, `public` naming the shipped one). Only the machine layer may
+declare them; a project or `--policy` layer may only narrow a list. The
+grammar and the merged view are `src/kernel/registries/` (`config`,
+`effective`). A `[sources]` entry for an ecosystem whose tailor is not
+wired is refused at load. Python and npm are wired.
+
+An ecosystem named in `[sources]` is enforced, end to end:
+
+- Resolution. The door's proxy gets one route per listed registry
+  (`registries::route`), and the permitted hosts are derived from the
+  list. uv gets the default registry (the first entry) as its one index.
+  npm and pnpm get `registry` set to the first entry without `scopes` and
+  one `@scope:registry` per scoped entry, as flags that beat `.npmrc`. A
+  `.npmrc` scope line naming an unlisted registry is refused before the
+  tool starts. The proxy adds the credential upstream: the tools never
+  see it.
+- The lock check (`registries::lock`). Before a sync fetches anything or
+  reuses a cached environment, every locked package's file must be under
+  a listed registry (its root or
+  its `files` origins), and the registry the lock names (uv's
+  `source.registry`, an npm scope) must be the one that serves it.
+- Downloads (`kernel::fetch::registry`). A registry download picks the
+  registry by longest root, sends the credential only to URLs under that
+  root, and follows a redirect only within the root and the `files`
+  origins, with no credential off the root. The Python simple API, the
+  `ward add` existence check and the pinned build-tool wheels read the
+  default registry the same way.
+- The receipt. Each registry package in a closure records
+  `registry: {name, url}`. `ward audit` fails a package whose registry the
+  effective list does not hold (`unapproved-registry`) and calls a closure
+  with a registry package that records none `outdated`.
+- Package age. `young-package` judges a configured registry's packages
+  as it judges the public registry's: its route reads publish times from
+  the JSON project pages and full packuments it serves, and a lookup goes
+  to the registry that serves the name (a scoped registry for its scopes)
+  before the public one.
+
+Anything the list does not allow is an error with a `fix:` line, never a
+fallback to the public registry. Credentials are resolved when a request
+needs them and never appear in a lock, a closure, a ledger or an error.
+
 ## Toolchain lock
 
 Every ecosystem has a pinned toolchain table with exact selection rules;

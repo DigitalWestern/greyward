@@ -185,6 +185,7 @@ impl Tailor for Python {
         // through one door on this sync's scope.
         let mut door =
             ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
+        let plan_phase = ui::phase("plan");
         let observed = project.observing_inputs()?;
         let (plan, selection, inputs) = inputs::read_plan(&observed, selected, &mut door)?;
         // The resolution files this plan was built from, by digest, taken
@@ -192,11 +193,14 @@ impl Tailor for Python {
         // is not the basis of a closure planned from the old one.
         let basis = super::resolve::resolution_basis(&observed)?;
         observed.verify_observed_inputs()?;
+        drop(plan_phase);
         let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
         let helpers = request.helpers(self)?;
-        let env = super::env::realize_env_with(&mut door, &plan, selected, helpers.get("rust"))?;
+        let env = ui::timed("realize env", || {
+            super::env::realize_env_with(&mut door, &plan, selected, helpers.get("rust"))
+        })?;
         // An sdist's generated Cargo.lock ran through a Detached door with
         // no project at hand; its ledger is evidence of this sync's
         // planning, rooted here so GC keeps it.
@@ -206,6 +210,7 @@ impl Tailor for Python {
         }
         // The `.venv` projection and the closure are published through the
         // held project descriptor.
+        let _t = ui::phase("project + closure");
         super::env::project_env_with_inputs(
             activity,
             project,

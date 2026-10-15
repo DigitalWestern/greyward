@@ -2,6 +2,9 @@
 //! manifest, plus the `[tool.uv.sources]` recording.
 
 use super::*;
+use crate::kernel::registries::config::Ecosystem;
+use crate::kernel::registries::effective::Sources;
+use crate::kernel::registries::lock;
 
 pub(super) fn record_uv_sources(value: &toml::Value) -> io::Result<()> {
     let Some(sources) = value
@@ -25,7 +28,8 @@ pub(super) fn record_uv_sources(value: &toml::Value) -> io::Result<()> {
                     )?;
                 }
             }
-            if table.contains_key("index") {
+            let index = table.get("index").and_then(toml::Value::as_str);
+            if index.is_some_and(|index| !listed_uv_index(value, index)) {
                 crate::kernel::policy::record(
                     crate::kernel::policy::UNATTESTED_INDEX,
                     name,
@@ -35,6 +39,29 @@ pub(super) fn record_uv_sources(value: &toml::Value) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the `[[tool.uv.index]]` entry named `name` points at a registry
+/// the effective python `[sources]` list holds: approved, no exception.
+fn listed_uv_index(value: &toml::Value, name: &str) -> bool {
+    let Some(url) = value
+        .get("tool")
+        .and_then(|tool| tool.get("uv"))
+        .and_then(|uv| uv.get("index"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| entry.get("name").and_then(toml::Value::as_str) == Some(name))
+        .and_then(|entry| entry.get("url"))
+        .and_then(toml::Value::as_str)
+    else {
+        return false;
+    };
+    lock::listed_index(
+        &crate::kernel::policy::effective().registries,
+        Ecosystem::Python,
+        url,
+    )
 }
 
 /// Whether `url` is public PyPI: https, the default port, and a host that
@@ -137,26 +164,44 @@ pub(super) struct UvDependency {
     pub(super) extras: BTreeSet<String>,
 }
 
-/// `(name, version, file names)` of every uv.lock package locked from the
-/// public PyPI index (no `source`, or a registry source on PyPI's hosts):
-/// what the `young-package` check judges. Local, git, URL and other-index
-/// packages are left out.
-pub fn uv_pypi_packages(text: &str) -> io::Result<Vec<(String, String, Vec<String>)>> {
+/// `(name, version, file names, route)` of every uv.lock package locked
+/// from the public PyPI index (a registry source on PyPI's hosts), from the
+/// default index (no `source`: the first of `indexes`, else PyPI) or from
+/// one of `indexes`, the listed registries' `(index URL,
+/// route)`: what the `young-package` check judges, each by the route of
+/// the index that served it. Local, git, URL and other-index packages are
+/// left out.
+pub fn uv_pypi_packages(
+    text: &str,
+    indexes: &[(String, String)],
+) -> io::Result<Vec<(String, String, Vec<String>, String)>> {
     Ok(parse_uv_lock(text)?
         .into_iter()
-        .filter(|package| match uv_source(&package.source) {
-            Some(UvSource::Registry(url)) => {
-                package.source == "registry" || (!url.is_empty() && is_public_pypi_url(&url))
-            }
-            _ => false,
-        })
-        .map(|package| {
+        .filter_map(|package| {
+            let Some(UvSource::Registry(url)) = uv_source(&package.source) else {
+                return None;
+            };
+            let route = if package.source == "registry" || url.is_empty() {
+                // No index named: uv's default, the first one it was given.
+                indexes.first().map_or_else(
+                    || crate::tailors::python::registry::ROUTE_ID.to_string(),
+                    |(_, route)| route.clone(),
+                )
+            } else if is_public_pypi_url(&url) {
+                crate::tailors::python::registry::ROUTE_ID.to_string()
+            } else {
+                indexes
+                    .iter()
+                    .find(|(index, _)| crate::kernel::registries::lock::same_url(index, &url))?
+                    .1
+                    .clone()
+            };
             let files = package
                 .files
                 .into_iter()
                 .map(|file| file.filename)
                 .collect();
-            (package.name, package.version, files)
+            Some((package.name, package.version, files, route))
         })
         .collect())
 }
@@ -472,15 +517,27 @@ pub(super) fn uv_lock_manifest(
         };
         selected_packages.insert(name.clone(), package);
     }
+    let sources = crate::kernel::policy::effective().registries;
     let mut output = Vec::new();
     for package in selected_packages.into_values() {
-        if record_uv_source_exceptions(package)? {
+        if record_uv_source_exceptions(package, &sources)? {
             continue;
         }
         let Some(locked) = locked_from_uv_package(package, &tag, platform, glibc) else {
             return Ok(None);
         };
-        record_uv_file_host(&locked)?;
+        let verdict = lock::check(
+            &sources,
+            Ecosystem::Python,
+            &lock::Entry {
+                name: &locked.name,
+                index: locked.index.as_deref(),
+                file: &locked.url,
+            },
+        )?;
+        if !matches!(verdict, lock::Verdict::Listed(_)) {
+            record_uv_file_host(&locked)?;
+        }
         output.push(locked);
     }
     if output.is_empty() {
@@ -639,7 +696,7 @@ fn resolve_uv_package<'a>(
 
 /// Record what this package's source costs us in attestation. Returns true
 /// when the package carries no locked registry artifact and must be skipped.
-fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
+fn record_uv_source_exceptions(package: &UvPackage, sources: &Sources) -> io::Result<bool> {
     let url = match uv_source(&package.source) {
         Some(UvSource::Registry(url)) => url,
         Some(UvSource::Local { root: true }) => return Ok(true),
@@ -664,7 +721,10 @@ fn record_uv_source_exceptions(package: &UvPackage) -> io::Result<bool> {
     // An empty registry is not the default index here: uv always writes
     // the URL, so an empty one is some other source. A package with no
     // source at all is the default index.
-    if package.source != "registry" && (url.is_empty() || !is_public_pypi_url(&url)) {
+    // A registry the effective list holds is approved: the lock check
+    // decides whether its files are really that registry's.
+    let listed = lock::listed_index(sources, Ecosystem::Python, &url);
+    if package.source != "registry" && (url.is_empty() || !is_public_pypi_url(&url)) && !listed {
         crate::kernel::policy::record(
             crate::kernel::policy::UNATTESTED_INDEX,
             &package.name,

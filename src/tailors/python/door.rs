@@ -12,8 +12,11 @@
 //! from `door::proxy_env`, and the default index forced on the command
 //! line (`--index-url` for `pip compile`, `--default-index` for `add`,
 //! `remove`, and `lock`), so a project's `[[tool.uv.index]]` default never
-//! replaces PyPI; an extra index it names is still reached, through
-//! interception, and recorded as `unattested-index`. The forced row adds
+//! replaces the policy's; an extra index it names is still reached, through
+//! interception, and recorded as `unattested-index` (refused outright when
+//! the machine policy lists python in `[sources]`). The indexes are the
+//! effective `[sources]` list ([`indexes`]): PyPI by default, a configured
+//! registry through its own route and credential. The forced row adds
 //! `--python <store python>`, `--no-config`, `--no-python-downloads`, and
 //! `--keyring-provider disabled`. uv's cache is a directory ward creates for
 //! one attempt and removes after it. An allowed retry has a fresh cache,
@@ -32,8 +35,10 @@ use super::registry;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Policy};
+use crate::kernel::registries::{self, config::Ecosystem, effective::Source};
 use crate::kernel::resolve::door::{self, ConfinedSpec, Publish, Wire, Wiring};
 use crate::kernel::resolve::record::{self, RecordSlot, RecordSpec};
+use crate::kernel::resolve::routes::{Permitted, Route};
 use crate::kernel::resolve::session::{Fact, Intercept};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
@@ -43,6 +48,7 @@ use crate::kernel::ui;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Why uv runs isolated, for the missing-capability message.
 pub(crate) const WHY_UV: &str = "runs the build backends of source distributions it resolves, \
@@ -302,8 +308,8 @@ fn with_flags(args: &[OsString], flags: &[OsString]) -> Vec<OsString> {
 }
 
 /// The arguments of one attempt, before the forced row.
-fn attempt_args(run: &UvRun<'_>, no_build: bool) -> Vec<OsString> {
-    let mut flags: Vec<OsString> = vec![run.index.flag().into(), registry::INDEX_URL.into()];
+fn attempt_args(run: &UvRun<'_>, index: &str, no_build: bool) -> Vec<OsString> {
+    let mut flags: Vec<OsString> = vec![run.index.flag().into(), index.into()];
     if no_build {
         flags.push("--no-build".into());
     }
@@ -324,6 +330,51 @@ fn record_for(spec: &RecordSpec, args: &[OsString]) -> RecordSpec {
     }
 }
 
+/// The effective `[sources]` list for python: the default registry's
+/// index, the one uv searches, and a route for every listed registry, so a lock naming another listed one
+/// still syncs. An empty list is an error, never a fallback to PyPI.
+pub(crate) struct Indexes {
+    /// The default registry's index URL.
+    pub default: String,
+    /// Every listed registry's index URL, in list order.
+    pub urls: Vec<String>,
+    pub routes: Vec<Route>,
+    pub permitted: Permitted,
+}
+
+pub(crate) fn indexes(policy: &Policy) -> io::Result<Indexes> {
+    let sources = policy.registries.ecosystem(Ecosystem::Python);
+    sources
+        .require_nonempty()
+        .map_err(|error| crate::kernel::error::refused(io::ErrorKind::PermissionDenied, error))?;
+    let mut indexes = Indexes {
+        default: String::new(),
+        urls: Vec::new(),
+        routes: Vec::new(),
+        permitted: Permitted::compiled(),
+    };
+    for source in &sources.list {
+        match source {
+            Source::Public => {
+                indexes.urls.push(registry::INDEX_URL.into());
+                indexes.routes.push(registry::route()?);
+            }
+            Source::Registry(configured) => {
+                indexes.urls.push(configured.url.clone());
+                indexes.routes.push(registries::route::route(
+                    Arc::new(registry::ConfiguredSimple::new(configured)),
+                    configured,
+                    &policy.registries,
+                )?);
+                indexes.permitted =
+                    registries::route::permit(indexes.permitted.clone(), configured);
+            }
+        }
+    }
+    indexes.default = indexes.urls[0].clone();
+    Ok(indexes)
+}
+
 /// One confined uv invocation.
 struct Attempt<'r> {
     lock_root: &'r Path,
@@ -340,6 +391,7 @@ fn confined<'r>(
     uv: &'r Uv,
     python: &'r Path,
     cache: &Path,
+    indexes: Indexes,
     attempt: Attempt<'r>,
 ) -> io::Result<(DelegateSpec, ConfinedSpec<'r>)> {
     let mut spec = DelegateSpec::new(uv.binary());
@@ -365,14 +417,28 @@ fn confined<'r>(
         .iter()
         .map(|glob| PathGlob::new(glob))
         .collect::<io::Result<_>>()?;
-    confined.routes = vec![registry::route()?];
+    // Each listed index with its route, in list order: `urls` and `routes`
+    // are pushed together, one per source.
+    let urls: Vec<(String, String)> = indexes
+        .urls
+        .iter()
+        .cloned()
+        .zip(
+            indexes
+                .routes
+                .iter()
+                .map(|route| route.protocol.route_id().to_string()),
+        )
+        .collect();
+    confined.routes = indexes.routes;
+    confined.permitted = indexes.permitted;
     confined.intercept = Intercept::Tls;
     confined.cwd = attempt.cwd;
     confined.facts = attempt.facts;
     let cache = cache.to_path_buf();
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| wiring(wire, &cache)));
     confined.publish(attempt.publish);
-    confined.locked = Some(super::locked::locked_list(confined.outputs.clone()));
+    confined.locked = Some(super::locked::locked_list(confined.outputs.clone(), urls));
     Ok((spec, confined))
 }
 
@@ -498,7 +564,8 @@ fn attempt(
     capture: bool,
     facts: Vec<Fact>,
 ) -> io::Result<DelegateReport> {
-    let args = attempt_args(run, no_build);
+    let indexes = indexes(&run.policy.clone().unwrap_or_else(policy::effective))?;
+    let args = attempt_args(run, &indexes.default, no_build);
     let publish = match &run.target {
         UvTarget::Project {
             record,
@@ -521,6 +588,7 @@ fn attempt(
         run.uv,
         python,
         &cache.dir,
+        indexes,
         Attempt {
             lock_root: run.lock_root,
             cwd: run.cwd.clone(),
@@ -644,7 +712,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            shown(attempt_args(&run, true)),
+            shown(attempt_args(&run, registry::INDEX_URL, true)),
             [
                 "add",
                 "--no-sync",
@@ -656,7 +724,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            shown(attempt_args(&run, false)),
+            shown(attempt_args(&run, registry::INDEX_URL, false)),
             [
                 "add",
                 "--no-sync",
@@ -944,6 +1012,159 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
         done();
     }
 
+    /// A wheel of `demo` 1.0 with nothing in it but its metadata.
+    fn demo_wheel() -> Vec<u8> {
+        use std::io::Write as _;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in [
+            ("demo/__init__.py", ""),
+            (
+                "demo-1.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: demo\nVersion: 1.0\n",
+            ),
+            (
+                "demo-1.0.dist-info/WHEEL",
+                "Wheel-Version: 1.0\nGenerator: ward-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            ),
+            ("demo-1.0.dist-info/RECORD", ""),
+        ] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// uv resolves against a configured registry that requires a token: it
+    /// is told that registry's URL alone, the proxy adds the token upstream,
+    /// every request lands under the registry's root, and the token is in
+    /// neither the lock nor the ledger. PyPI is never asked.
+    #[test]
+    #[ignore = "realizes the store uv and CPython over the network"]
+    fn uv_resolves_against_an_authenticated_configured_registry() {
+        use crate::kernel::testutil::upstream::{Behavior, Reply};
+        use sha2::{Digest as _, Sha256};
+        const TOKEN: &str = "corp-secret-token-0451";
+        let _serial = policy::attribution_test_lock();
+        let label = "uv_resolves_against_an_authenticated_configured_registry";
+        let Some(relay) = relay(label) else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        SKIP_SCAN_FOR_TEST.with(|skip| skip.set(true));
+        let mut reach = Reach::public(|_, _| vec![TEST_ORIGIN_PUBLIC.parse().unwrap()]);
+        reach.request_timeout = std::time::Duration::from_secs(20);
+        let harness: &'static Harness = Box::leak(Box::new(Harness::with(label, reach)));
+        PROXY_FOR_TEST.with(|slot| slot.set(Some(&harness.proxy)));
+        let port = harness.upstream.port();
+        let wheel = demo_wheel();
+        // A JSON page (PEP 691), whose upload time the age check reads.
+        let page = format!(
+            r#"{{"meta": {{"api-version": "1.0"}}, "name": "demo", "files": [{{"filename": "demo-1.0-py3-none-any.whl", "url": "../../packages/demo-1.0-py3-none-any.whl", "hashes": {{"sha256": "{}"}}, "upload-time": "2020-01-02T03:04:05.000000Z"}}]}}"#,
+            hex::encode(Sha256::digest(&wheel))
+        );
+        let authorized = |body: &[u8], kind: &str| Behavior::Authorized {
+            value: format!("Bearer {TOKEN}"),
+            reply: Reply::new(200, body).header("Content-Type", kind),
+        };
+        harness.upstream.set(
+            "/repo/pypi/simple/demo/",
+            authorized(page.as_bytes(), "application/vnd.pypi.simple.v1+json"),
+        );
+        harness.upstream.set(
+            "/repo/pypi/packages/demo-1.0-py3-none-any.whl",
+            authorized(&wheel, "application/octet-stream"),
+        );
+        let temp = TempDir::named("uv-configured-registry");
+        let token_file = temp.0.join("token");
+        fs::write(&token_file, TOKEN).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let text = format!(
+            r#"
+[credentials.corp]
+file = "{}"
+
+[[registry]]
+name = "corp"
+ecosystem = "python"
+url = "https://registry.test:{port}/repo/pypi/simple/"
+root = "https://registry.test:{port}/repo/pypi/"
+credential = "corp"
+
+[sources]
+python = ["corp"]
+"#,
+            token_file.display()
+        );
+        let path = Path::new("/machine/policy.toml");
+        let parsed = policy::parse_file(path, &text).unwrap();
+        let mut machine = Policy::default();
+        policy::merge_file(&mut machine, &parsed, policy::SourceOrigin::Machine, path).unwrap();
+
+        let uv = store_uv(harness);
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("requirements.in"), "demo==1.0\n").unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let (report, recorded) = through_door(
+            harness,
+            DoorKind::MissingLock,
+            UvRun {
+                uv: &uv,
+                lock_root: &dir,
+                cwd: None,
+                args: super::super::resolve::compile_args(
+                    "requirements.in",
+                    "requirements.lock.txt",
+                    "3.12",
+                    COMPILE_COMMAND,
+                ),
+                index: Index::PipCompile,
+                outputs: super::super::resolve::resolution_outputs(&held).unwrap(),
+                target: UvTarget::Project {
+                    record: None,
+                    slot: Default::default(),
+                    check: None,
+                },
+                builds: Builds::Probe,
+                capture: true,
+                policy: Some(machine),
+            },
+        );
+        done();
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(recorded.is_empty(), "{recorded:?}");
+        let lock = fs::read_to_string(dir.join("requirements.lock.txt")).unwrap();
+        assert!(lock.contains("demo==1.0"), "{lock}");
+        assert!(!lock.contains(TOKEN), "{lock}");
+        let entries = ledger_entries(harness, &report);
+        assert!(!entries.is_empty());
+        let root = format!("https://registry.test:{port}/repo/pypi/");
+        for entry in &entries {
+            assert!(entry.url.starts_with(&root), "{entries:?}");
+        }
+        assert!(!format!("{entries:?}").contains(TOKEN));
+        assert!(!stderr(&report).contains(TOKEN));
+        let seen = harness.upstream.seen();
+        assert!(seen
+            .iter()
+            .any(|request| request.target.contains("demo-1.0")));
+        for request in &seen {
+            assert!(request.target.starts_with("/repo/pypi/"), "{seen:?}");
+            assert_eq!(
+                request.headers.get("authorization"),
+                Some(format!("Bearer {TOKEN}").as_str()),
+                "{seen:?}"
+            );
+        }
+    }
+
     /// A requirement with no wheel at all (docopt 0.6.2, sdist only): the
     /// probe stops at it, and with `resolution-build` denied the door fails
     /// naming it and nothing lands. (The allowed rerun would fetch the
@@ -1069,5 +1290,69 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
             .collect();
         names.sort();
         assert_eq!(names, ["pyproject.toml", "spike"]);
+    }
+
+    fn with_sources(sources: &str) -> Policy {
+        let text = format!(
+            r#"
+[[registry]]
+name = "corp-pypi"
+ecosystem = "python"
+url = "https://nexus.corp.example/repository/pypi/simple/"
+root = "https://nexus.corp.example/repository/pypi/"
+files = ["https://cdn.corp.example/"]
+
+[sources]
+python = {sources}
+"#
+        );
+        let path = Path::new("/machine/policy.toml");
+        let other = policy::parse_file(path, &text).unwrap();
+        let mut merged = Policy::default();
+        policy::merge_file(&mut merged, &other, policy::SourceOrigin::Machine, path).unwrap();
+        merged
+    }
+
+    /// The effective list decides the indexes and routes; PyPI is there
+    /// only when `public` is listed, and an empty list is refused.
+    #[test]
+    fn indexes_follow_the_effective_sources_list() {
+        let default = indexes(&Policy::default()).unwrap();
+        assert_eq!(default.urls, [registry::INDEX_URL]);
+        assert_eq!(default.default, registry::INDEX_URL);
+        assert_eq!(default.routes.len(), 1);
+
+        let corp = indexes(&with_sources(r#"["corp-pypi"]"#)).unwrap();
+        assert_eq!(
+            corp.urls,
+            ["https://nexus.corp.example/repository/pypi/simple/"]
+        );
+        assert_eq!(corp.routes.len(), 1);
+        assert_eq!(corp.routes[0].protocol.route_id(), "pypi-corp-pypi");
+        for origin in ["https://nexus.corp.example/x", "https://cdn.corp.example/x"] {
+            assert!(corp.permitted.allows(&url::Url::parse(origin).unwrap()));
+        }
+
+        let both = indexes(&with_sources(r#"["corp-pypi", "public"]"#)).unwrap();
+        assert_eq!(
+            both.urls,
+            [
+                "https://nexus.corp.example/repository/pypi/simple/",
+                registry::INDEX_URL
+            ]
+        );
+        assert_eq!(both.routes.len(), 2);
+        // uv searches one index: the default, never a second.
+        assert_eq!(
+            both.default,
+            "https://nexus.corp.example/repository/pypi/simple/"
+        );
+
+        let Err(error) = indexes(&with_sources("[]")) else {
+            panic!("an empty python list was accepted");
+        };
+        let text = error.to_string();
+        assert!(text.contains("no registry is allowed for python"), "{text}");
+        assert!(text.contains("fix:"), "{text}");
     }
 }

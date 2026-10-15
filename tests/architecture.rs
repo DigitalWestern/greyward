@@ -1792,6 +1792,8 @@ fn verified_fetch_at(tokens: &[(Token, String)], i: usize, _names: &Names) -> bo
         "download_verified_digest_held",
         "download_toolchain_artifact_held",
         "download_verified_any_held",
+        "download_registry_held",
+        "download_registry_any_held",
         // The cache-only reads and the proxy's streaming insert: a hit is
         // admitted by digest the same way.
         "cache_verified_held",
@@ -1856,7 +1858,9 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // on a warm one.
     ("src/kernel/provider/crates.rs", "fetch_registry_crates", 1),
     ("src/tailors/elixir/mod.rs", "realize_deps", 1),
-    ("src/tailors/node/classify.rs", "fetch_tarball", 1),
+    // Twice: a registry tarball, and a `file:` package read from the cache
+    // alone, both by the lock's integrity.
+    ("src/tailors/node/classify.rs", "fetch_tarball", 2),
     ("src/tailors/node/realize.rs", "plant_declared_artifacts", 1),
     (
         "src/tailors/python/build.rs",
@@ -1869,7 +1873,7 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
         2,
     ),
     ("src/tailors/python/env.rs", "realize_artifacts", 1),
-    ("src/tailors/python/env.rs", "reverify_wheels", 1),
+    ("src/tailors/python/env.rs", "hold_wheels", 1),
     (
         "src/tailors/python/sdist_view.rs",
         "discard_failed_attempt",

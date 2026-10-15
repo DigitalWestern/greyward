@@ -357,6 +357,7 @@ pub fn realize_runtime(
     platform: Platform,
     selected: &Selected,
 ) -> io::Result<PathBuf> {
+    let _t = crate::kernel::ui::phase("toolchain node");
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, "Node.js")?;
     let spec = node_row(selected, platform)?;
@@ -1658,6 +1659,54 @@ mod tests {
         )
         .expect("warm realization");
         assert_eq!(again, env);
+
+        // Under a node list that does not hold the lock's registry the warm
+        // object is not reused: the registry check runs before the cache.
+        let text = r#"
+[[registry]]
+name = "corp"
+ecosystem = "node"
+url = "https://nexus.corp.example/repository/npm/"
+
+[sources]
+node = ["corp"]
+"#;
+        let path = Path::new("/machine/policy.toml");
+        let parsed = crate::kernel::policy::parse_file(path, text).unwrap();
+        let mut enforced = crate::kernel::policy::Policy::default();
+        crate::kernel::policy::merge_file(
+            &mut enforced,
+            &parsed,
+            crate::kernel::policy::SourceOrigin::Machine,
+            path,
+        )
+        .unwrap();
+        let _scope = crate::kernel::policy::PolicyScope::install(enforced);
+        let error = realize_node_env_with_node_object(
+            &store,
+            activity,
+            platform,
+            &plan,
+            &[],
+            &node_obj,
+            &test_gyp_python(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            error.to_string().contains("not under any listed registry"),
+            "{error}"
+        );
+
+        // A `file:` directory package comes from no registry: under the same
+        // list it is read from the cache by its integrity.
+        let mut local = plan.packages[0].clone();
+        local.url = super::local_package::url_for("vendor/a");
+        let (lease, _) = super::classify::fetch_tarball(&store, activity, &local).unwrap();
+        assert_eq!(fs::read(&lease).unwrap(), bytes);
+        let mut missing = local.clone();
+        missing.integrity = format!("sha512-{}", crate::kernel::base64::encode(&[9; 64]));
+        assert!(super::classify::fetch_tarball(&store, activity, &missing).is_err());
     }
 
     /// Characterization of the skip decision in `run_install_scripts_staged`:
@@ -2457,11 +2506,12 @@ mod tests {
             closure["workspace_links"],
             serde_json::json!([{"path": "node_modules/lib", "target": "packages/lib"}])
         );
+        let public = serde_json::json!({"name": "public", "url": "https://registry.npmjs.org/"});
         assert_eq!(
             closure["packages"],
             serde_json::json!([
-                {"path": "node_modules/c", "name": "c", "version": "1.0.0", "integrity": TEST_SRI},
-                {"path": "packages/lib/node_modules/c", "name": "c", "version": "2.0.0", "integrity": TEST_SRI},
+                {"path": "node_modules/c", "name": "c", "version": "1.0.0", "integrity": TEST_SRI, "registry": public},
+                {"path": "packages/lib/node_modules/c", "name": "c", "version": "2.0.0", "integrity": TEST_SRI, "registry": public},
             ])
         );
         assert_eq!(

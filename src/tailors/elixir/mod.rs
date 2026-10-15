@@ -37,7 +37,7 @@ use crate::kernel::toolchain::{Catalog, Selected};
 use crate::kernel::types::Identity;
 use crate::kernel::ui;
 pub use env::project_elixir_env;
-pub use resolve::{attest_project, generate_lock, plan_elixir};
+pub use resolve::{attest_project, generate_lock, plan_elixir, relock_if_stale};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;

@@ -105,7 +105,7 @@ pub(super) fn check_locked_inputs(
     }
     files.sort();
     let mut hasher = Sha256::new();
-    hasher.update(b"elixir-check-locked/2\0");
+    hasher.update(b"elixir-check-locked/3\0");
     hasher.update(project.path().as_os_str().as_encoded_bytes());
     hasher.update(b"\0");
     hasher.update(crate::kernel::store::object_id_from_path(beam_obj)?.as_bytes());

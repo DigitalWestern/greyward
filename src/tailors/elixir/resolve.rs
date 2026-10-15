@@ -8,7 +8,7 @@ use super::door::{elixir_tool, run_mix, run_mix_checked, MixPublish, MixRun, OUT
 use super::{err, read_mix_lock, require_lock, validate_plan, ElixirPlan, HexDep, HELPER};
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::record;
-use crate::kernel::resolve::ResolutionDoor;
+use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
 use serde::Deserialize;
@@ -32,9 +32,20 @@ pub(crate) fn resolution_basis(
     record::file_digests(project, &listed)
 }
 
+/// `--no-archives-check` on every mix dependency command ward runs. A
+/// project's `archives:` (nerves' `nerves_bootstrap`) names Mix archives a
+/// developer installs for their own tasks; the confined mix has only Hex,
+/// and fetching or locking dependencies never uses them.
+pub(super) const NO_ARCHIVES_CHECK: &str = "--no-archives-check";
+
+/// The words Mix raises with (`Mix.Dep.Lock.write`) when `mix deps.get
+/// --check-locked` would rewrite the lock: the one failure that means mix.exs
+/// has moved past mix.lock.
+const STALE_LOCK: &str = "is out of date and must be updated without the --check-locked flag";
+
 /// `prepare`: mix.lock, resolved by the store mix when there is none. The
-/// one place the Elixir tailor writes project inputs. `mix deps.get` runs
-/// confined through `door` (a missing-lock door), and mix.lock and the
+/// one place the Elixir tailor writes project inputs. `mix deps.get`
+/// runs confined through `door` (a missing-lock door), and mix.lock and the
 /// signed resolution record are published together through its
 /// transaction.
 pub fn generate_lock(
@@ -47,8 +58,60 @@ pub fn generate_lock(
         return Err(err("mix.exs not found"));
     }
     ui::note("no mix.lock; resolving with the store mix...");
+    deps_get(door, project, beam_obj, selected)
+}
+
+/// `prepare` for a project that has a mix.lock: the `--check-locked` gate,
+/// and when mix says mix.exs has moved past the lock, `mix deps.get`
+/// confined through `door`, the way Go's tailor runs `go mod tidy` for an
+/// untidy go.mod. Mix keeps every locked version it can, so only what
+/// mix.exs changed moves. The committed lock disagreed with its manifest,
+/// so `lock-disagreement` is recorded before it is rewritten: a policy
+/// denying the kind stops here with the lock untouched.
+pub fn relock_if_stale(
+    door: &mut ResolutionDoor<'_>,
+    project: &ProjectRoot,
+    beam_obj: &Path,
+    selected: &Selected,
+) -> io::Result<()> {
+    if !project.is_input_file(Path::new("mix.exs")) {
+        return Err(err("mix.exs not found"));
+    }
+    let observed = project.observing_inputs()?;
+    let basis = resolution_basis(&observed)?;
+    let lock = read_mix_lock(&observed)?;
+    let verdict = gate(
+        &mut door.reopen(DoorKind::Planner),
+        &observed,
+        beam_obj,
+        &lock,
+        &basis,
+    )?;
+    let Gate::Stale(why) = verdict else {
+        return Ok(());
+    };
+    crate::kernel::policy::record(
+        crate::kernel::policy::LOCK_DISAGREEMENT,
+        "mix.lock",
+        &format!(
+            "mix deps.get --check-locked: {}; re-resolved with the store mix deps.get",
+            why.lines().last().unwrap_or("").trim()
+        ),
+    )?;
+    ui::note("mix.lock is out of date with mix.exs; resolving with the store mix...");
+    deps_get(door, project, beam_obj, selected)
+}
+
+/// `mix deps.get` confined through `door`, publishing mix.lock with its
+/// resolution record.
+fn deps_get(
+    door: &mut ResolutionDoor<'_>,
+    project: &ProjectRoot,
+    beam_obj: &Path,
+    selected: &Selected,
+) -> io::Result<()> {
     let basis = resolution_basis(project)?;
-    let args = ["mix", "deps.get"];
+    let args = ["mix", "deps.get", NO_ARCHIVES_CHECK];
     let spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
@@ -82,6 +145,9 @@ pub(crate) fn update(
     args: &[&str],
 ) -> io::Result<()> {
     let basis = resolution_basis(project)?;
+    let mut args = args.to_vec();
+    args.push(NO_ARCHIVES_CHECK);
+    let args = &args[..];
     let spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
@@ -105,6 +171,15 @@ pub(crate) fn update(
     Ok(())
 }
 
+/// What the consistency gate found.
+#[derive(Debug)]
+pub(super) enum Gate {
+    /// mix.exs and mix.lock agree.
+    InSync,
+    /// mix would rewrite the lock; mix's own report.
+    Stale(String),
+}
+
 /// The consistency gate: `mix deps.get --check-locked`, exit status only
 /// (it evaluates mix.exs, delegated trust and never artifact authority).
 /// It needs the Hex registry, so it reaches the mirror. Its Hex home is
@@ -116,26 +191,92 @@ fn check_locked(
     project: &ProjectRoot,
     beam_obj: &Path,
     basis: &crate::comforter::join::Digests,
-) -> io::Result<()> {
+) -> io::Result<Gate> {
     let out = run_mix(
         door,
         MixRun {
             beam_obj,
             lock_root: project.path(),
-            args: &["mix", "deps.get", "--check-locked"],
+            args: &["mix", "deps.get", "--check-locked", NO_ARCHIVES_CHECK],
             online: true,
             inputs: Some(basis),
             files: Vec::new(),
             publish: MixPublish::Detached,
         },
     )?;
-    if !out.status.success() {
-        return Err(err(format!(
-            "mix.exs and mix.lock are out of sync; run `ward run mix deps.get` and retry\n{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    classify_check(out.status.success(), &String::from_utf8_lossy(&out.stderr))
+}
+
+/// [`check_locked`]'s reading of mix's exit status and stderr. Only Mix's
+/// own stale-lock words make the lock stale. Any other failure (a manifest
+/// that does not evaluate, a dependency mix cannot fetch) is mix failing to
+/// check, and says so with mix's report: it is no verdict on the lock.
+fn classify_check(success: bool, stderr: &str) -> io::Result<Gate> {
+    if success {
+        return Ok(Gate::InSync);
     }
-    Ok(())
+    let stderr = stderr.trim();
+    if stderr.contains(STALE_LOCK) {
+        return Ok(Gate::Stale(stderr.to_string()));
+    }
+    Err(err(format!(
+        "mix could not check mix.lock against mix.exs: `mix deps.get --check-locked` \
+         failed before comparing them\n{stderr}"
+    )))
+}
+
+/// The gate, skipped when its inputs are unchanged since it last passed
+/// (equal input hashes give the same answer). A pass is recorded only when
+/// the inputs still hash the same after the check, so the record names the
+/// bytes the check actually read.
+fn gate(
+    door: &mut ResolutionDoor<'_>,
+    project: &ProjectRoot,
+    beam_obj: &Path,
+    lock: &str,
+    basis: &crate::comforter::join::Digests,
+) -> io::Result<Gate> {
+    let bind = |input: String, basis: &crate::comforter::join::Digests| {
+        format!(
+            "canonical-project-v1:{input}:{}",
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(basis).expect("string map")
+            ))
+        )
+    };
+    let inputs = check_locked_inputs(project, beam_obj, lock)?.map(|input| bind(input, basis));
+    if let Some(inputs) = &inputs {
+        if check_locked_passed(door.store(), project, inputs)? {
+            ui::trace("mix.exs and mix.lock unchanged since their last passing check");
+            return Ok(Gate::InSync);
+        }
+    }
+    let verdict = check_locked(door, project, beam_obj, basis)?;
+    if matches!(verdict, Gate::InSync) {
+        let after_basis = resolution_basis(project)?;
+        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?
+            .map(|input| bind(input, &after_basis));
+        if let (Some(before), Some(after)) = (&inputs, &after) {
+            if before == after {
+                record_check_locked(door.store(), door.lease(), project, before);
+            }
+        }
+    }
+    Ok(verdict)
+}
+
+/// The refusal for a lock the gate finds stale at planning time: `prepare`
+/// would have re-resolved it, and the command layer skips `prepare` under
+/// `--frozen`.
+fn stale_lock(project: &ProjectRoot, why: &str) -> io::Error {
+    crate::kernel::error::stale(
+        io::ErrorKind::InvalidData,
+        format!(
+            "mix.lock in {} is out of date with mix.exs and --frozen never updates it; run \
+             `ward` once without --frozen and commit the result\n{why}",
+            project.path().display()
+        ),
+    )
 }
 
 /// The helper's strict parse of `lock`, confined with no route: the helper
@@ -181,7 +322,7 @@ fn parse_lock(
 }
 
 /// Plan: AST-parse mix.lock under the pinned toolchain (lock-only, no
-/// eval), after the `--check-locked` gate unless its inputs are unchanged
+/// eval), then the `--check-locked` gate unless its inputs are unchanged
 /// since it last passed. The project is read through the held descriptor.
 /// Returns the plan, the lock's sha256, and the resolution basis.
 pub fn plan_elixir(
@@ -198,35 +339,12 @@ pub fn plan_elixir(
     }
     require_lock(project)?;
     let lock = read_mix_lock(project)?;
-    let bind = |input: String, basis: &crate::comforter::join::Digests| {
-        format!(
-            "canonical-project-v1:{input}:{}",
-            hex::encode(Sha256::digest(
-                serde_json::to_vec(basis).expect("string map")
-            ))
-        )
-    };
-    let inputs = check_locked_inputs(project, beam_obj, &lock)?.map(|input| bind(input, &basis));
-    let unchanged = match &inputs {
-        Some(inputs) => check_locked_passed(door.store(), project, inputs)?,
-        None => false,
-    };
-    if unchanged {
-        ui::trace("mix.exs and mix.lock unchanged since their last passing check");
-    } else {
-        check_locked(door, project, beam_obj, &basis)?;
-        // Recorded only when the inputs still hash the same after the
-        // check, so the record names the bytes the check actually read.
-        let after_basis = resolution_basis(project)?;
-        let after = check_locked_inputs(project, beam_obj, &read_mix_lock(project)?)?
-            .map(|input| bind(input, &after_basis));
-        if let (Some(before), Some(after)) = (&inputs, &after) {
-            if before == after {
-                record_check_locked(door.store(), door.lease(), project, before);
-            }
-        }
-    }
+    // The lock is read first, offline: an entry ward cannot realize is
+    // refused by name before mix evaluates anything.
     let mut deps = parse_lock(door, project, beam_obj, &lock, &basis)?;
+    if let Gate::Stale(why) = gate(door, project, beam_obj, &lock, &basis)? {
+        return Err(stale_lock(project, &why));
+    }
     deps.sort_by(|a, b| a.app.cmp(&b.app));
     let plan = ElixirPlan {
         // The toolchain this plan was made under is the selected one, so
@@ -265,7 +383,7 @@ pub fn attest_project(
     }
     require_lock(project)?;
     let basis = resolution_basis(project)?;
-    let args = ["mix", "deps.get", "--check-locked"];
+    let args = ["mix", "deps.get", "--check-locked", NO_ARCHIVES_CHECK];
     let mut spec = crate::tailors::record_spec(
         &super::tailor::Elixir,
         project,
@@ -557,15 +675,15 @@ mod tests {
         assert_eq!(
             ledgers.len(),
             2,
-            "the gate and the parse each leave a ledger"
+            "the parse and the gate each leave a ledger"
         );
-        let gate = entries(harness, &ledgers[0]);
+        assert!(entries(harness, &ledgers[0]).is_empty());
+        let gate = entries(harness, &ledgers[1]);
         assert!(
             gate.iter()
                 .any(|e| e.url == "https://repo.hex.pm/packages/jason"),
             "{gate:?}"
         );
-        assert!(entries(harness, &ledgers[1]).is_empty());
 
         let (attested, recorded) = through_door(harness, DoorKind::Attest, |door| {
             attest_project(door, &held, &beam, &selected)
@@ -615,7 +733,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             receipt["command"],
-            serde_json::json!(["mix", "deps.update", "jason"])
+            serde_json::json!(["mix", "deps.update", "jason", "--no-archives-check"])
         );
 
         fs::write(
@@ -630,7 +748,55 @@ mod tests {
         let why = drifted.unwrap_err().to_string();
         assert!(why.contains("not attested"), "{why}");
         assert_eq!(fs::read(dir.join("mix.lock")).unwrap(), before);
+
+        // The planner names a stale lock as stale (what --frozen sees),
+        // and `prepare` re-resolves it, recording the disagreement.
+        let (stale, _) = through_door(harness, DoorKind::Planner, |door| {
+            plan_elixir(door, &held, &beam, &selected)
+        });
+        let why = stale.unwrap_err().to_string();
+        assert!(why.contains("out of date with mix.exs"), "{why}");
+        let (relocked, recorded) = through_door(harness, DoorKind::MissingLock, |door| {
+            relock_if_stale(door, &held, &beam, &selected)
+        });
+        relocked.unwrap();
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].kind, policy::LOCK_DISAGREEMENT);
+        let lock = fs::read_to_string(dir.join("mix.lock")).unwrap();
+        assert!(
+            lock.contains("\"telemetry\": {:hex, :telemetry, \"1.4.2\""),
+            "{lock}"
+        );
+        let (replanned, _) = through_door(harness, DoorKind::Planner, |door| {
+            plan_elixir(door, &held, &beam, &selected)
+        });
+        assert_eq!(replanned.unwrap().0.deps.len(), 2);
+        // An in-sync lock is left alone and records nothing.
+        let (again, recorded) = through_door(harness, DoorKind::MissingLock, |door| {
+            relock_if_stale(door, &held, &beam, &selected)
+        });
+        again.unwrap();
+        assert!(recorded.is_empty(), "{recorded:?}");
+        assert_eq!(fs::read_to_string(dir.join("mix.lock")).unwrap(), lock);
         done();
+    }
+
+    #[test]
+    fn only_mixs_stale_lock_words_make_a_lock_stale() {
+        assert!(matches!(classify_check(true, ""), Ok(Gate::InSync)));
+        let stale = "Resolving Hex dependencies...\n** (Mix) Your mix.lock is out of date \
+                     and must be updated without the --check-locked flag\n";
+        assert!(matches!(classify_check(false, stale), Ok(Gate::Stale(_))));
+        // A fetch mix could not make is no verdict on the lock.
+        let why = classify_check(
+            false,
+            "** (Mix) Command \"git --git-dir=.git fetch --force --quiet\" failed",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("could not check"), "{why}");
+        assert!(!why.contains("out of sync"), "{why}");
+        assert!(why.contains("git --git-dir"), "{why}");
     }
 
     #[test]

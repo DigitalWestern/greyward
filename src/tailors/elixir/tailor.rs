@@ -14,8 +14,8 @@ use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
 use crate::kernel::toolchain::input::{InputRow, Sources};
-use crate::kernel::toolchain::{Request, Version, VersionRequest};
 use crate::kernel::toolchain::{Catalog, Selected};
+use crate::kernel::toolchain::{Request, Version, VersionRequest};
 use crate::kernel::ui;
 use crate::tailors::elixir;
 use crate::tailors::{
@@ -157,10 +157,10 @@ impl Tailor for Elixir {
         toolchain: &Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
-        if elixir::require_lock(project).is_ok() {
-            return Ok(());
-        }
         let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        if elixir::require_lock(project).is_ok() {
+            return elixir::relock_if_stale(door, project, &beam, toolchain);
+        }
         elixir::generate_lock(door, project, &beam, toolchain)
     }
 
@@ -496,7 +496,10 @@ fn parse_elixir_tool_version(text: &str) -> io::Result<(Version, Option<Version>
             ),
         ));
     }
-    Ok((parse_version(".tool-versions elixir", version)?, Some(major)))
+    Ok((
+        parse_version(".tool-versions elixir", version)?,
+        Some(major),
+    ))
 }
 
 #[cfg(test)]
@@ -531,7 +534,12 @@ mod tests {
     #[test]
     fn an_otp_tag_constrains_the_otp_major() {
         let tagged = toolchain_request(&rows(None, Some("1.19.4-otp-27"))).unwrap();
-        let otp = &tagged.components.iter().find(|(c, _)| c == "otp").unwrap().1;
+        let otp = &tagged
+            .components
+            .iter()
+            .find(|(c, _)| c == "otp")
+            .unwrap()
+            .1;
         assert_eq!(*otp, VersionRequest::Prefix(Version::parse("27").unwrap()));
         assert!(otp.matches(&Version::parse("27.3.4.1").unwrap()));
         assert!(!otp.matches(&Version::parse("28.0").unwrap()));

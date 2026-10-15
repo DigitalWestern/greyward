@@ -209,6 +209,13 @@ fn validate_msbuild_inputs(
 ) -> io::Result<()> {
     for path in basis.keys().filter(|path| !is_lock_path(path)) {
         let rel = Path::new(path);
+        // A .slnx contains <Project> entries under <Solution>. Discovery
+        // already validated it as a solution, not an importable MSBuild
+        // document. Keep it in the input basis without treating those
+        // entries as the root of an MSBuild project.
+        if layout.solution.as_deref() == Some(rel) {
+            continue;
+        }
         let bytes = project
             .read_input(rel)?
             .ok_or_else(|| err("MSBuild input vanished"))?;

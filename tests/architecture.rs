@@ -1845,6 +1845,10 @@ const DIGEST_SOURCES: &[(&str, &str, usize)] = &[
     // Electron's SHASUMS256.txt from its GitHub release (kept in the
     // store). Never a lock's claim.
     ("src/tailors/ruby/mod.rs", "verify_gem", 1),
+    // The Bundler a lock was written with: the lock's own CHECKSUMS entry
+    // for it (the project's pin), else rubygems.org's API digest or the
+    // store record of it, as for every other gem.
+    ("src/tailors/ruby/bundler.rs", "realize", 1),
     ("src/kernel/provider/artifacts.rs", "provision", 1),
     // The project's pin: its committed lock (Cargo.lock checksums, mix.lock
     // outer checksums, package-lock integrity, ward's Python lock) or a

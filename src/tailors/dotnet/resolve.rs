@@ -67,9 +67,8 @@ fn is_lock_path(path: &str) -> bool {
 /// MSBuild opts them back into local reassignment. Every file MSBuild can
 /// import is scanned, whatever its extension: any file holding a
 /// `<Project` element, in every encoding XML allows (UTF-16/32's
-/// NUL-padded ASCII names included). A README or a data file holds none,
-/// so a solution's whole tree is not refused for mentioning a name. This
-/// is a conservative refusal.
+/// NUL-padded ASCII names included). Documentation examples stay ordinary
+/// data unless the document itself can be evaluated as an MSBuild project.
 fn reject_lock_controls(
     project: &ProjectRoot,
     basis: &crate::comforter::join::Digests,
@@ -88,7 +87,8 @@ fn reject_lock_controls(
             .read_input(Path::new(path))?
             .ok_or_else(|| err("MSBuild input vanished"))?;
         let ascii: Vec<u8> = bytes
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|byte| *byte != 0)
             .map(|byte| byte.to_ascii_lowercase())
             .collect();
@@ -97,7 +97,9 @@ fn reject_lock_controls(
                 .windows(name.len())
                 .any(|part| part == name.as_bytes())
         };
-        if !holds("<project") {
+        if !(holds("<project") || holds(":project"))
+            || !solution::is_msbuild_document(&super::decode_msbuild(&bytes)?, Path::new(path))?
+        {
             continue;
         }
         for control in ["treataslocalproperty", "nugetlockfilepath"] {
@@ -234,13 +236,15 @@ fn validate_msbuild_inputs(
             .filter(|byte| *byte != 0)
             .map(|byte| byte.to_ascii_lowercase())
             .collect();
-        if !ascii.windows(8).any(|part| part == b"<project") {
+        if !ascii
+            .windows(8)
+            .any(|part| part == b"<project" || part == b":project")
+        {
             continue;
         }
-        // Every solution stays in the basis, including unselected ones.
-        // A .slnx may also be an imported MSBuild document, so check its
-        // root before exempting its normal <Project Path=...> entries.
-        if solution::is_slnx_document(&super::decode_msbuild(&bytes)?, rel)? {
+        // Examples and solutions stay in the basis as data. Imports may
+        // use any filename, so recognize Project roots by their contents.
+        if !solution::is_msbuild_document(&super::decode_msbuild(&bytes)?, rel)? {
             continue;
         }
         super::validate_csproj(project, rel)?;
@@ -355,7 +359,9 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
             .read_input(Path::new(path))?
             .ok_or_else(|| err("MSBuild input vanished"))?;
         let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
-        windows = text.contains("<project") && windows_text(&text);
+        windows = (text.contains("<project") || text.contains(":project"))
+            && solution::is_msbuild_document(&text, Path::new(path))?
+            && windows_text(&text);
     }
     let references = layout
         .members
@@ -653,6 +659,41 @@ mod tests {
         let why = preflight(&project, "9.0.317").unwrap_err().to_string();
         assert!(why.contains("PackageDownload"), "{why}");
         assert!(why.contains("Other.SLNX"), "{why}");
+    }
+
+    #[test]
+    fn documentation_examples_do_not_become_msbuild_documents() {
+        let temp = TempDir::named("dotnet-documentation-inputs");
+        write_project(&temp.0, "App.csproj", &csproj(""));
+        let example = "<Project TreatAsLocalProperty=\"NuGetLockFilePath\"><PropertyGroup><TargetFramework>net9.0-windows</TargetFramework></PropertyGroup></Project>";
+        write_project(
+            &temp.0,
+            "README.md",
+            &format!("# Example\n```xml\n{example}\n```\n"),
+        );
+        write_project(
+            &temp.0,
+            "docs/example.html",
+            &format!("<div>{example}</div>"),
+        );
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let checked = preflight(&project, "9.0.317").unwrap();
+        assert!(!checked.windows);
+        for name in ["README.md", "docs/example.html"] {
+            assert!(checked.basis.contains_key(name), "{name}");
+        }
+        // An XML preamble must not hide an import from the existing
+        // conservative restrictions, even under an arbitrary filename.
+        write_project(
+            &temp.0,
+            "custom.data",
+            "<!DOCTYPE Project><Project><UsingTask TaskName=\"Hidden\" /></Project>",
+        );
+        let why = preflight(&project, "9.0.317").unwrap_err().to_string();
+        assert!(why.contains("expected <Project root"), "{why}");
+        write_project(&temp.0, "custom.data", "<m:Project xmlns:m=\"http://schemas.microsoft.com/developer/msbuild/2003\"><m:UsingTask TaskName=\"Hidden\" /></m:Project>");
+        let why = preflight(&project, "9.0.317").unwrap_err().to_string();
+        assert!(why.contains("expected <Project root"), "{why}");
     }
 
     #[test]

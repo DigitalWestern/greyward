@@ -121,26 +121,40 @@ fn xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// A solution XML document cannot be imported as an MSBuild project.
-/// The extension alone is insufficient: imports may use any filename.
-pub(super) fn is_slnx_document(text: &str, path: &Path) -> io::Result<bool> {
-    if !path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("slnx"))
+/// Only a Project-root document can be evaluated by MSBuild. Keep XML
+/// preambles conservative so declarations the validator refuses cannot
+/// conceal a project. Documentation examples remain ordinary inputs.
+pub(super) fn is_msbuild_document(text: &str, path: &Path) -> io::Result<bool> {
+    if !text
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
     {
         return Ok(false);
     }
     let markup = strip_comments_and_cdata(text, path)?.to_ascii_lowercase();
     let mut document = markup.trim_start_matches('\u{feff}').trim_start();
-    if document.starts_with("<?xml") {
+    if document.starts_with("<?xml")
+        && document
+            .as_bytes()
+            .get(5)
+            .is_some_and(u8::is_ascii_whitespace)
+    {
         let end = document
             .find("?>")
             .ok_or_else(|| err(format!("{}: unterminated XML declaration", path.display())))?;
         document = document[end + 2..].trim_start();
     }
-    Ok(document.strip_prefix("<solution").is_some_and(|after| {
-        after.starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
-    }))
+    if document.starts_with("<!") || document.starts_with("<?") {
+        return Ok(true);
+    }
+    let root = document
+        .strip_prefix('<')
+        .unwrap_or_default()
+        .split(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .next()
+        .unwrap_or_default();
+    Ok(root.rsplit(':').next() == Some("project"))
 }
 
 /// The `Path` of every `<Project>` an `.slnx` lists. Folders hold

@@ -1,6 +1,6 @@
 [package]
 name = "greyward"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 # Matches rust-toolchain.toml: the one compiler CI tests and releases build with.
 rust-version = "1.98.1"

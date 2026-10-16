@@ -6,7 +6,7 @@ below is the spec, generated from the command table in `src/cli/spec.rs`; if thi
 file and the binary differ, fix this file.*
 
 ```
-ward 0.2.0 — one command for every package manager
+ward 0.2.1 — one command for every package manager
 
 USAGE:
   ward                        set up this project
@@ -1492,7 +1492,7 @@ moves one ledger.
 prints the `[signing]` table to paste into the machine policy.
 **store** prints the store root (`store path`) or every registered project
 root (`store roots`). `store path` also answers for a store Greyward refuses to
-open, with a `warning:` and the `fix:` on stderr. **version** prints `ward 0.2.0`.
+open, with a `warning:` and the `fix:` on stderr. **version** prints `ward 0.2.1`.
 
 ## Open questions
 

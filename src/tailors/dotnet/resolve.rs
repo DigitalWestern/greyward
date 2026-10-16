@@ -225,13 +225,6 @@ fn validate_msbuild_inputs(
         .map(|(path, _)| path)
     {
         let rel = Path::new(path);
-        // A .slnx contains <Project> entries under <Solution>. Discovery
-        // already validated it as a solution, not an importable MSBuild
-        // document. Keep it in the input basis without treating those
-        // entries as the root of an MSBuild project.
-        if layout.solution.as_deref() == Some(rel) {
-            continue;
-        }
         let bytes = project
             .read_input(rel)?
             .ok_or_else(|| err("MSBuild input vanished"))?;
@@ -242,6 +235,12 @@ fn validate_msbuild_inputs(
             .map(|byte| byte.to_ascii_lowercase())
             .collect();
         if !ascii.windows(8).any(|part| part == b"<project") {
+            continue;
+        }
+        // Every solution stays in the basis, including unselected ones.
+        // A .slnx may also be an imported MSBuild document, so check its
+        // root before exempting its normal <Project Path=...> entries.
+        if solution::is_slnx_document(&super::decode_msbuild(&bytes)?, rel)? {
             continue;
         }
         super::validate_csproj(project, rel)?;
@@ -342,7 +341,13 @@ pub fn preflight(project: &ProjectRoot, sdk_version: &str) -> io::Result<Preflig
     });
     // Every MSBuild file of the tree, imported .props included: the
     // framework is often set in one a project imports by path.
-    for path in basis.keys().filter(|path| !is_lock_path(path)) {
+    for path in basis
+        .iter()
+        .filter(|(path, digest)| {
+            !is_lock_path(path) && !digest.starts_with(record::SYMLINK_DIGEST_PREFIX)
+        })
+        .map(|(path, _)| path)
+    {
         if windows {
             break;
         }
@@ -597,6 +602,57 @@ mod tests {
         let path = root.join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn preflight_preserves_nonrequired_links_without_reading_their_targets() {
+        let temp = TempDir::named("dotnet-preflight-links");
+        let outside = TempDir::named("dotnet-outside-input");
+        write_project(&temp.0, "App.csproj", &csproj(""));
+        write_project(&temp.0, "data/value.txt", "ordinary project data");
+        write_project(
+            &outside.0,
+            "settings",
+            "<Project><PropertyGroup><TargetFramework>net9.0-windows</TargetFramework></PropertyGroup></Project>",
+        );
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        for (name, target) in [
+            ("node_modules", PathBuf::from("data")),
+            ("CLAUDE.md", PathBuf::from("missing-agent-guide")),
+            ("host-settings", outside.0.join("settings")),
+        ] {
+            std::os::unix::fs::symlink(&target, temp.0.join(name)).unwrap();
+            let checked = preflight(&project, "9.0.317").unwrap();
+            assert!(!checked.windows, "{name} must not read a link target");
+            assert!(checked.basis[name].starts_with(record::SYMLINK_DIGEST_PREFIX));
+        }
+    }
+
+    #[test]
+    fn unselected_solutions_are_inputs_and_msbuild_imports_keep_their_checks() {
+        let temp = TempDir::named("dotnet-secondary-solutions");
+        write_project(&temp.0, "App.csproj", &csproj(""));
+        for name in ["A.slnx", "B.slnx", "nested/Other.SLNX"] {
+            write_project(
+                &temp.0,
+                name,
+                "\u{feff}<?xml version=\"1.0\"?><!-- solution --><Solution><Project Path=\"App.csproj\" /></Solution>",
+            );
+        }
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let checked = preflight(&project, "9.0.317").unwrap();
+        assert_eq!(checked.layout.solution, Some(PathBuf::from("A.slnx")));
+        for name in ["A.slnx", "B.slnx", "nested/Other.SLNX"] {
+            assert!(checked.basis.contains_key(name), "{name}");
+        }
+        write_project(
+            &temp.0,
+            "nested/Other.SLNX",
+            "<Project><ItemGroup><PackageDownload Include=\"Hidden\" Version=\"[1.0.0]\" /></ItemGroup></Project>",
+        );
+        let why = preflight(&project, "9.0.317").unwrap_err().to_string();
+        assert!(why.contains("PackageDownload"), "{why}");
+        assert!(why.contains("Other.SLNX"), "{why}");
     }
 
     #[test]

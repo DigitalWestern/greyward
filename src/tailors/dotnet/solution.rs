@@ -121,6 +121,28 @@ fn xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// A solution XML document cannot be imported as an MSBuild project.
+/// The extension alone is insufficient: imports may use any filename.
+pub(super) fn is_slnx_document(text: &str, path: &Path) -> io::Result<bool> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("slnx"))
+    {
+        return Ok(false);
+    }
+    let markup = strip_comments_and_cdata(text, path)?.to_ascii_lowercase();
+    let mut document = markup.trim_start_matches('\u{feff}').trim_start();
+    if document.starts_with("<?xml") {
+        let end = document
+            .find("?>")
+            .ok_or_else(|| err(format!("{}: unterminated XML declaration", path.display())))?;
+        document = document[end + 2..].trim_start();
+    }
+    Ok(document.strip_prefix("<solution").is_some_and(|after| {
+        after.starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+    }))
+}
+
 /// The `Path` of every `<Project>` an `.slnx` lists. Folders hold
 /// `<Project>` and `<File>` elements; only projects are listed.
 pub(crate) fn parse_slnx(text: &str, path: &Path) -> io::Result<Vec<String>> {

@@ -316,9 +316,10 @@ impl Tailor for Cargo {
         cargo::toolchain_catalog()
     }
 
-    /// `[toolchain] path` in rust-toolchain.toml names a local tree.
+    /// `[toolchain] path` in rust-toolchain.toml names a local tree; a
+    /// nightly channel names a signed channel manifest.
     fn external_toolchain(&self) -> Option<crate::comforter::toolchain::ExternalToolchain> {
-        Some(crate::kernel::provider::rust_path::select)
+        Some(external_toolchain)
     }
 
     fn listing(&self, ecosystem: &str, body: &Value) -> ClosureListing {
@@ -560,13 +561,57 @@ fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
     crate::kernel::toolchain::input::rust_rows(root)
 }
 
+/// The Rust toolchain that is not a catalog release: the local tree
+/// `[toolchain] path` names, or the nightly the channel names, resolved and
+/// verified now. `None` sends selection to the catalog.
+fn external_toolchain(
+    platform: Platform,
+    project: &Path,
+    rows: &[InputRow],
+) -> io::Result<Option<crate::kernel::toolchain::Bundle>> {
+    if let Some(bundle) = crate::kernel::provider::rust_path::select(platform, project, rows)? {
+        return Ok(Some(bundle));
+    }
+    match agreed_channel(rows)? {
+        Some(channel) => crate::kernel::provider::rust_nightly::select(channel),
+        None => Ok(None),
+    }
+}
+
 /// The selection request [`toolchain_rows`] state.
 fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
-    use crate::kernel::toolchain::input::{RUST_TOOLCHAIN_PATH, RUST_TOOLCHAIN_REQUESTS};
     use crate::kernel::toolchain::invalid;
-    use crate::kernel::toolchain::resolve::{exact_or_prefix, value, UPDATE_HINT};
+    use crate::kernel::toolchain::resolve::exact_or_prefix;
     use crate::kernel::toolchain::Version;
     let mut request = Request::newest();
+    if let Some(channel) = agreed_channel(rows)? {
+        if crate::kernel::provider::rust_nightly::Nightly::parse(channel)?.is_some() {
+            // The external selection answers for a nightly before the
+            // catalog is asked; only a caller without it gets here.
+            return Err(invalid(format!(
+                "rust channel {channel} is a nightly: ward resolves it from its signed channel \
+                 manifest when it writes greyward-toolchain.toml, never from the catalog"
+            )));
+        }
+        if channel != "stable" {
+            let version = Version::parse(channel).map_err(|_| {
+                invalid(format!(
+                    "rust channel {channel} is not supported; use an exact version, stable, \
+                     nightly or nightly-YYYY-MM-DD"
+                ))
+            })?;
+            request = request.with("rustc", exact_or_prefix(version));
+        }
+    }
+    Ok(request)
+}
+
+/// The channel the toolchain files ask for, once both files, when both are
+/// there, agree on it and on every list and path beside it.
+fn agreed_channel(rows: &[InputRow]) -> io::Result<Option<&str>> {
+    use crate::kernel::toolchain::input::{RUST_TOOLCHAIN_PATH, RUST_TOOLCHAIN_REQUESTS};
+    use crate::kernel::toolchain::invalid;
+    use crate::kernel::toolchain::resolve::{value, UPDATE_HINT};
     let legacy = value(rows, "rust-toolchain", "toolchain.channel");
     let modern = value(rows, "rust-toolchain.toml", "toolchain.channel");
     if let (Some(a), Some(b)) = (legacy, modern) {
@@ -602,17 +647,7 @@ fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
             }
         }
     }
-    if let Some(channel) = legacy.or(modern) {
-        if channel != "stable" {
-            let version = Version::parse(channel).map_err(|_| {
-                invalid(format!(
-                    "rust channel {channel} is not supported; use an exact version or stable"
-                ))
-            })?;
-            request = request.with("rustc", exact_or_prefix(version));
-        }
-    }
-    Ok(request)
+    Ok(legacy.or(modern))
 }
 
 #[cfg(test)]

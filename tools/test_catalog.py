@@ -46,6 +46,10 @@ def sha512(body):
     return hashlib.sha512(body).hexdigest()
 
 
+# A FakeNetwork body: the upstream does not answer at that URL.
+DOWN = object()
+
+
 class FakeNetwork:
     """`catalog.http_get`, answered from a table; records every request."""
 
@@ -58,6 +62,9 @@ class FakeNetwork:
         body = self.bodies.get(url)
         if body is None:
             return None
+        if body is DOWN:
+            # What the real http_get raises once its retries are spent.
+            raise catalog.Unreachable(f"{url}: HTTP Error 503: Service Unavailable")
         return body if isinstance(body, bytes) else body.encode()
 
     def json(self, url, value):
@@ -69,7 +76,7 @@ class Base(unittest.TestCase):
         self.net = FakeNetwork()
         self.scratch = tempfile.TemporaryDirectory()
         self.saved = (catalog.http_get, catalog.CACHE, catalog.run_linux_bottle, catalog.REPO,
-                      catalog.SCRATCH, catalog.TODAY)
+                      catalog.SCRATCH)
         catalog.http_get = self.net
         catalog.CACHE = os.path.join(self.scratch.name, "cache")
         # Keyrings, signatures and manifests land in the test's own scratch
@@ -81,11 +88,41 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         (catalog.http_get, catalog.CACHE, catalog.run_linux_bottle, catalog.REPO,
-         catalog.SCRATCH, catalog.TODAY) = self.saved
+         catalog.SCRATCH) = self.saved
         self.scratch.cleanup()
 
 
 class Http(Base):
+    def test_the_registry_token_goes_to_ghcr_only_and_never_past_a_redirect(self):
+        seen = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(request, timeout):
+            seen.append(request)
+            return Response(b"{}")
+
+        saved = catalog.urllib.request.urlopen
+        catalog.urllib.request.urlopen = urlopen
+        try:
+            real_get = self.saved[0]
+            real_get(f"{catalog.GHCR_RUBY}/manifests/4.0.3")
+            real_get("https://nodejs.org/dist/index.json")
+        finally:
+            catalog.urllib.request.urlopen = saved
+        ghcr, node = seen
+        # Unredirected: urllib does not copy it onto the blob CDN's request.
+        self.assertEqual(ghcr.unredirected_hdrs, {"Authorization": "Bearer QQ=="})
+        self.assertNotIn("Authorization", ghcr.headers)
+        self.assertIn("application/vnd.oci.image.index.v1+json", ghcr.headers["Accept"])
+        self.assertEqual(node.unredirected_hdrs, {})
+        self.assertNotIn("Authorization", node.headers)
+
     def test_listings_and_checksum_files_are_fetched_fresh_every_time(self):
         url = "https://go.dev/dl/?mode=json"
         self.net.bodies[url] = "[1]"
@@ -93,6 +130,22 @@ class Http(Base):
         self.net.bodies[url] = "[1, 2]"
         self.assertEqual(catalog.fetch_json(url), [1, 2])
         self.assertEqual(self.net.requests.count(url), 2)
+
+    def test_an_upstream_that_never_answers_is_unreachable_not_a_verdict(self):
+        attempts = []
+
+        def urlopen(request, timeout):
+            attempts.append(request.full_url)
+            raise catalog.urllib.error.HTTPError(request.full_url, 503, "Service Unavailable", {}, io.BytesIO())
+
+        saved = catalog.urllib.request.urlopen
+        catalog.urllib.request.urlopen = urlopen
+        try:
+            with self.assertRaises(catalog.Unreachable):
+                self.saved[0]("https://builds.dotnet.microsoft.com/dotnet/x.sha512")
+        finally:
+            catalog.urllib.request.urlopen = saved
+        self.assertEqual(len(attempts), 4)
 
     def test_a_404_is_not_remembered(self):
         url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/9.0.317/x.tar.gz.sha512"
@@ -151,9 +204,10 @@ def without_github_digest(net, repo, name):
     net.json(url, releases)
 
 
-def run_quietly(eco, check):
+def run_quietly(eco, check, drift=False):
     """`catalog.run` on the catalog under `catalog.REPO`: (ok, what it printed)."""
-    args = type("Args", (), {"check": check, "set_default": None, "against": None})()
+    args = type("Args", (), {"check": check, "set_default": None, "against": None,
+                             "drift": drift})()
     with contextlib.redirect_stdout(io.StringIO()) as out:
         ok = catalog.run(eco, args)
     return ok, out.getvalue()
@@ -367,20 +421,123 @@ def bottle(tag):
 class Ruby(Base):
     def setUp(self):
         super().setUp()
-        self.net.bodies[
-            "https://raw.githubusercontent.com/ruby/www.ruby-lang.org/master/_data/branches.yml"
-        ] = "- name: 3.4\n  status: normal maintenance\n\n- name: 4.0\n  status: normal maintenance\n"
         self.releases = []
+        self.tags = []
+        github_releases(self.net, catalog.PORTABLE, self.releases)
+        self.net.json(f"{catalog.GHCR_RUBY}/tags/list", {"name": "homebrew/core/portable-ruby", "tags": []})
 
-    def publish(self, tag):
+    def publish(self, tag, prerelease=False, body=None):
         assets = []
         for platform in catalog.PLATFORMS:
             name = f"portable-ruby-{tag}.{catalog.BOTTLE_TAGS[platform]}.bottle.tar.gz"
-            body = bottle(tag)
-            self.net.bodies[f"https://github.com/{catalog.PORTABLE}/releases/download/{tag}/{name}"] = body
-            assets.append(asset(name, body))
-        self.releases.append({"tag_name": tag, "draft": False, "prerelease": False, "assets": assets})
+            data = body or bottle(tag)
+            self.net.bodies[f"https://github.com/{catalog.PORTABLE}/releases/download/{tag}/{name}"] = data
+            assets.append(asset(name, data))
+        self.releases.append({"tag_name": tag, "draft": False, "prerelease": prerelease, "assets": assets})
         github_releases(self.net, catalog.PORTABLE, self.releases)
+
+    def publish_ghcr(self, tag, platforms=catalog.PLATFORMS, body=None, annotated=None):
+        """`tag` on the registry: an image index naming one manifest per
+        bottle (plus one for a platform ward does not ship), each with the
+        bottle as its single layer."""
+        manifests = []
+        for platform, slug in list(catalog.BOTTLE_TAGS.items()) + [(None, "arm64_linux")]:
+            if platform is not None and platform not in platforms:
+                continue
+            data = body or bottle(tag) + slug.encode()
+            digest = "sha256:" + sha256(data)
+            self.net.bodies[f"{catalog.GHCR_RUBY}/blobs/{digest}"] = data
+            manifest = {"schemaVersion": 2, "layers": [{"digest": digest, "size": len(data)}]}
+            manifest_digest = "sha256:" + sha256(json.dumps(manifest).encode())
+            self.net.json(f"{catalog.GHCR_RUBY}/manifests/{manifest_digest}", manifest)
+            manifests.append({"digest": manifest_digest, "annotations": {
+                "org.opencontainers.image.ref.name": f"{tag}.{slug}",
+                "sh.brew.bottle.digest": (annotated or digest)[len("sha256:"):]}})
+        self.net.json(f"{catalog.GHCR_RUBY}/manifests/{tag}", {"schemaVersion": 2, "manifests": manifests})
+        self.tags.append(tag)
+        self.net.json(f"{catalog.GHCR_RUBY}/tags/list", {"name": "homebrew/core/portable-ruby", "tags": self.tags})
+
+    def test_registry_bottles_enter_under_their_blob_urls(self):
+        self.publish("3.4.5")
+        self.publish_ghcr("4.0.2")
+        self.publish_ghcr("4.0.2_1")
+        out, report = self.generate([])
+        self.assertEqual(list(out), ["ruby-3.4.5", "ruby-4.0.2"])
+        rows = out["ruby-4.0.2"]["artifacts"]
+        self.assertEqual({a["build"] for a in rows}, {"4.0.2_1"})
+        self.assertEqual({a["provider"] for a in rows}, {catalog.GHCR_PROVIDER})
+        for a in rows:
+            self.assertEqual(a["url"], f"{catalog.GHCR_RUBY}/blobs/{a['digest']}")
+        self.assertEqual(report.added, ["ruby-3.4.5", "ruby-4.0.2"])
+        # Verified again on the next run, nothing added.
+        again, report = self.generate(list(out.values()))
+        self.assertEqual((again, report.added), (out, []))
+
+    def test_a_version_on_both_channels_with_other_bytes_is_a_revision_and_the_same_bytes_are_not(self):
+        self.publish("3.4.6", prerelease=True)
+        self.publish("3.4.5")
+        github, report = self.generate([])
+        self.assertEqual(list(github), ["ruby-3.4.5"])
+        self.assertEqual(report.skipped, [("portable-ruby 3.4.6", "marked prerelease by Homebrew")])
+        # The shipped catalog already has the prerelease 3.4.6 bottle.
+        shipped = list(github.values()) + [catalog.ruby_release(
+            report, "3.4.6", self.releases[0], "ruby-3.4.6")[0]]
+        self.publish_ghcr("3.4.5", body=bottle("3.4.5"))   # the same bytes
+        self.publish_ghcr("3.4.6")                          # rebuilt bytes
+        out, report = self.generate(shipped)
+        self.assertEqual(sorted(out), ["ruby-3.4.5", "ruby-3.4.6", "ruby-3.4.6-r2"])
+        self.assertEqual(out["ruby-3.4.6-r2"]["revision"], 2)
+        self.assertEqual(out["ruby-3.4.6-r2"]["artifacts"][0]["provider"], catalog.GHCR_PROVIDER)
+        self.assertEqual(report.added, ["ruby-3.4.6-r2"])
+
+    def test_fiddle_as_a_bundled_gem_extension_is_admitted_and_as_a_core_extension_is_not(self):
+        def layout(extra):
+            path = os.path.join(self.scratch.name, "bottle.tar.gz")
+            with tarfile.open(path, "w:gz") as tar:
+                for name in ("bin/ruby", "bin/gem", "bin/bundle", "lib/libruby-static.a",
+                             "include/ruby-4.0.0/ruby.h", extra):
+                    tar.addfile(tarfile.TarInfo(f"portable-ruby/4.0.3/{name}"), io.BytesIO(b""))
+            catalog.check_bottle_layout(path, "4.0.3")
+        layout("lib/ruby/gems/4.0.0/extensions/x86_64-linux/4.0.0-static/fiddle-1.1.8/fiddle.so")
+        for core in ("lib/ruby/4.0.0/x86_64-linux/fiddle.so",
+                     "lib/ruby/gems/4.0.0/extensions/x86_64-linux/4.0.0-static/openssl-4.0/openssl.so"):
+            with self.assertRaisesRegex(catalog.Failure, "dynamic extension"):
+                layout(core)
+
+    def test_a_registry_layer_that_is_not_the_annotated_bottle_is_an_error(self):
+        self.publish_ghcr("4.0.3", annotated="sha256:" + "0" * 64)
+        with self.assertRaisesRegex(catalog.Failure, "sh.brew.bottle.digest"):
+            self.generate([])
+
+    def test_a_registry_tag_without_both_bottles_is_skipped(self):
+        self.publish_ghcr("4.0.3", platforms=(LINUX,))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped, [("ruby-4.0.3", f"portable-ruby 4.0.3 has no {DARWIN} bottle")])
+
+    def test_a_new_bottle_failing_the_recipe_is_skipped_with_the_reason(self):
+        self.publish_ghcr("4.0.4", body=bottle("9.9.9"))
+        out, report = self.generate([])
+        self.assertEqual(out, {})
+        self.assertEqual(report.skipped[0][0], "ruby-4.0.4")
+        self.assertIn("is outside portable-ruby/4.0.4/", report.skipped[0][1])
+
+    def test_a_new_bottle_that_cannot_be_downloaded_fails_the_run(self):
+        # An outage says nothing about the bottle: it is not skipped as
+        # failing the recipe, so the drift job cannot pass over it.
+        self.publish_ghcr("4.0.4")
+        blob = next(url for url in self.net.bodies if "/blobs/" in url)
+        self.net.bodies[blob] = DOWN
+        with self.assertRaises(catalog.Unreachable):
+            self.generate([])
+
+    def test_a_shipped_registry_bottle_the_registry_withdrew_is_an_error(self):
+        self.publish_ghcr("4.0.3")
+        out, _ = self.generate([])
+        self.tags.clear()
+        self.net.json(f"{catalog.GHCR_RUBY}/tags/list", {"tags": []})
+        with self.assertRaisesRegex(catalog.Failure, "no longer publishes portable-ruby 4.0.3"):
+            self.generate(list(out.values()))
 
     def generate(self, existing):
         report = catalog.Report("ruby")
@@ -671,14 +828,17 @@ class Go(Base):
             ],
         }
 
-    def test_supported_stable_releases_enter_with_go_devs_digests(self):
+    def test_every_stable_release_enters_with_go_devs_digests(self):
+        # A line go.dev no longer lists as supported still enters: a
+        # project pinned to its last patch gets exactly that patch.
         self.publish("1.25.9", supported=False)
         self.publish("1.26.3")
         self.publish("1.27rc1", stable=False)
         self.publish("1.26.4", stable=False)  # go.dev's own flag, even on a x.y.z version
         out, report = self.generate([])
-        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3")})
-        self.assertEqual((report.added, report.skipped), (["go-1.26.3"], []))
+        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3"),
+                               "go-1.25.9": self.expected("1.25.9")})
+        self.assertEqual((report.added, report.skipped), (["go-1.26.3", "go-1.25.9"], []))
         self.assertEqual(out["go-1.26.3"]["artifacts"][1]["url"],
                          "https://go.dev/dl/go1.26.3.linux-amd64.tar.gz")
 
@@ -786,6 +946,40 @@ class Go(Base):
         self.assertIn('default = "go-1.26.3"', now)
         self.assertIn('key = "go-1.26.4"', now)
         self.assertIn(text[text.index('\n[[release]]'):], now)
+
+    def test_drift_annotates_a_release_not_shipped_yet_and_writes_nothing(self):
+        self.publish("1.26.3")
+        self.shipped("1.26.3")
+        path = os.path.join(self.scratch.name, catalog.FILES["go"])
+        text = read(path)
+        ok, out = run_quietly("go", check=False, drift=True)
+        self.assertTrue(ok)
+        self.assertIn("go: no drift", out)
+        self.publish("1.26.4")
+        ok, out = run_quietly("go", check=False, drift=True)
+        self.assertFalse(ok)
+        self.assertIn("::error title=go catalog drift::src/tailors/go/catalog.toml lacks 1 "
+                      "release(s) upstream publishes: go-1.26.4. Run `python3 tools/catalog.py go` "
+                      "and open a pull request.", out)
+        self.assertEqual(read(path), text)
+
+    def test_drift_annotates_a_shipped_row_that_no_longer_verifies(self):
+        self.publish("1.26.3")
+        self.shipped("1.26.3")
+        name = "go1.26.3.darwin-arm64.tar.gz"
+        self.net.bodies[f"https://dl.google.com/go/{name}.sha256"] = "0" * 64
+        argv = sys.argv
+        sys.argv = ["catalog.py", "--drift", "go"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    catalog.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("::error title=go catalog no longer verifies::go "
+                      f"{name} .sha256: sha256:{'0' * 64}", out.getvalue())
 
 
 class Against(Base):
@@ -932,7 +1126,6 @@ class Node(Base):
     (served as the keyring), so gpgv runs on every path."""
 
     INDEX = "https://nodejs.org/dist/index.json"
-    SCHEDULE = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
     KEYRING = "https://raw.githubusercontent.com/nodejs/release-keys/main/gpg/pubring.kbx"
 
     @classmethod
@@ -949,18 +1142,11 @@ class Node(Base):
         self.home = os.environ.get("GNUPGHOME")
         os.environ["GNUPGHOME"] = os.path.join(self.scratch.name, "gnupg")
         os.makedirs(os.environ["GNUPGHOME"], mode=0o700)
-        catalog.TODAY = datetime.date(2026, 6, 1)
         self.net.bodies[self.KEYRING] = self.keyring
         self.releasers_saved = catalog.NODE_RELEASERS
         catalog.NODE_RELEASERS = os.path.join(self.scratch.name, "node-releasers.txt")
         with open(catalog.NODE_RELEASERS, "w") as f:
             f.write(f"# the test releaser\n{self.release_key}  # Test Node Releaser\n")
-        self.net.json(self.SCHEDULE, {
-            "v20": {"start": "2023-04-18", "end": "2026-04-30"},
-            "v22": {"start": "2024-04-24", "end": "2027-04-30"},
-            "v24": {"start": "2025-05-06", "end": "2028-04-30"},
-            "v26": {"start": "2026-10-20", "end": "2029-04-30"},
-        })
         self.index = []
 
     def tearDown(self):
@@ -990,13 +1176,14 @@ class Node(Base):
             lines.append(f"{digest or sha256(name.encode())}  {name}")
         return ("\n".join(lines) + "\n").encode()
 
-    def publish(self, version, platforms=(DARWIN, LINUX), listed=True):
+    def publish(self, version, platforms=(DARWIN, LINUX), listed=True,
+                files=("osx-arm64-tar", "linux-x64", "src", "win-x64-exe")):
         base = f"https://nodejs.org/dist/v{version}/"
         body = self.shasums(version, platforms)
         self.net.bodies[base + "SHASUMS256.txt"] = body
         self.net.bodies[base + "SHASUMS256.txt.sig"] = self.sign(body)
         if listed:
-            self.index.insert(0, {"version": f"v{version}"})
+            self.index.insert(0, {"version": f"v{version}", "files": list(files)})
             self.net.json(self.INDEX, self.index)
 
     def generate(self, existing):
@@ -1020,26 +1207,30 @@ class Node(Base):
             ],
         }
 
-    def test_releases_of_lines_the_schedule_supports_enter_with_signed_digests(self):
-        self.publish("20.19.5")   # line ended
-        self.publish("22.20.0")
+    def test_every_release_with_both_tarballs_enters_with_signed_digests(self):
+        # Ended and current lines alike: a pin to an old patch must find it.
+        self.publish("18.17.1")
+        self.publish("20.19.5")
         self.publish("24.9.0")
-        self.publish("26.0.0")    # line not started
         out, report = self.generate([])
         self.assertEqual(out, {"node-24.9.0": self.expected("24.9.0"),
-                               "node-22.20.0": self.expected("22.20.0")})
-        self.assertEqual((report.added, report.skipped), (["node-24.9.0", "node-22.20.0"], []))
+                               "node-20.19.5": self.expected("20.19.5"),
+                               "node-18.17.1": self.expected("18.17.1")})
+        self.assertEqual((report.added, report.skipped),
+                         (["node-24.9.0", "node-20.19.5", "node-18.17.1"], []))
         self.assertEqual(out["node-24.9.0"]["artifacts"][1]["url"],
                          "https://nodejs.org/dist/v24.9.0/node-v24.9.0-linux-x64.tar.gz")
 
-    def test_shipped_releases_are_kept_even_after_their_line_ends(self):
+    def test_releases_index_json_lists_without_both_tarballs_are_skipped_unfetched(self):
+        self.publish("15.14.0", listed=False)
+        self.index.insert(0, {"version": "v15.14.0", "files": ["osx-x64-tar", "linux-x64"]})
         self.publish("24.9.0")
-        existing = self.shipped("24.9.0")
-        catalog.TODAY = datetime.date(2028, 6, 1)
-        self.publish("24.10.0")
-        out, report = self.generate(existing)
-        self.assertEqual(list(out.values()), existing)
-        self.assertEqual(report.added, [])
+        # Its SHASUMS256.txt is never read: a request for it would fail.
+        del self.net.bodies["https://nodejs.org/dist/v15.14.0/SHASUMS256.txt"]
+        out, report = self.generate([])
+        self.assertEqual(list(out), ["node-24.9.0"])
+        self.assertEqual(report.skipped, [("1 node releases (15.14.0 to 15.14.0)",
+                                           "index.json lists no darwin-arm64 or no linux-x64 tarball for them")])
 
     def test_a_new_release_enters_beside_the_shipped_one(self):
         self.publish("24.9.0")
@@ -1223,10 +1414,6 @@ class Python(Base):
 
     def setUp(self):
         super().setUp()
-        self.net.json("https://peps.python.org/api/release-cycle.json", {
-            "3.13": {"status": "bugfix"}, "3.12": {"status": "security"},
-            "3.9": {"status": "end-of-life"},
-        })
         self.sums = {}      # tag -> {asset name: digest}
         self.tags = ["20260101", "20210101"]  # no SHA256SUMS: skipped, named
         for platform in (DARWIN, LINUX):
@@ -1304,8 +1491,11 @@ class Python(Base):
         self.publish("20260801", ["3.13.0"])
         self.publish("20260910", ["3.12.1", "3.12.2", "3.13.0", "3.13.1", "3.9.25"])
         out, report = self.generate(existing)
+        # 3.9 is end-of-life and still enters: a pin to its last patch
+        # must find it.
         self.assertEqual(out, {
             "cpython-3.12.1": existing[0],
+            "cpython-3.9.25": self.expected("3.9.25", "20260910"),
             "cpython-3.12.2": self.expected("3.12.2", "20260910"),
             "cpython-3.13.0": self.expected("3.13.0", "20260910"),
             "cpython-3.13.1": self.expected("3.13.1", "20260910"),
@@ -1315,12 +1505,13 @@ class Python(Base):
             out["cpython-3.13.1"]["artifacts"][1]["url"],
             "https://github.com/astral-sh/python-build-standalone/releases/download/20260910/"
             "cpython-3.13.1%2B20260910-x86_64-unknown-linux-gnu-install_only.tar.gz")
-        self.assertEqual(report.added, ["cpython-3.12.2", "cpython-3.13.0", "cpython-3.13.1"])
+        self.assertEqual(report.added, ["cpython-3.9.25", "cpython-3.12.2", "cpython-3.13.0", "cpython-3.13.1"])
+        never_built = "no PBS release with a SHA256SUMS publishes it for both platforms"
         self.assertEqual(report.skipped, [
             ("PBS releases 20260101, 1 releases before 20220227",
              "no SHA256SUMS published, so nothing to verify a row against"),
-            ("cpython-3.12.0", "no PBS release with a SHA256SUMS publishes it for both platforms"),
-        ])
+        ] + [(f"cpython-3.9.{patch}", never_built) for patch in range(25)]
+          + [("cpython-3.12.0", never_built)])
         again, report = self.generate(list(out.values()))
         self.assertEqual((again, report.added), (out, []))
 
@@ -1578,28 +1769,37 @@ class Dotnet(Base):
     def shipped(self, *versions):
         return written("dotnet", self.scratch.name, [self.expected(v) for v in versions])
 
-    def test_supported_channels_enter_and_previews_and_eol_channels_do_not(self):
+    def test_every_channel_enters_and_previews_do_not(self):
+        # 8.0 is end-of-life and still enters: a global.json pinned to one
+        # of its SDKs must find it.
         self.publish("10.0", "10.0.100", "10.0.100-rc.2.25502.107")
         self.publish("9.0", "9.0.300", old_style=True)
         self.publish("8.0", "8.0.400")
         self.publish("11.0", "11.0.100-preview.1.26101.1")
         out, report = self.generate([])
-        self.assertEqual(out, {"dotnet-sdk-9.0.300": self.expected("9.0.300"),
+        self.assertEqual(out, {"dotnet-sdk-8.0.400": self.expected("8.0.400"),
+                               "dotnet-sdk-9.0.300": self.expected("9.0.300"),
                                "dotnet-sdk-10.0.100": self.expected("10.0.100")})
         self.assertEqual((report.added, report.skipped, report.notes),
-                         (["dotnet-sdk-9.0.300", "dotnet-sdk-10.0.100"], [], []))
-        self.assertNotIn(f"{self.META}/8.0/releases.json", self.net.requests)
+                         (["dotnet-sdk-8.0.400", "dotnet-sdk-9.0.300", "dotnet-sdk-10.0.100"], [], []))
 
-    def test_shipped_rows_are_kept_even_in_an_eol_channel(self):
+    def test_a_runtime_only_release_with_no_sdk_is_passed_over(self):
+        self.publish("10.0", "10.0.100")
+        self.releases["8.0"].insert(0, {"release-version": "8.0.1"})
+        self.sync()
+        out, _ = self.generate([])
+        self.assertEqual(list(out), ["dotnet-sdk-10.0.100"])
+
+    def test_shipped_rows_are_kept_beside_newer_ones(self):
         self.publish("8.0", "8.0.400")
         self.publish("10.0", "10.0.100")
         existing = self.shipped("8.0.400")
-        # Read now that a shipped row may live there, but nothing new enters.
         self.publish("8.0", "8.0.401")
         out, report = self.generate(existing)
         self.assertEqual(out, {"dotnet-sdk-8.0.400": existing[0],
+                               "dotnet-sdk-8.0.401": self.expected("8.0.401"),
                                "dotnet-sdk-10.0.100": self.expected("10.0.100")})
-        self.assertEqual(report.added, ["dotnet-sdk-10.0.100"])
+        self.assertEqual(report.added, ["dotnet-sdk-8.0.401", "dotnet-sdk-10.0.100"])
 
     def test_a_shipped_release_no_longer_in_the_metadata_is_an_error(self):
         self.publish("10.0", "10.0.100")
@@ -1641,14 +1841,36 @@ class Dotnet(Base):
         self.assertEqual(str(cm.exception),
                          "dotnet 10.0.100: https://evil.example/dotnet-sdk.tar.gz is not on the shipped endpoint")
 
-    def test_a_sha512_beside_the_archive_that_disagrees_is_an_error(self):
+    def test_a_new_sdk_whose_sha512_beside_the_archive_disagrees_is_skipped(self):
         self.publish("10.0", "10.0.100")
         url = self.url("10.0.100", LINUX)
         self.net.bodies[url + ".sha512"] = "0" * 128
-        with self.assertRaises(catalog.Failure) as cm:
-            self.generate([])
-        self.assertEqual(str(cm.exception),
-                         f"dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())}")
+        out, report = self.generate([])
+        self.assertEqual((out, report.added), ({}, []))
+        self.assertEqual(report.skipped, [(
+            "dotnet-sdk-10.0.100",
+            "the release metadata and the .sha512 beside the archive disagree "
+            f"(dotnet {url} .sha512: sha512:{'0' * 128} != sha512:{sha512(url.encode())})")])
+
+    def test_a_new_sdks_sha512_that_cannot_be_fetched_fails_the_drift_run(self):
+        # The case a weekly drift run met as "no drift": the new release's
+        # .sha512 never answers. That is not a disagreement to skip over.
+        self.publish("10.0", "10.0.100")
+        self.shipped("10.0.100")
+        self.publish("10.0", "10.0.101")
+        self.net.bodies[self.url("10.0.101", LINUX) + ".sha512"] = DOWN
+        argv = sys.argv
+        sys.argv = ["catalog.py", "--drift", "dotnet"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    catalog.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("::error title=dotnet upstream could not be read::", out.getvalue())
+        self.assertNotIn("no drift", out.getvalue())
 
     def test_a_shipped_rows_sha512_that_disagrees_is_an_error(self):
         self.publish("10.0", "10.0.100")

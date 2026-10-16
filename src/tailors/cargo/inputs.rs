@@ -361,6 +361,35 @@ mod tests {
     use super::*;
     use crate::kernel::testutil::TempDir;
 
+    /// The planner preserves the lock bytes it consumed. The publication
+    /// check must use the same content digest for an unchanged symlinked
+    /// lock and refuse a later edit to its target.
+    #[test]
+    fn a_symlinked_lock_agrees_with_the_consumed_plan_basis() {
+        let temp = TempDir::named("symlink-lock-basis");
+        let lock = "version = 4\n";
+        std::fs::write(
+            temp.0.join("Cargo.toml"),
+            "[package]\nname=\"linked-lock\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(temp.0.join("actual-lock"), lock).unwrap();
+        std::os::unix::fs::symlink("actual-lock", temp.0.join("Cargo.lock")).unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let basis = resolution_basis(&project, lock).unwrap();
+        let files = crate::kernel::resolve::record::ResolutionFiles {
+            outputs: super::super::resolve::resolution_outputs(&project).unwrap(),
+            inputs: super::super::resolve::resolution_inputs(&project).unwrap(),
+        };
+        assert!(
+            crate::comforter::join::check_basis_for_test(&project, "cargo", &files, &basis).is_ok()
+        );
+        std::fs::write(temp.0.join("actual-lock"), "changed").unwrap();
+        let error = crate::comforter::join::check_basis_for_test(&project, "cargo", &files, &basis)
+            .unwrap_err();
+        assert!(error.to_string().contains("Cargo.lock changed"), "{error}");
+    }
+
     /// The workspace walk reaches a root whose directory is search-only
     /// (0111): its manifest is read by name through the held ancestor (#480).
     #[test]

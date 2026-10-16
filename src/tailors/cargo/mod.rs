@@ -1164,7 +1164,7 @@ checksum = "{hash_b}"
                 version
             );
         }
-        fs::write(root.join("rust-toolchain"), "1.69.0\n").unwrap();
+        fs::write(root.join("rust-toolchain"), "1.48.0\n").unwrap();
         assert!(resolve_toolchain(Platform::X86_64UnknownLinuxGnu, &project).is_err());
 
         fs::write(root.join("rust-toolchain"), "beta\n").unwrap();

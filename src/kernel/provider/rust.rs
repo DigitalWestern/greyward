@@ -32,7 +32,7 @@ pub use super::rust_extras::{
     project_extras_in, realize_toolchain, toolchain_file_extras_within, toolchain_object_id, Extras,
 };
 
-/// The shipped Rust catalog: every stable release from 1.70.0 on, with its
+/// The shipped Rust catalog: every stable release from 1.49.0 on, with its
 /// rustc, rust-std, cargo and rustfmt archives and its channel manifest,
 /// and the release a project with no Rust pin gets. Generated and verified
 /// by `tools/catalog.py cargo`, which checks each manifest's signature

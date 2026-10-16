@@ -1,0 +1,38 @@
+# Catalog drift: once a week, every shipped toolchain catalog is re-verified
+# against its upstream and compared with what upstream publishes now.
+#
+# `python3 tools/catalog.py --drift` fails, with one error annotation per
+# catalog, when
+#   - upstream publishes a release (a Go, Node, Python, Ruby, .NET or Rust
+#     patch, a Homebrew rebuild) the catalog does not ship yet: run
+#     `python3 tools/catalog.py <ecosystem>` and open a pull request; or
+#   - a shipped row no longer verifies (an archive withdrawn or
+#     re-published under the same name), which needs a person.
+# It writes nothing. Not run on pull requests: heavy.yml's `catalog` job
+# already holds a pull request's catalog changes append-only and verified.
+name: catalog-drift
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-22.04
+    # Ruby's and Elixir's rows are checked by downloading the archives.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # tomllib needs Python 3.11; the runner has 3.10.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      # GH_TOKEN lifts the GitHub API rate limit for the release listings.
+      - name: Every catalog against upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/catalog.py --drift

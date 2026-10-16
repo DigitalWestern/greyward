@@ -1914,7 +1914,7 @@ node = ["corp"]
             lock_source: "package-lock.json".into(),
         };
         let locked = crate::kernel::provider::cpython::shipped_selection("3.13").unwrap();
-        assert_eq!(locked.version("cpython").unwrap(), "3.13.15");
+        assert_eq!(locked.version("cpython").unwrap(), "3.13.16");
         let default = test_gyp_python();
         assert_eq!(default.version("cpython").unwrap(), "3.12.14");
 

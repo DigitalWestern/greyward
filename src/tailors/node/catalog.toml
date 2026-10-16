@@ -7,6 +7,36 @@ primary = ["node"]
 default = "node-24.20.0"
 
 [[release]]
+key = "node-26.12.0"
+components = [
+  { name = "node", version = "26.12.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "26.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.12.0/node-v26.12.0-darwin-arm64.tar.gz", digest = "sha256:2a154d4a5458930e0a2d6a1ecf64eddf5a2b3e1c13636b609c2ecb042e8c4553" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "26.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.12.0/node-v26.12.0-linux-x64.tar.gz", digest = "sha256:d9f88af72ad34f7ddf8e67289829f1698f54b6254f7d4f54b7453117ff1a3d2c" },
+]
+
+[[release]]
+key = "node-26.11.1"
+components = [
+  { name = "node", version = "26.11.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "26.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.11.1/node-v26.11.1-darwin-arm64.tar.gz", digest = "sha256:d916511b55965e91be7a88e17f88d895b6793ceaba3e6c9b194aefe51c2c65ac" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "26.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.11.1/node-v26.11.1-linux-x64.tar.gz", digest = "sha256:15fc043a51a5783f2f4b634561091658f5a7f0e3db03f997dca3a8033a33e45b" },
+]
+
+[[release]]
+key = "node-26.11.0"
+components = [
+  { name = "node", version = "26.11.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "26.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.11.0/node-v26.11.0-darwin-arm64.tar.gz", digest = "sha256:1b51d948058a5a0f4d83723d395786f13a647565ca4dfdeac37dafa95040e5f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "26.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.11.0/node-v26.11.0-linux-x64.tar.gz", digest = "sha256:2dcdf1a51a055e3ac1027ce5a01c2409ec7fa016b99e25e58a939568a9e0b6ad" },
+]
+
+[[release]]
 key = "node-26.10.0"
 components = [
   { name = "node", version = "26.10.0" },
@@ -154,6 +184,156 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "26.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.0.0/node-v26.0.0-darwin-arm64.tar.gz", digest = "sha256:dcee8564c1a9342f9594dd5e52d533894dfef6b85aa771bbbb870baa3c403235" },
   { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "26.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v26.0.0/node-v26.0.0-linux-x64.tar.gz", digest = "sha256:42cee4d7ec80b7f7c89281cf00726b14840ac674462404dd4fd36f03964dc0af" },
+]
+
+[[release]]
+key = "node-25.9.0"
+components = [
+  { name = "node", version = "25.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.9.0/node-v25.9.0-darwin-arm64.tar.gz", digest = "sha256:e479f3c469d3d9303a44f00a8ea37a3788395d171bb8059c48a4bbbd2e371b59" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.9.0/node-v25.9.0-linux-x64.tar.gz", digest = "sha256:134e55b2408448a219760fe04dc44d6851f9de8a79549021ffd870e9082d9e7b" },
+]
+
+[[release]]
+key = "node-25.8.2"
+components = [
+  { name = "node", version = "25.8.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.8.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.8.2/node-v25.8.2-darwin-arm64.tar.gz", digest = "sha256:fb8dabfda3232ef90d992e6439824fc3237356c04d182f3fa883bebeef31e871" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.8.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.8.2/node-v25.8.2-linux-x64.tar.gz", digest = "sha256:e06c7069012d40914c57b31157c69d4ce83ea1fe9d63bbb7d26e0509a4535d21" },
+]
+
+[[release]]
+key = "node-25.8.1"
+components = [
+  { name = "node", version = "25.8.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.8.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.8.1/node-v25.8.1-darwin-arm64.tar.gz", digest = "sha256:c667629236e3213616f0917b84eb52706e213c0e8a2312402335fff6fc7463c4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.8.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.8.1/node-v25.8.1-linux-x64.tar.gz", digest = "sha256:6fe3b8fa448579f728f7a0e5bbb3ab6a352d2c6307e13ae37a86106a3e4c9aaf" },
+]
+
+[[release]]
+key = "node-25.8.0"
+components = [
+  { name = "node", version = "25.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.8.0/node-v25.8.0-darwin-arm64.tar.gz", digest = "sha256:75ff6fd07e0a85fb4d2529f6189c996014b1d3d83180c31e65feb2b3eaeec5d9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.8.0/node-v25.8.0-linux-x64.tar.gz", digest = "sha256:2ae6f70d74a459c0a96456e486dc60f3e7e65d7752ad302771834e58b27500af" },
+]
+
+[[release]]
+key = "node-25.7.0"
+components = [
+  { name = "node", version = "25.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.7.0/node-v25.7.0-darwin-arm64.tar.gz", digest = "sha256:d4e3cfe5e6bddda41ba0c683e37329632465b93371ddc538c763578758d5bc35" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.7.0/node-v25.7.0-linux-x64.tar.gz", digest = "sha256:033ad3a740d62d3c7e3aaa1fecfeec16a719d4af33ab030666bf171057b070d9" },
+]
+
+[[release]]
+key = "node-25.6.1"
+components = [
+  { name = "node", version = "25.6.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.6.1/node-v25.6.1-darwin-arm64.tar.gz", digest = "sha256:a80cb252d170a4730f78f5950cf19a46106f156e5886e5c1cc8c5602aea60243" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.6.1/node-v25.6.1-linux-x64.tar.gz", digest = "sha256:3809fdbfd54829bad363b9db8e96ca3600509e2ff20ede74181cfc1ca8451ce3" },
+]
+
+[[release]]
+key = "node-25.6.0"
+components = [
+  { name = "node", version = "25.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.6.0/node-v25.6.0-darwin-arm64.tar.gz", digest = "sha256:5bfb537a913368152c5eba6aafe43ec834b23ee0ca4b96e5e18253937fe4103e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.6.0/node-v25.6.0-linux-x64.tar.gz", digest = "sha256:a218fdaee14cb399f6b33925d4615a4046ba8db144f6e883c3b81e78937429eb" },
+]
+
+[[release]]
+key = "node-25.5.0"
+components = [
+  { name = "node", version = "25.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.5.0/node-v25.5.0-darwin-arm64.tar.gz", digest = "sha256:568ff9aae73e82499346be25250c7caacab2ca4bbb697bc73056cf3b983b8211" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.5.0/node-v25.5.0-linux-x64.tar.gz", digest = "sha256:e8e50aee2e5328bcbc2ead32d86d0b577220ccdd80c438583dca3aa2965873f2" },
+]
+
+[[release]]
+key = "node-25.4.0"
+components = [
+  { name = "node", version = "25.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.4.0/node-v25.4.0-darwin-arm64.tar.gz", digest = "sha256:bfa7af56c0f24074d7a6c5b08d837b8be211f44db5fcc93dcb2cb96153e49b65" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.4.0/node-v25.4.0-linux-x64.tar.gz", digest = "sha256:5951a889ab65b3a73cc88e6d412d70499f523a89fe553b5349471af7586f2be2" },
+]
+
+[[release]]
+key = "node-25.3.0"
+components = [
+  { name = "node", version = "25.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.3.0/node-v25.3.0-darwin-arm64.tar.gz", digest = "sha256:d80f384c182971724a7aa819173084e1d8244338fa8e9271a1961d38274d7209" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.3.0/node-v25.3.0-linux-x64.tar.gz", digest = "sha256:cc91362eb9a009efa26117c39c7bd55fe130123f01cf60d300b8b57e9501c27c" },
+]
+
+[[release]]
+key = "node-25.2.1"
+components = [
+  { name = "node", version = "25.2.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.2.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.2.1/node-v25.2.1-darwin-arm64.tar.gz", digest = "sha256:be87e21bd235a451fad02c89e5bf7cb17e206e4cd89dd5664f20d19e7dfde6f9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.2.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.2.1/node-v25.2.1-linux-x64.tar.gz", digest = "sha256:2094ecdc844ea11e9777cac42672b0d89cd63d27204193a587dc5a2d276bb940" },
+]
+
+[[release]]
+key = "node-25.2.0"
+components = [
+  { name = "node", version = "25.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.2.0/node-v25.2.0-darwin-arm64.tar.gz", digest = "sha256:5ce975101e85598d2f1f84b297e8bd7ff315e46fa644be1ffc76f0c48de480bb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.2.0/node-v25.2.0-linux-x64.tar.gz", digest = "sha256:41eb2871bc1fffe872c7a0dc588fccacf2892e563ff3115648a41278fe5b579b" },
+]
+
+[[release]]
+key = "node-25.1.0"
+components = [
+  { name = "node", version = "25.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.1.0/node-v25.1.0-darwin-arm64.tar.gz", digest = "sha256:811dcf54580d9eef0abfed9f65457545d2aac8e24853b6e638194fcba0257168" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.1.0/node-v25.1.0-linux-x64.tar.gz", digest = "sha256:0b8de924cd43546a2098c091b73002442cd61340622b2c1489df408755de21fc" },
+]
+
+[[release]]
+key = "node-25.0.0"
+components = [
+  { name = "node", version = "25.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "25.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.0.0/node-v25.0.0-darwin-arm64.tar.gz", digest = "sha256:e3734fe04ebebf5b88cb6e1db770d3fbf736bd861748597ca008ad3d51f165f8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "25.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v25.0.0/node-v25.0.0-linux-x64.tar.gz", digest = "sha256:28dd46a6733192647d7c8267343f5a3f1c616f773c448e2c0d2539ae70724b40" },
+]
+
+[[release]]
+key = "node-24.22.0"
+components = [
+  { name = "node", version = "24.22.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "24.22.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v24.22.0/node-v24.22.0-darwin-arm64.tar.gz", digest = "sha256:6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "24.22.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v24.22.0/node-v24.22.0-linux-x64.tar.gz", digest = "sha256:28ea0a438de9a13bd7891fd758eee6c7819ee8af5442dfd8d45bd65e56d4228c" },
 ]
 
 [[release]]
@@ -444,6 +624,146 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "24.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v24.0.0/node-v24.0.0-darwin-arm64.tar.gz", digest = "sha256:194e2f3dd3ec8c2adcaa713ed40f44c5ca38467880e160974ceac1659be60121" },
   { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "24.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v24.0.0/node-v24.0.0-linux-x64.tar.gz", digest = "sha256:b760ed6de40c35a25eb011b3cf5943d35d7a76f0c8c331d5a801e10925826cb3" },
+]
+
+[[release]]
+key = "node-23.11.1"
+components = [
+  { name = "node", version = "23.11.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.11.1/node-v23.11.1-darwin-arm64.tar.gz", digest = "sha256:255509d2c4fe8e1d6fefb950ad8db285ed75ba543e18744d83dc139f978e404d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.11.1/node-v23.11.1-linux-x64.tar.gz", digest = "sha256:a2029c2b0cb05d10248e887c5df3f8547b7ab4aaa4e63b8e4da03e72f478140e" },
+]
+
+[[release]]
+key = "node-23.11.0"
+components = [
+  { name = "node", version = "23.11.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.11.0/node-v23.11.0-darwin-arm64.tar.gz", digest = "sha256:635990b46610238e3c008cd01480c296e0c2bfe7ec59ea9a8cd789d5ac621bb0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.11.0/node-v23.11.0-linux-x64.tar.gz", digest = "sha256:66f768a7f2d89ecdda8fe1e33ee71ac04ed9180111cbf1c5fb944655fe7c90c7" },
+]
+
+[[release]]
+key = "node-23.10.0"
+components = [
+  { name = "node", version = "23.10.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.10.0/node-v23.10.0-darwin-arm64.tar.gz", digest = "sha256:f44ff5990735df42c79820654e2e394b6351ac9fd5eb140c3cae953cf7af302c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.10.0/node-v23.10.0-linux-x64.tar.gz", digest = "sha256:26f85defcb75e3f8f00c6ad429f9a5b2fb1766e955045fe97e31b11c44315f2d" },
+]
+
+[[release]]
+key = "node-23.9.0"
+components = [
+  { name = "node", version = "23.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.9.0/node-v23.9.0-darwin-arm64.tar.gz", digest = "sha256:02fea0822268b245066e895a20a0c530f750a710517ac9faafdc0f1cd4434994" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.9.0/node-v23.9.0-linux-x64.tar.gz", digest = "sha256:bb1a81335c86578e70ee282eb9f93c5aa2e75f7cb6b99d9315a52899d42884f9" },
+]
+
+[[release]]
+key = "node-23.8.0"
+components = [
+  { name = "node", version = "23.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.8.0/node-v23.8.0-darwin-arm64.tar.gz", digest = "sha256:7c3bb4ccfd558f5cc12ffb81df795c5960e429088feb1ae650fa2ae65418858a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.8.0/node-v23.8.0-linux-x64.tar.gz", digest = "sha256:f6d98bbdd0a4078c1e422a6a1d8bf07ad693a4dd793bb5772990456faeca6e95" },
+]
+
+[[release]]
+key = "node-23.7.0"
+components = [
+  { name = "node", version = "23.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.7.0/node-v23.7.0-darwin-arm64.tar.gz", digest = "sha256:0dac0de3308a87f84cb14bab349a3f0ae5f6cdb8da32600459ee407236f9cebc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.7.0/node-v23.7.0-linux-x64.tar.gz", digest = "sha256:d9173025ec1f18264bc5f1e70e99c19d9bba72c563143d150db0ced98a177c2f" },
+]
+
+[[release]]
+key = "node-23.6.1"
+components = [
+  { name = "node", version = "23.6.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.6.1/node-v23.6.1-darwin-arm64.tar.gz", digest = "sha256:b87c90f1efff3f2f49070ce4714a11228a43331bb590b06fc7bcb36e530b2ea0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.6.1/node-v23.6.1-linux-x64.tar.gz", digest = "sha256:0aaa37396638ae6e71af66927dcc41414327051d5a8030d3057db1ceb7719854" },
+]
+
+[[release]]
+key = "node-23.6.0"
+components = [
+  { name = "node", version = "23.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.6.0/node-v23.6.0-darwin-arm64.tar.gz", digest = "sha256:93e84485e41e7f35246e11329ea920ee5a8e7e12e90bfcea2f8205953c869bc2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.6.0/node-v23.6.0-linux-x64.tar.gz", digest = "sha256:14a2b49629e74820bd6d94b92498f658774e3819bb71b0cb8b3717d9c0c81b70" },
+]
+
+[[release]]
+key = "node-23.5.0"
+components = [
+  { name = "node", version = "23.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.5.0/node-v23.5.0-darwin-arm64.tar.gz", digest = "sha256:71b1ca0e4d776b9b7648781303d8c5eb12be32c5ed0df4f97a26fd779bc7ef80" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.5.0/node-v23.5.0-linux-x64.tar.gz", digest = "sha256:72ca246aafffeac41486bf5594b0223f9a28e7c3d9081a07884b75cc21cf9e8a" },
+]
+
+[[release]]
+key = "node-23.4.0"
+components = [
+  { name = "node", version = "23.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.4.0/node-v23.4.0-darwin-arm64.tar.gz", digest = "sha256:06623a5bf78ceedc56a7bed6c299d78fc8c8724fe96b963392fddf9b20d854de" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.4.0/node-v23.4.0-linux-x64.tar.gz", digest = "sha256:2d5ae1dfa7f67e96b23d1d1ff51b8c76c7ec51fbfb7c4c1f010101b9557a2a86" },
+]
+
+[[release]]
+key = "node-23.3.0"
+components = [
+  { name = "node", version = "23.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.3.0/node-v23.3.0-darwin-arm64.tar.gz", digest = "sha256:472b9109dd9987ea49916f12b01ed2f09f1c4bf4befcf5695c1b9fd9cff3d177" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.3.0/node-v23.3.0-linux-x64.tar.gz", digest = "sha256:a4ceaf6e41d76017ee56705badc5d492cf3d5feca607c7a7d3ae54f7db14913b" },
+]
+
+[[release]]
+key = "node-23.2.0"
+components = [
+  { name = "node", version = "23.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.2.0/node-v23.2.0-darwin-arm64.tar.gz", digest = "sha256:0a4c1379f81b02cb724b7f69b7e2fdf8a4765d98710ae8e05c4ee2da85a54f94" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.2.0/node-v23.2.0-linux-x64.tar.gz", digest = "sha256:b88f5d5b6f9a17818a85b7afbf325700434fc8755cec105c7709c6fd363b17ca" },
+]
+
+[[release]]
+key = "node-23.1.0"
+components = [
+  { name = "node", version = "23.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.1.0/node-v23.1.0-darwin-arm64.tar.gz", digest = "sha256:414d4b68299be0cbccfabfac59e53d0726151320e9ff71457ab0bb507fc0592d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.1.0/node-v23.1.0-linux-x64.tar.gz", digest = "sha256:1c436b2ac33a4fef7cf08c08b8a33362325c0c8ac8d05d4054a79628d5d0b5ae" },
+]
+
+[[release]]
+key = "node-23.0.0"
+components = [
+  { name = "node", version = "23.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "23.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.0.0/node-v23.0.0-darwin-arm64.tar.gz", digest = "sha256:72ce7905b83f9499b92501675cf76e53b545cb9d0a42dca497fa80c8eb5fbcf9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "23.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v23.0.0/node-v23.0.0-linux-x64.tar.gz", digest = "sha256:702cbc710fcf1102cef1aced74443fee34eff8df4827de30ec970d377ce31d9e" },
 ]
 
 [[release]]
@@ -804,4 +1124,1574 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "22.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v22.0.0/node-v22.0.0-darwin-arm64.tar.gz", digest = "sha256:ea96d349cfaa67aa87ceeaa3e5b52c9167f7ac302fd8d1ff162d0785e9dc0785" },
   { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "22.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.gz", digest = "sha256:74bb0f3a80307c529421c3ed84517b8f543867709f41e53cd73df99e6442af4d" },
+]
+
+[[release]]
+key = "node-21.7.3"
+components = [
+  { name = "node", version = "21.7.3" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.7.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.3/node-v21.7.3-darwin-arm64.tar.gz", digest = "sha256:165d3ba3500cfc8708f85d3815aaaa21ce418164c933d5419c30825ccad3a99c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.7.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.3/node-v21.7.3-linux-x64.tar.gz", digest = "sha256:a64cbb12282cb60d35743ef4f51561f8d89946a5f0a484f99168f4de602d7c3d" },
+]
+
+[[release]]
+key = "node-21.7.2"
+components = [
+  { name = "node", version = "21.7.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.7.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.2/node-v21.7.2-darwin-arm64.tar.gz", digest = "sha256:d00a2b5002db121d798f1c9556342abb6ec6a4fac9d6197bc86c922a796812ae" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.7.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.2/node-v21.7.2-linux-x64.tar.gz", digest = "sha256:06b891c82c9b19b8d8553222de5de8afd43a38c1b898f9ca323e1d2e22da9075" },
+]
+
+[[release]]
+key = "node-21.7.1"
+components = [
+  { name = "node", version = "21.7.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.7.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.1/node-v21.7.1-darwin-arm64.tar.gz", digest = "sha256:0a4dde483479dcf272f3d4d7afb509c3d45cf7a1ea451ce108f434dad4fa43e4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.7.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.1/node-v21.7.1-linux-x64.tar.gz", digest = "sha256:c7b15146aed968b781c235b6a8f67608be559c4615de9526a9851ae28660cc09" },
+]
+
+[[release]]
+key = "node-21.7.0"
+components = [
+  { name = "node", version = "21.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.0/node-v21.7.0-darwin-arm64.tar.gz", digest = "sha256:f48ad51cf3c2814bbf61c8c26efd810e5e22dcac980786fd7ac5b54365233d2c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.7.0/node-v21.7.0-linux-x64.tar.gz", digest = "sha256:0fce039e2b6af00766492127a49f959ae92ed22fede4c49e9a8c2543aadbd6e2" },
+]
+
+[[release]]
+key = "node-21.6.2"
+components = [
+  { name = "node", version = "21.6.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.6.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.6.2/node-v21.6.2-darwin-arm64.tar.gz", digest = "sha256:120c8205654c640865864dc464389b3ffe6d7ebe310dffdbe3fd8718a512e14f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.6.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.6.2/node-v21.6.2-linux-x64.tar.gz", digest = "sha256:d4504dcbcd1a9ded42d86bc20a7e72d6d631e49dcf3f9c849c3b51b12f3f4544" },
+]
+
+[[release]]
+key = "node-21.6.1"
+components = [
+  { name = "node", version = "21.6.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.6.1/node-v21.6.1-darwin-arm64.tar.gz", digest = "sha256:94c280bba809fa66867e363ec9e990217aedf893116660b8c75a1c4fda3baea5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.6.1/node-v21.6.1-linux-x64.tar.gz", digest = "sha256:d2ac105754e5fc657a6a25ea7d31f19dd63d3ec845dce0aef0232533d52bc125" },
+]
+
+[[release]]
+key = "node-21.6.0"
+components = [
+  { name = "node", version = "21.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.6.0/node-v21.6.0-darwin-arm64.tar.gz", digest = "sha256:425d80f28edf6ec2e4d53388d839cf45e0ec771e6276028559d433348ca75f7b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.6.0/node-v21.6.0-linux-x64.tar.gz", digest = "sha256:d12a6fc04091aa246402b4cac67215cd2578f178300a361cfa9e28b2ca16d679" },
+]
+
+[[release]]
+key = "node-21.5.0"
+components = [
+  { name = "node", version = "21.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.5.0/node-v21.5.0-darwin-arm64.tar.gz", digest = "sha256:66af9055dcceacc2fcd01ccbb47a565a1dd8f4314300a0f37f13771059490a09" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.5.0/node-v21.5.0-linux-x64.tar.gz", digest = "sha256:6e61f81fe1759892fb1f84f62fe470c8d4d6dfc07969af5700f06b4672a9e8d3" },
+]
+
+[[release]]
+key = "node-21.4.0"
+components = [
+  { name = "node", version = "21.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.4.0/node-v21.4.0-darwin-arm64.tar.gz", digest = "sha256:459a23a6044003c6cb5d24867da0c473bd8c2e4cb5689517051be182eed46c2b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.4.0/node-v21.4.0-linux-x64.tar.gz", digest = "sha256:d8cd0ec0b78bcbc591e7a4655a92c1c667e64bc434e7a895904dc1fe9442af1d" },
+]
+
+[[release]]
+key = "node-21.3.0"
+components = [
+  { name = "node", version = "21.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.3.0/node-v21.3.0-darwin-arm64.tar.gz", digest = "sha256:0dcb82d52dffacd0e0072c01cd919806432dd40be5d7ae37cc1fb2df9cd85c75" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.3.0/node-v21.3.0-linux-x64.tar.gz", digest = "sha256:e8f8af0a4a5b07ff9ced55efc1b6ea712a1441b95c02ce0d8814070148f27f42" },
+]
+
+[[release]]
+key = "node-21.2.0"
+components = [
+  { name = "node", version = "21.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.2.0/node-v21.2.0-darwin-arm64.tar.gz", digest = "sha256:e085e9e695a5fc715c24d0d2ee73a2cebfc2a2b456a28b58f31077609591f4a0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.2.0/node-v21.2.0-linux-x64.tar.gz", digest = "sha256:2600d1103d9963ca194aa52b5610ea28f1e4c2df81e525799fba9b7b530c6e54" },
+]
+
+[[release]]
+key = "node-21.1.0"
+components = [
+  { name = "node", version = "21.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.1.0/node-v21.1.0-darwin-arm64.tar.gz", digest = "sha256:4872463830381785b91d13a7fbb9b6f4a9c7658e10d964f6c421951cec8833ad" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.1.0/node-v21.1.0-linux-x64.tar.gz", digest = "sha256:b919cad4e8a5abbd7e6a4433c4f8a7cdc1a78c1e526c6c1aa4a5fcf74011ad2b" },
+]
+
+[[release]]
+key = "node-21.0.0"
+components = [
+  { name = "node", version = "21.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "21.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.0.0/node-v21.0.0-darwin-arm64.tar.gz", digest = "sha256:d49aae353ab9e264a1d8c75f80eb26dcc4006f50b35ba05bda3a9c33f5554609" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "21.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v21.0.0/node-v21.0.0-linux-x64.tar.gz", digest = "sha256:013f370f1772197cb4e22f22f2185ee26d2e5f3acdb2f252d11cd214e9a8cdb9" },
+]
+
+[[release]]
+key = "node-20.20.2"
+components = [
+  { name = "node", version = "20.20.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.20.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-darwin-arm64.tar.gz", digest = "sha256:466e05f3477c20dfb723054dfebffe55bc74660ee77f612166fca121dacb65b6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.20.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.gz", digest = "sha256:19e56f0825510207dd904f087fe52faa0a4eb6b2aab5f0ea7a33830d04888b8b" },
+]
+
+[[release]]
+key = "node-20.20.1"
+components = [
+  { name = "node", version = "20.20.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.20.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.20.1/node-v20.20.1-darwin-arm64.tar.gz", digest = "sha256:36c5ef36d955995ea2dea700b16b8e79bedeb1ecb4569e77ddc8fc739aa56bac" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.20.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.20.1/node-v20.20.1-linux-x64.tar.gz", digest = "sha256:6362e50804cdcc110592201f67beda93bcd702fdcbe1c42840a50d590e3af0ce" },
+]
+
+[[release]]
+key = "node-20.20.0"
+components = [
+  { name = "node", version = "20.20.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.20.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.20.0/node-v20.20.0-darwin-arm64.tar.gz", digest = "sha256:69b98aa4662032ab06bd92216f0aebb2727d7ee4e1eb79ea5787bbbb38af4801" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.20.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.20.0/node-v20.20.0-linux-x64.tar.gz", digest = "sha256:92dfd59fb4837230abba5d6dd717b882ca897e22fde2f9268e1aac2c4bde0f5b" },
+]
+
+[[release]]
+key = "node-20.19.6"
+components = [
+  { name = "node", version = "20.19.6" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.6", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.6/node-v20.19.6-darwin-arm64.tar.gz", digest = "sha256:53dc59c40870460d5f72b279d06ef2c0ae70cdc154317003f853545f2f4e7747" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.6", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.6/node-v20.19.6-linux-x64.tar.gz", digest = "sha256:24344f9f03e3b388a901f8fb5d98e627e6cf74ce44aaf5a0fd6c4b39e4f2adc8" },
+]
+
+[[release]]
+key = "node-20.19.5"
+components = [
+  { name = "node", version = "20.19.5" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.5", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.5/node-v20.19.5-darwin-arm64.tar.gz", digest = "sha256:cfed7503d8d99fbcf2f52e408ec52f616058eb0867b34dbc3437259993ef5cba" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.5", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.5/node-v20.19.5-linux-x64.tar.gz", digest = "sha256:4eba5fbe1fb10753bc06e42f001a91c5cec16798b7764a3e9257adc59af47fe1" },
+]
+
+[[release]]
+key = "node-20.19.4"
+components = [
+  { name = "node", version = "20.19.4" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.4", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.4/node-v20.19.4-darwin-arm64.tar.gz", digest = "sha256:8b89801f527a85e3f7de539512c9dde08673ac99db6458cc7cc627e05d707054" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.4", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.4/node-v20.19.4-linux-x64.tar.gz", digest = "sha256:d80a33707605ced9a31b8f543cea9ab512bc3d2fef2c148f31a50e939ff07560" },
+]
+
+[[release]]
+key = "node-20.19.3"
+components = [
+  { name = "node", version = "20.19.3" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.3/node-v20.19.3-darwin-arm64.tar.gz", digest = "sha256:4efd92305e36e6e9f8cfe8d7781b188eec86f306ca712535ecf2c10dc8c1ae13" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.3/node-v20.19.3-linux-x64.tar.gz", digest = "sha256:76272878069683c3a36b933d2f4842436a26b527daa930ae9346b477011ee2f3" },
+]
+
+[[release]]
+key = "node-20.19.2"
+components = [
+  { name = "node", version = "20.19.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.2/node-v20.19.2-darwin-arm64.tar.gz", digest = "sha256:5f96c725cd2be1151f08b25c05bf5a21866a2dc7db3803d351a6ea19fcc53665" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.2/node-v20.19.2-linux-x64.tar.gz", digest = "sha256:eec2c7b9c6ac72e42885a42edfc0503c0e4ee455f855c4a17a6cbcf026656dd5" },
+]
+
+[[release]]
+key = "node-20.19.1"
+components = [
+  { name = "node", version = "20.19.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.1/node-v20.19.1-darwin-arm64.tar.gz", digest = "sha256:d3746fee0e00e3a7fedf50633f8e04adb6873b1fe9b5b50c37dff16f64a4f2c7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.1/node-v20.19.1-linux-x64.tar.gz", digest = "sha256:086ab500a98900a4c05127559b2cec4d659b3aa674453be5028d416de4eb1532" },
+]
+
+[[release]]
+key = "node-20.19.0"
+components = [
+  { name = "node", version = "20.19.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.19.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.0/node-v20.19.0-darwin-arm64.tar.gz", digest = "sha256:c016cd1975a264a29dc1b07c6fbe60d5df0a0c2beb4113c0450e3d998d1a0d9c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.19.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.19.0/node-v20.19.0-linux-x64.tar.gz", digest = "sha256:8a4dbcdd8bccef3132d21e8543940557e55dcf44f00f0a99ba8a062f4552e722" },
+]
+
+[[release]]
+key = "node-20.18.3"
+components = [
+  { name = "node", version = "20.18.3" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.18.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.3/node-v20.18.3-darwin-arm64.tar.gz", digest = "sha256:1f15b7ed18a580af31cf32bc126572292d820f547bf55bf9cdce08041a24e1d9" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.18.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.3/node-v20.18.3-linux-x64.tar.gz", digest = "sha256:9fc3952da39b20d1fcfdb777b198cc035485afbbb1004b4df93f35245d61151e" },
+]
+
+[[release]]
+key = "node-20.18.2"
+components = [
+  { name = "node", version = "20.18.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.18.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.2/node-v20.18.2-darwin-arm64.tar.gz", digest = "sha256:fa76d5b5340f14070ebaa88ef8faa28c1e9271502725e830cb52f0cf5b6493de" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.18.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.2/node-v20.18.2-linux-x64.tar.gz", digest = "sha256:eb5b031bdd728871c3b9a82655dbfa533bc262c0b6da1d09a86842430cef07d4" },
+]
+
+[[release]]
+key = "node-20.18.1"
+components = [
+  { name = "node", version = "20.18.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.18.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-darwin-arm64.tar.gz", digest = "sha256:9e92ce1032455a9cc419fe71e908b27ae477799371b45a0844eedb02279922a4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.18.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.gz", digest = "sha256:259e5a8bf2e15ecece65bd2a47153262eda71c0b2c9700d5e703ce4951572784" },
+]
+
+[[release]]
+key = "node-20.18.0"
+components = [
+  { name = "node", version = "20.18.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.18.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz", digest = "sha256:92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.18.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.gz", digest = "sha256:24a5d58a1d4c2903478f4b7c3cfd2eeb5cea2cae3baee11a4dc6a1fed25fec6c" },
+]
+
+[[release]]
+key = "node-20.17.0"
+components = [
+  { name = "node", version = "20.17.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.17.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.17.0/node-v20.17.0-darwin-arm64.tar.gz", digest = "sha256:476324108c4361935465631eec47df1c943ba2c87bc050853385b1d1c71f0b1f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.17.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.17.0/node-v20.17.0-linux-x64.tar.gz", digest = "sha256:21e656f6f4e34080ddc5d75fbfe58ce8482fe6e70a76aeae14afdcdc1e23079d" },
+]
+
+[[release]]
+key = "node-20.16.0"
+components = [
+  { name = "node", version = "20.16.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.16.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.16.0/node-v20.16.0-darwin-arm64.tar.gz", digest = "sha256:fc7355e778b181575153b7dea4879e8021776eeb376c43c50f65893d2ea70aa3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.16.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.16.0/node-v20.16.0-linux-x64.tar.gz", digest = "sha256:b3f874ea84e440d69ed02ca92429d0eccd17737fde86db69c1c153d16ec654f2" },
+]
+
+[[release]]
+key = "node-20.15.1"
+components = [
+  { name = "node", version = "20.15.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.15.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.15.1/node-v20.15.1-darwin-arm64.tar.gz", digest = "sha256:4743bc042f90ba5d9edf09403207290a9cdd2f6061bdccf7caaa0bbfd49f343e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.15.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.15.1/node-v20.15.1-linux-x64.tar.gz", digest = "sha256:a9db028c0a1c63e3aa0d97de24b0966bc507d8239b3aedc4e752eea6b0580665" },
+]
+
+[[release]]
+key = "node-20.15.0"
+components = [
+  { name = "node", version = "20.15.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.15.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.15.0/node-v20.15.0-darwin-arm64.tar.gz", digest = "sha256:2646c338d2c5ecabba4f745fc315d6fdfbb7e01b5badecc154ad27dda00325fc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.15.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.15.0/node-v20.15.0-linux-x64.tar.gz", digest = "sha256:3a873874caae30b5a9125fdf8872f7800cc0216eb89d097470110cd267a596e2" },
+]
+
+[[release]]
+key = "node-20.14.0"
+components = [
+  { name = "node", version = "20.14.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.14.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.14.0/node-v20.14.0-darwin-arm64.tar.gz", digest = "sha256:d2148d79e9ff04d2982d00faeae942ceba488ca327a91065e528235167b9e9d6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.14.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.14.0/node-v20.14.0-linux-x64.tar.gz", digest = "sha256:5b9bf40cfc7c21de14a1b4c367650e3c96eb101156bf9368ffc2f947414b6581" },
+]
+
+[[release]]
+key = "node-20.13.1"
+components = [
+  { name = "node", version = "20.13.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.13.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.13.1/node-v20.13.1-darwin-arm64.tar.gz", digest = "sha256:c30fe595f59dcd2c5158da6bf8bc251ffc85ca37304afa89db150fb3c62c4507" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.13.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.13.1/node-v20.13.1-linux-x64.tar.gz", digest = "sha256:80b978a9fe544b1892e73a4bf89e0b3792b1d459b621874efdc2ddd2270c03fe" },
+]
+
+[[release]]
+key = "node-20.13.0"
+components = [
+  { name = "node", version = "20.13.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.13.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.13.0/node-v20.13.0-darwin-arm64.tar.gz", digest = "sha256:ef850bf9045d756c7a703c30fc09d7d9de9c7e7f254c6f4c02a1531381a806fd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.13.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.13.0/node-v20.13.0-linux-x64.tar.gz", digest = "sha256:a74ceb142362d152aa871710ef9fb338ab72c76415f5afa802fc0aea445397b3" },
+]
+
+[[release]]
+key = "node-20.12.2"
+components = [
+  { name = "node", version = "20.12.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.12.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.12.2/node-v20.12.2-darwin-arm64.tar.gz", digest = "sha256:98eb624b52efec2530079e1d11296ec0ac20771b94b087d21649250339cf5332" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.12.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.12.2/node-v20.12.2-linux-x64.tar.gz", digest = "sha256:f8f9b6877778ed2d5f920a5bd853f0f8a8be1c42f6d448c763a95625cbbb4b0d" },
+]
+
+[[release]]
+key = "node-20.12.1"
+components = [
+  { name = "node", version = "20.12.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.12.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.12.1/node-v20.12.1-darwin-arm64.tar.gz", digest = "sha256:65df8cb0724e3a58c7757b75a70cc1057e1f67ffc5e852bfe6241de0b37c70a0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.12.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.12.1/node-v20.12.1-linux-x64.tar.gz", digest = "sha256:da2f590a39717792dcf8c4bf6b9e4b269601e6ce3a3f150a3c4b379f7eea6d83" },
+]
+
+[[release]]
+key = "node-20.12.0"
+components = [
+  { name = "node", version = "20.12.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.12.0/node-v20.12.0-darwin-arm64.tar.gz", digest = "sha256:422a74b7ede14b697a8c2ca887ea161fe79898a35f163fdfb98435c5ab25027b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.12.0/node-v20.12.0-linux-x64.tar.gz", digest = "sha256:b6b998947595c9550d6b89c815a68d608f5920275f1b48812f89792de3fdd893" },
+]
+
+[[release]]
+key = "node-20.11.1"
+components = [
+  { name = "node", version = "20.11.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.11.1/node-v20.11.1-darwin-arm64.tar.gz", digest = "sha256:e0065c61f340e85106a99c4b54746c5cee09d59b08c5712f67f99e92aa44995d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.gz", digest = "sha256:bf3a779bef19452da90fb88358ec2c57e0d2f882839b20dc6afc297b6aafc0d7" },
+]
+
+[[release]]
+key = "node-20.11.0"
+components = [
+  { name = "node", version = "20.11.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.11.0/node-v20.11.0-darwin-arm64.tar.gz", digest = "sha256:94e443d007e2882f8e5aecc85d978f7591520dc3b642adc7583b3cb0b3fc37d7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-x64.tar.gz", digest = "sha256:9556262f6cd4c020af027782afba31ca6d1a37e45ac0b56cecd2d5a4daf720e0" },
+]
+
+[[release]]
+key = "node-20.10.0"
+components = [
+  { name = "node", version = "20.10.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.10.0/node-v20.10.0-darwin-arm64.tar.gz", digest = "sha256:68b93099451d77aac116cf8fce179cabcf53fec079508dc6b39d3a086fb461a8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.10.0/node-v20.10.0-linux-x64.tar.gz", digest = "sha256:d3f0908a9d9190a8525c5b9a716ed91bb57e908555841b0c47f75b2a001ff91b" },
+]
+
+[[release]]
+key = "node-20.9.0"
+components = [
+  { name = "node", version = "20.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.9.0/node-v20.9.0-darwin-arm64.tar.gz", digest = "sha256:31d2d46ae8d8a3982f54e2ff1e60c2e4a8e80bf78a3e8b46dcaac95ac5d7ce6a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.9.0/node-v20.9.0-linux-x64.tar.gz", digest = "sha256:f0919f092fbf74544438907fa083c21e76b2d7a4bc287f0607ada1553ef16f60" },
+]
+
+[[release]]
+key = "node-20.8.1"
+components = [
+  { name = "node", version = "20.8.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.8.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.8.1/node-v20.8.1-darwin-arm64.tar.gz", digest = "sha256:5451f3651c89cd8f224e74961c84e68f4c8d63fe288431a3223b0465cc8b961e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.8.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.8.1/node-v20.8.1-linux-x64.tar.gz", digest = "sha256:a42ac1f81704b14c7d07ddde989a8e290087b0487ee3f47185eb0240ba518195" },
+]
+
+[[release]]
+key = "node-20.8.0"
+components = [
+  { name = "node", version = "20.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.8.0/node-v20.8.0-darwin-arm64.tar.gz", digest = "sha256:cbcb7fdbcd9341662256df5e4488a0045242f87382879242093e0f0699511abc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.8.0/node-v20.8.0-linux-x64.tar.gz", digest = "sha256:ae6f288a21a3bc7a82b79d3f00c52216df6de09c45eac0ea754243a9c7fb5e69" },
+]
+
+[[release]]
+key = "node-20.7.0"
+components = [
+  { name = "node", version = "20.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.7.0/node-v20.7.0-darwin-arm64.tar.gz", digest = "sha256:08aa09792f30a86e8904e334ba6d348ad73e926b5e441ed9abcdcbea651dc926" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.7.0/node-v20.7.0-linux-x64.tar.gz", digest = "sha256:034bbec28da7b729aea531000a56b37076e94e44aa5dfa346a1d1a89025915a8" },
+]
+
+[[release]]
+key = "node-20.6.1"
+components = [
+  { name = "node", version = "20.6.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.6.1/node-v20.6.1-darwin-arm64.tar.gz", digest = "sha256:d8ba8018d45b294429b1a7646ccbeaeb2af3cdf45b5c91dabbd93e2a2035cb46" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.6.1/node-v20.6.1-linux-x64.tar.gz", digest = "sha256:26dd13a6f7253f0ab9bcab561353985a297d927840771d905566735b792868da" },
+]
+
+[[release]]
+key = "node-20.6.0"
+components = [
+  { name = "node", version = "20.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.6.0/node-v20.6.0-darwin-arm64.tar.gz", digest = "sha256:1ed71ea4ef5985f11b65c3961875ad91223c201f2042c00568a82fe7020a5cea" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.6.0/node-v20.6.0-linux-x64.tar.gz", digest = "sha256:fc14b089783e7fcaefd01bb7afc0561fac55e1950d56a6b33891a93cb8007b17" },
+]
+
+[[release]]
+key = "node-20.5.1"
+components = [
+  { name = "node", version = "20.5.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.5.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.5.1/node-v20.5.1-darwin-arm64.tar.gz", digest = "sha256:9cc794517788aee103dfcffa04d0b90ac33854b0d10eb11a26ba4be38403f731" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.5.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.5.1/node-v20.5.1-linux-x64.tar.gz", digest = "sha256:a8678ae00425acdf692e943e3f1cea11a4c46281e4257b82886423bd4ef6f2b5" },
+]
+
+[[release]]
+key = "node-20.5.0"
+components = [
+  { name = "node", version = "20.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.5.0/node-v20.5.0-darwin-arm64.tar.gz", digest = "sha256:56d29a7c620415164e6226804cc1eb8eb7b05ea3123b60c86393fabb551bd5ea" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.5.0/node-v20.5.0-linux-x64.tar.gz", digest = "sha256:6799042a2970dcecdb71a91d392c53d954ec06d36155c7d11bf7c9a4983b60ea" },
+]
+
+[[release]]
+key = "node-20.4.0"
+components = [
+  { name = "node", version = "20.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.4.0/node-v20.4.0-darwin-arm64.tar.gz", digest = "sha256:34f51397b6aad957b1a8eb70d13da5baf357ead124c1e429a7e939aa61266c06" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.4.0/node-v20.4.0-linux-x64.tar.gz", digest = "sha256:2a9b03dd17fa6d9241b93e244d7e8f2524c4019fb5cfe3a99e59da1ee983cb9a" },
+]
+
+[[release]]
+key = "node-20.3.1"
+components = [
+  { name = "node", version = "20.3.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.3.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.3.1/node-v20.3.1-darwin-arm64.tar.gz", digest = "sha256:fabf0d5bde4e1c16b6b96c310115425508c3750cd2b1d2992fa03d52b0050cf1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.3.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.3.1/node-v20.3.1-linux-x64.tar.gz", digest = "sha256:100507c0c4b4cf2f0661ab8ca79b21790c20a4aae24859e9ab60b7d95fbfd740" },
+]
+
+[[release]]
+key = "node-20.3.0"
+components = [
+  { name = "node", version = "20.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.3.0/node-v20.3.0-darwin-arm64.tar.gz", digest = "sha256:25d5db6192ebcb7013f4138c71a7c423d0da33f28149d28b3b6df7c00527dd40" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.3.0/node-v20.3.0-linux-x64.tar.gz", digest = "sha256:80238ee1a9dee6b0d5d1081503c6fdd1c7f81bdf4ca6abd90aa5a568712a2eaa" },
+]
+
+[[release]]
+key = "node-20.2.0"
+components = [
+  { name = "node", version = "20.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.2.0/node-v20.2.0-darwin-arm64.tar.gz", digest = "sha256:8dd23fb204b2c239239085761ccae232c5cdc129f633489598a8759248e5f063" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.2.0/node-v20.2.0-linux-x64.tar.gz", digest = "sha256:cb0eff87d37f0df1dcd176a58b9ed0be3b5c08a02fe133a5dffd11dcae29626b" },
+]
+
+[[release]]
+key = "node-20.1.0"
+components = [
+  { name = "node", version = "20.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.1.0/node-v20.1.0-darwin-arm64.tar.gz", digest = "sha256:fd3bca029883cb84d4f58e7adb1a2c4fc4e616a8297fb08cb5c34465b7c4071a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.1.0/node-v20.1.0-linux-x64.tar.gz", digest = "sha256:fbc345638e3fed3b639353b2b3971bddba9e55e93b6e1848be6215787d7f20b8" },
+]
+
+[[release]]
+key = "node-20.0.0"
+components = [
+  { name = "node", version = "20.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "20.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.0.0/node-v20.0.0-darwin-arm64.tar.gz", digest = "sha256:ee27eea6694a5d8c834b11a12fb85a5dae01a91178be12920a6da12d8c299c43" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "20.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v20.0.0/node-v20.0.0-linux-x64.tar.gz", digest = "sha256:95439a0a836fc858565c7b6a7b1e55d1741901e6f205485e496abbefe973cfce" },
+]
+
+[[release]]
+key = "node-19.9.0"
+components = [
+  { name = "node", version = "19.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.9.0/node-v19.9.0-darwin-arm64.tar.gz", digest = "sha256:13f7f0e57a2123e55a3172b65e08bc2a51fb52bf366a83d7dda12456ebdc3da0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.9.0/node-v19.9.0-linux-x64.tar.gz", digest = "sha256:15168a298d150335c098f19449f9baef0b0758466723fafc23ef209156dae604" },
+]
+
+[[release]]
+key = "node-19.8.1"
+components = [
+  { name = "node", version = "19.8.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.8.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.8.1/node-v19.8.1-darwin-arm64.tar.gz", digest = "sha256:aafae50af9af911771c766e529eb2522a14bc4695331260e4280be7f526dcaf4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.8.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.8.1/node-v19.8.1-linux-x64.tar.gz", digest = "sha256:77b47ce0ed17ef90c1df6ef1ca6ea0f1375346ae4d5099708d9ee39d805f9d6e" },
+]
+
+[[release]]
+key = "node-19.8.0"
+components = [
+  { name = "node", version = "19.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.8.0/node-v19.8.0-darwin-arm64.tar.gz", digest = "sha256:a4cd2534f84d4c1399ac6bc970492440bb35c91b08023703f09346d02973b148" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.8.0/node-v19.8.0-linux-x64.tar.gz", digest = "sha256:a7f584b2f28eb18e1130ee590cf0062e4ee967412d1e8d029f3eb46c56598afc" },
+]
+
+[[release]]
+key = "node-19.7.0"
+components = [
+  { name = "node", version = "19.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.7.0/node-v19.7.0-darwin-arm64.tar.gz", digest = "sha256:7a96935baf731d0917a96370dda707b8195ae0a123d6c5ff777d41c3fdda949d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.7.0/node-v19.7.0-linux-x64.tar.gz", digest = "sha256:f5f0ab097f4d120045a327ed2cf9afff264e10c5d304d6ec9529beedfd0c0fd6" },
+]
+
+[[release]]
+key = "node-19.6.1"
+components = [
+  { name = "node", version = "19.6.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.6.1/node-v19.6.1-darwin-arm64.tar.gz", digest = "sha256:f95951571baaf2180ce41eb5f3e878f6580bc5b203d79fedb479bf5a1b147138" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.6.1/node-v19.6.1-linux-x64.tar.gz", digest = "sha256:c6a64d49003861bf465a9ab8e876d5c13c59f1df4507df7cf5dc8ae6e48edf9d" },
+]
+
+[[release]]
+key = "node-19.6.0"
+components = [
+  { name = "node", version = "19.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.6.0/node-v19.6.0-darwin-arm64.tar.gz", digest = "sha256:a759366eea06f3433f1f1f7778b6e22d68bbf75661a2de1cd03fc85e30f649cf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.6.0/node-v19.6.0-linux-x64.tar.gz", digest = "sha256:142e3caf0ea8476767d4ad006acf46b9dd059c169d3287f9d58eac964f16a4e1" },
+]
+
+[[release]]
+key = "node-19.5.0"
+components = [
+  { name = "node", version = "19.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.5.0/node-v19.5.0-darwin-arm64.tar.gz", digest = "sha256:6b2ee18d9e888840411086151ab7f2fe519ff9b9292ed450aa98838b7eb58009" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.5.0/node-v19.5.0-linux-x64.tar.gz", digest = "sha256:0df264934dadd15e7e9ba7576e88129017e62b29f259325c3fd3f1688fdf85bb" },
+]
+
+[[release]]
+key = "node-19.4.0"
+components = [
+  { name = "node", version = "19.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.4.0/node-v19.4.0-darwin-arm64.tar.gz", digest = "sha256:9b6bfec4787ec5e500d21e835467fc4bb67689ef7d30a66e31d5bc372405eb42" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.4.0/node-v19.4.0-linux-x64.tar.gz", digest = "sha256:e39635d2cb60bba7aea80801fc6524806cb6980b68bf8c9b74389c93db445f63" },
+]
+
+[[release]]
+key = "node-19.3.0"
+components = [
+  { name = "node", version = "19.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.3.0/node-v19.3.0-darwin-arm64.tar.gz", digest = "sha256:a50be904794d083fa8ecd4113845cea37968cbe3e5c1e758b0ec6215e1e7495e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.3.0/node-v19.3.0-linux-x64.tar.gz", digest = "sha256:b525028ae5bb71b5b32cb7fce903ccce261dbfef4c7dd0f3e0ffc27cd6fc0b3f" },
+]
+
+[[release]]
+key = "node-19.2.0"
+components = [
+  { name = "node", version = "19.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.2.0/node-v19.2.0-darwin-arm64.tar.gz", digest = "sha256:394341380de1b1c6e5a5ab8af86e08e8f097ba7d101d4315bdd7cdcf3b306467" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.2.0/node-v19.2.0-linux-x64.tar.gz", digest = "sha256:64cad7fb9ff6c0bc85b7f58275f23177a11c820240a0a7cb036e764a98c3527e" },
+]
+
+[[release]]
+key = "node-19.1.0"
+components = [
+  { name = "node", version = "19.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.1.0/node-v19.1.0-darwin-arm64.tar.gz", digest = "sha256:d05a4a3c9f081c7fbab131f447714fa708328c5c1634c278716adfbdbae0ff26" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.1.0/node-v19.1.0-linux-x64.tar.gz", digest = "sha256:1a42a67beb3e07289da2ad22a58717801c6ab80d09668e2da6b1c537b2a80a5e" },
+]
+
+[[release]]
+key = "node-19.0.1"
+components = [
+  { name = "node", version = "19.0.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.0.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.0.1/node-v19.0.1-darwin-arm64.tar.gz", digest = "sha256:96bcdf51e92320a79ada8ef9f97ab6eda8426e84fb2aad4b290719d8d749f4de" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.0.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.0.1/node-v19.0.1-linux-x64.tar.gz", digest = "sha256:7df29266d2cfd75b6e6ae59205476debac94848e29350378ece95701c13c32ee" },
+]
+
+[[release]]
+key = "node-19.0.0"
+components = [
+  { name = "node", version = "19.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "19.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.0.0/node-v19.0.0-darwin-arm64.tar.gz", digest = "sha256:e30054d93857d3b2f55d22a4305e379ba9544adea885428900ff57bae465435e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "19.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v19.0.0/node-v19.0.0-linux-x64.tar.gz", digest = "sha256:857f4dde358a8b23afab47ebdc685ae736bcfeac1258c2dddae3648f6a03a77a" },
+]
+
+[[release]]
+key = "node-18.20.8"
+components = [
+  { name = "node", version = "18.20.8" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.8", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.8/node-v18.20.8-darwin-arm64.tar.gz", digest = "sha256:bae4965d29d29bd32f96364eefbe3bca576a03e917ddbb70b9330d75f2cacd76" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.8", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.8/node-v18.20.8-linux-x64.tar.gz", digest = "sha256:27a9f3f14d5e99ad05a07ed3524ba3ee92f8ff8b6db5ff80b00f9feb5ec8097a" },
+]
+
+[[release]]
+key = "node-18.20.7"
+components = [
+  { name = "node", version = "18.20.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.7", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.7/node-v18.20.7-darwin-arm64.tar.gz", digest = "sha256:cdbe696f68b9162872295d4ec88a0700a3827261ae729f5eaf0606c69d6ab37e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.7", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.7/node-v18.20.7-linux-x64.tar.gz", digest = "sha256:ca593cc143875d33b257ab45ae629a02485333e8096221c44ef62c99678aa7fc" },
+]
+
+[[release]]
+key = "node-18.20.6"
+components = [
+  { name = "node", version = "18.20.6" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.6", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.6/node-v18.20.6-darwin-arm64.tar.gz", digest = "sha256:7105fb1ac42968010020db61edcc0ea0a366b37d792405d2959668e45b612753" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.6", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.6/node-v18.20.6-linux-x64.tar.gz", digest = "sha256:bff0672c5117e6f0809c456d9194630b5886442ddf298b2292529959c45b92c0" },
+]
+
+[[release]]
+key = "node-18.20.5"
+components = [
+  { name = "node", version = "18.20.5" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.5", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.5/node-v18.20.5-darwin-arm64.tar.gz", digest = "sha256:bdfeaf59dbf29aec08c0c66130edf0a8a17014b4f2997727641dfd0b58b51f48" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.5", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.5/node-v18.20.5-linux-x64.tar.gz", digest = "sha256:e7b80346bb586790ac6b29aa25c96716fcdf6039a6929c2ed506cec09cebc3c0" },
+]
+
+[[release]]
+key = "node-18.20.4"
+components = [
+  { name = "node", version = "18.20.4" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.4", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.4/node-v18.20.4-darwin-arm64.tar.gz", digest = "sha256:aca5b568cc2a7e918037f05168634a921d88f43882c92a01b4ef5e39d0b89414" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.4", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.4/node-v18.20.4-linux-x64.tar.gz", digest = "sha256:c4b0827dc47609d0a8379e6de6c74b3934da0b1312c733b5ebdcac16e3f1e954" },
+]
+
+[[release]]
+key = "node-18.20.3"
+components = [
+  { name = "node", version = "18.20.3" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.3/node-v18.20.3-darwin-arm64.tar.gz", digest = "sha256:99328b985f7336a8fcfb62fda382155d210979fcca928e2dd75b7148d9bba636" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.3", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.3/node-v18.20.3-linux-x64.tar.gz", digest = "sha256:262bdd5d59608360cb872cdb3d2aa089867b46963ec7e6a000c1afc7d183db5c" },
+]
+
+[[release]]
+key = "node-18.20.2"
+components = [
+  { name = "node", version = "18.20.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.2/node-v18.20.2-darwin-arm64.tar.gz", digest = "sha256:2647d831f16b3dc7857ed4ee721d3c378194918ecda80b9471590250d328fa3c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.2/node-v18.20.2-linux-x64.tar.gz", digest = "sha256:a222595d353a7d1e48994a7d9c25e61ab1b8a1b0ce0652029f5cf999978b2e49" },
+]
+
+[[release]]
+key = "node-18.20.1"
+components = [
+  { name = "node", version = "18.20.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.1/node-v18.20.1-darwin-arm64.tar.gz", digest = "sha256:275ffd6e96ea38e0ce0db2a37950381102fc95d1ad863b360ba0889dc7190405" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.1/node-v18.20.1-linux-x64.tar.gz", digest = "sha256:d226c39c5546dca97567db8f8ca7f92fca6572d44f181b1f85af83eee5d6f9e1" },
+]
+
+[[release]]
+key = "node-18.20.0"
+components = [
+  { name = "node", version = "18.20.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.20.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.0/node-v18.20.0-darwin-arm64.tar.gz", digest = "sha256:10066ad4dd9e03ea5c4c45ef8775420ff37b860de09bbdf87b97e0c07b1ea036" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.20.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.20.0/node-v18.20.0-linux-x64.tar.gz", digest = "sha256:80620426d177141aa99376de2ad1cb5ed461104cc53c0a5334df91467c60cac3" },
+]
+
+[[release]]
+key = "node-18.19.1"
+components = [
+  { name = "node", version = "18.19.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.19.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.19.1/node-v18.19.1-darwin-arm64.tar.gz", digest = "sha256:0c7249318868877032ed21cc0ed450015ee44b31b9b281955521cd3fc39fbfa3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.19.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.19.1/node-v18.19.1-linux-x64.tar.gz", digest = "sha256:724802c45237477dbe5777923743e6c77906830cae03a82b5653ebd75b301dda" },
+]
+
+[[release]]
+key = "node-18.19.0"
+components = [
+  { name = "node", version = "18.19.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.19.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.19.0/node-v18.19.0-darwin-arm64.tar.gz", digest = "sha256:8907c42a968765b77730fb319458d63ec4ed009265f8012097c3a052407aa99b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.19.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.19.0/node-v18.19.0-linux-x64.tar.gz", digest = "sha256:153312ae9fe8684f345100e4d141a521dc542b36d8c1e09c31ac290eae98c62a" },
+]
+
+[[release]]
+key = "node-18.18.2"
+components = [
+  { name = "node", version = "18.18.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.18.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.18.2/node-v18.18.2-darwin-arm64.tar.gz", digest = "sha256:9f982cc91b28778dd8638e4f94563b0c2a1da7aba62beb72bd427721035ab553" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.18.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.18.2/node-v18.18.2-linux-x64.tar.gz", digest = "sha256:a44c3e7f8bf91e852c928e5d8bd67ca316b35e27eec1d8acbe3b9dbe03688dab" },
+]
+
+[[release]]
+key = "node-18.18.1"
+components = [
+  { name = "node", version = "18.18.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.18.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.18.1/node-v18.18.1-darwin-arm64.tar.gz", digest = "sha256:e2b276e7a62cb4bd487211a185f84a94f012220f9e09d2ecd1f24de482c8f023" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.18.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.18.1/node-v18.18.1-linux-x64.tar.gz", digest = "sha256:9ce4db11f1d8399f6b58aab6858a688b2e09405127b47ebc4594dc8262a5e29f" },
+]
+
+[[release]]
+key = "node-18.18.0"
+components = [
+  { name = "node", version = "18.18.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.18.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.18.0/node-v18.18.0-darwin-arm64.tar.gz", digest = "sha256:b21a2e8a3e75f81eb6124ea463d67cf4648a04dce9062e8d5a1bc44c99606a15" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.18.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.18.0/node-v18.18.0-linux-x64.tar.gz", digest = "sha256:8aae62b6b3a5d659459c35c51e4373b950d11595a273db16c6162c712c5533a2" },
+]
+
+[[release]]
+key = "node-18.17.1"
+components = [
+  { name = "node", version = "18.17.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.17.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.17.1/node-v18.17.1-darwin-arm64.tar.gz", digest = "sha256:18ca716ea57522b90473777cb9f878467f77fdf826d37beb15a0889fdd74533e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.17.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.17.1/node-v18.17.1-linux-x64.tar.gz", digest = "sha256:2cb75f2bc04b0a3498733fbee779b2f76fe3f655188b4ac69ef2887b6721da2d" },
+]
+
+[[release]]
+key = "node-18.17.0"
+components = [
+  { name = "node", version = "18.17.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.17.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.17.0/node-v18.17.0-darwin-arm64.tar.gz", digest = "sha256:19731ef427e77ad9c5f476eb62bfb02a7f179d3012feed0bbded62e45f23e679" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.17.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.17.0/node-v18.17.0-linux-x64.tar.gz", digest = "sha256:5c4a7fd9262c0c47bafab3442de6c3fed1602be3d243cb8cf11309a201955e75" },
+]
+
+[[release]]
+key = "node-18.16.1"
+components = [
+  { name = "node", version = "18.16.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.16.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.16.1/node-v18.16.1-darwin-arm64.tar.gz", digest = "sha256:2ccb24e9211f4d17d8d8cfc0ea521198bb6a54e2f779f8feda952dbd3bb651ac" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.16.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.16.1/node-v18.16.1-linux-x64.tar.gz", digest = "sha256:59582f51570d0857de6333620323bdeee5ae36107318f86ce5eca24747cabf5b" },
+]
+
+[[release]]
+key = "node-18.16.0"
+components = [
+  { name = "node", version = "18.16.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.16.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.16.0/node-v18.16.0-darwin-arm64.tar.gz", digest = "sha256:82c7bb4869419ce7338669e6739a786dfc7e72f276ffbed663f85ffc905dcdb4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.16.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.16.0/node-v18.16.0-linux-x64.tar.gz", digest = "sha256:fc83046a93d2189d919005a348db3b2372b598a145d84eb9781a3a4b0f032e95" },
+]
+
+[[release]]
+key = "node-18.15.0"
+components = [
+  { name = "node", version = "18.15.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.15.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.15.0/node-v18.15.0-darwin-arm64.tar.gz", digest = "sha256:bd302a689c3c34e2b61d86b97de66d26a335881a17af09b6a0a4bb1019df56e4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.15.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.15.0/node-v18.15.0-linux-x64.tar.gz", digest = "sha256:b298a73a9fc07badfa9e4a2e86ed48824fc9201327cdc43e3f3f58b273c535e7" },
+]
+
+[[release]]
+key = "node-18.14.2"
+components = [
+  { name = "node", version = "18.14.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.14.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.14.2/node-v18.14.2-darwin-arm64.tar.gz", digest = "sha256:19f2e5f0659909e6f4b583fe581c0a5f14d079232f24093a55722d1bcf1b9991" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.14.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.14.2/node-v18.14.2-linux-x64.tar.gz", digest = "sha256:95bdaaf92265eefd40d2055fb9b5cd6cbc3cb2c4495e3ebd4b1b501822d69731" },
+]
+
+[[release]]
+key = "node-18.14.1"
+components = [
+  { name = "node", version = "18.14.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.14.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.14.1/node-v18.14.1-darwin-arm64.tar.gz", digest = "sha256:513f3ab25244c5ea3eedc6218b7418dcd7a0f20e143fdbf8955f0ea74f53c2d8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.14.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.14.1/node-v18.14.1-linux-x64.tar.gz", digest = "sha256:6a7c6862b86cb01b892ca5967dba14bd3122dbfed9d5c9fedd30585d5974f1f6" },
+]
+
+[[release]]
+key = "node-18.14.0"
+components = [
+  { name = "node", version = "18.14.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.14.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.14.0/node-v18.14.0-darwin-arm64.tar.gz", digest = "sha256:514438c258ee87e3083c21359f6d5e84988946db8a5ed5fa8bb0485276ea99f0" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.14.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.14.0/node-v18.14.0-linux-x64.tar.gz", digest = "sha256:bcdfd28bb7ab9a53c7045e0862556f77c250580c6d3d6cb960843895e024cac6" },
+]
+
+[[release]]
+key = "node-18.13.0"
+components = [
+  { name = "node", version = "18.13.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.13.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.13.0/node-v18.13.0-darwin-arm64.tar.gz", digest = "sha256:418d535e64dbcbd628715180c2de4ffcecb8a84b81f233c60e6ab9f0d795c249" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.13.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.13.0/node-v18.13.0-linux-x64.tar.gz", digest = "sha256:2d2881cf860624b9fa9866670a65708c747d458213bdccaa8e7266b105d404ad" },
+]
+
+[[release]]
+key = "node-18.12.1"
+components = [
+  { name = "node", version = "18.12.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.12.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.12.1/node-v18.12.1-darwin-arm64.tar.gz", digest = "sha256:9857042e18a0530a19f22f29a38de4fed5608e32543216f9afb6edea8d0dfdd3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.12.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.12.1/node-v18.12.1-linux-x64.tar.gz", digest = "sha256:a8fcacb8033504e6d704bdee821f7005ee3774db25c799bcf2a13b5bda7de172" },
+]
+
+[[release]]
+key = "node-18.12.0"
+components = [
+  { name = "node", version = "18.12.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.12.0/node-v18.12.0-darwin-arm64.tar.gz", digest = "sha256:7aa5ef109086be0adf433b851504f0522a71a02c6d675e729375cd591a854f3c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.12.0/node-v18.12.0-linux-x64.tar.gz", digest = "sha256:0699c8e02581a9c312d7157331561d36ef23963766eb47daa702edb6fd6735bd" },
+]
+
+[[release]]
+key = "node-18.11.0"
+components = [
+  { name = "node", version = "18.11.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.11.0/node-v18.11.0-darwin-arm64.tar.gz", digest = "sha256:db5f8d16967d8b04129d77013101c9b0bb8a3b98e5895cf4bfd9a9af21ff8e27" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.11.0/node-v18.11.0-linux-x64.tar.gz", digest = "sha256:5935236185a515b4beb991baabbe0084d552eb5122ab9b3fd0fad018af795cb3" },
+]
+
+[[release]]
+key = "node-18.10.0"
+components = [
+  { name = "node", version = "18.10.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.10.0/node-v18.10.0-darwin-arm64.tar.gz", digest = "sha256:0689815cdd69a9a977ee3bab20c6228d03966a1f988464f18ce490678dc5cdc3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.10.0/node-v18.10.0-linux-x64.tar.gz", digest = "sha256:f468b86031cca41ee9aa7a911e70eb624413153c7432754cbe9206c7ef3de090" },
+]
+
+[[release]]
+key = "node-18.9.1"
+components = [
+  { name = "node", version = "18.9.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.9.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.9.1/node-v18.9.1-darwin-arm64.tar.gz", digest = "sha256:289dca525c5535bddf389b69386ceb12d7c77eeae9aa2f666652877f982f9b5d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.9.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.9.1/node-v18.9.1-linux-x64.tar.gz", digest = "sha256:33ecf5f39618f4beb90a9be98880325cb4f06e33b52e315040a54fd0700f2434" },
+]
+
+[[release]]
+key = "node-18.9.0"
+components = [
+  { name = "node", version = "18.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.9.0/node-v18.9.0-darwin-arm64.tar.gz", digest = "sha256:60300b40f539fc93005859fcb7ea585bfd111800e90b6ee744a07f2380512bbb" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.9.0/node-v18.9.0-linux-x64.tar.gz", digest = "sha256:7fdbfdb985a48db3d22a2472330db05d94c9aff59192b09d8f9ab5fcedba76d5" },
+]
+
+[[release]]
+key = "node-18.8.0"
+components = [
+  { name = "node", version = "18.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.8.0/node-v18.8.0-darwin-arm64.tar.gz", digest = "sha256:4952a8ec7ca07328571ba0b06d228c2a8220041a6f07df4f46765c341a80ccd4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.8.0/node-v18.8.0-linux-x64.tar.gz", digest = "sha256:01c2060503bb42caa1c6cc2ee4b432f80c0b38ad46b4eed956774fb36302f46e" },
+]
+
+[[release]]
+key = "node-18.7.0"
+components = [
+  { name = "node", version = "18.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.7.0/node-v18.7.0-darwin-arm64.tar.gz", digest = "sha256:ea24b35067bd0dc40ea8fda1087acc87672cbcbba881f7477dbd432e3c03343d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.7.0/node-v18.7.0-linux-x64.tar.gz", digest = "sha256:0bef16a77faed5220c2ea1555f7bd19ea79bfbb848dba62fbe9d43eb1a36fce0" },
+]
+
+[[release]]
+key = "node-18.6.0"
+components = [
+  { name = "node", version = "18.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.6.0/node-v18.6.0-darwin-arm64.tar.gz", digest = "sha256:b68009204398118dd2806a96a9a4cec35f19c2ba454a325519e0f74ffb9c855e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.6.0/node-v18.6.0-linux-x64.tar.gz", digest = "sha256:eff59cd54fdcd24dc09965b41dc8d347ab4ce367b6c395fd983cfb4c3a542e03" },
+]
+
+[[release]]
+key = "node-18.5.0"
+components = [
+  { name = "node", version = "18.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.5.0/node-v18.5.0-darwin-arm64.tar.gz", digest = "sha256:8d4012c137ba18d8a3e650c01f83d995235dcef87a65d2be55471594b33be52f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.5.0/node-v18.5.0-linux-x64.tar.gz", digest = "sha256:deb4b0b8b82354a1b5087b724ab0d5861081302a12c0b204d799b31fea527eda" },
+]
+
+[[release]]
+key = "node-18.4.0"
+components = [
+  { name = "node", version = "18.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.4.0/node-v18.4.0-darwin-arm64.tar.gz", digest = "sha256:90850d1ff13ef07e5ae2c8c2f29c29bd2654308def2776eb73be0f7aa6a4f9bd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.4.0/node-v18.4.0-linux-x64.tar.gz", digest = "sha256:4e3f5c72ec735aa23d52042be61e32e7279d26d7f05ebb5571c410e81d10c9a3" },
+]
+
+[[release]]
+key = "node-18.3.0"
+components = [
+  { name = "node", version = "18.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.3.0/node-v18.3.0-darwin-arm64.tar.gz", digest = "sha256:5800be1084a61dbbe6748535c7f0aefa8bc9b2a5aeb6482916f4b7500d6fc892" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.3.0/node-v18.3.0-linux-x64.tar.gz", digest = "sha256:9b64ed313363872f83f6586ad985e793258c5ba6e569812b9dd349ec819956cf" },
+]
+
+[[release]]
+key = "node-18.2.0"
+components = [
+  { name = "node", version = "18.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.2.0/node-v18.2.0-darwin-arm64.tar.gz", digest = "sha256:d140f15ca709767365e09edd0cb345f10f32f582d82d726f67f63dd7db4443d1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.2.0/node-v18.2.0-linux-x64.tar.gz", digest = "sha256:73d3f98e96e098587c2154dcaa82a6469a510e89a4881663dc4c86985acf245e" },
+]
+
+[[release]]
+key = "node-18.1.0"
+components = [
+  { name = "node", version = "18.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.1.0/node-v18.1.0-darwin-arm64.tar.gz", digest = "sha256:8bc7b56fb7660dac5e981fd8724b95414fb52f698e8ce87dda92a683e5d2f4fa" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.1.0/node-v18.1.0-linux-x64.tar.gz", digest = "sha256:db3819510007d29516cb45aa65a7cd967de917e40c176bb60de6c3d0cd6440af" },
+]
+
+[[release]]
+key = "node-18.0.0"
+components = [
+  { name = "node", version = "18.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "18.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.0.0/node-v18.0.0-darwin-arm64.tar.gz", digest = "sha256:35c05023a5d1ca647e2364e7383b6cf6299e8fed648b03597ca9be52ed0c4d59" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "18.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v18.0.0/node-v18.0.0-linux-x64.tar.gz", digest = "sha256:6260d3526dff25d43451ea8e90e0174975b4cd067e8535dc1d85a6d6b29f3043" },
+]
+
+[[release]]
+key = "node-17.9.1"
+components = [
+  { name = "node", version = "17.9.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.9.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.9.1/node-v17.9.1-darwin-arm64.tar.gz", digest = "sha256:d6add5bbe10203a76d9ed964a2e5075a45aaf76137dbf3ee772fe6a679a34f36" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.9.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.9.1/node-v17.9.1-linux-x64.tar.gz", digest = "sha256:efa39656f3a9761b5696dbd68efdff3a9be3ce00004171be53250a8a6f120272" },
+]
+
+[[release]]
+key = "node-17.9.0"
+components = [
+  { name = "node", version = "17.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.9.0/node-v17.9.0-darwin-arm64.tar.gz", digest = "sha256:bad50341f8a1fd737c53efc01aa3f4eaf63df5601adf9ba036a8adb695d13428" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.9.0/node-v17.9.0-linux-x64.tar.gz", digest = "sha256:8c9f4c95c254336fcb2c768e746f4316b8176adc0fb599cbbb460d0933991d12" },
+]
+
+[[release]]
+key = "node-17.8.0"
+components = [
+  { name = "node", version = "17.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.8.0/node-v17.8.0-darwin-arm64.tar.gz", digest = "sha256:b0bdcddc070a559018f876e0810a678415f99d69ed6e4df15fd1c7cf5fc2e45f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.8.0/node-v17.8.0-linux-x64.tar.gz", digest = "sha256:02d3e21362ae3cf670fa4b12c6b982e2544a815a007ea96f881b89f305843dfe" },
+]
+
+[[release]]
+key = "node-17.7.2"
+components = [
+  { name = "node", version = "17.7.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.7.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.7.2/node-v17.7.2-darwin-arm64.tar.gz", digest = "sha256:9b078739799239adb3a0aea051e3cf60be886f28bb39d34d75780297dddd7af1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.7.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.7.2/node-v17.7.2-linux-x64.tar.gz", digest = "sha256:7865d88b7a07ec407ceb9a3a9aa92a1c5a07469885834a5ee56661de369a9e40" },
+]
+
+[[release]]
+key = "node-17.7.1"
+components = [
+  { name = "node", version = "17.7.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.7.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.7.1/node-v17.7.1-darwin-arm64.tar.gz", digest = "sha256:d5bb0974a881e017a178b33dab1e90d1fe1e183602d1e86b62fed1e2ea1960a6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.7.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.7.1/node-v17.7.1-linux-x64.tar.gz", digest = "sha256:a88875ba97a71f77fc85890897d23bb7bbb2097bed6de5d40cca52b7b67f79d3" },
+]
+
+[[release]]
+key = "node-17.7.0"
+components = [
+  { name = "node", version = "17.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.7.0/node-v17.7.0-darwin-arm64.tar.gz", digest = "sha256:4badbaf77e80cdc7333fdddbfaea80bf019adc4d09f71378ffa7e903eebd3b33" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.7.0/node-v17.7.0-linux-x64.tar.gz", digest = "sha256:c807f2e7c08882a2005fce8db0820b810b2bcc4b6a872faa15fb2af193500d62" },
+]
+
+[[release]]
+key = "node-17.6.0"
+components = [
+  { name = "node", version = "17.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.6.0/node-v17.6.0-darwin-arm64.tar.gz", digest = "sha256:801ec54f30e43c0513aa390b0a5e67afd2287c3bd81861afa744df6e7e8c109f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.6.0/node-v17.6.0-linux-x64.tar.gz", digest = "sha256:de9596fda9cc88451d03146278806687e954c03413e8aa0ee98ad46442d6cb1c" },
+]
+
+[[release]]
+key = "node-17.5.0"
+components = [
+  { name = "node", version = "17.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.5.0/node-v17.5.0-darwin-arm64.tar.gz", digest = "sha256:b5b5d8557d1556cc8224e0e0b0711b6baba79be74b22e6eaf9870ac71fcd757a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.5.0/node-v17.5.0-linux-x64.tar.gz", digest = "sha256:86fabd8177686b5f2f4ec8ac81e88a008b74a34e789080188f1c13f5d665ca6e" },
+]
+
+[[release]]
+key = "node-17.4.0"
+components = [
+  { name = "node", version = "17.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.4.0/node-v17.4.0-darwin-arm64.tar.gz", digest = "sha256:9bd53805faf6df658ecd4f54321b25eff89818efdcb52c20435ff1703fd7064c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.4.0/node-v17.4.0-linux-x64.tar.gz", digest = "sha256:132c61652c315a6f784167b97a53e9638bac45853f1544a84d4cbb90fe7a3bda" },
+]
+
+[[release]]
+key = "node-17.3.1"
+components = [
+  { name = "node", version = "17.3.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.3.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.3.1/node-v17.3.1-darwin-arm64.tar.gz", digest = "sha256:e664dd753777c813d893aad2b797847e2f0dc4c537cfefc377e3c88716934d38" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.3.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.3.1/node-v17.3.1-linux-x64.tar.gz", digest = "sha256:7fd238a05ce8c98b19e6799103d12619f16bbab7111a6719f57b7ef190b74cfa" },
+]
+
+[[release]]
+key = "node-17.3.0"
+components = [
+  { name = "node", version = "17.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.3.0/node-v17.3.0-darwin-arm64.tar.gz", digest = "sha256:b504ba3628337f7ac2c67d04bf30e56082942345aa1a50e0e464f51df6662ff3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.3.0/node-v17.3.0-linux-x64.tar.gz", digest = "sha256:479fb0b4b6405fb7240376187e2823cf384635a4998bdbaddc3ea826b63c8c74" },
+]
+
+[[release]]
+key = "node-17.2.0"
+components = [
+  { name = "node", version = "17.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.2.0/node-v17.2.0-darwin-arm64.tar.gz", digest = "sha256:436d2c069069302615d24fd663494277eca183af25776fb4ce40008422666c6e" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.2.0/node-v17.2.0-linux-x64.tar.gz", digest = "sha256:a26491670f11d6ef4f919d3c2678fe65292c9e1d7e9184ec551a011816d92f0d" },
+]
+
+[[release]]
+key = "node-17.1.0"
+components = [
+  { name = "node", version = "17.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.1.0/node-v17.1.0-darwin-arm64.tar.gz", digest = "sha256:5e89e1cd17c58ef795d3bb420dd2a473c72a642422328c66dec59eb6d9243408" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.1.0/node-v17.1.0-linux-x64.tar.gz", digest = "sha256:54b387bb1b6faa436d73777343a1a2147e67ff5e33a80971df2fd030dde4fd24" },
+]
+
+[[release]]
+key = "node-17.0.1"
+components = [
+  { name = "node", version = "17.0.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.0.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.0.1/node-v17.0.1-darwin-arm64.tar.gz", digest = "sha256:b49c65be9112f7e5de4e39f4f01e541ee73b3d28d3e2bbd3ea85a86952d0dc2d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.0.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.0.1/node-v17.0.1-linux-x64.tar.gz", digest = "sha256:c2aaef730245ad180d2a2b9d2d2806feca57e93e0691faabb41175d26bed9c89" },
+]
+
+[[release]]
+key = "node-17.0.0"
+components = [
+  { name = "node", version = "17.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "17.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.0.0/node-v17.0.0-darwin-arm64.tar.gz", digest = "sha256:bba3a1d2638ee194f82a6173296bebabf1b28897a5cd41bbc146629ac05e0751" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "17.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v17.0.0/node-v17.0.0-linux-x64.tar.gz", digest = "sha256:252505ade312c6c346c6b8d00e2be9e383446d81430ee4c1e5a04972e0817da4" },
+]
+
+[[release]]
+key = "node-16.20.2"
+components = [
+  { name = "node", version = "16.20.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.20.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.20.2/node-v16.20.2-darwin-arm64.tar.gz", digest = "sha256:6a5c4108475871362d742b988566f3fe307f6a67ce14634eb3fbceb4f9eea88c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.20.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.20.2/node-v16.20.2-linux-x64.tar.gz", digest = "sha256:c9193e6c414891694759febe846f4f023bf48410a6924a8b1520c46565859665" },
+]
+
+[[release]]
+key = "node-16.20.1"
+components = [
+  { name = "node", version = "16.20.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.20.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.20.1/node-v16.20.1-darwin-arm64.tar.gz", digest = "sha256:5f6b31c5a75567d382ba67220f3d7a2d9bb0c03d8af9307cd35a9cb32a6fde9d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.20.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.20.1/node-v16.20.1-linux-x64.tar.gz", digest = "sha256:c76d2aabd2d02542505fd24e18876fb8515e23638531249277272def42ab54e3" },
+]
+
+[[release]]
+key = "node-16.20.0"
+components = [
+  { name = "node", version = "16.20.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.20.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.20.0/node-v16.20.0-darwin-arm64.tar.gz", digest = "sha256:15d0857009f13e85057010b605e57b418318fdf422b5f9dd7e0ef32115da9c10" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.20.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.20.0/node-v16.20.0-linux-x64.tar.gz", digest = "sha256:7abc0e558fa3b3c4cc0fd3c7fa5dbe61500ba7213f5e87ed560c65a733c6a5c4" },
+]
+
+[[release]]
+key = "node-16.19.1"
+components = [
+  { name = "node", version = "16.19.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.19.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.19.1/node-v16.19.1-darwin-arm64.tar.gz", digest = "sha256:168f787f457bf645f3fc41e7419b62071db7d42519ce461b1d7ebfc0acbdbfb1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.19.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.19.1/node-v16.19.1-linux-x64.tar.gz", digest = "sha256:ca63da538e02de15b7e974f7a17ce4732cc0d63023942301d30044c472ed9ddd" },
+]
+
+[[release]]
+key = "node-16.19.0"
+components = [
+  { name = "node", version = "16.19.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.19.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.19.0/node-v16.19.0-darwin-arm64.tar.gz", digest = "sha256:5c9434fbb0f323fecf3d261b23a2e544919380c5043d0046d9745682fefd9cde" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.19.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.19.0/node-v16.19.0-linux-x64.tar.gz", digest = "sha256:23770ba26a52cb8fedd1096613bbc419b8a033d774a457d9024bb5a0159f3585" },
+]
+
+[[release]]
+key = "node-16.18.1"
+components = [
+  { name = "node", version = "16.18.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.18.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.18.1/node-v16.18.1-darwin-arm64.tar.gz", digest = "sha256:71720bb0a80cf158d8fdf492def08048befd953ad45e2458b1d095e32c612ba7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.18.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.18.1/node-v16.18.1-linux-x64.tar.gz", digest = "sha256:8949919fc52543efae3bfd057261927c616978614926682ad642915f98fe1981" },
+]
+
+[[release]]
+key = "node-16.18.0"
+components = [
+  { name = "node", version = "16.18.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.18.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.18.0/node-v16.18.0-darwin-arm64.tar.gz", digest = "sha256:8ceee891d0171381520e9017326589a9a616d6be2689493304970290d9b6e3b2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.18.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.18.0/node-v16.18.0-linux-x64.tar.gz", digest = "sha256:faca6476cb5b41aa995370fd856d16fcfbbef5c18718a6fa44cc1bae4140849d" },
+]
+
+[[release]]
+key = "node-16.17.1"
+components = [
+  { name = "node", version = "16.17.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.17.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.17.1/node-v16.17.1-darwin-arm64.tar.gz", digest = "sha256:f9f02f7872e2e8ee54320fce13deb9d56904f32bb0615b6e21aa3371d8899150" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.17.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.17.1/node-v16.17.1-linux-x64.tar.gz", digest = "sha256:da5658693243b3ecf6a4cba6751a71df1eb9e9703ca93b42a9404aed85f58ad0" },
+]
+
+[[release]]
+key = "node-16.17.0"
+components = [
+  { name = "node", version = "16.17.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.17.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.17.0/node-v16.17.0-darwin-arm64.tar.gz", digest = "sha256:96eefac1e168ec1bf39c5ae1e7b2760522624adfbe2e0c92875cd33ef9a07792" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.17.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.17.0/node-v16.17.0-linux-x64.tar.gz", digest = "sha256:4827808e50b8ee42b4dadf056835287dac267b9cff56cea56e70843bf8cecb79" },
+]
+
+[[release]]
+key = "node-16.16.0"
+components = [
+  { name = "node", version = "16.16.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.16.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.16.0/node-v16.16.0-darwin-arm64.tar.gz", digest = "sha256:167721c2d72402e54adc0f8c87ca840796216c4d98946509d73221b771ad3e4c" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.16.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.16.0/node-v16.16.0-linux-x64.tar.gz", digest = "sha256:c85b16d1a4c259d01be7111ecb0361260627e4fc245004a920521eacb28e50df" },
+]
+
+[[release]]
+key = "node-16.15.1"
+components = [
+  { name = "node", version = "16.15.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.15.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.15.1/node-v16.15.1-darwin-arm64.tar.gz", digest = "sha256:7f492d01bed05c982fd55d6ba68711fe29bd7a1bb97b528909ac5aa9e3ab951d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.15.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.15.1/node-v16.15.1-linux-x64.tar.gz", digest = "sha256:f78a49c0c9c2f546c3a44eb434c49a852125441422a1bcfc433dedc58d6a241c" },
+]
+
+[[release]]
+key = "node-16.15.0"
+components = [
+  { name = "node", version = "16.15.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.15.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.15.0/node-v16.15.0-darwin-arm64.tar.gz", digest = "sha256:ad8d8fc5330ef47788f509c2af398c8060bb59acbe914070d0df684cd2d8d39b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.15.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.15.0/node-v16.15.0-linux-x64.tar.gz", digest = "sha256:d1c1de461be10bfd9c70ebae47330fb1b4ab0a98ad730823fb1340e34993edee" },
+]
+
+[[release]]
+key = "node-16.14.2"
+components = [
+  { name = "node", version = "16.14.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.14.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.14.2/node-v16.14.2-darwin-arm64.tar.gz", digest = "sha256:a66d9217d2003bd416d3dd06dfd2c7a044c4c9ff2e43a27865790bd0d59c682d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.14.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.14.2/node-v16.14.2-linux-x64.tar.gz", digest = "sha256:57e02c27eb5e52f560f72d96240e898cb52818dc9fc50f45478ce39ece38583a" },
+]
+
+[[release]]
+key = "node-16.14.1"
+components = [
+  { name = "node", version = "16.14.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.14.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.14.1/node-v16.14.1-darwin-arm64.tar.gz", digest = "sha256:8f6d45796f3d996484dcf53bb0e53cd019cd0ef7a1a247bd0178ebaa7e63a184" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.14.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.14.1/node-v16.14.1-linux-x64.tar.gz", digest = "sha256:8db3d6d8ecfc2af932320fb12449de2b5b76f946ac72b47c6a9074afe82737ff" },
+]
+
+[[release]]
+key = "node-16.14.0"
+components = [
+  { name = "node", version = "16.14.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.14.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.14.0/node-v16.14.0-darwin-arm64.tar.gz", digest = "sha256:56e547d22bc7be8aa40c8cfd604c156a5bcf8692f643ec1801c1fa2390498542" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.14.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.14.0/node-v16.14.0-linux-x64.tar.gz", digest = "sha256:2c69e7b040c208b61ebf9735c63d2e5bcabfed32ef05a9b8dd5823489ea50d6b" },
+]
+
+[[release]]
+key = "node-16.13.2"
+components = [
+  { name = "node", version = "16.13.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.13.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.13.2/node-v16.13.2-darwin-arm64.tar.gz", digest = "sha256:09d300008ad58792c12622a5eafdb14c931587bb88713df4df64cdf4ff2188d1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.13.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.13.2/node-v16.13.2-linux-x64.tar.gz", digest = "sha256:a0f23911d5d9c371e95ad19e4e538d19bffc0965700f187840eb39a91b0c3fb0" },
+]
+
+[[release]]
+key = "node-16.13.1"
+components = [
+  { name = "node", version = "16.13.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.13.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.13.1/node-v16.13.1-darwin-arm64.tar.gz", digest = "sha256:2d27c10c49af87a8d87bce4d32ca0e37afbc8dcc73d524ec7de3506c6309d4fc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.13.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.13.1/node-v16.13.1-linux-x64.tar.gz", digest = "sha256:5f80197d654fd0b749cdeddf1f07a5eac1fcf6b423a00ffc8f2d3bea9c6dc8d1" },
+]
+
+[[release]]
+key = "node-16.13.0"
+components = [
+  { name = "node", version = "16.13.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.13.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.13.0/node-v16.13.0-darwin-arm64.tar.gz", digest = "sha256:46d83fc0bd971db5050ef1b15afc44a6665dee40bd6c1cbaec23e1b40fa49e6d" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.13.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.13.0/node-v16.13.0-linux-x64.tar.gz", digest = "sha256:589b7e7eb22f8358797a2c14a0bd865459d0b44458b8f05d2721294dacc7f734" },
+]
+
+[[release]]
+key = "node-16.12.0"
+components = [
+  { name = "node", version = "16.12.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.12.0/node-v16.12.0-darwin-arm64.tar.gz", digest = "sha256:1d681c528205f56531084a09e9648586f91e68726ee73851c8e4b1098df2f603" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.12.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.12.0/node-v16.12.0-linux-x64.tar.gz", digest = "sha256:1f41d5b68ca39eb2e76dad4e5beb8de8b0a1498773e3e53b80c03e42202969fb" },
+]
+
+[[release]]
+key = "node-16.11.1"
+components = [
+  { name = "node", version = "16.11.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.11.1/node-v16.11.1-darwin-arm64.tar.gz", digest = "sha256:5e772e478390fab3001b7148a923e4f22fca50170000f18b28475337d3a97248" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.11.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.11.1/node-v16.11.1-linux-x64.tar.gz", digest = "sha256:48fba5e9d60e12e777994dafba7b04449c3d0cd004340970fd674220e572a39e" },
+]
+
+[[release]]
+key = "node-16.11.0"
+components = [
+  { name = "node", version = "16.11.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.11.0/node-v16.11.0-darwin-arm64.tar.gz", digest = "sha256:b8f75887d6e94f8f38df9b6016258ea742677ffb45e6d513d55dc09bcd9c1fd3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.11.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.11.0/node-v16.11.0-linux-x64.tar.gz", digest = "sha256:bfc84faaa07864398edbe8bfb9d7d0e64fa20649b8c498cd299e0ff44657d9a3" },
+]
+
+[[release]]
+key = "node-16.10.0"
+components = [
+  { name = "node", version = "16.10.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.10.0/node-v16.10.0-darwin-arm64.tar.gz", digest = "sha256:dfdaf4149365e170929b99692520388e89f618e8d64ddd3ded7126bccf4583ed" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.10.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.10.0/node-v16.10.0-linux-x64.tar.gz", digest = "sha256:bca7f42ea3e61938cc28868614bb37908111b9ff190fe8022fa9954651b5665d" },
+]
+
+[[release]]
+key = "node-16.9.1"
+components = [
+  { name = "node", version = "16.9.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.9.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.9.1/node-v16.9.1-darwin-arm64.tar.gz", digest = "sha256:cf7ec489e2250e9837cb608cb14123ea6645b14943dbfdc9de206d62f0de6fa2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.9.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.9.1/node-v16.9.1-linux-x64.tar.gz", digest = "sha256:1d48c69e4141792f314d29f081501dc22218cfc22f9992c098f7e3f5e0531139" },
+]
+
+[[release]]
+key = "node-16.9.0"
+components = [
+  { name = "node", version = "16.9.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.9.0/node-v16.9.0-darwin-arm64.tar.gz", digest = "sha256:13105eb6623f474e4596c725bd4d6fcd500c68155f9f954bd3332c46f5df7378" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.9.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.9.0/node-v16.9.0-linux-x64.tar.gz", digest = "sha256:f7389d3bc9efdf5ce95ff52ea880efcbf2c9de662ef7b143aedf141aeb74ab95" },
+]
+
+[[release]]
+key = "node-16.8.0"
+components = [
+  { name = "node", version = "16.8.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.8.0/node-v16.8.0-darwin-arm64.tar.gz", digest = "sha256:891e72d166abbb1b838b5113cc8cfaf2fe905dfe77afe84a5af56e426ff74ddf" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.8.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.8.0/node-v16.8.0-linux-x64.tar.gz", digest = "sha256:aa1f366b522a9565332096fdc32ed0cd58a2049c0875d839703d3fe58b4c226d" },
+]
+
+[[release]]
+key = "node-16.7.0"
+components = [
+  { name = "node", version = "16.7.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.7.0/node-v16.7.0-darwin-arm64.tar.gz", digest = "sha256:969875c1a6b2790663d7b25d7641d1e3919225659921a98d2f1e4711bbec5ef3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.7.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.7.0/node-v16.7.0-linux-x64.tar.gz", digest = "sha256:13a15e1934d356c9e8f97fcfff411d7d5236e90ed04d6aeeca5f10f529b58a57" },
+]
+
+[[release]]
+key = "node-16.6.2"
+components = [
+  { name = "node", version = "16.6.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.6.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.6.2/node-v16.6.2-darwin-arm64.tar.gz", digest = "sha256:29e46e83f6837ff1c815c49f590c25fa51b0811a6590c62120a9d464ba431fc6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.6.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.6.2/node-v16.6.2-linux-x64.tar.gz", digest = "sha256:913913f62416b96dee5f463b54e1adebaf669dd2ff3b047d6290deadc3003d97" },
+]
+
+[[release]]
+key = "node-16.6.1"
+components = [
+  { name = "node", version = "16.6.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.6.1/node-v16.6.1-darwin-arm64.tar.gz", digest = "sha256:8b766a2bcc686f968146b09892f24cfbeaebb547a4d50744d9af80def5221613" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.6.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.6.1/node-v16.6.1-linux-x64.tar.gz", digest = "sha256:e7e4149626ccd0653783ee8aef81eb50fa7ada2f9f7cbc031969b3b1ac3ffa6b" },
+]
+
+[[release]]
+key = "node-16.6.0"
+components = [
+  { name = "node", version = "16.6.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.6.0/node-v16.6.0-darwin-arm64.tar.gz", digest = "sha256:07720d1bc18dca0bb3abdcd3c2e4f39a7cb532ca7f56c48bd42a4233de7fcd89" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.6.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.6.0/node-v16.6.0-linux-x64.tar.gz", digest = "sha256:4658500d47ab2373b9c5ffb8256bd4e514b6326a6c8a9c6186105fba4de75548" },
+]
+
+[[release]]
+key = "node-16.5.0"
+components = [
+  { name = "node", version = "16.5.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.5.0/node-v16.5.0-darwin-arm64.tar.gz", digest = "sha256:4296521e8b5d73d4c3b9b7f6f9f666e577342ea92a520f33040f1a252387d079" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.5.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.5.0/node-v16.5.0-linux-x64.tar.gz", digest = "sha256:837d76357d8622aac81a5b7f27ba0fd9556faa311a44254f1ffd26aaf42b052f" },
+]
+
+[[release]]
+key = "node-16.4.2"
+components = [
+  { name = "node", version = "16.4.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.4.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.4.2/node-v16.4.2-darwin-arm64.tar.gz", digest = "sha256:94f2890a3f68044bb89891d25063cc07bcd1e3754d27cfbcdeffeb0dc8cff592" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.4.2", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.4.2/node-v16.4.2-linux-x64.tar.gz", digest = "sha256:710a6955f5f500030f97d0deef6c15ef25533b9a7de66796248229b37ce07704" },
+]
+
+[[release]]
+key = "node-16.4.1"
+components = [
+  { name = "node", version = "16.4.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.4.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.4.1/node-v16.4.1-darwin-arm64.tar.gz", digest = "sha256:c6e2a79873c4afbd9fcd7e9d2889e2a7b84860bea472a07ccbe33387397990f5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.4.1", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.4.1/node-v16.4.1-linux-x64.tar.gz", digest = "sha256:21181395c11ee1d13c05c4e07b1f4e36ba501d92030ac60a901291c50915b320" },
+]
+
+[[release]]
+key = "node-16.4.0"
+components = [
+  { name = "node", version = "16.4.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.4.0/node-v16.4.0-darwin-arm64.tar.gz", digest = "sha256:771469be99d6af048d9b192cd7b338c68a4604e0fcc7f8804278c91b5ad3f74f" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.4.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.4.0/node-v16.4.0-linux-x64.tar.gz", digest = "sha256:6fb7bc9aece48f2d94941c586ed5d541ac29c8981bc09585fcabe9e4b87d57fa" },
+]
+
+[[release]]
+key = "node-16.3.0"
+components = [
+  { name = "node", version = "16.3.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.3.0/node-v16.3.0-darwin-arm64.tar.gz", digest = "sha256:aeac294dbe54a4dfd222eedfbae704b185c40702254810e2c5917f6dbc80e017" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.3.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.3.0/node-v16.3.0-linux-x64.tar.gz", digest = "sha256:86f6d06c05021ae73b51f57bb56569a2eebd4a2ecc0b881972a0572e465b5d27" },
+]
+
+[[release]]
+key = "node-16.2.0"
+components = [
+  { name = "node", version = "16.2.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.2.0/node-v16.2.0-darwin-arm64.tar.gz", digest = "sha256:451d87c07c522e24152a584b2d5461d4e3a7c690bd8882bef9ae8bf6b19d1dfd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.2.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.2.0/node-v16.2.0-linux-x64.tar.gz", digest = "sha256:c3fd89a768e40a2fd8008919100bd283e6e9aec742eddeb1d494eb2a626466dc" },
+]
+
+[[release]]
+key = "node-16.1.0"
+components = [
+  { name = "node", version = "16.1.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.1.0/node-v16.1.0-darwin-arm64.tar.gz", digest = "sha256:4ed9f6d78528fc80997a02a461437a3c3e82ba530fe8338ecf970e733883f8a8" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.1.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.1.0/node-v16.1.0-linux-x64.tar.gz", digest = "sha256:50dadc0c130ff7d079d0fb4a86e40756c76edb3cd3b42b8cf2a57497116695fa" },
+]
+
+[[release]]
+key = "node-16.0.0"
+components = [
+  { name = "node", version = "16.0.0" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "node", provider = "nodejs.org", build = "16.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.0.0/node-v16.0.0-darwin-arm64.tar.gz", digest = "sha256:2d6d412abcf7c9375f19fde14086a6423e5bb9415eeca1ccad49638ffc476ea3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "node", provider = "nodejs.org", build = "16.0.0", recipe = "nodejs/legacy", url = "https://nodejs.org/dist/v16.0.0/node-v16.0.0-linux-x64.tar.gz", digest = "sha256:9268cdb3c71cec4f3dc3bef98994f310c3bef259fae8c68e3f1c605c5dfcbc58" },
 ]

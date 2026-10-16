@@ -35,7 +35,7 @@ impl ProjectRoot {
         Ok(root)
     }
 
-    pub(super) fn observe_input(&self, path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
+    pub(crate) fn observe_input(&self, path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
         let Some(observed) = &self.observed else {
             return Ok(());
         };

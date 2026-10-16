@@ -110,6 +110,14 @@ pub const YOUNG_PACKAGE: &str = "young-package";
 /// a name chosen to be mistaken for the popular one. A heuristic, recorded
 /// at every sync. The subject is the name, the detail the popular name.
 pub const LOOKALIKE_NAME: &str = "lookalike-name";
+/// A symlink in a project whose manifest is code (a Gemfile, a mix.exs, a
+/// csproj) leads out of the project, or through an entry the resolver's
+/// copy leaves out, so the resolver ran without it: the link was left out
+/// of its copy of the project. The resolution record still names the link
+/// by its target text. A manifest, lock or configuration file that is such
+/// a link is refused instead. The subject is the link's path, the detail
+/// its target.
+pub const OUTWARD_SYMLINK: &str = "outward-symlink";
 
 pub const KINDS: &[&str] = &[
     REQUIREMENT_SKIPPED,
@@ -136,6 +144,7 @@ pub const KINDS: &[&str] = &[
     PROJECT_SCRIPT_SKIPPED,
     YOUNG_PACKAGE,
     LOOKALIKE_NAME,
+    OUTWARD_SYMLINK,
 ];
 
 /// Kinds that describe the project, its lock or its resolution rather than
@@ -159,6 +168,7 @@ pub const PLAN_TIME_KINDS: &[&str] = &[
     PROJECT_SCRIPT_SKIPPED,
     YOUNG_PACKAGE,
     LOOKALIKE_NAME,
+    OUTWARD_SYMLINK,
 ];
 
 /// Kinds were spelled with two separators until the names were unified on

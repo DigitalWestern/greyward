@@ -164,6 +164,11 @@ impl Tailor for Node {
         super::resolve::resolution_inputs(project)
     }
 
+    /// The project's `node_modules` link and each workspace member's.
+    fn projected_paths(&self) -> &'static [&'static str] {
+        &["**/node_modules"]
+    }
+
     fn attester(&self) -> Option<&dyn Attester> {
         Some(self)
     }

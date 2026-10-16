@@ -505,8 +505,9 @@ pub trait Tailor: Sync {
     fn toolchain_catalog(&self) -> io::Result<Catalog>;
 
     /// The reader of a toolchain that is not a catalog release at all: a
-    /// directory on this machine (`kernel::toolchain::PATH_SOURCE`), which
-    /// the lock then records in place of a catalog selection. The command
+    /// directory on this machine (`kernel::toolchain::PATH_SOURCE`), or a
+    /// Rust nightly resolved from its signed channel manifest, which the
+    /// lock then records in place of a catalog selection. The command
     /// layer hands it to resolution on `EcosystemInput::external`. `None`
     /// means the catalog always answers, as it does for every ecosystem
     /// that has no such thing.
@@ -604,6 +605,16 @@ pub trait Tailor: Sync {
         Ok(Vec::new())
     }
 
+    /// What this tailor's sync places in a project outside `.greyward`, as
+    /// path patterns relative to the project (`**/` for any depth): the
+    /// visible environment links (`node_modules`, `.venv`).
+    /// [`resolution_links`] verifies links at these paths point into the
+    /// store before omitting them from executable-manifest inputs. Real
+    /// directories and unrelated inward links at these paths stay inputs.
+    fn projected_paths(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// `ward attest`: this ecosystem's lock check, when it has one. `None`
     /// is refused (or, unnamed, skipped) when targets are chosen, before
     /// any preflight or store work.
@@ -631,6 +642,43 @@ pub trait Attester: Sync {
         host: &dyn EditHost,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<(crate::kernel::resolve::record::ResolutionRecord, Vec<u8>)>;
+}
+
+/// Every tailor's [`Tailor::projected_paths`].
+pub fn projected_paths() -> Vec<&'static str> {
+    let mut paths = Vec::new();
+    for tailor in registry() {
+        for path in tailor.projected_paths() {
+            if !paths.contains(path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// How an executable-manifest tailor treats the symlinks in its project,
+/// in both its resolution-input walk (`kernel::resolve::inputs::walk`) and
+/// its door's snapshot (`Snapshot::settle_links`). A project with several
+/// ecosystems has another tailor's `node_modules` or `.venv` link in it by
+/// the time this one resolves: a link at one of [`projected_paths`] into
+/// the store (configured or canonical) is ward's output, not this tool's
+/// input. A real directory or a foreign link at such a path stays an input.
+/// `required` names what the tool cannot do without, so a link there that
+/// leads out of the project is refused rather than withheld.
+pub(crate) fn resolution_links(
+    required: &[&str],
+) -> io::Result<crate::kernel::resolve::inputs::LinkRules> {
+    let mut roots = Vec::new();
+    if let Ok(configured) = crate::kernel::store::Store::configured_path() {
+        if let Ok(canonical) = configured.canonicalize() {
+            if canonical != configured {
+                roots.push(canonical);
+            }
+        }
+        roots.push(configured);
+    }
+    crate::kernel::resolve::inputs::LinkRules::new(&projected_paths(), required, roots)
 }
 
 /// The resolution files `tailor` names in `project`, or `None` when it
@@ -1017,6 +1065,61 @@ mod tests {
     const DARWIN: Platform = Platform::Aarch64AppleDarwin;
     const LINUX: Platform = Platform::X86_64UnknownLinuxGnu;
 
+    /// Every executable-manifest tailor leaves every other tailor's
+    /// projection out of its resolution inputs: a Rails app with a
+    /// JavaScript front end has node's `node_modules` link (and a
+    /// workspace member's) in it by the time Ruby resolves. Only ward's
+    /// own links into the store are left out: a checked-in `node_modules`
+    /// directory is an input, and a foreign link there is named by its
+    /// target text.
+    #[test]
+    fn executable_manifest_inputs_leave_out_every_projection() {
+        let projected = projected_paths();
+        for path in ["**/node_modules", "**/.venv"] {
+            assert!(projected.contains(&path), "{path}: {projected:?}");
+        }
+        let store = crate::kernel::store::Store::configured_path().unwrap();
+        let temp = crate::kernel::testutil::TempDir::new();
+        std::fs::create_dir_all(temp.0.join("packages/web")).unwrap();
+        std::fs::create_dir_all(temp.0.join("fixtures/node_modules")).unwrap();
+        std::fs::create_dir_all(temp.0.join(".greyward")).unwrap();
+        std::fs::write(temp.0.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+        std::fs::write(temp.0.join("Gemfile.lock"), "GEM\n").unwrap();
+        std::fs::write(temp.0.join(".greyward/closure.json"), "{}").unwrap();
+        std::fs::write(temp.0.join("fixtures/node_modules/config.rb"), "x").unwrap();
+        std::os::unix::fs::symlink(store.join("forest"), temp.0.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            store.join("member"),
+            temp.0.join("packages/web/node_modules"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(store.join("env"), temp.0.join(".venv")).unwrap();
+        std::os::unix::fs::symlink("/elsewhere/env", temp.0.join("packages/web/.venv")).unwrap();
+        std::fs::write(temp.0.join("packages/web/package.json"), "{}").unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        assert_eq!(
+            by_id("ruby").unwrap().resolution_inputs(&project).unwrap(),
+            vec![
+                PathBuf::from("fixtures/node_modules/config.rb"),
+                PathBuf::from("packages/web/.venv"),
+                PathBuf::from("packages/web/package.json"),
+            ]
+        );
+        std::fs::remove_dir_all(temp.0.join("fixtures")).unwrap();
+        std::fs::remove_file(temp.0.join("packages/web/.venv")).unwrap();
+        assert_eq!(
+            by_id("elixir")
+                .unwrap()
+                .resolution_inputs(&project)
+                .unwrap(),
+            vec![
+                PathBuf::from("Gemfile"),
+                PathBuf::from("Gemfile.lock"),
+                PathBuf::from("packages/web/package.json"),
+            ]
+        );
+    }
+
     /// Every shipped ecosystem has a resolution door, so `ward attest` can
     /// check each one's lock: a tailor that loses its attester stops being
     /// attestable, and this says so.
@@ -1302,8 +1405,8 @@ mod tests {
     }
 
     /// Each shipped publisher's real redirect chain stays inside its own
-    /// endpoints: one row of the default releases per publisher, on any
-    /// platform, is opened through the policy-checked fetch and its first
+    /// endpoints: one row per publisher, from the default release where it
+    /// has one, on any platform, is opened through the policy-checked fetch and its first
     /// bytes read.
     #[test]
     #[ignore = "network: opens one shipped artifact per publisher"]
@@ -1313,8 +1416,15 @@ mod tests {
         let mut opened = std::collections::BTreeSet::new();
         for tailor in registry() {
             let catalog = tailor.toolchain_catalog().unwrap();
-            let bundle = crate::kernel::toolchain::shipped(&catalog).unwrap().bundle;
-            for row in &bundle.artifacts {
+            let default = crate::kernel::toolchain::shipped(&catalog).unwrap().bundle;
+            // The default first, then any release served by a publisher the
+            // default does not use (Ruby's newer builds come only from
+            // Homebrew's container registry).
+            let rows = default
+                .artifacts
+                .iter()
+                .chain(catalog.bundles().iter().flat_map(|b| b.artifacts.iter()));
+            for row in rows {
                 if !opened.insert(row.provider.clone()) {
                     continue;
                 }
@@ -1840,8 +1950,8 @@ mod tests {
             version(&rows(None, Some(">=3.9"))),
             crate::tailors::python::pyselect::DEFAULT_VERSION
         );
-        assert_eq!(version(&rows(None, Some(">=3.13"))), "3.14.7");
-        assert_eq!(version(&rows(Some("3.13"), None)), "3.13.15");
+        assert_eq!(version(&rows(None, Some(">=3.13"))), "3.15.0");
+        assert_eq!(version(&rows(Some("3.13"), None)), "3.13.16");
         assert_eq!(version(&rows(Some("3.11.16"), Some(">=3.9"))), "3.11.16");
     }
 

@@ -651,6 +651,38 @@ mod tests {
     /// whole member set undetermined, with the one fixed refusal; one
     /// through a symlink inside it is a member (#694). npm's answer is
     /// faked here; the ignored tests in `npm_members` run the real one.
+    /// The planner preserves the lock bytes it consumed. The publication
+    /// check must use the same content digest for an unchanged symlinked
+    /// lock and refuse a later edit to its target.
+    #[test]
+    fn a_symlinked_lock_agrees_with_the_consumed_plan_basis() {
+        let temp = TempDir::named("symlink-lock-basis");
+        let lock = "{\"lockfileVersion\":3,\"packages\":{}}";
+        std::fs::write(
+            temp.0.join("package.json"),
+            "{\"name\":\"linked-lock\",\"version\":\"1.0.0\"}",
+        )
+        .unwrap();
+        std::fs::write(temp.0.join("actual-lock"), lock).unwrap();
+        std::os::unix::fs::symlink("actual-lock", temp.0.join("package-lock.json")).unwrap();
+        let project = ProjectRoot::open(&temp.0).unwrap();
+        let basis = resolution_basis(&project, "package-lock.json", lock).unwrap();
+        let files = crate::kernel::resolve::record::ResolutionFiles {
+            outputs: resolution_outputs(&project).unwrap(),
+            inputs: resolution_inputs(&project).unwrap(),
+        };
+        assert!(
+            crate::comforter::join::check_basis_for_test(&project, "node", &files, &basis).is_ok()
+        );
+        std::fs::write(temp.0.join("actual-lock"), "changed").unwrap();
+        let error = crate::comforter::join::check_basis_for_test(&project, "node", &files, &basis)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("package-lock.json changed"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_member_symlinked_outside_the_project_leaves_the_members_undetermined() {
         let temp = TempDir::named("node-outside-member");

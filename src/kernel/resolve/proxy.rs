@@ -1056,8 +1056,24 @@ fn connect<S: Stream>(context: &Context, request: &Request, reader: &mut BufRead
             super::intercept::serve_tunnel(context, &tunnel, record, reader);
             Ok(())
         }
-        Intercept::Tls | Intercept::RefuseVisibly => refuse_tunnel(state, &tunnel, record, out),
+        // Git alone, and only to the hosts the manifest names.
+        Intercept::Git if git_host_listed(&state.config.git_hosts, &host, port) => {
+            super::intercept::serve_tunnel(context, &tunnel, record, reader);
+            Ok(())
+        }
+        Intercept::Tls | Intercept::Git | Intercept::RefuseVisibly => {
+            refuse_tunnel(state, &tunnel, record, out)
+        }
     };
+}
+
+/// Whether a git-only session admits a tunnel to `host` on `port`: a listed
+/// bare host on 443, or a listed `host:port` exactly.
+fn git_host_listed(hosts: &[String], host: &str, port: u16) -> bool {
+    hosts.iter().any(|listed| match listed.rsplit_once(':') {
+        Some((name, listed_port)) => name == host && listed_port.parse() == Ok(port),
+        None => port == 443 && listed == host,
+    })
 }
 
 /// Refuse an authenticated tunnel, naming the host and why, and record the
@@ -1072,6 +1088,16 @@ fn refuse_tunnel(
         (
             policy::GIT_DEPENDENCY,
             "git:// is unauthenticated; use https://".to_string(),
+        )
+    } else if state.config.intercept == Intercept::Git {
+        (
+            policy::UNATTESTED_INDEX,
+            format!(
+                "{} is not reachable from this door; it reaches registries only through its \
+                 mirror routes, and git only on the hosts the manifest's git sources name ({})",
+                tunnel.host,
+                state.config.git_hosts.join(", ")
+            ),
         )
     } else {
         (
@@ -1366,6 +1392,19 @@ mod tests {
         get, mirror, proxy_authorization, send, Harness, Reach, TEST_ORIGIN_PUBLIC,
     };
     use crate::kernel::testutil::SocketDir;
+
+    /// A git-only session's host list: a bare host admits 443 alone, a
+    /// `host:port` that port alone, and nothing else matches.
+    #[test]
+    fn git_hosts_admit_443_or_their_exact_port() {
+        let hosts = ["git.test".to_string(), "ported.test:8443".to_string()];
+        assert!(git_host_listed(&hosts, "git.test", 443));
+        assert!(!git_host_listed(&hosts, "git.test", 8443));
+        assert!(!git_host_listed(&hosts, "git.test", GIT_PORT));
+        assert!(git_host_listed(&hosts, "ported.test", 8443));
+        assert!(!git_host_listed(&hosts, "ported.test", 443));
+        assert!(!git_host_listed(&hosts, "other.test", 443));
+    }
 
     #[test]
     fn retry_after_reads_seconds_and_http_dates() {

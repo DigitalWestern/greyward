@@ -23,11 +23,6 @@ pub(crate) fn registry_exists(name: &str) -> io::Result<Option<String>> {
     })
 }
 
-/// Bundler's CLI remove unconditionally installs in the shipped release.
-/// Use only its Gemfile editor, then re-lock in a separate delegated run.
-pub(crate) const REMOVE_GEMS: &str =
-    "abort 'no gems requested' if ARGV.empty?; Bundler::Injector.remove(ARGV)";
-
 /// The Ruby and Bundler commands one edit runs, in order. Resolution only ever
 /// writes the Gemfile and Gemfile.lock: `bundle add` and `bundle update`
 /// would also install every gem they resolve into the host's gem paths
@@ -50,14 +45,9 @@ pub(super) fn bundler_runs(verb: EditVerb, texts: &[String], dev: bool) -> Vec<V
             })
             .collect(),
         EditVerb::Remove => {
-            let mut args = vec![
-                "ruby",
-                "-rbundler",
-                "-rbundler/injector",
-                "-e",
-                REMOVE_GEMS,
-                "--",
-            ];
+            // The CLI remove installs gems in the shipped release. The
+            // indexed helper uses only its editor, then we re-lock.
+            let mut args = vec!["ruby", "@SCRATCH@/helper.rb", "remove"];
             args.extend(texts.iter().map(String::as_str));
             vec![args, vec!["bundle", "lock"]]
         }
@@ -79,6 +69,8 @@ pub(crate) fn edit_manifest(
     let selected = edit.host.toolchain(project, "ruby")?;
     let ruby_obj = super::realize_runtime(door.store(), door.lease(), door.platform(), &selected)?;
     let root = ProjectRoot::open(project)?;
+    // An existing lock written by a newer Bundler is edited with that one.
+    let bundler = super::bundler::project_bundler(door, &root, &ruby_obj, &selected)?;
     // Every run publishes the Gemfile and Gemfile.lock with a record of its
     // own, so no state between two runs sits under an older record.
     for args in bundler_runs(edit.verb, texts, dev) {
@@ -100,6 +92,7 @@ pub(crate) fn edit_manifest(
                 inputs: Some(&basis),
                 frozen: false,
                 files: Vec::new(),
+                bundler: bundler.as_ref(),
                 publish: RubyPublish::Project {
                     receipt: Some(record::producer(spec, Default::default())),
                 },
@@ -157,15 +150,7 @@ mod tests {
         assert_eq!(
             bundler_runs(EditVerb::Remove, &named, false),
             [
-                vec![
-                    "ruby",
-                    "-rbundler",
-                    "-rbundler/injector",
-                    "-e",
-                    REMOVE_GEMS,
-                    "--",
-                    "rack"
-                ],
+                vec!["ruby", "@SCRATCH@/helper.rb", "remove", "rack"],
                 vec!["bundle", "lock"],
             ]
         );

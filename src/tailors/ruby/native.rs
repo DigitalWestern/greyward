@@ -71,6 +71,9 @@ pub(super) struct GemInstall<'a> {
     /// ward's native library set, which native gems build with
     /// (`native_libs`).
     pub(super) native_libs: Option<&'a Path>,
+    /// The Bundler version the helper activates before it requires one
+    /// (`bundler`), when the plan provisioned one.
+    pub(super) bundler: Option<&'a str>,
 }
 
 impl GemInstall<'_> {
@@ -227,6 +230,12 @@ impl GemInstall<'_> {
                 ("GEM_PATH".to_string(), staged.display().to_string()),
                 ("BUNDLE_IGNORE_CONFIG".to_string(), "1".to_string()),
             ];
+            if let Some(version) = self.bundler {
+                env.push((
+                    super::bundler::VERSION_VARIABLE.to_string(),
+                    version.to_string(),
+                ));
+            }
             env.extend(extra);
             let mut read = vec![ruby_obj.to_path_buf(), scratch.to_path_buf()];
             if let Some(set) = native_libs {

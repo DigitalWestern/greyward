@@ -256,6 +256,7 @@ impl Harness {
             door: "edit".into(),
             routes: vec![self.route()],
             intercept: Intercept::RefuseVisibly,
+            git_hosts: Vec::new(),
             policy,
             mode,
             store: self.store.clone(),

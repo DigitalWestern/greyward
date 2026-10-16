@@ -3,7 +3,10 @@
 //! mirror, or with no route at all for the helper's lock checks.
 
 use super::{forced_env, registry, ENV_REMOVE, ENV_REMOVE_PREFIXES, GEMFILE};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::{ConfinedSpec, Publish, ReceiptProducer, Wire, Wiring};
+use crate::kernel::resolve::inputs::{self, LinkRules, Walk, WalkSpec};
+use crate::kernel::resolve::session::Intercept;
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
@@ -23,10 +26,43 @@ pub(crate) const OUTPUTS: [&str; 2] = ["Gemfile", "Gemfile.lock"];
 /// (`BUNDLE_IGNORE_CONFIG=1`, gems in the run's scratch).
 pub(super) const EXCLUDE: [&str; 4] = ["vendor/bundle", ".bundle", ".git", ".greyward"];
 
+/// What Bundler cannot resolve without besides [`OUTPUTS`]: a gemspec the
+/// Gemfile's `gemspec` names and the Ruby version files. A link among
+/// them that leads out of the project is refused, never withheld.
+const REQUIRED: [&str; 5] = [
+    "Gemfile",
+    "Gemfile.lock",
+    "**/*.gemspec",
+    ".ruby-version",
+    ".tool-versions",
+];
+
+/// How the walk and the snapshot treat the project's symlinks
+/// (`tailors::resolution_links`).
+pub(super) fn links() -> io::Result<LinkRules> {
+    crate::tailors::resolution_links(&REQUIRED)
+}
+
+/// Every project entry a Gemfile could read, by digest
+/// (`kernel::resolve::inputs::walk`).
+pub(super) fn walk(project: &ProjectRoot) -> io::Result<Walk> {
+    inputs::walk(
+        project,
+        &WalkSpec {
+            excludes: &EXCLUDE,
+            outputs: &OUTPUTS,
+            links: &links()?,
+        },
+    )
+}
+
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there, the one greyward-written
 /// directory the sandbox sees.
 pub(crate) const SCRATCH: &str = "@SCRATCH@";
+
+/// The helper's file name in the scratch directory.
+pub(super) const HELPER_FILE: &str = "helper.rb";
 
 /// Where a confined Bundler run's results go.
 pub(crate) enum RubyPublish<'a> {
@@ -58,6 +94,11 @@ pub(crate) struct RubyRun<'a> {
     /// to it.
     pub files: Vec<(PathBuf, Vec<u8>)>,
     pub publish: RubyPublish<'a>,
+    /// The Bundler the lock was written with, when ward provisioned one
+    /// newer than the store Ruby's (`super::bundler`): its object is bound
+    /// read-only and put on `GEM_PATH`, where RubyGems activates it for the
+    /// lock, and the helper activates it by version.
+    pub bundler: Option<&'a super::bundler::Provisioned>,
 }
 
 /// The ruby a resolution record names: the selected release, whose
@@ -83,10 +124,13 @@ fn spec(run: &RubyRun<'_>) -> DelegateSpec {
                 .join("bin")
                 .join(if bundle { "ruby" } else { run.args[0] }),
         );
+    // The helper does that (`ruby -x bin/bundle`), around a throwaway git
+    // index of the project copy for the gemspecs' `git ls-files`.
     if bundle {
         spec.args([
-            OsString::from("-x"),
-            run.ruby_obj.join("bin/bundle").into_os_string(),
+            format!("{SCRATCH}/{HELPER_FILE}"),
+            "indexed".into(),
+            "bundle".into(),
         ]);
     }
     spec.args(&run.args[1..]).lock_root(run.lock_root);
@@ -121,6 +165,13 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.ruby_obj.to_path_buf()];
+    let bundler = run
+        .bundler
+        .map(|bundler| (bundler.object.clone(), bundler.pin.version.clone()));
+    if let Some((object, _)) = &bundler {
+        confined.store_reads.push(object.clone());
+    }
+    confined.links = Some(links()?);
     confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
@@ -130,14 +181,46 @@ pub(crate) fn ruby_confined<'a>(run: &mut RubyRun<'a>) -> io::Result<ConfinedSpe
     } else {
         Vec::new()
     };
+    // A run that may write the lock clones the Gemfile's git sources:
+    // git fetches to the hosts they name, and to no other, go through the
+    // proxy, each recorded as `git-dependency`.
+    if run.online {
+        let root = crate::kernel::fsroot::ProjectRoot::open(run.lock_root)?;
+        let gemfile = root.read_input_string(Path::new(GEMFILE))?;
+        let hosts = super::githosts::git_hosts(gemfile.as_deref().unwrap_or_default());
+        if !hosts.is_empty() {
+            confined.intercept = Intercept::Git;
+            confined.git_hosts = hosts;
+        }
+    }
     let online = run.online;
-    let files = std::mem::take(&mut run.files);
+    let mut files = std::mem::take(&mut run.files);
+    // Both the bundle launcher and the removal editor use the helper.
+    if (run.args[0] == "bundle" || run.args.get(1) == Some(&"@SCRATCH@/helper.rb"))
+        && !files.iter().any(|(path, _)| path == Path::new(HELPER_FILE))
+    {
+        files.push((
+            PathBuf::from(HELPER_FILE),
+            super::HELPER.as_bytes().to_vec(),
+        ));
+    }
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         let gems = wire.scratch.join("gems");
-        let mut env: Vec<(OsString, OsString)> = vec![
-            ("GEM_HOME".into(), gems.clone().into()),
-            ("GEM_PATH".into(), gems.into()),
-        ];
+        // The run's own gem home first; a provisioned Bundler's object
+        // after it, read-only (a store path holds no ':').
+        let mut path = gems.clone().into_os_string();
+        if let Some((object, _)) = &bundler {
+            path.push(":");
+            path.push(object);
+        }
+        let mut env: Vec<(OsString, OsString)> =
+            vec![("GEM_HOME".into(), gems.into()), ("GEM_PATH".into(), path)];
+        if let Some((_, version)) = &bundler {
+            env.push((
+                super::bundler::VERSION_VARIABLE.into(),
+                version.clone().into(),
+            ));
+        }
         // A run with no route gets no proxy at all: a connection it tried
         // would fail in the sandbox rather than reach the session as a
         // refused CONNECT.
@@ -256,6 +339,7 @@ mod tests {
             frozen: false,
             files: Vec::new(),
             publish: RubyPublish::Detached,
+            bundler: None,
         };
         let command = format!("{:?}", spec(&run).command());
         let spec = spec(&run);
@@ -263,7 +347,7 @@ mod tests {
         assert_eq!(direct.get_program(), "/store/obj/ruby/bin/ruby");
         assert_eq!(
             direct.get_args().collect::<Vec<_>>(),
-            vec!["-x", "/store/obj/ruby/bin/bundle", "lock"],
+            vec!["@SCRATCH@/helper.rb", "indexed", "bundle", "lock"],
         );
         assert!(
             command.contains("PATH=\"/store/obj/ruby/bin:/usr/bin:/bin\""),

@@ -9,9 +9,11 @@
 //! env vars, so every greyward-controlled invocation scrubs BUNDLE_*/RUBY*
 //! preload vars and sets BUNDLE_IGNORE_CONFIG=1.
 
+mod bundler;
 mod door;
 pub mod edit;
 mod gem_home;
+mod githosts;
 mod helper;
 mod locked;
 mod native;
@@ -22,6 +24,7 @@ mod resolve;
 mod sources;
 pub mod tailor;
 mod unpack;
+pub use bundler::RubyBundler;
 pub use sources::{RubyGitGem, RubyPathGem};
 
 use helper::HELPER;
@@ -192,6 +195,11 @@ fn ruby_gems_identity(spec: &RubySpec, plan: &RubyPlan, native_libs_id: Option<&
     // under; the value names every lock source read from that directory.
     for checkout in sources::checkouts(&plan.git_gems) {
         inputs.insert(format!("git:{}", checkout.name), checkout.identity_input());
+    }
+    // A provisioned Bundler (`bundler`); a plan on the store Ruby's own
+    // keeps the id it always had.
+    if let Some(bundler) = &plan.bundler {
+        inputs.insert("bundler".to_string(), bundler.identity_input());
     }
     Identity {
         kind: "ruby-gems".into(),
@@ -578,6 +586,10 @@ pub struct RubyPlan {
     /// Gems the lock takes from a `GIT` source at a locked commit.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git_gems: Vec<RubyGitGem>,
+    /// The Bundler `BUNDLED WITH` names, provisioned when newer than the
+    /// store Ruby's own (`bundler`); `bundler_version` is then its version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundler: Option<RubyBundler>,
 }
 
 fn valid_component(s: &str) -> bool {
@@ -685,10 +697,23 @@ pub fn plan_ruby(
     // sync; the store's digest records keep an unchanged lock off the
     // network, and its object cache makes realizes instant.
 
+    // The Bundler the lock was written with, when the store Ruby's own is
+    // older: both gates read the lock with it.
+    let bundler = bundler::locked_bundler(door, ruby_obj, selected, &lock)?;
     // Both gates run confined with no route: full network denial.
+    let mut gate = |mode| {
+        resolve::helper(
+            door,
+            project,
+            ruby_obj,
+            mode,
+            Some(&basis),
+            bundler.as_ref(),
+        )
+    };
     // Gate 1: Gemfile/lock equivalence + ruby directive. EVALS THE GEMFILE
     // (delegated resolver trust) — exit status only, stdout untrusted.
-    let out = resolve::helper(door, project, ruby_obj, "check", Some(&basis))?;
+    let out = gate("check")?;
     if !out.status.success() {
         return Err(err(format!(
             "Gemfile/Gemfile.lock validation failed: {}",
@@ -696,7 +721,7 @@ pub fn plan_ruby(
         )));
     }
     // Gate 2: LOCK-ONLY closure derivation (never evaluates the Gemfile).
-    let out = resolve::helper(door, project, ruby_obj, "plan", Some(&basis))?;
+    let out = gate("plan")?;
     if !out.status.success() {
         return Err(err(format!(
             "bundler lock analysis failed: {}{}",
@@ -773,6 +798,7 @@ pub fn plan_ruby(
             digest_in_lock,
         });
     }
+    bundler::check_reader(bundler.as_ref(), &parsed.bundler)?;
     let plan = RubyPlan {
         // The interpreter this plan was made under is the selected one, so
         // the plan records the selection's version, never the shipped pin.
@@ -782,6 +808,7 @@ pub fn plan_ruby(
         gems,
         path_gems: parsed.path_gems,
         git_gems: parsed.git_gems,
+        bundler: bundler.map(|bundler| bundler.pin),
     };
     validate_plan(&plan)?;
     // Snapshot guard: the lock this plan derives from is the lock whose
@@ -880,6 +907,22 @@ fn verify_gem(
     let url = gem_url(g);
     let lease = download_verified_held(store, activity, &url, &g.sha256)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", g.full_name)))?;
+    let (executables, native) =
+        read_gem_spec_checked(activity, ruby_obj, scratch, helper, g, &lease)?;
+    Ok((lease, executables, native))
+}
+
+/// Read the gemspec embedded in the verified `.gem` at `gem_file` and check
+/// it names exactly `g` (`spec_matches_plan`): its executables, and
+/// whether it declares native extensions.
+fn read_gem_spec_checked(
+    activity: &StoreActivity,
+    ruby_obj: &Path,
+    scratch: &Path,
+    helper: &Path,
+    g: &RubyGem,
+    gem_file: &Path,
+) -> io::Result<(Vec<String>, bool)> {
     let out = read_gem_spec(
         activity,
         ruby_obj,
@@ -891,7 +934,7 @@ fn verify_gem(
                 .to_str()
                 .ok_or_else(|| err("helper path not UTF-8"))?,
             "spec",
-            lease.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
+            gem_file.to_str().ok_or_else(|| err("gem path not UTF-8"))?,
         ],
     )?;
     if !out.status.success() {
@@ -901,8 +944,7 @@ fn verify_gem(
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    let (executables, native) = spec_matches_plan(g, &out.stdout)?;
-    Ok((lease, executables, native))
+    spec_matches_plan(g, &out.stdout)
 }
 
 /// On an object hit, record the API digests this plan used. The object
@@ -1157,6 +1199,19 @@ fn install_gems(
         scratch,
         staged: &staged,
         native_libs: work.native_libs.map(|set| set.path.as_path()),
+        bundler: plan
+            .bundler
+            .as_ref()
+            .map(|bundler| bundler.version.as_str()),
+    };
+    // The Bundler the lock was written with, first: the git checkouts'
+    // installs below read their gemspecs with it, and at run time it is the
+    // `bundle` RubyGems activates for this lock.
+    let _bundler_lease = match &plan.bundler {
+        Some(bundler) => Some(bundler::install(bundler, scratch, &sandboxed, |gem| {
+            verify_gem(store, activity, ruby_obj, scratch, helper, gem).map(|(lease, ..)| lease)
+        })?),
+        None => None,
     };
     let mut fell_back = Vec::new();
     // The host state every fallback was built against (`same_host_state`).
@@ -1225,6 +1280,9 @@ fn install_gems(
     }
     for gem in &plan.gems {
         deps.cache_digest(Digest::sha256(&gem.sha256)?);
+    }
+    if let Some(bundler) = &plan.bundler {
+        deps.cache_digest(Digest::sha256(&bundler.sha256)?);
     }
     // A gem rebuilt against the whole host recorded `host-build-inputs`:
     // the object carries it, so a later cache hit replays it through
@@ -1357,6 +1415,7 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
         bundler_version: "2.6.9".into(),
         path_gems: Vec::new(),
         git_gems: Vec::new(),
+        bundler: None,
         gems: Vec::new(),
     };
     let gem_plan = RubyPlan {
@@ -1384,6 +1443,24 @@ pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let linux_libs = (!platform.is_macos()).then_some(native_libs_id.as_str());
     let git = ruby_gems_identity(&spec, &git_plan, linux_libs);
     cases.push(git.clone());
+    // A lock written by a newer Bundler: its own object, and the gems
+    // object it is installed into first.
+    let provisioned = RubyBundler {
+        version: "4.0.3".into(),
+        sha256: "f06623d5edf4183e5fac847a953c1f1bd95e27aa766471525d3a9c70bdee9394".into(),
+        digest_in_lock: false,
+        digest_from_api: false,
+    };
+    cases.push(bundler::identity(&spec, &provisioned));
+    cases.push(ruby_gems_identity(
+        &spec,
+        &RubyPlan {
+            bundler_version: provisioned.version.clone(),
+            bundler: Some(provisioned),
+            ..gem_plan.clone()
+        },
+        None,
+    ));
     if !platform.is_macos() {
         cases.push(ruby_gems_identity(&spec, &gem_plan, Some(&native_libs_id)));
         cases.push(ruby_gems_fallback_identity(
@@ -1540,14 +1617,20 @@ mod tests {
         for bundle in catalog.bundles() {
             for platform in Platform::ALL {
                 let row = bundle.artifact(*platform, "ruby").unwrap();
-                assert!(
-                    row.url.starts_with(&format!(
+                // A GitHub release asset named for its build, or a registry
+                // blob named for the digest the row pins.
+                let released = row.provider == "homebrew-portable-ruby"
+                    && row.url.starts_with(&format!(
                         "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/{}/portable-ruby-{}.",
                         row.build, row.build
-                    )),
-                    "{}",
-                    row.url
-                );
+                    ));
+                let registry = row.provider == "ghcr-homebrew-portable-ruby"
+                    && row.url
+                        == format!(
+                            "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:{}",
+                            row.digest.hex()
+                        );
+                assert!(released || registry, "{}", row.url);
             }
         }
         // The default is unchanged by the newer rows around it.
@@ -1574,6 +1657,7 @@ mod tests {
             bundler_version: "2.6.9".into(),
             path_gems: Vec::new(),
             git_gems: Vec::new(),
+            bundler: None,
             gems: vec![RubyGem {
                 name: "rake".into(),
                 version: "13.2.1".into(),
@@ -1808,6 +1892,7 @@ mod tests {
             bundler_version: "2.6.9".into(),
             path_gems: Vec::new(),
             git_gems: Vec::new(),
+            bundler: None,
             gems: vec![RubyGem {
                 name: "rake".into(),
                 version: "13.2.1".into(),
@@ -1842,6 +1927,7 @@ mod tests {
             bundler_version: "2.6.9".into(),
             path_gems: Vec::new(),
             git_gems: Vec::new(),
+            bundler: None,
             gems: vec![base.clone()],
         };
         assert!(validate_plan(&ok).is_ok());
@@ -1874,6 +1960,7 @@ mod tests {
             bundler_version: "2.6.9".into(),
             path_gems: Vec::new(),
             git_gems: Vec::new(),
+            bundler: None,
             gems: vec![
                 RubyGem {
                     name: "mini_portile2".into(),
@@ -2145,6 +2232,7 @@ mod tests {
             bundler_version: "2.6.9".into(),
             path_gems: Vec::new(),
             git_gems: Vec::new(),
+            bundler: None,
             gems: vec![
                 gem("pinned", true, false),
                 gem("asked", false, true),

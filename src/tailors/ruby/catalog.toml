@@ -7,6 +7,96 @@ primary = ["ruby"]
 default = "ruby-3.4.6"
 
 [[release]]
+key = "ruby-4.0.7"
+components = [
+  { name = "ruby", version = "4.0.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.7_1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:25d6becc4464b6e65ac38a76ccd27eee8be5d0d805f6b3292d74e37deb8dd13b", digest = "sha256:25d6becc4464b6e65ac38a76ccd27eee8be5d0d805f6b3292d74e37deb8dd13b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.7_1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:1f78c64df16fc4715452d059c3a8482ba12b683cc582a2e07e19bddaea88d4f7", digest = "sha256:1f78c64df16fc4715452d059c3a8482ba12b683cc582a2e07e19bddaea88d4f7" },
+]
+
+[[release]]
+key = "ruby-4.0.6"
+components = [
+  { name = "ruby", version = "4.0.6" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.6_2", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:1643bb83d705f0c5e34445af151bb064bdf984081eff18a9646466b8fdd104db", digest = "sha256:1643bb83d705f0c5e34445af151bb064bdf984081eff18a9646466b8fdd104db" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.6_2", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:01c1adce6394bcb5b1daa0921e5b0b5c64ec90641abd4678681ea7df7445791a", digest = "sha256:01c1adce6394bcb5b1daa0921e5b0b5c64ec90641abd4678681ea7df7445791a" },
+]
+
+[[release]]
+key = "ruby-4.0.5"
+components = [
+  { name = "ruby", version = "4.0.5" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.5_1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:4ba8d535df01e4bf97e6661c3815796fd77364ea2552606e891659133a76f0e1", digest = "sha256:4ba8d535df01e4bf97e6661c3815796fd77364ea2552606e891659133a76f0e1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.5_1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:2627985aa990199b93efb66d8e6752e8234c4901fa3a365fa13875ba45a4059e", digest = "sha256:2627985aa990199b93efb66d8e6752e8234c4901fa3a365fa13875ba45a4059e" },
+]
+
+[[release]]
+key = "ruby-4.0.4"
+components = [
+  { name = "ruby", version = "4.0.4" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.4", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:e666cc63add686cf3394d7b9f27c314b22d1871cd9a751aaef7e9d44cebf54e1", digest = "sha256:e666cc63add686cf3394d7b9f27c314b22d1871cd9a751aaef7e9d44cebf54e1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.4", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:1e0dca6f678788420721478178944db366e9e90c5768765074ae38631ccd4558", digest = "sha256:1e0dca6f678788420721478178944db366e9e90c5768765074ae38631ccd4558" },
+]
+
+[[release]]
+key = "ruby-4.0.3"
+components = [
+  { name = "ruby", version = "4.0.3" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.3", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:8ad98d9cf15477d1a43f4012cfd5eff5c271398bca1e2724b55bd4944a0bb1d4", digest = "sha256:8ad98d9cf15477d1a43f4012cfd5eff5c271398bca1e2724b55bd4944a0bb1d4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.3", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:cb96f8003dc6afae036adeaf892578fbc34eb11bbb5660dca7213677fa1047e8", digest = "sha256:cb96f8003dc6afae036adeaf892578fbc34eb11bbb5660dca7213677fa1047e8" },
+]
+
+[[release]]
+key = "ruby-4.0.2"
+components = [
+  { name = "ruby", version = "4.0.2" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.2_1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:f41c72b891c40623f9d5cd2135f58a1b8a5c014ae04149888289409316276c72", digest = "sha256:f41c72b891c40623f9d5cd2135f58a1b8a5c014ae04149888289409316276c72" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.2_1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:25a7c872b5e518adc2c6877e1474fba4dc7bd27f79729bfbfcc22d44fbca839f", digest = "sha256:25a7c872b5e518adc2c6877e1474fba4dc7bd27f79729bfbfcc22d44fbca839f" },
+]
+
+[[release]]
+key = "ruby-4.0.1"
+components = [
+  { name = "ruby", version = "4.0.1" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:cef6f881f516d2cdbd0a5bfc7e20318da8b047cf2674ee27c5d4858d3ecd6430", digest = "sha256:cef6f881f516d2cdbd0a5bfc7e20318da8b047cf2674ee27c5d4858d3ecd6430" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "4.0.1", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:e5868bc36f93b2d9caf5457ddaa0e790637c0962d84bae078f7200c4092c936e", digest = "sha256:e5868bc36f93b2d9caf5457ddaa0e790637c0962d84bae078f7200c4092c936e" },
+]
+
+[[release]]
+key = "ruby-3.4.8"
+components = [
+  { name = "ruby", version = "3.4.8" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "3.4.8", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:1c98fa49eacc935640a6f8e10a2bf33f14cfc276804b71ddb658ea45ba99d167", digest = "sha256:1c98fa49eacc935640a6f8e10a2bf33f14cfc276804b71ddb658ea45ba99d167" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "3.4.8", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:63a9c333137e7cf8a568e0f37ec6802c22fbbdd5839f4825c863c26e415d2947", digest = "sha256:63a9c333137e7cf8a568e0f37ec6802c22fbbdd5839f4825c863c26e415d2947" },
+]
+
+[[release]]
+key = "ruby-3.4.7"
+components = [
+  { name = "ruby", version = "3.4.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "3.4.7", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:c6946ba2c387b47934e77c352c2056489421003ec7ddb2abf246cef2168ec140", digest = "sha256:c6946ba2c387b47934e77c352c2056489421003ec7ddb2abf246cef2168ec140" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "3.4.7", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:3cca179476f84b0055766aa976005e3d45da635f0bc7616984675e2232db1eb4", digest = "sha256:3cca179476f84b0055766aa976005e3d45da635f0bc7616984675e2232db1eb4" },
+]
+
+[[release]]
 key = "ruby-3.4.6"
 components = [
   { name = "ruby", version = "3.4.6" },
@@ -14,6 +104,17 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "ruby", provider = "homebrew-portable-ruby", build = "3.4.6", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.arm64_big_sur.bottle.tar.gz", digest = "sha256:62fe925f284cc38aac68b9a42b02cd90de753f8832e8866be3fd60558dd70f67" },
   { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "homebrew-portable-ruby", build = "3.4.6", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.4.6/portable-ruby-3.4.6.x86_64_linux.bottle.tar.gz", digest = "sha256:40932a3950ccc8bf9d13d98e692e5518427cc66b4f9520956cec349629d25259" },
+]
+
+[[release]]
+key = "ruby-3.4.6-r2"
+revision = 2
+components = [
+  { name = "ruby", version = "3.4.6" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "3.4.6", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:695bdce688efbfb42c7087081d1d3e9b360383a68f518f09d5b2e7b1a94732c3", digest = "sha256:695bdce688efbfb42c7087081d1d3e9b360383a68f518f09d5b2e7b1a94732c3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "ghcr-homebrew-portable-ruby", build = "3.4.6", recipe = "ruby-toolchain/1", url = "https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:4fda7484ee4de45e40cedd46837622d98f2ae80481ea04935740177d58bbefdc", digest = "sha256:4fda7484ee4de45e40cedd46837622d98f2ae80481ea04935740177d58bbefdc" },
 ]
 
 [[release]]
@@ -124,4 +225,34 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "ruby", provider = "homebrew-portable-ruby", build = "3.3.1", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.3.1/portable-ruby-3.3.1.arm64_big_sur.bottle.tar.gz", digest = "sha256:86ff822590529e8e9093cdc1702a1d3321678c85347d30f82db4f993db8f9eb1" },
   { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "homebrew-portable-ruby", build = "3.3.1", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.3.1/portable-ruby-3.3.1.x86_64_linux.bottle.tar.gz", digest = "sha256:f49956aa43522c8e86127f7f5d377af2651fe35da975f5993eb2d038865c118c" },
+]
+
+[[release]]
+key = "ruby-3.1.4"
+components = [
+  { name = "ruby", version = "3.1.4" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "homebrew-portable-ruby", build = "3.1.4", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.1.4/portable-ruby-3.1.4.arm64_big_sur.bottle.tar.gz", digest = "sha256:d783cbeb6e6ef0d71c0b442317b54554370decd6fac66bf2d4938c07a63f67be" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "homebrew-portable-ruby", build = "3.1.4", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/3.1.4/portable-ruby-3.1.4.x86_64_linux.bottle.tar.gz", digest = "sha256:f7be167f7ac4f296b9f4c5874ceeea4aafd9999c3c7f2b0378cae7dd273e2322" },
+]
+
+[[release]]
+key = "ruby-2.6.10"
+components = [
+  { name = "ruby", version = "2.6.10" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "homebrew-portable-ruby", build = "2.6.10_1", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.10_1/portable-ruby-2.6.10_1.arm64_big_sur.bottle.tar.gz", digest = "sha256:905b0c3896164ae8067a22fff2fd0b80b16d3c8bb72441403eedf69da71ec717" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "homebrew-portable-ruby", build = "2.6.10_1", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.10_1/portable-ruby-2.6.10_1.x86_64_linux.bottle.tar.gz", digest = "sha256:68923daf3e139482b977c3deba63a3b54ea37bb5f716482948878819ef911bad" },
+]
+
+[[release]]
+key = "ruby-2.6.8"
+components = [
+  { name = "ruby", version = "2.6.8" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "ruby", provider = "homebrew-portable-ruby", build = "2.6.8_1", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.8_1/portable-ruby-2.6.8_1.arm64_big_sur.bottle.tar.gz", digest = "sha256:cf9137b1da5568d4949f71161a69b101f60ddb765e94d2b423c9801b67a1cb43" },
+  { platform = "x86_64-unknown-linux-gnu", component = "ruby", provider = "homebrew-portable-ruby", build = "2.6.8_1", recipe = "ruby-toolchain/1", url = "https://github.com/Homebrew/homebrew-portable-ruby/releases/download/2.6.8_1/portable-ruby-2.6.8_1.x86_64_linux.bottle.tar.gz", digest = "sha256:fc45ee6eddf4c7a17f4373dde7b1bc8a58255ea61e6847d3bf895225b28d072a" },
 ]

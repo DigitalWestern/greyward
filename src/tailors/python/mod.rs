@@ -373,7 +373,7 @@ mod tests {
             for invalid in [
                 "03.12",
                 "3.12.014",
-                "3.9.25",
+                "3.7.17",
                 "3.12.14.0",
                 "v3.12",
                 "3.12.14 ",
@@ -381,7 +381,7 @@ mod tests {
             ] {
                 assert!(lookup(platform, invalid).is_none(), "{invalid}");
             }
-            assert_eq!(lookup(platform, "3.12").unwrap().version, "3.12.14");
+            assert_eq!(lookup(platform, "3.12").unwrap().version, "3.12.15");
             assert_eq!(lookup(platform, "3.12.14").unwrap().version, "3.12.14");
         }
     }

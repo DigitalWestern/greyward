@@ -28,6 +28,8 @@ Usage, from the repository root:
     python3 tools/catalog.py                 # every ecosystem
     python3 tools/catalog.py go node         # just these
     python3 tools/catalog.py --check go      # verify, write nothing, exit 1 on drift
+    python3 tools/catalog.py --drift         # the same, with GitHub Actions annotations
+                                             # (catalog-drift.yml runs it weekly)
     python3 tools/catalog.py --set-default go-1.27.1 go
     python3 tools/catalog.py --against origin/main   # a PR's catalogs: append-only, rows verified
 
@@ -47,7 +49,6 @@ Standard library only. Offline tests: `python3 tools/test_catalog.py`.
 import argparse
 import base64
 import concurrent.futures
-import datetime
 import hashlib
 import json
 import os
@@ -65,7 +66,6 @@ REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 DARWIN = "aarch64-apple-darwin"
 LINUX = "x86_64-unknown-linux-gnu"
 PLATFORMS = (DARWIN, LINUX)
-TODAY = datetime.date.today()
 
 FILES = {
     "python": "src/kernel/provider/cpython.catalog.toml",
@@ -91,6 +91,13 @@ class Failure(Exception):
     """A row that does not verify, or an upstream that cannot be read."""
 
 
+class Unreachable(Failure):
+    """An upstream that did not answer after every retry. It says nothing
+    about a release, so it is never read as a verdict on one: a step that
+    leaves out a release whose checks fail re-raises it, and the run (the
+    weekly drift job too) fails."""
+
+
 # --------------------------------------------------------------------------
 # HTTP. Listings, indexes and checksum files change upstream (a new release,
 # a re-published asset), so they are always fetched fresh: a cached answer
@@ -100,6 +107,11 @@ class Failure(Exception):
 
 CACHE = os.path.join(os.environ.get("TMPDIR", "/tmp"), "greyward-catalog-cache")
 _token = None
+# GitHub's container registry (Homebrew's portable-ruby): anonymous pulls
+# send this fixed token, and listings ask for the OCI index and manifest.
+GHCR_ORIGIN = "https://ghcr.io"
+GHCR_ANONYMOUS = "Bearer QQ=="
+OCI_ACCEPT = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
 
 
 def github_token():
@@ -120,22 +132,32 @@ def http_get(url):
     """One GET: the body, or None for a 404. The single network seam (the
     offline tests replace it)."""
     headers = {"User-Agent": "greyward-catalog-generator"}
+    unredirected = {}
     if url.startswith("https://api.github.com/"):
         headers["Accept"] = "application/vnd.github+json"
         if github_token():
             headers["Authorization"] = f"Bearer {github_token()}"
+    if url.startswith(GHCR_ORIGIN + "/"):
+        headers["Accept"] = OCI_ACCEPT
+        # The registry's anonymous pull token, the public constant Homebrew
+        # sends too. Never forwarded to the blob CDN a pull redirects to.
+        unredirected["Authorization"] = GHCR_ANONYMOUS
     last = None
     for _ in range(4):
+        request = urllib.request.Request(url, headers=headers)
+        for name, value in unredirected.items():
+            request.add_unredirected_header(name, value)
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as r:
+            with urllib.request.urlopen(request, timeout=120) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
+            e.close()
             if e.code == 404:
                 return None
             last = e
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             last = e
-    raise Failure(f"{url}: {last}")
+    raise Unreachable(f"{url}: {last}")
 
 
 def fetch(url, missing_ok=False):
@@ -393,14 +415,14 @@ def checksum_lines(source, text):
 
 # --------------------------------------------------------------------------
 # Go: go.dev's release JSON (sha256), cross-checked with dl.google.com's
-# per-file .sha256. Supported lines are the ones go.dev lists without
-# include=all.
+# per-file .sha256. Every stable release go.dev still lists is shipped,
+# whether or not its line is still supported: a project pinned to an old
+# patch must get exactly that patch. Releases without a darwin-arm64
+# archive (before 1.16) are skipped, as selection needs both platforms.
 
 
 def go_rows(report):
     everything = fetch_json("https://go.dev/dl/?mode=json&include=all")
-    supported = fetch_json("https://go.dev/dl/?mode=json")
-    lines = {".".join(r["version"][2:].split(".")[:2]) for r in supported}
     by_version = {}
     for r in everything:
         if not r.get("stable"):
@@ -417,7 +439,7 @@ def go_rows(report):
             elif (f["os"], f["arch"]) == ("linux", "amd64"):
                 files[LINUX] = f
         by_version[version] = files
-    return lines, by_version
+    return by_version
 
 
 def go_release(version, files):
@@ -437,7 +459,7 @@ def go_cross_check(rel):
 
 
 def generate_go(existing, report):
-    lines, by_version = go_rows(report)
+    by_version = go_rows(report)
     out = {}
     for rel in existing:
         version = rel["components"][0]["version"]
@@ -448,7 +470,7 @@ def generate_go(existing, report):
         out[rel["key"]] = rel
     for version, files in by_version.items():
         key = f"go-{version}"
-        if key in out or ".".join(version.split(".")[:2]) not in lines:
+        if key in out:
             continue
         missing = [p for p in PLATFORMS if p not in files]
         if missing:
@@ -464,8 +486,12 @@ def generate_go(existing, report):
 # Node: nodejs.org's index, and each release's SHASUMS256.txt, whose
 # detached signature is checked against the nodejs/release-keys keyring and
 # must chain to a releaser pinned in tools/keys/node-releasers.txt.
-# Supported lines are the ones the nodejs/Release schedule has started and
-# not yet ended.
+# Every release nodejs.org still serves both tarballs for is shipped,
+# whether or not its line is still supported: a project pinned to an old
+# patch (`.nvmrc` 18.17.1) must get exactly that patch. index.json's
+# `files` list says which builds a release has, so releases without a
+# darwin-arm64 tarball (before 16.0.0) are named and skipped without
+# fetching their SHASUMS256.txt.
 
 
 SCRATCH = None
@@ -528,6 +554,10 @@ def node_shasums(version, keyring, pins):
     return {name: digest for digest, name in checksum_lines(f"node {version}: SHASUMS256.txt", text.decode())}
 
 
+# The index.json `files` names of the two tarballs a release must have.
+NODE_FILES = {"osx-arm64-tar", "linux-x64"}
+
+
 def node_release(version, sums):
     rows = []
     for platform, slug in ((DARWIN, "darwin-arm64"), (LINUX, "linux-x64")):
@@ -541,13 +571,17 @@ def node_release(version, sums):
 
 def generate_node(existing, report):
     index = fetch_json("https://nodejs.org/dist/index.json")
-    schedule = fetch_json("https://raw.githubusercontent.com/nodejs/Release/main/schedule.json")
-    lines = {
-        line[1:]
-        for line, span in schedule.items()
-        if datetime.date.fromisoformat(span["start"]) <= TODAY < datetime.date.fromisoformat(span["end"])
-    }
-    wanted = [r["version"][1:] for r in index if r["version"][1:].split(".")[0] in lines]
+    wanted, unbuilt = [], []
+    for r in index:
+        version = r["version"][1:]
+        if NODE_FILES <= set(r.get("files", [])):
+            wanted.append(version)
+        else:
+            unbuilt.append(version)
+    if unbuilt:
+        unbuilt.sort(key=version_key)
+        report.skip(f"{len(unbuilt)} node releases ({unbuilt[0]} to {unbuilt[-1]})",
+                    "index.json lists no darwin-arm64 or no linux-x64 tarball for them")
     keyring, pins = node_keyring(), node_fingerprints()
     versions = sorted({rel["components"][0]["version"] for rel in existing} | set(wanted), key=version_key)
     sums = dict(zip(versions, parallel(lambda v: node_shasums(v, keyring, pins), versions)))
@@ -572,8 +606,9 @@ def generate_node(existing, report):
 
 # --------------------------------------------------------------------------
 # Python: python-build-standalone's per-release SHA256SUMS, cross-checked
-# with GitHub's asset digests. Supported minors are the CPython lines whose
-# status is bugfix or security. A new version takes the newest PBS release
+# with GitHub's asset digests. Every CPython version PBS builds is shipped,
+# end-of-life lines included: a project pinned to `3.8.20` must get exactly
+# that patch. A new version takes the newest PBS release
 # that publishes its install_only build for both platforms; an existing row
 # keeps the PBS release it was minted from. Every bundle carries the uv
 # the default release carries.
@@ -597,8 +632,6 @@ def pbs_sums(tag):
 
 
 def generate_python(existing, report, default_key):
-    cycle = fetch_json("https://peps.python.org/api/release-cycle.json")
-    minors = {line for line, info in cycle.items() if info["status"] in ("bugfix", "security")}
     tags = sorted((t for t in github_tags(PBS) if re.fullmatch(r"\d{8}", t)), reverse=True)
     sums = dict(zip(tags, parallel(pbs_sums, tags)))
     no_sums = [t for t in tags if sums[t] is None]
@@ -650,7 +683,7 @@ def generate_python(existing, report, default_key):
                 seen.setdefault(m.group(1), set()).add(tag)
     for version in sorted(seen, key=version_key):
         key = f"cpython-{version}"
-        if key in out or ".".join(version.split(".")[:2]) not in minors:
+        if key in out:
             continue
         for tag in sorted(seen[version], reverse=True):
             fresh = bundle(version, tag)
@@ -662,9 +695,10 @@ def generate_python(existing, report, default_key):
             report.skip(key, "no PBS release publishes install_only builds for both platforms")
     # CPython patches PBS never built (or built only before it published
     # SHA256SUMS): named, so a gap in the catalog is never silent.
+    minors = {".".join(v.split(".")[:2]) for v in seen}
     for minor in sorted(minors, key=version_key):
         patches = [version_key(v)[2] for v in seen if v.startswith(minor + ".")]
-        for patch in range(0, max(patches, default=-1) + 1):
+        for patch in range(0, max(patches) + 1):
             key = f"cpython-{minor}.{patch}"
             if key not in out and not any(what == key for what, _ in report.skipped):
                 report.skip(key, "no PBS release with a SHA256SUMS publishes it for both platforms")
@@ -702,26 +736,30 @@ def generate_python(existing, report, default_key):
 
 # --------------------------------------------------------------------------
 # Ruby: Homebrew's portable-ruby bottles (the artifact the Ruby tailor
-# realizes). Each bottle is downloaded, hashed, compared with GitHub's
-# digest, and its layout checked against the `ruby-toolchain/1` recipe.
-# Supported lines are ruby-lang's branches still in normal or security
-# maintenance. A version enters with Homebrew's newest rebuild of it
-# (`3.3.4_1`); a later rebuild of a shipped version is a new release,
-# `ruby-3.3.4_2` with `revision = 2`, beside the old one.
+# realizes), from both places Homebrew has published them:
+#
+# - GitHub releases of Homebrew/homebrew-portable-ruby, up to 3.4.6. That
+#   channel stopped moving in 2025 (#754). Each bottle is downloaded,
+#   hashed and compared with GitHub's asset digest.
+# - GitHub's container registry, ghcr.io/homebrew/core/portable-ruby, where
+#   Homebrew publishes every build since (3.4.6 to 4.0.x). A tag's OCI image
+#   index names one manifest per bottle; the manifest's single layer is the
+#   bottle, addressed by its sha256, and the index annotates the same
+#   sha256 as `sh.brew.bottle.digest`. The bottle is downloaded from the
+#   registry's blob URL and hashed: all three must agree.
+#
+# Every bottle's layout is checked against the `ruby-toolchain/1` recipe
+# and the Linux one is run relocated. Every line Homebrew built is shipped,
+# end-of-life ones included. A version enters with Homebrew's newest
+# rebuild of it (`3.3.4_1`); a later rebuild of a shipped version is a new
+# release, `ruby-3.3.4_2` with `revision = 2`, beside the old one. A bottle
+# that fails the recipe's checks as a new release is named and left out.
 
 PORTABLE = "Homebrew/homebrew-portable-ruby"
 BOTTLE_TAGS = {DARWIN: "arm64_big_sur", LINUX: "x86_64_linux"}
-
-
-def ruby_lines():
-    text = fetch_text("https://raw.githubusercontent.com/ruby/www.ruby-lang.org/master/_data/branches.yml")
-    lines = set()
-    for block in re.split(r"^- ", text, flags=re.M)[1:]:
-        name = re.search(r"name:\s*['\"]?([\d.]+)", block)
-        status = re.search(r"status:\s*(.+)", block)
-        if name and status and status.group(1).strip() in ("normal maintenance", "security maintenance"):
-            lines.add(name.group(1))
-    return lines
+GHCR_RUBY = f"{GHCR_ORIGIN}/v2/homebrew/core/portable-ruby"
+GHCR_PROVIDER = "ghcr-homebrew-portable-ruby"
+RUBY_TAG = re.compile(r"(\d+\.\d+\.\d+)(?:_(\d+))?")
 
 
 def check_bottle_layout(path, tag):
@@ -754,8 +792,13 @@ def check_bottle_layout(path, tag):
             raise Failure(f"ruby {tag}: bottle lacks {what}")
     # The recipe realizes the bottle unrepaired, which is only sound when
     # the extensions that need host libraries are compiled into bin/ruby.
+    # Ruby 4.0 made fiddle a bundled gem, so its bottles carry it as a gem
+    # extension under lib/ruby/gems/, built against Homebrew's static
+    # libffi: that one is admitted, and the Linux bottle's run below loads
+    # it relocated.
     for name in names:
-        if re.search(r"/(openssl|psych|zlib|fiddle)\.(so|bundle)$", name):
+        if re.search(r"/(openssl|psych|zlib)\.(so|bundle)$", name) or (
+                re.search(r"/fiddle\.(so|bundle)$", name) and not name.startswith("lib/ruby/gems/")):
             raise Failure(f"ruby {tag}: {name} is a dynamic extension; the recipe expects static ones")
 
 
@@ -769,7 +812,7 @@ def run_linux_bottle(path, tag, version):
     with tempfile.TemporaryDirectory(prefix="greyward-catalog-ruby-") as scratch:
         subprocess.run(["tar", "-xzf", path, "-C", scratch, "--strip-components", "2"], check=True)
         result = subprocess.run(
-            [os.path.join(scratch, "bin/ruby"), "-ropenssl", "-rpsych", "-rzlib", "-e", "print RUBY_VERSION"],
+            [os.path.join(scratch, "bin/ruby"), "-ropenssl", "-rpsych", "-rzlib", "-rfiddle", "-e", "print RUBY_VERSION"],
             capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
         )
         if result.returncode != 0 or result.stdout != version:
@@ -777,7 +820,15 @@ def run_linux_bottle(path, tag, version):
     return True
 
 
+def checked_bottle(url, tag):
+    """The recipe's checks on the bottle at `url`, and its sha256."""
+    digest = "sha256:" + download_digest(url, "sha256")
+    check_bottle_layout(archive_path(url), tag)
+    return digest
+
+
 def ruby_release(report, tag, release_json, key=None, revision=None):
+    """A GitHub-released bottle pair, or (None, the platform lacking one)."""
     version = tag.split("_")[0]
     digests = asset_digests(release_json)
     rows = []
@@ -786,61 +837,122 @@ def ruby_release(report, tag, release_json, key=None, revision=None):
         if name not in digests:
             return None, platform
         url = f"https://github.com/{PORTABLE}/releases/download/{tag}/{name}"
-        digest = "sha256:" + download_digest(url, "sha256")
+        digest = checked_bottle(url, tag)
         check_github_digest(report, f"ruby {name}", digests[name], digest, None)
-        check_bottle_layout(archive_path(url), tag)
         if platform == LINUX:
             run_linux_bottle(archive_path(url), tag, version)
         rows.append(row(platform, "ruby", "homebrew-portable-ruby", tag, "ruby-toolchain/1", url, digest))
     return release(key or f"ruby-{version}", [component("ruby", version)], rows, revision), None
 
 
+def ghcr_bottles(tag):
+    """The registry's bottle digest per platform for `tag`: the layer each
+    platform's manifest names, which must be the digest the image index
+    annotates for that bottle. A platform the index has no bottle for is
+    absent."""
+    index = fetch_json(f"{GHCR_RUBY}/manifests/{tag}")
+    out = {}
+    for platform, slug in BOTTLE_TAGS.items():
+        entries = [m for m in index.get("manifests", [])
+                   if m.get("annotations", {}).get("org.opencontainers.image.ref.name") == f"{tag}.{slug}"]
+        if not entries:
+            continue
+        if len(entries) > 1:
+            raise Failure(f"ruby: ghcr portable-ruby {tag} lists {len(entries)} {slug} bottles")
+        annotated = "sha256:" + entries[0]["annotations"].get("sh.brew.bottle.digest", "")
+        manifest = fetch_json(f"{GHCR_RUBY}/manifests/{entries[0]['digest']}")
+        layers = manifest.get("layers", [])
+        if len(layers) != 1:
+            raise Failure(f"ruby: ghcr portable-ruby {tag} {slug} manifest has {len(layers)} layers, not one")
+        expect_equal(f"ruby ghcr {tag} {slug} layer digest and sh.brew.bottle.digest",
+                     layers[0]["digest"], annotated)
+        out[platform] = annotated
+    return out
+
+
+def ruby_ghcr_release(tag, bottles, key=None, revision=None):
+    """A registry bottle pair, or (None, the platform lacking one)."""
+    version = tag.split("_")[0]
+    rows = []
+    for platform in PLATFORMS:
+        if platform not in bottles:
+            return None, platform
+        url = f"{GHCR_RUBY}/blobs/{bottles[platform]}"
+        expect_equal(f"ruby ghcr {tag} {BOTTLE_TAGS[platform]} downloaded sha256",
+                     checked_bottle(url, tag), bottles[platform])
+        if platform == LINUX:
+            run_linux_bottle(archive_path(url), tag, version)
+        rows.append(row(platform, "ruby", GHCR_PROVIDER, tag, "ruby-toolchain/1", url, bottles[platform]))
+    return release(key or f"ruby-{version}", [component("ruby", version)], rows, revision), None
+
+
 def generate_ruby(existing, report):
-    lines = ruby_lines()
-    releases = {r["tag_name"]: r for r in github_releases(PORTABLE) if not r["draft"]}
+    github = {r["tag_name"]: r for r in github_releases(PORTABLE) if not r["draft"]}
+    ghcr_tags = [t for t in fetch_json(f"{GHCR_RUBY}/tags/list").get("tags", []) if RUBY_TAG.fullmatch(t)]
+    ghcr = dict(zip(ghcr_tags, parallel(ghcr_bottles, ghcr_tags)))
+
+    def build(tag, provider, key=None, revision=None):
+        if provider == GHCR_PROVIDER:
+            return ruby_ghcr_release(tag, ghcr[tag], key, revision)
+        return ruby_release(report, tag, github[tag], key, revision)
+
     out = {}
     for rel in existing:
-        tag = rel["artifacts"][0]["build"]
-        if tag not in releases:
-            raise Failure(f"ruby: {rel['key']}: portable-ruby no longer publishes {tag}")
-        fresh, _ = ruby_release(report, tag, releases[tag], rel["key"], rel.get("revision"))
+        tag, provider = rel["artifacts"][0]["build"], rel["artifacts"][0]["provider"]
+        if tag not in (ghcr if provider == GHCR_PROVIDER else github):
+            raise Failure(f"ruby: {rel['key']}: {provider} no longer publishes portable-ruby {tag}")
+        fresh, _ = build(tag, provider, rel["key"], rel.get("revision"))
         check_row("ruby", rel["key"], rel, fresh)
         out[rel["key"]] = rel
+
+    # The newest rebuild of each version, the registry's when both have it.
     newest = {}
-    for tag, r in releases.items():
-        m = re.fullmatch(r"(\d+\.\d+\.\d+)(?:_(\d+))?", tag)
+    candidates = [(t, "homebrew-portable-ruby") for t in github] + [(t, GHCR_PROVIDER) for t in ghcr]
+    for tag, provider in candidates:
+        m = RUBY_TAG.fullmatch(tag)
         if not m:
             continue
-        version, revision = m.group(1), int(m.group(2) or 0)
-        if ".".join(version.split(".")[:2]) not in lines:
-            continue
-        if r["prerelease"]:
-            if f"ruby-{version}" not in out:
+        if provider != GHCR_PROVIDER and github[tag]["prerelease"]:
+            if tag not in ghcr:
                 report.skip(f"portable-ruby {tag}", "marked prerelease by Homebrew")
             continue
-        if version not in newest or revision > newest[version][0]:
-            newest[version] = (revision, tag)
-    for version, (rebuild, tag) in sorted(newest.items(), key=lambda kv: version_key(kv[0])):
+        version, rebuild = m.group(1), int(m.group(2) or 0)
+        if version not in newest or (rebuild, provider == GHCR_PROVIDER) > newest[version][:2]:
+            newest[version] = (rebuild, provider == GHCR_PROVIDER, tag, provider)
+    for version, (rebuild, _, tag, provider) in sorted(newest.items(), key=lambda kv: version_key(kv[0])):
         shipped = [r for r in out.values() if r["components"][0]["version"] == version]
-        if any(r["artifacts"][0]["build"] == tag for r in shipped):
+        if any(r["artifacts"][0]["build"] == tag and r["artifacts"][0]["provider"] == provider
+               for r in shipped):
             continue
         if shipped:
-            # Homebrew rebuilt a version this catalog ships: the old bottle
-            # stays (locks name it), the rebuild is a revision beside it.
-            key, revision = f"ruby-{tag}", max(rebuild, next_revision(shipped))
+            # Homebrew rebuilt a version this catalog ships, or publishes it
+            # again elsewhere: the old bottle stays (locks name it), the new
+            # one is a revision beside it. The same bytes under another URL
+            # are not a new release.
+            revision = max(rebuild, next_revision(shipped))
+            key = f"ruby-{tag}"
+            if any(r["key"] == key for r in shipped):
+                key = f"ruby-{tag}-r{revision}"
         else:
             key, revision = f"ruby-{version}", None
-        fresh, missing = ruby_release(report, tag, releases[tag], key, revision)
+        try:
+            fresh, missing = build(tag, provider, key, revision)
+        except Unreachable:
+            raise
+        except Failure as failure:
+            report.skip(key, f"portable-ruby {tag} fails the ruby-toolchain/1 checks: {failure}")
+            continue
         if fresh is None:
             report.skip(key, f"portable-ruby {tag} has no {missing} bottle")
             continue
+        digests = {(a["platform"], a["digest"]) for a in fresh["artifacts"]}
+        if any({(a["platform"], a["digest"]) for a in r["artifacts"]} == digests for r in shipped):
+            continue
         out[key] = fresh
         if shipped:
-            report.republish(key, f"Homebrew rebuilt ruby {version} as {tag}")
+            report.republish(key, f"Homebrew rebuilt ruby {version} as {tag} ({provider})")
         else:
             report.added.append(key)
-    report.skip("ruby-lang lines without a portable-ruby build",
-                ", ".join(sorted(l for l in lines if not any(v.startswith(l + ".") for v in newest))) or "none")
     return out
 
 
@@ -1020,9 +1132,9 @@ def generate_elixir(existing, report):
 
 # --------------------------------------------------------------------------
 # .NET: Microsoft's release metadata (sha512), cross-checked with the
-# `.sha512` file served beside each archive. Supported channels are the
-# ones whose support phase is active or maintenance; previews are never
-# admitted.
+# `.sha512` file served beside each archive. Every channel's SDKs are
+# shipped, end-of-life channels included (a `global.json` pinned to an old
+# feature band must get exactly that SDK); previews are never admitted.
 
 
 def dotnet_release(sdk):
@@ -1057,26 +1169,24 @@ def dotnet_cross_check(rel):
 def generate_dotnet(existing, report):
     index = fetch_json("https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json")
     sdks = {}
-    for channel in index["releases-index"]:
-        supported = channel["support-phase"] in ("active", "maintenance")
-        meta = fetch_json(channel["releases.json"]) if supported or existing else None
-        if meta is None:
-            continue
+    metas = parallel(lambda channel: fetch_json(channel["releases.json"]), index["releases-index"])
+    for meta in metas:
         for r in meta["releases"]:
-            for sdk in r.get("sdks") or [r["sdk"]]:
+            # A runtime-only servicing release (some 1.x and 2.x ones) has no SDK.
+            for sdk in r.get("sdks") or ([r["sdk"]] if r.get("sdk") else []):
                 if re.fullmatch(r"\d+\.\d+\.\d+", sdk["version"]):
-                    sdks.setdefault(sdk["version"], (sdk, supported))
+                    sdks.setdefault(sdk["version"], sdk)
     out = {}
     for rel in existing:
         version = rel["components"][0]["version"]
         if version not in sdks:
             raise Failure(f"dotnet: {rel['key']}: no longer in the release metadata")
-        fresh, _ = dotnet_release(sdks[version][0])
+        fresh, _ = dotnet_release(sdks[version])
         check_row("dotnet", rel["key"], rel, fresh)
         out[rel["key"]] = rel
-    for version, (sdk, supported) in sorted(sdks.items(), key=lambda kv: version_key(kv[0])):
+    for version, sdk in sorted(sdks.items(), key=lambda kv: version_key(kv[0])):
         key = f"dotnet-sdk-{version}"
-        if key in out or not supported:
+        if key in out:
             continue
         fresh, missing = dotnet_release(sdk)
         if fresh is None:
@@ -1084,7 +1194,28 @@ def generate_dotnet(existing, report):
             continue
         out[key] = fresh
         report.added.append(key)
-    checked = sum(parallel(dotnet_cross_check, list(out.values()), workers=16))
+    def cross_check(rel):
+        try:
+            return dotnet_cross_check(rel), None
+        except Unreachable:
+            raise
+        except Failure as failure:
+            return 0, str(failure)
+
+    # A shipped row the `.sha512` contradicts is an error. A new one is
+    # left out and named: Microsoft's two checksums for it disagree (some
+    # end-of-life SDKs), so neither can vouch for it.
+    releases = list(out.values())
+    checked = 0
+    for rel, (count, why) in zip(releases, parallel(cross_check, releases, workers=16)):
+        if why is None:
+            checked += count
+        elif rel["key"] not in report.added:
+            raise Failure(why)
+        else:
+            del out[rel["key"]]
+            report.added.remove(rel["key"])
+            report.skip(rel["key"], f"the release metadata and the .sha512 beside the archive disagree ({why})")
     total = sum(len(r["artifacts"]) for r in out.values())
     if checked < total:
         report.note(f"{total - checked} of {total} rows have no .sha512 beside the archive; "
@@ -1108,7 +1239,10 @@ RUST_KEY = os.path.join(REPO, "tools", "keys", "rust-release-signing-key.asc")
 # "Rust Language (Tag and Release Signing Key) <rust-key@rust-lang.org>", as
 # published at https://static.rust-lang.org/rust-key.gpg.ascii.
 RUST_FINGERPRINT = "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
-RUST_OLDEST = (1, 70, 0)
+# 1.49.0 is the first release that builds aarch64-apple-darwin hosts, so
+# the first one complete on both platforms. Older pins are refused at
+# selection, by name.
+RUST_OLDEST = (1, 49, 0)
 # (catalog component, manifest package, recipe). A package the manifest
 # renames is looked up under its new name.
 RUST_COMPONENTS = (
@@ -1357,6 +1491,8 @@ def run(eco, args):
         with open(path) as f:
             current = f.read()
     report.print()
+    if getattr(args, "drift", False):
+        return drift(eco, report, current == text)
     if args.check:
         if current != text:
             print(f"{eco}: {FILES[eco]} differs from what upstream publishes today "
@@ -1367,6 +1503,30 @@ def run(eco, args):
         with open(path, "w") as f:
             f.write(text)
         print(f"{eco}: wrote {FILES[eco]}")
+    return True
+
+
+def annotate(title, message):
+    """One GitHub Actions error annotation: the scheduled drift job's
+    failure names the catalog and what to run, not just an exit code."""
+    print(f"::error title={title}::{message}")
+
+
+def drift(eco, report, unchanged):
+    """`--drift`: every shipped row re-verified (the generator already did,
+    and raised on a row upstream withdrew or changed), then a failure when
+    upstream publishes a release the catalog does not ship yet."""
+    if report.added:
+        annotate(f"{eco} catalog drift",
+                 f"{FILES[eco]} lacks {len(report.added)} release(s) upstream publishes: "
+                 f"{', '.join(report.added)}. Run `python3 tools/catalog.py {eco}` and open a "
+                 f"pull request.")
+        return False
+    if not unchanged:
+        annotate(f"{eco} catalog drift",
+                 f"{FILES[eco]} is not what `python3 tools/catalog.py {eco}` writes; regenerate it.")
+        return False
+    print(f"{eco}: no drift")
     return True
 
 
@@ -1381,9 +1541,15 @@ def main():
     parser.add_argument("--against", metavar="REF",
                         help="check the checked-in catalogs against git revision REF: no row "
                              "of REF removed or changed, every row verified upstream; write nothing")
+    parser.add_argument("--drift", action="store_true",
+                        help="re-verify every shipped row and fail, with a GitHub Actions "
+                             "annotation, when upstream publishes a release not shipped yet; "
+                             "write nothing (the weekly catalog-drift workflow)")
     args = parser.parse_args()
-    if args.against and (args.check or args.set_default):
-        parser.error("--against verifies only; it takes neither --check nor --set-default")
+    if args.against and (args.check or args.set_default or args.drift):
+        parser.error("--against verifies only; it takes neither --check, --drift nor --set-default")
+    if args.drift and (args.check or args.set_default):
+        parser.error("--drift verifies only; it takes neither --check nor --set-default")
     ecosystems = args.ecosystems or list(FILES)
     unknown = [eco for eco in ecosystems if eco not in FILES]
     if unknown:
@@ -1396,6 +1562,10 @@ def main():
             ok = run(eco, args) and ok
         except Failure as failure:
             print(f"error: {failure}", file=sys.stderr)
+            if args.drift:
+                title = (f"{eco} upstream could not be read" if isinstance(failure, Unreachable)
+                         else f"{eco} catalog no longer verifies")
+                annotate(title, str(failure))
             ok = False
     sys.exit(0 if ok else 1)
 

@@ -1823,12 +1823,12 @@ mod tests {
         .unwrap();
         let before = tree_snapshot(&store.root);
 
-        let error = ensure_go_for(&store, activity, platform, "1.25.0")
+        let error = ensure_go_for(&store, activity, platform, "1.15.0")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("resolved Go 1.25.0"), "{error}");
+        assert!(error.contains("resolved Go 1.15.0"), "{error}");
         assert!(
-            error.contains("realizes only Go 1.26.0, 1.26.1, "),
+            error.contains("realizes only Go 1.16.1, 1.16.2, "),
             "{error}"
         );
         assert!(error.contains(" 1.27.0"), "{error}");

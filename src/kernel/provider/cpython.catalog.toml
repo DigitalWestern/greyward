@@ -7,6 +7,32 @@ primary = ["cpython"]
 default = "cpython-3.12.14"
 
 [[release]]
+key = "cpython-3.15.0"
+components = [
+  { name = "cpython", version = "3.15.0" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.15.0%2B20261013-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:f5d1d82e2f5660d4decae5d2b7470631850bcd7bd39595d9c3cca3c5ee54eae7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.15.0%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:e02a368dd5dc76ffe0599e5109ad6c1ee84e597910758b0e006bab25372a8921" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.14.8"
+components = [
+  { name = "cpython", version = "3.14.8" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.14.8%2B20261013-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:709f419d175eb015f810b68aa54bdae1d776c9824cb362aa701c93b0a9f2a9e7" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.14.8%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:322271a761140ffb3f522431048f701831e412c8f64770103d2b881ee2bbaed0" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
 key = "cpython-3.14.7"
 components = [
   { name = "cpython", version = "3.14.7" },
@@ -106,6 +132,19 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20251120", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.14.0%2B20251120-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:0c508b08257a31d047d36ea75e9af53acce2b17e225c3c35c168781041073643" },
   { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20251120", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251120/cpython-3.14.0%2B20251120-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:4c4eb8334f3dc0199459dbaf84edf888f166b21ae96ed5d75aeb662a6decb51f" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.13.16"
+components = [
+  { name = "cpython", version = "3.13.16" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:ca0e6a70fb75a0984751bd75493e3de77680aef7fbd0fea9b903c299537b3423" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.13.16%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:e588e50db882fa6a89f926d9a9ad64e445183af0eda5bda226a2c151b17db8a6" },
   { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
   { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
 ]
@@ -319,6 +358,19 @@ artifacts = [
 ]
 
 [[release]]
+key = "cpython-3.12.15"
+components = [
+  { name = "cpython", version = "3.12.15" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:ba32036ad8f4c434d97a1ee7feef8b7edc0fac16777639b97e39c74a108e4440" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:5d546fc004fc2435fa142eb8f42ed8de5eb4725963dc22f7e6671014a80eb560" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
 key = "cpython-3.12.14"
 components = [
   { name = "cpython", version = "3.12.14" },
@@ -514,6 +566,19 @@ artifacts = [
 ]
 
 [[release]]
+key = "cpython-3.11.17"
+components = [
+  { name = "cpython", version = "3.11.17" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.11.17%2B20261013-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:d81d757a9785850393cd695a9a686c765a6370fbdc83738589ef2ecd3e5c44b3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20261013", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.11.17%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:846bf682e2b67393f2affa5e5c0994e446abc3a7cc5bb699890c36346823644c" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
 key = "cpython-3.11.16"
 components = [
   { name = "cpython", version = "3.11.16" },
@@ -704,6 +769,19 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20230116", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230116/cpython-3.11.1%2B20230116-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:4918cdf1cab742a90f85318f88b8122aeaa2d04705803c7b6e78e81a3dd40f80" },
   { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20230116", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230116/cpython-3.11.1%2B20230116-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:02a551fefab3750effd0e156c25446547c238688a32fabde2995c941c03a6423" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.10.22"
+components = [
+  { name = "cpython", version = "3.10.22" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20261009", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.10.22%2B20261009-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:02d1a66b5fe8676e6df5084f4e0b71779a4e6f1c46f192d3d3a12b7eb3a789ec" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20261009", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.10.22%2B20261009-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:1780de9ddda04e956d2a4a0ad09b7f5667d92f4f12cd0881ec939de5d542903f" },
   { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
   { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
 ]
@@ -951,6 +1029,331 @@ components = [
 artifacts = [
   { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220227", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220227/cpython-3.10.2%2B20220227-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:1409acd9a506e2d1d3b65c1488db4e40d8f19d09a7df099667c87a506f71c0ef" },
   { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220227", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220227/cpython-3.10.2%2B20220227-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:9b64eca2a94f7aff9409ad70bdaa7fbbf8148692662e764401883957943620dd" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.25"
+components = [
+  { name = "cpython", version = "3.9.25" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20251031", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251031/cpython-3.9.25%2B20251031-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:87275619c2706affa4d1090d2ca3dad354b6d69f8b85dbfafe38785870751b9a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20251031", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251031/cpython-3.9.25%2B20251031-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:42834f61eb6df43432c3dd6ab9ca3fdf8c06d10a404ebdb53d6902e6b9570b08" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.24"
+components = [
+  { name = "cpython", version = "3.9.24" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20251028", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251028/cpython-3.9.24%2B20251028-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:73a95cd45a2c1fb95ea4e4e9b9bb5bdec5e1533ce7e34b606c2428e31847901b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20251028", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251028/cpython-3.9.24%2B20251028-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:7e90b7e04edf1130f8302165376e04b5fc99f6f27381baddc3254514e338e5a8" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.23"
+components = [
+  { name = "cpython", version = "3.9.23" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20251007", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251007/cpython-3.9.23%2B20251007-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:32e4b31e693c2830e20f80d115388328cd6a7cff21aa79777e0f2ada6c754ea6" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20251007", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20251007/cpython-3.9.23%2B20251007-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:c479843a04b0504bc6c571a44219f25e98b7e83463a75aee241b51b1cb2aee27" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.22"
+components = [
+  { name = "cpython", version = "3.9.22" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20250529", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250529/cpython-3.9.22%2B20250529-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:29a81900ec2f964538ddd404536da57c2aa816901713e4c03bca3678cae25cb2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20250529", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250529/cpython-3.9.22%2B20250529-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:b92e31b14691b0db0ad9a27951cf49da070e1cc25f11ce2c2c13d19f6862445a" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.21"
+components = [
+  { name = "cpython", version = "3.9.21" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20250317", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.9.21%2B20250317-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:2a7d83db10c082ce59e9c4b8bd6c5790310198fb759a7c94aceebac1d93676d3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20250317", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20250317/cpython-3.9.21%2B20250317-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:6f426b5494e90701ffa2753e229252e8b3ac61151a09c8cd6c0a649512df8ab2" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.20"
+components = [
+  { name = "cpython", version = "3.9.20" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20241016", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.9.20%2B20241016-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:34ab2bc4c51502145e1a624b4e4ea06877e3d1934a88cc73ac2e0fd5fd439b75" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20241016", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.9.20%2B20241016-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:c20ee831f7f46c58fa57919b75a40eb2b6a31e03fd29aaa4e8dab4b9c4b60d5d" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.19"
+components = [
+  { name = "cpython", version = "3.9.19" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20240814", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.9.19%2B20240814-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:ddd57774886a66a71283559cdd39bd2cbfd756cbd996b19b0b3bdb842a2a4a81" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20240814", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.9.19%2B20240814-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:d21cf7bab25e2a8a1c873395bb7aa4f4b7ae533d2437d92f6496500c1e49625d" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.18"
+components = [
+  { name = "cpython", version = "3.9.18" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20240224", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240224/cpython-3.9.18%2B20240224-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:2548f911a6e316575c303ba42bb51540dc9b47a9f76a06a2a37460d93b177aa2" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20240224", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240224/cpython-3.9.18%2B20240224-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:0e5663025121186bd17d331538a44f48b41baff247891d014f3f962cbe2716b4" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.17"
+components = [
+  { name = "cpython", version = "3.9.17" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20230726", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230726/cpython-3.9.17%2B20230726-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:73dbe2d702210b566221da9265acc274ba15275c5d0d1fa327f44ad86cde9aa1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20230726", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230726/cpython-3.9.17%2B20230726-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:26c4a712b4b8e11ed5c027db5654eb12927c02da4857b777afb98f7a930ce637" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.16"
+components = [
+  { name = "cpython", version = "3.9.16" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20230507", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230507/cpython-3.9.16%2B20230507-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:c1de1d854717a6245f45262ef1bb17b09e2c587590e7e3f406593c143ff875bd" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20230507", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230507/cpython-3.9.16%2B20230507-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:2b6e146234a4ef2a8946081fc3fbfffe0765b80b690425a49ebe40b47c33445b" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.15"
+components = [
+  { name = "cpython", version = "3.9.15" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20221106", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221106/cpython-3.9.15%2B20221106-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:64dc7e1013481c9864152c3dd806c41144c79d5e9cd3140e185c6a5060bdc9ab" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20221106", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221106/cpython-3.9.15%2B20221106-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:cdc3a4cfddcd63b6cebdd75b14970e02d8ef0ac5be4d350e57ab5df56c19e85e" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.14"
+components = [
+  { name = "cpython", version = "3.9.14" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20221002", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221002/cpython-3.9.14%2B20221002-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:e38df7f230979ce6c53a5bafb3a81287838e5f3892c40cd1b98a0c961c444713" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20221002", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221002/cpython-3.9.14%2B20221002-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:e63d0c00a499e0202ba7a0f53ce69fca6d30237af39af9bc3c76bce6c7bf14d7" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.13"
+components = [
+  { name = "cpython", version = "3.9.13" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220802", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220802/cpython-3.9.13%2B20220802-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:d9603edc296a2dcbc59d7ada780fd12527f05c3e0b99f7545112daf11636d6e5" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220802", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220802/cpython-3.9.13%2B20220802-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:ce1cfca2715e7e646dd618a8cb9baff93000e345ccc979b801fc6ccde7ce97df" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.12"
+components = [
+  { name = "cpython", version = "3.9.12" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220502", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220502/cpython-3.9.12%2B20220502-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:8dee06c07cc6429df34b6abe091a4684a86f7cec76f5d1ccc1c3ce2bd11168df" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220502", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220502/cpython-3.9.12%2B20220502-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:ccca12f698b3b810d79c52f007078f520d588232a36bc12ede944ec3ea417816" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.11"
+components = [
+  { name = "cpython", version = "3.9.11" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220318", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220318/cpython-3.9.11%2B20220318-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:cf92a28f98c8d884df0937bf19d5f1a40caa25a6a211a237b7e9b592b2b71c2b" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220318", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220318/cpython-3.9.11%2B20220318-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:0429d5ceb095d5e24c292bf1a39208b88ae236a680ef8fa3e1830e3a1a7e8882" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.9.10"
+components = [
+  { name = "cpython", version = "3.9.10" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220227", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220227/cpython-3.9.10%2B20220227-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:ad66c2a3e7263147e046a32694de7b897a46fb0124409d29d3a93ede631c8aee" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220227", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220227/cpython-3.9.10%2B20220227-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:455089cc576bd9a58db45e919d1fc867ecdbb0208067dffc845cc9bbf0701b70" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.20"
+components = [
+  { name = "cpython", version = "3.8.20" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20241002", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20241002/cpython-3.8.20%2B20241002-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:2ddfc04bdb3e240f30fb782fa1deec6323799d0e857e0b63fa299218658fd3d4" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20241002", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20241002/cpython-3.8.20%2B20241002-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:285e141c36f88b2e9357654c5f77d1f8fb29cc25132698fe35bb30d787f38e87" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.19"
+components = [
+  { name = "cpython", version = "3.8.19" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20240814", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.8.19%2B20240814-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:f01a9d293e2bff8c4c62478d826a8bb46a197fabe21b26cb4db7a098e23dc9f1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20240814", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240814/cpython-3.8.19%2B20240814-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:9ebb4d3ff993e977c5f2c043369024be8429447cee67a16e7d4a84f03064116a" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.18"
+components = [
+  { name = "cpython", version = "3.8.18" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20240224", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240224/cpython-3.8.18%2B20240224-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:4d493a1792bf211f37f98404cc1468f09bd781adc2602dea0df82ad264c11abc" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20240224", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20240224/cpython-3.8.18%2B20240224-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:5ae36825492372554c02708bdd26b8dcd57e3dbf34b3d6d599ad91d93540b2b7" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.17"
+components = [
+  { name = "cpython", version = "3.8.17" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20230826", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230826/cpython-3.8.17%2B20230826-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:c6f7a130d0044a78e39648f4dae56dcff5a41eba91888a99f6e560507162e6a1" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20230826", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230826/cpython-3.8.17%2B20230826-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:8d3e1826c0bb7821ec63288038644808a2d45553245af106c685ef5892fabcd8" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.16"
+components = [
+  { name = "cpython", version = "3.8.16" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20230726", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230726/cpython-3.8.16%2B20230726-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:7e484eb6de40d6f6bdfd5099eaa9647f65e45fb6d846ccfc56b1cb1e38b5ab02" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20230726", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20230726/cpython-3.8.16%2B20230726-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:b1f1502c3a13b899724dbd32bd77a973fa9733b932c5700d747fe33d5de9ac4f" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.15"
+components = [
+  { name = "cpython", version = "3.8.15" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20221106", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221106/cpython-3.8.15%2B20221106-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:1e0a92d1a4f5e6d4a99f86b1cbf9773d703fe7fd032590f3e9c285c7a5eeb00a" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20221106", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221106/cpython-3.8.15%2B20221106-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:e47edfb2ceaf43fc699e20c179ec428b6f3e497cf8e2dcd8e9c936d4b96b1e56" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.14"
+components = [
+  { name = "cpython", version = "3.8.14" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20221002", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221002/cpython-3.8.14%2B20221002-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:6c17f6dcda59de5d8eee922ef7eede403a540dae05423ef2c2a042d8d4f22467" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20221002", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20221002/cpython-3.8.14%2B20221002-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:4eb53bce831bf52682067579c09ccaccb6524dd44bd4b8047454c69b4817f4f0" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.13"
+components = [
+  { name = "cpython", version = "3.8.13" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220802", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220802/cpython-3.8.13%2B20220802-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:ae4131253d890b013171cb5f7b03cadc585ae263719506f7b7e063a7cf6fde76" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220802", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220802/cpython-3.8.13%2B20220802-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:fb566629ccb5f76ef56d275a3f8017d683f1c20c5beb5d5f38b155ed11e16187" },
+  { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
+  { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
+]
+
+[[release]]
+key = "cpython-3.8.12"
+components = [
+  { name = "cpython", version = "3.8.12" },
+  { name = "uv", version = "0.12.7" },
+]
+artifacts = [
+  { platform = "aarch64-apple-darwin", component = "cpython", provider = "python-build-standalone", build = "20220227", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220227/cpython-3.8.12%2B20220227-aarch64-apple-darwin-install_only.tar.gz", digest = "sha256:f9a3cbb81e0463d6615125964762d133387d561b226a30199f5b039b20f1d944" },
+  { platform = "x86_64-unknown-linux-gnu", component = "cpython", provider = "python-build-standalone", build = "20220227", recipe = "cpython/legacy", url = "https://github.com/astral-sh/python-build-standalone/releases/download/20220227/cpython-3.8.12%2B20220227-x86_64-unknown-linux-gnu-install_only.tar.gz", digest = "sha256:5be9c6d61e238b90dfd94755051c0d3a2d8023ebffdb4b0fa4e8fedd09a6cab6" },
   { platform = "aarch64-apple-darwin", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-aarch64-apple-darwin.tar.gz", digest = "sha256:127ebdda7ad953cdf198e964b570ea5771b85467ea93eb7cb6d6f8e6f55408f3" },
   { platform = "x86_64-unknown-linux-gnu", component = "uv", provider = "uv", build = "0.12.7", recipe = "uv/legacy", url = "https://github.com/astral-sh/uv/releases/download/0.12.7/uv-x86_64-unknown-linux-gnu.tar.gz", digest = "sha256:788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21" },
 ]

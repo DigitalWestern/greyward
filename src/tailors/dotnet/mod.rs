@@ -10,15 +10,29 @@
 //! lock (not project obj/) is the only durable authority: every sandboxed
 //! build re-restores offline into scratch and builds --no-restore.
 
+mod build;
 mod door;
 pub mod edit;
 pub mod objects;
 pub(crate) mod registry;
 mod resolve;
+mod rollforward;
+mod solution;
 pub mod tailor;
+mod targets;
 mod unpack;
+mod verifier;
 
+pub use build::build_sandboxed;
+#[cfg(test)]
+use build::{
+    buildable, checked_output_dir, publish_output, same_named_members, validate_build_args,
+    ProjectPhase,
+};
 pub use resolve::{attest_project, generate_lock};
+use verifier::{rewrite_metadata_source, verifier_projects, write_verifier};
+#[cfg(test)]
+use verifier::{synthetic_csproj, synthetic_lock, VerifierProject};
 
 #[cfg(test)]
 use unpack::extract_sdk_archive;
@@ -33,7 +47,6 @@ use crate::kernel::store::Store;
 use crate::kernel::toolchain::document::Shipped;
 use crate::kernel::toolchain::{ArtifactRow, Catalog, Selected};
 use crate::kernel::types::Identity;
-use crate::kernel::ui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -174,6 +187,7 @@ const SDK_VERSION: &str = "9.0.317";
 pub(crate) fn live_identity_cases(platform: Platform) -> Vec<Identity> {
     let sdk = sdk_identity(&pin_spec(platform));
     let empty_plan = DotnetPlan {
+        members: Vec::new(),
         sdk_version: SDK_VERSION.into(),
         project: "app.csproj".into(),
         targets: vec!["net9.0".into()],
@@ -225,61 +239,7 @@ pub fn realize_runtime(
         .map(|(path, _)| path)
 }
 
-/// global.json gate: it must name the SELECTED SDK exactly, with
-/// rollForward disabled and no redirection. Comparing against the shipped
-/// constant would let a catalog refresh start failing locked projects.
-/// The project is read through the held descriptor.
-pub fn check_global_json(project: &ProjectRoot, sdk_version: &str) -> io::Result<()> {
-    let rel = Path::new("global.json");
-    if !regular_file_if_present(project, rel, "global.json")? {
-        return Ok(());
-    }
-    let text = read_input_text(project, rel)?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| err(format!("global.json: {e}")))?;
-    reject_global_redirects(&v, "global.json")?;
-    let sdk = v
-        .get("sdk")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| err("global.json must contain an sdk object"))?;
-    let want = sdk
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| err("global.json sdk.version is required"))?;
-    if want != sdk_version {
-        return Err(err(format!(
-            "global.json requires SDK {want}; pinned: {sdk_version}"
-        )));
-    }
-    if sdk.get("rollForward").and_then(serde_json::Value::as_str) != Some("disable") {
-        return Err(err(
-            "global.json must set \"rollForward\": \"disable\" (ward pins the SDK exactly)",
-        ));
-    }
-    Ok(())
-}
-
-fn reject_global_redirects(value: &serde_json::Value, path: &str) -> io::Result<()> {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, value) in map {
-                if key == "paths" || key == "msbuild-sdks" {
-                    return Err(err(format!(
-                        "{path}: {key} is not supported (SDK redirection)"
-                    )));
-                }
-                reject_global_redirects(value, path)?;
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                reject_global_redirects(value, path)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
+pub use rollforward::check_global_json;
 
 /// A project-relative name inspected from the held descriptor without
 /// following a symlink (what `symlink_metadata` on its path did).
@@ -437,10 +397,16 @@ pub struct NugetPackage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DotnetPlan {
     pub sdk_version: String,
+    /// The project file, or the solution when one is restored.
     pub project: String,
-    /// Full lock target matrix retained for provenance (TFM and TFM/RID).
+    /// Full lock target matrix retained for provenance (TFM and TFM/RID),
+    /// across every member's lock.
     pub targets: Vec<String>,
     pub packages: Vec<NugetPackage>,
+    /// A solution's restored projects, project-relative; empty for a single
+    /// project, so its plan and closure keep their shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 fn valid_id(s: &str) -> bool {
@@ -452,16 +418,36 @@ fn valid_id(s: &str) -> bool {
         && !s.contains("..")
 }
 
-fn target_framework(target: &str) -> io::Result<&str> {
-    let tfm = target.split('/').next().unwrap_or("");
-    if tfm.is_empty()
-        || !tfm
+/// The framework of a lock target (`net8.0`, `net8.0/linux-x64`), as a
+/// TargetFramework MSBuild reads. NuGet writes the frameworks before .NET 5
+/// by full name (`.NETFramework,Version=v4.7.2`), which maps to its short
+/// name (`net472`); a short name passes as written.
+fn target_framework(target: &str) -> io::Result<String> {
+    let key = target.split('/').next().unwrap_or("");
+    let bad = || err(format!("invalid lock target framework: {target}"));
+    if let Some(rest) = key.strip_prefix('.') {
+        let (name, version) = rest.split_once(",Version=v").ok_or_else(bad)?;
+        if version.is_empty()
+            || !version.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            || version.starts_with('.')
+        {
+            return Err(bad());
+        }
+        return match name {
+            "NETFramework" => Ok(format!("net{}", version.replace('.', ""))),
+            "NETStandard" => Ok(format!("netstandard{version}")),
+            "NETCoreApp" => Ok(format!("netcoreapp{version}")),
+            _ => Err(bad()),
+        };
+    }
+    if key.is_empty()
+        || !key
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
     {
-        return Err(err(format!("invalid lock target framework: {target}")));
+        return Err(bad());
     }
-    Ok(tfm)
+    Ok(key.to_string())
 }
 
 fn validate_plan(plan: &DotnetPlan, sdk_version: &str) -> io::Result<()> {
@@ -474,14 +460,8 @@ fn validate_plan(plan: &DotnetPlan, sdk_version: &str) -> io::Result<()> {
     if plan.targets.is_empty() {
         return Err(err("packages.lock.json has no target frameworks"));
     }
-    let mut base_tfms = std::collections::BTreeSet::new();
     for target in &plan.targets {
-        base_tfms.insert(target_framework(target)?);
-    }
-    if base_tfms.len() > 1 {
-        return Err(err(
-            "multi-targeted locks are unsupported in v0; use a single TargetFramework",
-        ));
+        target_framework(target)?;
     }
     let mut seen = std::collections::BTreeSet::new();
     for p in &plan.packages {
@@ -513,39 +493,16 @@ fn root_names(project: &ProjectRoot) -> io::Result<Vec<std::ffi::OsString>> {
     })
 }
 
-/// Locate the single .csproj (v0 boundary: one SDK-style project, no sln).
-/// Returns its project-relative name; the root is listed through the held
-/// descriptor.
-pub fn find_project(project: &ProjectRoot) -> io::Result<PathBuf> {
-    let mut found = Vec::new();
-    for name in root_names(project)? {
-        let path = PathBuf::from(name);
-        let name = path.to_str().unwrap_or("");
-        if name.ends_with(".sln") || name.ends_with(".slnx") {
-            return Err(err(
-                "solution files are not supported yet; sync a single project",
-            ));
-        }
-        if name.ends_with(".csproj") {
-            found.push(path);
-        }
-    }
-    match found.len() {
-        1 => Ok(found.remove(0)),
-        0 => Err(err("no .csproj found")),
-        _ => Err(err(
-            "multiple .csproj files; ward supports one project per directory in v0",
-        )),
-    }
-}
-
 /// Directory-read failures propagate: guessing "no dotnet here" would hide
 /// them, and guessing "dotnet present" would trigger SDK realization first.
 /// The project is read through the held descriptor.
 pub fn has_marker(project: &ProjectRoot) -> io::Result<bool> {
     for name in root_names(project)? {
-        let name = name.to_string_lossy();
-        if name.ends_with(".csproj") || name.ends_with(".sln") || name.ends_with(".slnx") {
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".sln")
+            || lower.ends_with(".slnx")
+            || solution::is_project_file(Path::new(&lower))
+        {
             return Ok(true);
         }
     }
@@ -558,26 +515,21 @@ pub fn has_marker(project: &ProjectRoot) -> io::Result<bool> {
     Ok(present(LOCK_FILE) || present(".greyward/closures/dotnet.json"))
 }
 
-/// MSBuild elements a csproj may not contain, each because it breaks what
-/// the tailor relies on: the lock is the only package authority, the
-/// project is this one file, and every write lands in scratch.
+/// MSBuild elements a project file or a `Directory.*` file may not
+/// contain, each because it changes restore: the lock is the only package
+/// authority, and restore output lands in scratch.
 const BLOCKED_ELEMENTS: &[(&str, &str)] = &[
-    (
-        "Import",
-        "pulls in targets and props outside the validated project file",
-    ),
-    ("Sdk", "adds an MSBuild SDK other than Microsoft.NET.Sdk"),
     ("UsingTask", "loads task assemblies outside the SDK"),
     (
         "PackageDownload",
         "downloads packages the lock does not name",
     ),
     (
-        "ProjectReference",
-        "builds another project ward has not validated",
+        "RestoreSources",
+        "points restore at feeds other than the projected packages",
     ),
     (
-        "RestoreSources",
+        "RestoreAdditionalProjectSources",
         "points restore at feeds other than the projected packages",
     ),
     (
@@ -590,11 +542,81 @@ const BLOCKED_ELEMENTS: &[(&str, &str)] = &[
     ),
     ("BaseIntermediateOutputPath", "moves obj away from scratch"),
     ("IntermediateOutputPath", "moves obj away from scratch"),
-    ("BaseOutputPath", "moves build output away from scratch"),
-    ("OutputPath", "moves build output away from scratch"),
-    ("OutDir", "moves build output away from scratch"),
-    ("PublishDir", "moves publish output away from scratch"),
 ];
+
+/// Properties that only say where build output goes. A project may set
+/// them to a path inside the checkout: relative, no `..` that climbs out
+/// of it, and starting from nothing or from one of its own directories.
+/// `ward build` never writes there: [`OUTPUT_TARGETS`] moves every
+/// project's output to scratch.
+const OUTPUT_PROPERTIES: &[&str] = &["OutputPath", "OutDir", "BaseOutputPath", "PublishDir"];
+
+/// The MSBuild properties an output path may start from: each names a
+/// directory inside the checkout.
+const OUTPUT_ANCHORS: &[&str] = &[
+    "$(msbuildprojectdirectory)",
+    "$(msbuildthisfiledirectory)",
+    "$(solutiondir)",
+    "$(projectdir)",
+];
+
+/// Does `value` (lowercase), set in a file `depth` directories below the
+/// project root, name a place inside the project? A relative path starts
+/// from the evaluated project's directory, which is the file's or below
+/// it, so `depth` levels of `..` stay inside; `$(SolutionDir)` is the
+/// root. Properties other than the anchors may follow
+/// (`bin\$(Configuration)\`), not lead.
+fn output_inside(value: &str, depth: usize) -> bool {
+    let value = value.trim();
+    let (rest, mut depth) = match OUTPUT_ANCHORS
+        .iter()
+        .find_map(|anchor| value.strip_prefix(anchor).map(|rest| (*anchor, rest)))
+    {
+        Some((anchor, rest)) => (
+            rest.trim_start_matches(['/', '\\']),
+            if anchor == "$(solutiondir)" { 0 } else { depth },
+        ),
+        None => (value, depth),
+    };
+    if rest.starts_with(['/', '\\', '~', '$']) || rest.as_bytes().get(1) == Some(&b':') {
+        return false;
+    }
+    for part in rest.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => match depth.checked_sub(1) {
+                Some(up) => depth = up,
+                None => return false,
+            },
+            _ => depth += 1,
+        }
+    }
+    true
+}
+
+/// The text of every `<name>` element in `markup` (lowercase, comments
+/// stripped): empty for `<name/>`.
+fn element_values<'a>(markup: &'a str, name: &str) -> Vec<&'a str> {
+    let open = format!("<{name}");
+    let close = format!("</{name}");
+    let mut values = Vec::new();
+    for (at, _) in markup.match_indices(&open) {
+        let after = &markup[at + open.len()..];
+        if !after.starts_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/') {
+            continue;
+        }
+        let Some(end) = after.find('>') else {
+            continue;
+        };
+        if after[..end].ends_with('/') {
+            values.push("");
+            continue;
+        }
+        let body = &after[end + 1..];
+        values.push(body.find(&close).map(|end| &body[..end]).unwrap_or(body));
+    }
+    values
+}
 
 /// The csproj text with every comment and CDATA section replaced by a
 /// space. Both hold character data, never markup, so what remains is what
@@ -692,7 +714,75 @@ fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Validate a project-relative csproj, read through the held descriptor.
+/// XML can encode element names as UTF-8, UTF-16 or UTF-32. Decode before
+/// applying the same restrictions to every MSBuild input.
+fn decode_msbuild(bytes: &[u8]) -> io::Result<String> {
+    let utf32 = if bytes.starts_with(&[0xff, 0xfe, 0, 0]) {
+        Some((true, &bytes[4..]))
+    } else if bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+        Some((false, &bytes[4..]))
+    } else if bytes.starts_with(&[b'<', 0, 0, 0]) {
+        Some((true, bytes))
+    } else if bytes.starts_with(&[0, 0, 0, b'<']) {
+        Some((false, bytes))
+    } else {
+        None
+    };
+    if let Some((little, bytes)) = utf32 {
+        if !bytes.len().is_multiple_of(4) {
+            return Err(err("invalid UTF-32 MSBuild input"));
+        }
+        return bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| {
+                let chunk = *chunk;
+                char::from_u32(if little {
+                    u32::from_le_bytes(chunk)
+                } else {
+                    u32::from_be_bytes(chunk)
+                })
+                .ok_or_else(|| err("invalid UTF-32 MSBuild input"))
+            })
+            .collect();
+    }
+    let utf16 = if bytes.starts_with(&[0xff, 0xfe]) {
+        Some((true, &bytes[2..]))
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        Some((false, &bytes[2..]))
+    } else if bytes.starts_with(&[b'<', 0]) {
+        Some((true, bytes))
+    } else if bytes.starts_with(&[0, b'<']) {
+        Some((false, bytes))
+    } else {
+        None
+    };
+    if let Some((little, bytes)) = utf16 {
+        if !bytes.len().is_multiple_of(2) {
+            return Err(err("invalid UTF-16 MSBuild input"));
+        }
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| {
+                let chunk = [chunk[0], chunk[1]];
+                if little {
+                    u16::from_le_bytes(chunk)
+                } else {
+                    u16::from_be_bytes(chunk)
+                }
+            })
+            .collect();
+        return String::from_utf16(&units).map_err(|_| err("invalid UTF-16 MSBuild input"));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| err("MSBuild input must use UTF-8, UTF-16 or UTF-32"))
+}
+
+/// Validate a project-relative project file or `Directory.*` MSBuild file,
+/// read through the held descriptor.
 ///
 /// Matching is on whole element and attribute names, case-insensitively,
 /// with comments and CDATA removed first; entity references cannot encode
@@ -701,7 +791,10 @@ fn is_name_byte(b: u8) -> bool {
 /// is what holds the boundary when a build step does something the scan
 /// does not model.
 fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
-    let text = read_input_text(project, rel)?;
+    let bytes = project
+        .read_input(rel)?
+        .ok_or_else(|| err("MSBuild input vanished"))?;
+    let text = decode_msbuild(&bytes)?;
     let path = project.path().join(rel);
     let path = path.as_path();
     let markup = strip_comments_and_cdata(&text, path)?.to_ascii_lowercase();
@@ -757,6 +850,13 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
     for attribute in ["itemname", "propertyname"] {
         for value in attribute_values(&markup, attribute, path)? {
             let value = value.trim();
+            if value.eq_ignore_ascii_case("ProjectReference")
+                || OUTPUT_PROPERTIES
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(value))
+            {
+                return Err(err(format!("{}: task-created {value} is not supported; its project graph or output path cannot be checked before execution", path.display())));
+            }
             if let Some((name, why)) = BLOCKED_ELEMENTS
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case(value))
@@ -768,10 +868,42 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
             }
         }
     }
-    for value in attribute_values(&markup, "sdk", path)? {
-        if value != "microsoft.net.sdk" {
+    let has_output = OUTPUT_PROPERTIES
+        .iter()
+        .any(|name| opens_element(&markup, &name.to_ascii_lowercase()));
+    let early_output_file = solution::is_project_file(rel)
+        || rel
+            .file_name()
+            .is_some_and(|name| name == "Directory.Build.props");
+    if has_output
+        && (!early_output_file
+            || opens_element(&markup, "target")
+            || opens_element(&markup, "import"))
+    {
+        return Err(err(format!(
+            "{}: output properties in imported files, targets or projects with explicit imports may override ward's output hook; move them to an SDK-style project or Directory.Build.props without explicit imports",
+            path.display()
+        )));
+    }
+    for property in OUTPUT_PROPERTIES {
+        for value in element_values(&markup, &property.to_ascii_lowercase()) {
+            let depth = rel.parent().map_or(0, |parent| parent.components().count());
+            if !output_inside(value, depth) {
+                return Err(err(format!(
+                    "{}: <{property}>{}</{property}> puts build output outside the project; \
+                     use a path inside it",
+                    path.display(),
+                    value.trim()
+                )));
+            }
+        }
+    }
+    for name in solution::sdk_names(&markup, path)? {
+        if !solution::bundled_sdk(&name) {
             return Err(err(format!(
-                "{}: only Microsoft.NET.Sdk is supported",
+                "{}: the MSBuild SDK {name} is fetched from NuGet when MSBuild evaluates the \
+                 project, and no lock pins it; only the Microsoft.NET.Sdk family the .NET SDK \
+                 carries is supported",
                 path.display()
             )));
         }
@@ -779,24 +911,29 @@ fn validate_csproj(project: &ProjectRoot, rel: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// What a v1 packages.lock.json pins: its targets in lock order and one
-/// package per case-insensitive id and version, sorted by that key.
-#[derive(Debug)]
+/// What a packages.lock.json pins: its targets in lock order, one package
+/// per case-insensitive id and version, sorted by that key, and each
+/// target's own packages (what the verifier restores per framework).
+#[derive(Debug, Clone)]
 struct ParsedLock {
     targets: Vec<String>,
     packages: Vec<NugetPackage>,
+    by_target: Vec<(String, Vec<NugetPackage>)>,
 }
 
 /// The one reader of packages.lock.json. Preflight calls it once and hands
 /// planning what it read, so every refusal of a lock has one text and the
 /// lock preflight accepts is the one planning uses.
+///
+/// Version 1 and version 2 (Central Package Management) locks are read.
+/// `Direct`, `Transitive` and `CentralTransitive` entries are packages;
+/// `Project` entries name another project of the restore and pin nothing.
 fn parse_lock(text: &str) -> io::Result<ParsedLock> {
-    let v: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| err(format!("packages.lock.json: {e}")))?;
-    if v["version"] != 1 {
+    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| err(format!("packages.lock.json: {e}")))?;
+    if v["version"] != 1 && v["version"] != 2 {
         return Err(err(format!(
-            "packages.lock.json version {} unsupported (v1 only in v0; \
-             Central Package Management locks are v2+)",
+            "packages.lock.json version {} unsupported (versions 1 and 2 are read)",
             v["version"]
         )));
     }
@@ -804,28 +941,28 @@ fn parse_lock(text: &str) -> io::Result<ParsedLock> {
         .as_object()
         .ok_or_else(|| err("packages.lock.json has no dependencies"))?;
     let mut targets = Vec::new();
+    let mut by_target = Vec::new();
     let mut packages: BTreeMap<(String, String), NugetPackage> = BTreeMap::new();
     for (target, entries) in deps {
         targets.push(target.clone());
         let entries = entries
             .as_object()
             .ok_or_else(|| err(format!("bad lock target {target}")))?;
+        let mut in_target = Vec::new();
         for (id, e) in entries {
             match e["type"].as_str() {
-                Some("Direct") | Some("Transitive") => {}
-                Some("Project") => {
-                    return Err(err(format!(
-                    "{id}: Project lock entries are not supported; use package dependencies only"
-                )))
-                }
+                Some("Direct") | Some("Transitive") | Some("CentralTransitive") => {}
+                Some("Project") => continue,
                 Some(kind) => {
                     return Err(err(format!(
-                    "{id}: unsupported lock dependency type {kind}; expected Direct or Transitive"
-                )))
+                        "{id}: unsupported lock dependency type {kind}; expected Direct, \
+                         Transitive, CentralTransitive or Project"
+                    )))
                 }
                 None => {
                     return Err(err(format!(
-                        "{id}: unsupported lock dependency type {}; expected Direct or Transitive",
+                        "{id}: unsupported lock dependency type {}; expected Direct, \
+                         Transitive, CentralTransitive or Project",
                         e["type"]
                     )))
                 }
@@ -849,13 +986,16 @@ fn parse_lock(text: &str) -> io::Result<ParsedLock> {
                     )));
                 }
             } else {
-                packages.insert(key, pkg);
+                packages.insert(key, pkg.clone());
             }
+            in_target.push(pkg);
         }
+        by_target.push((target.clone(), in_target));
     }
     Ok(ParsedLock {
         targets,
         packages: packages.into_values().collect(),
+        by_target,
     })
 }
 
@@ -863,130 +1003,116 @@ pub use resolve::{preflight, Preflight};
 
 const LOCK_FILE: &str = "packages.lock.json";
 
-/// The lock every plan reads, or the refusal that names it: `prepare`
-/// generates it, and the command layer skips `prepare` under `--frozen`.
-/// Checked before any toolchain is realized, so a frozen sync of an
-/// unlocked project fails without a download.
+/// The locks every plan reads, or the refusal that names the first missing
+/// one: `prepare` generates them, and the command layer skips `prepare`
+/// under `--frozen`. Checked before any toolchain is realized, so a frozen
+/// sync of an unlocked project fails without a download.
 pub fn require_lock(project: &ProjectRoot) -> io::Result<()> {
-    if project.is_input_file(Path::new(LOCK_FILE)) {
-        Ok(())
-    } else {
-        Err(crate::tailors::missing_lock(project, LOCK_FILE))
+    let layout = solution::discover(project)?;
+    for lock in layout.member_locks() {
+        if !project.is_input_file(&lock) {
+            return Err(crate::tailors::missing_lock(
+                project,
+                &lock.to_string_lossy(),
+            ));
+        }
     }
+    Ok(())
 }
 
-/// Plan from packages.lock.json (v1 only; ward makes the opt-in lock
-/// mandatory), as `checked` read and parsed it. The project is read
-/// through the held descriptor.
+/// Plan from the members' packages.lock.json files, as `checked` read and
+/// parsed them: every package any member pins, once. The project is read
+/// through the held descriptor. The second value is the lock's sha256, or
+/// for a solution the sha256 of every member lock's path and sha256.
 pub fn plan_dotnet(
     project: &ProjectRoot,
     selected: &Selected,
     checked: &Preflight,
 ) -> io::Result<(DotnetPlan, String)> {
-    let lock_rel = Path::new(LOCK_FILE);
     let sdk_version = selected.version("dotnet-sdk")?.to_string();
-    let Preflight { csproj, lock, .. } = checked;
-    let Some((lock, ParsedLock { targets, packages })) = lock else {
-        return Err(crate::tailors::missing_lock(project, LOCK_FILE));
-    };
+    let Preflight { layout, locks, .. } = checked;
+    for lock in layout.member_locks() {
+        if !locks.iter().any(|read| read.path == lock) {
+            return Err(crate::tailors::missing_lock(
+                project,
+                &lock.to_string_lossy(),
+            ));
+        }
+    }
+    let mut targets: Vec<String> = Vec::new();
+    let mut packages: BTreeMap<(String, String), NugetPackage> = BTreeMap::new();
+    for read in locks {
+        for target in &read.parsed.targets {
+            if !targets.contains(target) {
+                targets.push(target.clone());
+            }
+        }
+        for package in &read.parsed.packages {
+            let key = (package.id.to_ascii_lowercase(), package.version.clone());
+            match packages.get(&key) {
+                Some(prev) if prev.content_hash != package.content_hash => {
+                    return Err(err(format!(
+                        "{}@{}: conflicting contentHash across the solution's locks ({})",
+                        package.id,
+                        package.version,
+                        read.path.display()
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    packages.insert(key, package.clone());
+                }
+            }
+        }
+    }
+    let named = layout
+        .solution
+        .as_ref()
+        .unwrap_or(&layout.members[0])
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project")
+        .to_string();
     let plan = DotnetPlan {
         // The SDK this plan was restored under is the selected one.
         sdk_version: sdk_version.clone(),
-        project: csproj
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project")
-            .to_string(),
-        targets: targets.clone(),
-        packages: packages.clone(),
+        project: named,
+        targets,
+        packages: packages.into_values().collect(),
+        members: match (&layout.solution, layout.members.len()) {
+            (Some(_), _) | (_, 2..) => layout
+                .members
+                .iter()
+                .map(|member| member.to_string_lossy().into_owned())
+                .collect(),
+            _ => Vec::new(),
+        },
     };
     validate_plan(&plan, &sdk_version)?;
-    let now = read_input_text(project, lock_rel)?;
-    if now != *lock {
-        return Err(err(
-            "packages.lock.json changed while planning; re-run 'ward'",
-        ));
+    for read in locks {
+        if read_input_text(project, &read.path)? != read.text {
+            return Err(err(format!(
+                "{} changed while planning; re-run 'ward'",
+                read.path.display()
+            )));
+        }
     }
     if resolve::resolution_basis(project)? != checked.basis {
         return Err(err(
             ".NET resolution inputs changed while planning; run `ward` again",
         ));
     }
-    Ok((plan, hex::encode(Sha256::digest(lock.as_bytes()))))
-}
-
-fn synthetic_csproj(plan: &DotnetPlan, tfm: &str) -> String {
-    let refs = plan
-        .packages
-        .iter()
-        .map(|p| {
-            format!(
-                "    <PackageReference Include=\"{}\" Version=\"[{}]\" />\n",
-                p.id, p.version
-            )
-        })
-        .collect::<String>();
-    format!(
-        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    \
-         <TargetFramework>{tfm}</TargetFramework>\n    \
-         <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>\n    \
-         <NoAutoResponse>true</NoAutoResponse>\n  </PropertyGroup>\n  \
-         <ItemGroup>\n{refs}  </ItemGroup>\n</Project>\n"
-    )
-}
-
-fn synthetic_lock(plan: &DotnetPlan, tfm: &str) -> serde_json::Value {
-    let entries = plan
-        .packages
-        .iter()
-        .map(|p| {
-            (
-                p.id.clone(),
-                serde_json::json!({
-                    "type": "Direct",
-                    "requested": format!("[{}]", p.version),
-                    "resolved": p.version,
-                    "contentHash": p.content_hash,
-                }),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    serde_json::json!({
-        "version": 1,
-        "dependencies": { tfm: entries },
-    })
-}
-
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn rewrite_metadata_source(path: &Path) -> io::Result<()> {
-    let text = fs::read_to_string(path)?;
-    let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-        err(format!(
-            "{}: invalid .nupkg.metadata JSON: {e}",
-            path.display()
-        ))
-    })?;
-    value
-        .as_object_mut()
-        .ok_or_else(|| {
-            err(format!(
-                "{}: .nupkg.metadata is not an object",
-                path.display()
-            ))
-        })?
-        .insert(
-            "source".to_string(),
-            serde_json::Value::String("greyward-feed".to_string()),
-        );
-    fs::write(path, serde_json::to_vec(&value)?)
+    let digest = match (&layout.solution, locks.as_slice()) {
+        (None, [only]) => hex::encode(Sha256::digest(only.text.as_bytes())),
+        _ => {
+            let mut all = Sha256::new();
+            for (path, sha256) in checked.lock_inputs() {
+                all.update(format!("{path}\0{sha256}\n").as_bytes());
+            }
+            hex::encode(all.finalize())
+        }
+    };
+    Ok((plan, digest))
 }
 
 /// Realize the global-packages object: ward fetches every nupkg into a
@@ -1003,7 +1129,7 @@ pub fn realize_packages(
     plan: &DotnetPlan,
     sdk_obj: &Path,
     selected: &Selected,
-    _checked: &Preflight,
+    checked: &Preflight,
 ) -> io::Result<PathBuf> {
     crate::tailors::install_kinds();
     crate::kernel::platform::require_host(platform, ".NET packages")?;
@@ -1052,53 +1178,48 @@ pub fn realize_packages(
         }
     }
 
-    // Locked-mode restore from a synthetic project into the staged folder:
-    // the user's project and global.json are never evaluated in realization.
+    // Locked-mode restore of synthetic projects into the staged folder: the
+    // user's projects and global.json are never evaluated in realization.
     let staged = store.stage_with_activity(activity)?;
     let verifier = scratch.join("verifier");
-    fs::create_dir_all(verifier.join("obj"))?;
+    fs::create_dir_all(&verifier)?;
     prepare_scratch(&scratch)?;
-    let tfm = target_framework(
-        plan.targets
-            .first()
-            .ok_or_else(|| err("plan has no target framework"))?,
-    )?;
-    if plan.targets.len() > 1 {
-        ui::note(&format!(
-            "synthetic NuGet verifier uses the first TFM/RID lock target: {tfm}"
-        ));
-    }
-    fs::write(
-        verifier.join("greyward-verifier.csproj"),
-        synthetic_csproj(plan, tfm),
-    )?;
-    fs::write(
-        verifier.join("packages.lock.json"),
-        serde_json::to_vec_pretty(&synthetic_lock(plan, tfm))?,
-    )?;
-    fs::write(
-        verifier.join("nuget.config"),
-        format!(
-            "<configuration><packageSources><clear /><add key=\"greyward-feed\" \
-             value=\"{}\" /></packageSources><config><add key=\"updatePackageLastAccessTime\" \
-             value=\"false\" /></config></configuration>",
-            xml_escape(&feed.display().to_string())
-        ),
-    )?;
+    let parsed: Vec<&ParsedLock> = checked.locks.iter().map(|read| &read.parsed).collect();
+    let projects = verifier_projects(&parsed);
+    let sdk_major = spec
+        .version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .ok_or_else(|| err(format!("SDK version {} has no major", spec.version)))?;
+    let objs = match write_verifier(&verifier, &feed, &projects, sdk_major) {
+        Ok(objs) => objs,
+        Err(e) => {
+            let _ = crate::kernel::store::remove_tree(&scratch);
+            let _ = crate::kernel::store::remove_tree(&staged);
+            return Err(e);
+        }
+    };
     let config = verifier.join("nuget.config").canonicalize()?;
-    let result = crate::kernel::sandbox::run_build_spec_on(
-        platform,
-        &verify_spec(
-            &sdk_obj,
-            &feed,
-            &verifier,
-            &config,
-            &staged,
-            &scratch,
-            ensure_dotnet_tmp(platform)?,
-        ),
-        Some(activity),
-    );
+    // Nothing locked, nothing to verify: the object is the empty folder.
+    let result = if projects.is_empty() {
+        Ok(())
+    } else {
+        crate::kernel::sandbox::run_build_spec_on(
+            platform,
+            &verify_spec(
+                &sdk_obj,
+                &feed,
+                &verifier,
+                &config,
+                &staged,
+                &scratch,
+                objs,
+                ensure_dotnet_tmp(platform)?,
+            ),
+            Some(activity),
+        )
+    };
     if let Err(e) = result {
         let _ = crate::kernel::store::remove_tree(&scratch);
         let _ = crate::kernel::store::remove_tree(&staged);
@@ -1145,6 +1266,7 @@ pub fn project_dotnet_env(
     packages_obj: &Path,
     plan: &DotnetPlan,
     lock_sha256: &str,
+    lock_inputs: &[(String, String)],
     resolution_basis: &crate::comforter::join::Digests,
     selected: &Selected,
     attribution: &mut crate::kernel::policy::Attribution,
@@ -1157,6 +1279,14 @@ pub fn project_dotnet_env(
     refs.object_path(&store, activity, &sdk_obj)?;
     refs.object_path(&store, activity, &packages_obj)?;
     let mut body = closure_body(&sdk_obj, &packages_obj, plan, lock_sha256, selected)?;
+    // A solution's closure records each member lock, which `ward status`
+    // compares one by one; a single project's keeps its one lock hash.
+    if !lock_inputs.is_empty() {
+        body["inputs"] = lock_inputs
+            .iter()
+            .map(|(path, sha256)| serde_json::json!({"path": path, "sha256": sha256}))
+            .collect();
+    }
     body[crate::comforter::join::BASIS_FIELD] =
         crate::comforter::join::basis_value(resolution_basis);
     crate::comforter::write_closure(project, "dotnet", body, &store, activity, refs, attribution)
@@ -1295,8 +1425,10 @@ fn add_dotnet_tmp_write_root(mut roots: Vec<PathBuf>, dotnet_tmp: PathBuf) -> Ve
 }
 
 /// The locked-mode package verification: `dotnet restore` of the synthetic
-/// verifier project against the local feed. It writes only the staged
-/// package tree, the verifier's `obj/` and the CoreCLR tmp root (#680).
+/// verifier projects (their generated solution) against the local feed. It
+/// writes only the staged package tree, each verifier project's `obj/` and
+/// the CoreCLR tmp root (#680).
+#[allow(clippy::too_many_arguments)]
 fn verify_spec(
     sdk_obj: &Path,
     feed: &Path,
@@ -1304,12 +1436,16 @@ fn verify_spec(
     config: &Path,
     staged: &Path,
     scratch: &Path,
+    objs: Vec<PathBuf>,
     dotnet_tmp: PathBuf,
 ) -> BuildSpec {
+    let mut write = vec![staged.to_path_buf()];
+    write.extend(objs);
     BuildSpec {
         argv: vec![
             sdk_obj.join("dotnet").display().to_string(),
             "restore".to_string(),
+            verifier.join("greyward-verifier.sln").display().to_string(),
             "--locked-mode".to_string(),
             "--no-cache".to_string(),
             "--disable-build-servers".to_string(),
@@ -1324,334 +1460,11 @@ fn verify_spec(
             feed.to_path_buf(),
             verifier.to_path_buf(),
         ],
-        write: add_dotnet_tmp_write_root(vec![staged.into(), verifier.join("obj")], dotnet_tmp),
+        write: add_dotnet_tmp_write_root(write, dotnet_tmp),
         scratch: scratch.to_path_buf(),
         path: format!("{}:/usr/bin:/bin", sdk_obj.display()),
         host_view: crate::kernel::sandbox::HostView::Full,
     }
-}
-
-/// The paths a sandboxed project restore and build run over. The project
-/// and the package object are read-only: each phase writes only its own
-/// scratch directories and the selected CoreCLR tmp root.
-struct ProjectPhase<'a> {
-    project_dir: &'a Path,
-    sdk_obj: &'a Path,
-    packages_obj: &'a Path,
-    scratch: &'a Path,
-    objdir: &'a Path,
-    output_scratch: &'a Path,
-}
-
-impl ProjectPhase<'_> {
-    /// The offline locked restore writes the scratch obj/ only; the
-    /// `--no-restore` build (`build`) writes the scratch output too.
-    fn spec(
-        &self,
-        build: bool,
-        argv: Vec<String>,
-        env: Vec<(String, String)>,
-        dotnet_tmp: PathBuf,
-    ) -> BuildSpec {
-        let mut write = Vec::new();
-        if build {
-            write.push(self.output_scratch.to_path_buf());
-        }
-        write.push(self.objdir.to_path_buf());
-        BuildSpec {
-            argv,
-            cwd: self.project_dir.to_path_buf(),
-            env,
-            read: vec![
-                self.project_dir.to_path_buf(),
-                self.sdk_obj.to_path_buf(),
-                self.packages_obj.to_path_buf(),
-            ],
-            write: add_dotnet_tmp_write_root(write, dotnet_tmp),
-            scratch: self.scratch.to_path_buf(),
-            path: format!("{}:/usr/bin:/bin", self.sdk_obj.display()),
-            host_view: crate::kernel::sandbox::HostView::Full,
-        }
-    }
-}
-
-fn validate_build_args(args: &[String]) -> io::Result<()> {
-    let mut i = 0;
-    while i < args.len() {
-        let lower = args[i].to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "-c" | "--configuration" | "-v" | "--verbosity" | "-f" | "--framework"
-        ) {
-            if i + 1 == args.len() || args[i + 1].starts_with('-') || args[i + 1].starts_with('@') {
-                return Err(err(format!("{}: missing option value", args[i])));
-            }
-            i += 2;
-            continue;
-        }
-        if matches!(lower.as_str(), "--no-incremental" | "-warnaserror")
-            || lower.starts_with("-p:configuration=")
-            || lower.starts_with("-p:treatwarningsaserrors=")
-        {
-            i += 1;
-            continue;
-        }
-        return Err(err(format!(
-            "{}: not allowed for sandboxed dotnet build",
-            args[i]
-        )));
-    }
-    Ok(())
-}
-
-/// The output directory `bin/greyward-<fingerprint>` under the project's held
-/// path, with `bin` created. Neither may be a symlink, and both must
-/// resolve under the held path: the path is not canonicalized first, so a
-/// symlink swapped in at the project path since ward opened it is refused
-/// as escaping the project rather than published into (#497).
-fn checked_output_dir(project: &ProjectRoot, fingerprint: &str) -> io::Result<PathBuf> {
-    let project_dir = project.path();
-    let bin = project_dir.join("bin");
-    if let Ok(md) = fs::symlink_metadata(&bin) {
-        if md.file_type().is_symlink() {
-            return Err(err(format!("{} must not be a symlink", bin.display())));
-        }
-        if !md.is_dir() {
-            return Err(err(format!("{} must be a directory", bin.display())));
-        }
-    }
-    let output = bin.join(format!("greyward-{fingerprint}"));
-    if let Ok(md) = fs::symlink_metadata(&output) {
-        if md.file_type().is_symlink() {
-            return Err(err(format!("{} must not be a symlink", output.display())));
-        }
-        if !md.is_dir() {
-            return Err(err(format!("{} must be a directory", output.display())));
-        }
-    }
-    // Created from the held descriptor, so nothing is made where a
-    // symlink at the project path or at `bin` points.
-    project.create_dir_all(Path::new("bin"))?;
-    let canonical_bin = bin.canonicalize()?;
-    if !canonical_bin.starts_with(project_dir) {
-        return Err(err(format!("{} escapes the project", bin.display())));
-    }
-    if output.exists() && !output.canonicalize()?.starts_with(project_dir) {
-        return Err(err(format!("{} escapes the project", output.display())));
-    }
-    Ok(output)
-}
-
-fn publish_output(
-    staged: &Path,
-    project: &ProjectRoot,
-    platform: Platform,
-    fingerprint: &str,
-    activity: Option<&StoreActivity>,
-) -> io::Result<PathBuf> {
-    let output = checked_output_dir(project, fingerprint)?;
-    let bin = output
-        .parent()
-        .ok_or_else(|| err("output directory has no bin parent"))?;
-    let suffix = crate::kernel::fsroot::random_suffix()?;
-    let new = bin.join(format!(".greyward-{fingerprint}.new.{suffix}"));
-    let old = bin.join(format!(".greyward-{fingerprint}.old.{suffix}"));
-    for path in [&new, &old] {
-        if fs::symlink_metadata(path).is_ok() {
-            return Err(err(format!(
-                "temporary output already exists: {}",
-                path.display()
-            )));
-        }
-    }
-    match fs::rename(staged, &new) {
-        Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            let cloned = match activity {
-                Some(activity) => {
-                    crate::kernel::store::clone_tree_with_activity(activity, staged, &new, platform)
-                }
-                None => crate::comforter::clone_tree_for(staged, &new, platform),
-            };
-            if let Err(clone_error) = cloned {
-                let _ = crate::kernel::store::remove_tree(&new);
-                return Err(io::Error::new(
-                    clone_error.kind(),
-                    format!("publish {}: {clone_error}", output.display()),
-                ));
-            }
-        }
-        Err(e) => {
-            return Err(io::Error::new(
-                e.kind(),
-                format!("publish {}: {e}", output.display()),
-            ))
-        }
-    }
-
-    let had_old = output.exists();
-    if had_old {
-        if let Err(e) = fs::rename(&output, &old) {
-            let _ = crate::kernel::store::remove_tree(&new);
-            return Err(io::Error::new(
-                e.kind(),
-                format!("publish {}: {e}", output.display()),
-            ));
-        }
-    }
-    if let Err(e) = fs::rename(&new, &output) {
-        let _ = crate::kernel::store::remove_tree(&new);
-        let restore = if had_old {
-            fs::rename(&old, &output)
-        } else {
-            Ok(())
-        };
-        return Err(match restore {
-            Ok(()) => io::Error::new(e.kind(), format!("publish {}: {e}", output.display())),
-            Err(restore_error) => io::Error::new(
-                e.kind(),
-                format!(
-                    "publish {}: {e}; restoring previous output failed: {restore_error}",
-                    output.display()
-                ),
-            ),
-        });
-    }
-    if had_old {
-        if let Err(e) = crate::kernel::store::remove_tree(&old) {
-            // The publish itself succeeded; rolling back here could lose
-            // BOTH versions (the old tree may be partially deleted). Keep
-            // the new output and report the leftover.
-            ui::warning(
-                &format!("previous output left at {} ({e})", old.display()),
-                &ui::shell_line(&["rm", "-rf", &old.display().to_string()]),
-            );
-        }
-    }
-    Ok(output)
-}
-
-/// Sandboxed build: fresh offline locked restore into scratch obj, attest
-/// assets, then build --no-restore. Project obj/ is never authority.
-pub fn build_sandboxed(
-    platform: Platform,
-    activity: &StoreActivity,
-    project: &ProjectRoot,
-    sdk_obj: &Path,
-    packages_obj: &Path,
-    args: &[String],
-    selected: &Selected,
-) -> io::Result<()> {
-    validate_build_args(args)?;
-    let sdk_spec = sdk_spec(platform, selected)?;
-    let csproj = preflight(project, &sdk_spec.version)?.csproj;
-    let project_dir = project.path().to_path_buf();
-    let sdk_obj = sdk_obj.canonicalize()?;
-    let packages_obj = packages_obj.canonicalize()?;
-    let store = Store::open()?;
-    store.require_activity(activity, "dotnet build")?;
-    let scratch = store.stage_with_activity(activity)?;
-    let objdir = scratch.join("obj");
-    let output_scratch = scratch.join("output");
-    fs::create_dir_all(&objdir)?;
-    fs::create_dir_all(&output_scratch)?;
-    prepare_scratch(&scratch)?;
-    // Empty source list: everything must come from the projected packages.
-    fs::write(
-        scratch.join("nuget.config"),
-        "<configuration><packageSources><clear /></packageSources><config>\
-         <add key=\"updatePackageLastAccessTime\" value=\"false\" /></config></configuration>",
-    )?;
-    let common = |verb: &str| -> Vec<String> {
-        vec![
-            sdk_obj.join("dotnet").display().to_string(),
-            verb.to_string(),
-            csproj.display().to_string(),
-        ]
-    };
-    // CoreCLR named mutexes use the platform-selected local write root.
-    let env: Vec<(String, String)> = forced_env(&sdk_obj, &packages_obj, &scratch);
-    let mut restore = common("restore");
-    restore.extend([
-        "--locked-mode".to_string(),
-        "--no-cache".to_string(),
-        "--configfile".to_string(),
-        scratch.join("nuget.config").display().to_string(),
-        "-noAutoResponse".to_string(),
-        format!("-p:MSBuildProjectExtensionsPath={}/", objdir.display()),
-        format!("-p:BaseIntermediateOutputPath={}/", objdir.display()),
-        "-p:UseSharedCompilation=false".to_string(),
-        "-nodeReuse:false".to_string(),
-        "--disable-build-servers".to_string(),
-    ]);
-    let phase = ProjectPhase {
-        project_dir: &project_dir,
-        sdk_obj: &sdk_obj,
-        packages_obj: &packages_obj,
-        scratch: &scratch,
-        objdir: &objdir,
-        output_scratch: &output_scratch,
-    };
-    let spec = phase.spec(false, restore, env.clone(), ensure_dotnet_tmp(platform)?);
-    crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!(
-                "offline locked restore failed: {e}; network is denied — \
-                     packages outside the lock, framework packs, or workloads \
-                     are unsupported in v0"
-            ),
-        )
-    })?;
-    if !objdir.join("project.assets.json").is_file() {
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        return Err(err("restore produced no project.assets.json"));
-    }
-    let assets = fs::read(objdir.join("project.assets.json"))?;
-    let assets_sha256 = hex::encode(Sha256::digest(&assets));
-    let mut build = common("build");
-    build.extend(args.iter().cloned());
-    build.extend([
-        "--no-restore".to_string(),
-        format!("-p:OutputPath={}/", output_scratch.display()),
-        "-noAutoResponse".to_string(),
-        format!("-p:MSBuildProjectExtensionsPath={}/", objdir.display()),
-        format!("-p:BaseIntermediateOutputPath={}/", objdir.display()),
-        "-p:UseSharedCompilation=false".to_string(),
-        "-nodeReuse:false".to_string(),
-        "--disable-build-servers".to_string(),
-    ]);
-    let spec = phase.spec(true, build, env, ensure_dotnet_tmp(platform)?);
-    if let Err(e) = crate::kernel::sandbox::run_build_spec_on(platform, &spec, Some(activity)) {
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        return Err(io::Error::new(
-            e.kind(),
-            format!("dotnet build failed: {e}\n(network is denied during builds)"),
-        ));
-    }
-    let after = fs::read(objdir.join("project.assets.json"))?;
-    if hex::encode(Sha256::digest(&after)) != assets_sha256 {
-        let _ = crate::kernel::store::remove_tree(&scratch);
-        return Err(err(
-            "project.assets.json changed during build; refusing to publish output",
-        ));
-    }
-    let output = match publish_output(
-        &output_scratch,
-        project,
-        platform,
-        &sdk_fingerprint_of(&sdk_spec),
-        Some(activity),
-    ) {
-        Ok(output) => output,
-        Err(e) => {
-            let _ = crate::kernel::store::remove_tree(&scratch);
-            return Err(e);
-        }
-    };
-    let _ = crate::kernel::store::remove_tree(&scratch);
-    ui::note(&format!("built into {}", output.display()));
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1784,40 +1597,52 @@ mod tests {
     }
 
     /// The global.json gate answers to the selection, so a project locked to
-    /// an older SDK keeps passing after the shipped catalog moves on.
+    /// an older SDK keeps passing after the shipped catalog moves on, and it
+    /// reads rollForward as the range the host reads.
     #[test]
     fn the_global_json_gate_compares_against_the_selected_sdk() {
         let scratch = TempDir::named("dotnet-globaljson");
         let temp = scratch.0.clone();
-        fs::write(
-            temp.join("global.json"),
-            "{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"disable\"}}",
-        )
-        .unwrap();
-        check_global_json(&ProjectRoot::open(&temp).unwrap(), "9.0.100").unwrap();
-        let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("requires SDK 9.0.100"), "{error}");
+        let gate = |text: &str, selected: &str| {
+            fs::write(temp.join("global.json"), text).unwrap();
+            check_global_json(&ProjectRoot::open(&temp).unwrap(), selected)
+        };
+        let exact = r#"{"sdk":{"version":"9.0.100","rollForward":"disable"}}"#;
+        gate(exact, "9.0.100").unwrap();
+        let error = gate(exact, SDK_VERSION).unwrap_err().to_string();
+        assert!(error.contains("admits SDK ==9.0.100"), "{error}");
         assert!(error.contains(SDK_VERSION), "{error}");
-        // The right version still has to pin rollForward and redirect nothing.
+        // A roll-forward policy admits its range, and only its range.
+        let feature =
+            "\u{feff}{\"sdk\":{\"version\":\"9.0.100\",\"rollForward\":\"latestFeature\"}}";
+        gate(feature, SDK_VERSION).unwrap();
+        let error = gate(feature, "10.0.100").unwrap_err().to_string();
+        assert!(error.contains(">=9.0.100,<9.1"), "{error}");
+        // No rollForward is the host's patch policy: the same feature band.
+        gate(r#"{"sdk":{"version":"9.0.300"}}"#, SDK_VERSION).unwrap();
+        assert!(gate(r#"{"sdk":{"version":"9.0.100"}}"#, SDK_VERSION).is_err());
+        // What the host ignores constrains nothing.
+        gate(r#"{"sdk":{"version":"9.0.*"}}"#, SDK_VERSION).unwrap();
+        gate(r#"{"sdk":{"allowPrerelease":false}}"#, SDK_VERSION).unwrap();
+        gate(r#"{"tools":{}}"#, SDK_VERSION).unwrap();
+        // Redirection and an unknown policy are refused.
         for (text, refusal) in [
             (
-                format!("{{\"sdk\":{{\"version\":\"{SDK_VERSION}\"}}}}"),
-                "rollForward",
-            ),
-            (
                 format!(
-                    "{{\"sdk\":{{\"version\":\"{SDK_VERSION}\",\"rollForward\":\"disable\"}},\
-                     \"msbuild-sdks\":{{\"X\":\"1.0\"}}}}"
+                    r#"{{"sdk":{{"version":"{SDK_VERSION}","rollForward":"disable"}},"msbuild-sdks":{{"X":"1.0"}}}}"#
                 ),
                 "SDK redirection",
             ),
+            (
+                format!(r#"{{"sdk":{{"version":"{SDK_VERSION}","paths":[".dotnet"]}}}}"#),
+                "SDK redirection",
+            ),
+            (
+                format!(r#"{{"sdk":{{"version":"{SDK_VERSION}","rollForward":"newest"}}}}"#),
+                "roll-forward policy",
+            ),
         ] {
-            fs::write(temp.join("global.json"), &text).unwrap();
-            let error = check_global_json(&ProjectRoot::open(&temp).unwrap(), SDK_VERSION)
-                .unwrap_err()
-                .to_string();
+            let error = gate(&text, SDK_VERSION).unwrap_err().to_string();
             assert!(error.contains(refusal), "{text}: {error}");
         }
         // No global.json at all is no constraint.
@@ -1833,6 +1658,7 @@ mod tests {
         let selected = shipped_selection().unwrap();
         let sdk_obj = Path::new("/store/objects/abc-dotnet-sdk-9.0.317");
         let plan = DotnetPlan {
+            members: Vec::new(),
             sdk_version: SDK_VERSION.into(),
             project: "app.csproj".into(),
             targets: vec!["net9.0".into()],
@@ -1888,6 +1714,7 @@ mod tests {
         let project = temp.join("project");
         fs::create_dir_all(&project).unwrap();
         let plan = DotnetPlan {
+            members: Vec::new(),
             sdk_version: SDK_VERSION.into(),
             project: "app.csproj".into(),
             targets: vec!["net9.0".into()],
@@ -1900,6 +1727,7 @@ mod tests {
             &store.object_path(&packages_id),
             &plan,
             &"c".repeat(64),
+            &[],
             &Default::default(),
             &shipped_selection().unwrap(),
             &mut attribution,
@@ -2074,13 +1902,32 @@ mod tests {
             &verifier.join("nuget.config"),
             &staged,
             &scratch,
+            vec![verifier.join("v0/obj"), verifier.join("v1/obj")],
             dotnet_tmp.clone(),
         );
         let restore = phase.spec(false, Vec::new(), Vec::new(), dotnet_tmp.clone());
         let build = phase.spec(true, Vec::new(), Vec::new(), dotnet_tmp.clone());
         assert_eq!(
             verify.write,
-            [staged.clone(), verifier.join("obj"), dotnet_tmp.clone()]
+            [
+                staged.clone(),
+                verifier.join("v0/obj"),
+                verifier.join("v1/obj"),
+                dotnet_tmp.clone()
+            ]
+        );
+        // Artifacts mode: one scratch tree both phases write.
+        let artifacts = scratch.join("artifacts");
+        let artifacts_phase = ProjectPhase {
+            objdir: &artifacts,
+            output_scratch: &artifacts,
+            ..phase
+        };
+        assert_eq!(
+            artifacts_phase
+                .spec(true, Vec::new(), Vec::new(), dotnet_tmp.clone())
+                .write,
+            [artifacts.clone(), dotnet_tmp.clone()]
         );
         assert_eq!(restore.write, [objdir.clone(), dotnet_tmp.clone()]);
         assert_eq!(
@@ -2101,6 +1948,192 @@ mod tests {
         "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>"
     }
 
+    /// A member locked for Windows turns on Windows targeting for restore
+    /// and is left out of `ward build`; a portable project gets neither.
+    #[test]
+    fn windows_members_restore_with_windows_targeting_and_are_not_built() {
+        let scratch = TempDir::named("dn-windows");
+        let root = scratch.0.clone();
+        for (path, text) in [
+            (
+                "s.sln",
+                "Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"a\", \"a\\a.csproj\", \"{1}\"\nEndProject\n\
+                 Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"w\", \"w\\w.csproj\", \"{2}\"\nEndProject\n",
+            ),
+            ("a/a.csproj", minimal_csproj()),
+            ("w/w.csproj", minimal_csproj()),
+            (
+                "a/packages.lock.json",
+                r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+            ),
+            (
+                "w/packages.lock.json",
+                r#"{"version":1,"dependencies":{"net9.0-windows7.0":{}}}"#,
+            ),
+        ] {
+            fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            fs::write(root.join(path), text).unwrap();
+        }
+        let checked = preflight(&ProjectRoot::open(&root).unwrap(), SDK_VERSION).unwrap();
+        assert!(checked.windows);
+        assert_eq!(checked.windows_members(), [PathBuf::from("w/w.csproj")]);
+        assert_eq!(
+            buildable(&checked).unwrap().members,
+            [PathBuf::from("a/a.csproj")]
+        );
+
+        fs::write(
+            root.join("w/packages.lock.json"),
+            r#"{"version":1,"dependencies":{"net9.0":{}}}"#,
+        )
+        .unwrap();
+        let checked = preflight(&ProjectRoot::open(&root).unwrap(), SDK_VERSION).unwrap();
+        assert!(!checked.windows);
+        assert_eq!(buildable(&checked).unwrap().members.len(), 2);
+
+        // With no lock yet, project text decides.
+        fs::remove_file(root.join("w/packages.lock.json")).unwrap();
+        fs::write(root.join("w/w.csproj"), in_project("<UseWPF>true</UseWPF>")).unwrap();
+        let checked = preflight(&ProjectRoot::open(&root).unwrap(), SDK_VERSION).unwrap();
+        assert!(checked.windows);
+    }
+
+    #[test]
+    fn solution_builds_refuse_two_members_of_one_name() {
+        let members = |paths: &[&str]| paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        same_named_members(&members(&["a/App.csproj", "b/Lib.csproj"])).unwrap();
+        let why = same_named_members(&members(&["a/App.csproj", "b/app.fsproj"]))
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("a/App.csproj and b/app.fsproj"), "{why}");
+    }
+
+    /// A file deeper in the checkout may climb as far as the root.
+    #[test]
+    fn output_paths_may_climb_to_the_root() {
+        assert!(output_inside("..\\output\\release\\", 1));
+        assert!(output_inside("$(msbuildthisfiledirectory)../../bin", 2));
+        assert!(!output_inside("..\\..\\output", 1));
+        assert!(!output_inside("$(solutiondir)..\\bin", 3));
+        assert!(output_inside("$(solutiondir)bin\\$(configuration)", 0));
+        let scratch = TempDir::named("dn-output-depth");
+        fs::create_dir_all(scratch.0.join("src/app")).unwrap();
+        let project = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputPath>../../Output/Release/</OutputPath></PropertyGroup></Project>";
+        fs::write(scratch.0.join("src/app/app.csproj"), project).unwrap();
+        fs::write(scratch.0.join("app.csproj"), project).unwrap();
+        let root = ProjectRoot::open(&scratch.0).unwrap();
+        validate_csproj(&root, Path::new("src/app/app.csproj")).unwrap();
+        assert!(validate_csproj(&root, Path::new("app.csproj")).is_err());
+    }
+
+    #[test]
+    fn lock_targets_name_their_framework() {
+        for (target, tfm) in [
+            ("net9.0", "net9.0"),
+            ("net9.0/linux-x64", "net9.0"),
+            ("net11.0-windows7.0", "net11.0-windows7.0"),
+            (".NETStandard,Version=v2.0", "netstandard2.0"),
+            (".NETFramework,Version=v4.7.2", "net472"),
+            (".NETCoreApp,Version=v3.1/win-x64", "netcoreapp3.1"),
+        ] {
+            assert_eq!(target_framework(target).unwrap(), tfm, "{target}");
+        }
+        for bad in [
+            "",
+            "net9.0;evil",
+            ".NETFramework,Version=v",
+            ".NETFramework,Version=v4'",
+            ".Other,Version=v1.0",
+            ".NETStandard",
+            "net$(X)",
+        ] {
+            assert!(target_framework(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Every lock's packages are restored under the framework they were
+    /// locked for; one id at two versions for one framework goes to a
+    /// second verifier project.
+    #[test]
+    fn verifier_projects_keep_each_framework_at_one_version() {
+        let package = |id: &str, version: &str, kind: &str| {
+            format!(
+                r#""{id}":{{"type":"{kind}","resolved":"{version}","contentHash":"{CONTENT_HASH}"}}"#
+            )
+        };
+        let a = parse_lock(&format!(
+            r#"{{"version":1,"dependencies":{{
+                "net8.0":{{{},{}}},
+                ".NETStandard,Version=v2.0":{{{}}},
+                "net8.0/linux-x64":{{{}}}}}}}"#,
+            package("Json", "13.0.1", "Direct"),
+            package("Core", "1.0.0", "Transitive"),
+            package("Json", "12.0.0", "Direct"),
+            package("Native", "2.0.0", "Transitive"),
+        ))
+        .unwrap();
+        let b = parse_lock(&format!(
+            r#"{{"version":2,"dependencies":{{"net8.0":{{{},{}}}}}}}"#,
+            package("Json", "13.0.3", "CentralTransitive"),
+            package("Other", "1.0.0", "Project"),
+        ))
+        .unwrap();
+        let projects = verifier_projects(&[&a, &b]);
+        assert_eq!(projects.len(), 2);
+        let ids = |project: &VerifierProject, key: &str| -> Vec<String> {
+            project[key]
+                .values()
+                .map(|p| format!("{}@{}", p.id, p.version))
+                .collect()
+        };
+        assert_eq!(
+            ids(&projects[0], "net8.0"),
+            ["Core@1.0.0", "Json@13.0.1", "Native@2.0.0"]
+        );
+        assert_eq!(
+            ids(&projects[0], ".NETStandard,Version=v2.0"),
+            ["Json@12.0.0"]
+        );
+        assert_eq!(ids(&projects[1], "net8.0"), ["Json@13.0.3"]);
+
+        let csproj = synthetic_csproj(&projects[0], 8).unwrap();
+        assert!(
+            csproj.contains("<TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>"),
+            "{csproj}"
+        );
+        // The SDK's own framework prunes like the user's restore did; any
+        // other restores with no framework reference to download.
+        assert!(
+            csproj.contains(
+                "<FrameworkReference Include=\"Microsoft.AspNetCore.App\" />\n  </ItemGroup>"
+            ),
+            "{csproj}"
+        );
+        assert!(
+            csproj.contains(
+                "<PropertyGroup Condition=\"'$(TargetFramework)' == 'netstandard2.0'\">\n    \
+                 <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>\n"
+            ),
+            "{csproj}"
+        );
+        assert!(!csproj.contains("'net8.0'\">\n    <Disable"), "{csproj}");
+        let older = synthetic_csproj(&projects[0], 9).unwrap();
+        assert!(!older.contains("<FrameworkReference"), "{older}");
+        assert!(
+            csproj.contains(
+                "<ItemGroup Condition=\"'$(TargetFramework)' == 'netstandard2.0'\">\n    \
+                 <PackageReference Include=\"Json\" Version=\"[12.0.0]\" />"
+            ),
+            "{csproj}"
+        );
+        let lock = synthetic_lock(&projects[0]);
+        assert_eq!(
+            lock["dependencies"][".NETStandard,Version=v2.0"]["Json"]["requested"],
+            "[12.0.0]"
+        );
+        assert_eq!(lock["dependencies"]["net8.0"]["Core"]["type"], "Direct");
+    }
+
     #[test]
     fn lock_parsing_and_validation() {
         let base = NugetPackage {
@@ -2109,25 +2142,36 @@ mod tests {
             content_hash: CONTENT_HASH.into(),
         };
         let ok = DotnetPlan {
+            members: Vec::new(),
             sdk_version: SDK_VERSION.into(),
             project: "p.csproj".into(),
             targets: vec!["net9.0".into()],
             packages: vec![base.clone()],
         };
         assert!(validate_plan(&ok, SDK_VERSION).is_ok());
+        // Multi-targeted locks, long framework names included, are read.
+        assert!(validate_plan(
+            &DotnetPlan {
+                targets: vec![
+                    "net9.0".into(),
+                    "net8.0".into(),
+                    ".NETStandard,Version=v2.0".into(),
+                ],
+                ..ok.clone()
+            },
+            SDK_VERSION,
+        )
+        .is_ok());
         let error = validate_plan(
             &DotnetPlan {
-                targets: vec!["net9.0".into(), "net8.0".into()],
+                targets: vec!["net9.0".into(), "net8.0;evil".into()],
                 ..ok.clone()
             },
             SDK_VERSION,
         )
         .unwrap_err()
         .to_string();
-        assert!(
-            error.contains("multi-targeted locks are unsupported in v0"),
-            "{error}"
-        );
+        assert!(error.contains("invalid lock target framework"), "{error}");
         let same_tfm_rids = DotnetPlan {
             targets: vec![
                 "net9.0".into(),
@@ -2192,6 +2236,7 @@ mod tests {
     fn the_packages_identity_is_the_lock_and_the_sdk() {
         crate::tailors::install_kinds();
         let plan = |content_hash: &str| DotnetPlan {
+            members: Vec::new(),
             sdk_version: SDK_VERSION.into(),
             project: "app.csproj".into(),
             targets: vec!["net9.0".into()],
@@ -2312,7 +2357,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported MSBuild/project feature <Sdk>"),
+                .contains("the MSBuild SDK x is fetched from NuGet"),
             "{error}"
         );
         let garbage = base.join("garbage.csproj");
@@ -2339,9 +2384,7 @@ mod tests {
         .unwrap();
         let error = preflight(&ProjectRoot::open(&symlinked).unwrap(), SDK_VERSION).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("csproj must be a regular file, not a symlink"),
+            error.to_string().contains("project.csproj is a symlink"),
             "{error}"
         );
 
@@ -2353,10 +2396,10 @@ mod tests {
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"Project","resolved":"1.0.0","contentHash":"A"}}}}"#,
         )
         .unwrap();
-        let error = preflight(&ProjectRoot::open(&project_lock).unwrap(), SDK_VERSION)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Project lock entries"), "{error}");
+        // A Project entry names another project of the tree, which the
+        // solution restores itself: nothing to fetch.
+        let checked = preflight(&ProjectRoot::open(&project_lock).unwrap(), SDK_VERSION).unwrap();
+        assert!(checked.locks[0].parsed.packages.is_empty());
 
         let central_transitive = base.join("central-transitive");
         fs::create_dir(&central_transitive).unwrap();
@@ -2366,39 +2409,32 @@ mod tests {
             r#"{"version":1,"dependencies":{"net9.0":{"Other":{"type":"CentralTransitive","resolved":"1.0.0","contentHash":"A"}}}}"#,
         )
         .unwrap();
-        let error = preflight(
+        let checked = preflight(
             &ProjectRoot::open(&central_transitive).unwrap(),
             SDK_VERSION,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("Other"), "{error}");
-        assert!(error.contains("CentralTransitive"), "{error}");
+        .unwrap();
+        assert_eq!(checked.locks[0].parsed.packages[0].id, "Other");
 
+        // An import is evaluated in the sandbox like the project itself.
         let import = base.join("import");
         fs::create_dir(&import).unwrap();
         fs::write(
             import.join("project.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"evil.targets\" /></Project>",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"shared.targets\" /></Project>",
         )
         .unwrap();
-        let error = preflight(&ProjectRoot::open(&import).unwrap(), SDK_VERSION).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported MSBuild/project feature <Import>"),
-            "{error}"
-        );
+        preflight(&ProjectRoot::open(&import).unwrap(), SDK_VERSION).unwrap();
 
         let bad_global = base.join("bad-global");
         fs::create_dir(&bad_global).unwrap();
         fs::write(bad_global.join("project.csproj"), minimal_csproj()).unwrap();
-        fs::write(bad_global.join("global.json"), "{}").unwrap();
+        fs::write(bad_global.join("global.json"), r#"{"sdk":"9.0.100"}"#).unwrap();
         let error = preflight(&ProjectRoot::open(&bad_global).unwrap(), SDK_VERSION).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("global.json must contain an sdk object"),
+                .contains("global.json sdk must be an object"),
             "{error}"
         );
 
@@ -2439,7 +2475,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported MSBuild/project feature <Sdk>"),
+                .contains("the MSBuild SDK x is fetched from NuGet"),
             "{error}"
         );
         let projector = bypass.join("projector.csproj");
@@ -2478,22 +2514,25 @@ mod tests {
                 r#"{{"version":1,"dependencies":{{"net9.0":{{"Newtonsoft.Json":{{{fields}}}}}}}}}"#
             )
         };
-        let error = refusal("v2", r#"{"version":2,"dependencies":{}}"#);
+        let error = refusal("v3", r#"{"version":3,"dependencies":{}}"#);
         assert!(
-            error.contains("packages.lock.json version 2 unsupported (v1 only in v0; Central Package Management locks are v2+)"),
+            error.contains("packages.lock.json version 3 unsupported (versions 1 and 2 are read)"),
             "{error}"
         );
+        // Version 2 (Central Package Management) is read like version 1.
+        let v2 = parse_lock("\u{feff}{\"version\":2,\"dependencies\":{\"net9.0\":{}}}").unwrap();
+        assert_eq!(v2.targets, ["net9.0"]);
         let error = refusal(
             "kind",
             &entry(r#""type":"Weird","resolved":"1.0.0","contentHash":"A""#),
         );
         assert!(
-            error.contains("Newtonsoft.Json: unsupported lock dependency type Weird; expected Direct or Transitive"),
+            error.contains("Newtonsoft.Json: unsupported lock dependency type Weird; expected Direct, Transitive, CentralTransitive or Project"),
             "{error}"
         );
         let error = refusal("untyped", &entry(r#""resolved":"1.0.0","contentHash":"A""#));
         assert!(
-            error.contains("Newtonsoft.Json: unsupported lock dependency type null; expected Direct or Transitive"),
+            error.contains("Newtonsoft.Json: unsupported lock dependency type null; expected Direct, Transitive, CentralTransitive or Project"),
             "{error}"
         );
         let error = refusal("unresolved", &entry(r#""type":"Direct","contentHash":"A""#));
@@ -2567,28 +2606,42 @@ mod tests {
             "<!-- lead --><Project Sdk=\"Microsoft.NET.Sdk\"><!-- Sdk=\"Other\" --></Project>"
                 .into(),
             in_project("<![CDATA[<OutputPath>]]>"),
-        ] {
-            assert!(csproj_verdict(&accepted).is_ok(), "{accepted}");
-        }
-        for refused in [
+            // Output-only properties that stay inside the project.
             in_project("<OutputPath>bin/elsewhere</OutputPath>"),
             in_project("<OutputPath Condition=\"'$(Configuration)' == 'Release'\">x</OutputPath>"),
             in_project("<OutputPath\n>x</OutputPath>"),
             in_project("<OutputPath/>"),
             in_project("<outputpath>x</outputpath>"),
-            in_project("<OUTPUTPATH>x</OUTPUTPATH>"),
-            in_project("<BaseOutputPath>x</BaseOutputPath>"),
-            in_project("<OutDir>x</OutDir>"),
-            in_project("<PublishDir Condition=\"true\">x</PublishDir>"),
+            in_project("<OUTPUTPATH>out\\x</OUTPUTPATH>"),
+            in_project("<BaseOutputPath>x/../y</BaseOutputPath>"),
+            in_project("<OutDir>$(MSBuildProjectDirectory)/out</OutDir>"),
+            in_project("<PublishDir Condition=\"true\">$(SolutionDir)publish/</PublishDir>"),
+            // Imports, project references and the bundled SDK family.
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><ProjectReference Include=\"../o/o.csproj\" /></ItemGroup></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><import Project=\"shared.targets\" /></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>".into(),
+            "<Project><Sdk Name=\"Microsoft.NET.Sdk.Razor\" /></Project>".into(),
+        ] {
+            assert!(csproj_verdict(&accepted).is_ok(), "{accepted}");
+        }
+        for refused in [
+            in_project("<OutputPath>/elsewhere</OutputPath>"),
+            in_project("<OutputPath>../elsewhere</OutputPath>"),
+            in_project("<OutDir>x/../../elsewhere</OutDir>"),
+            in_project("<BaseOutputPath>C:\\out</BaseOutputPath>"),
+            in_project("<PublishDir>~/out</PublishDir>"),
+            in_project("<PublishDir>$(Home)/out</PublishDir>"),
+            in_project("<OutDir>$(MSBuildProjectDirectory)/../out</OutDir>"),
             in_project("<IntermediateOutputPath>x</IntermediateOutputPath>"),
             in_project("<BaseIntermediateOutputPath>x</BaseIntermediateOutputPath>"),
             in_project("<MSBuildProjectExtensionsPath>x</MSBuildProjectExtensionsPath>"),
             in_project("<RestoreSources>https://evil</RestoreSources>"),
             in_project("<RestorePackagesPath>x</RestorePackagesPath>"),
             "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><PackageDownload Include=\"X\" Version=\"[1.0.0]\" /></ItemGroup></Project>".into(),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><ProjectReference Include=\"../o/o.csproj\" /></ItemGroup></Project>".into(),
             "<Project Sdk=\"Microsoft.NET.Sdk\"><UsingTask TaskName=\"T\" AssemblyFile=\"t.dll\" /></Project>".into(),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><import Project=\"evil.targets\" /></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk;Other.Sdk/1.0\"></Project>".into(),
+            "<Project><Sdk Name=\"Other.Sdk\" Version=\"1.0\" /></Project>".into(),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"x.props\" Sdk=\"Other.Sdk\" /></Project>".into(),
             "<Project Sdk=\"Microsoft.NET.Sdk\" TreatAsLocalProperty=\"OutputPath\"></Project>".into(),
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Target Name=\"T\"><CreateItem Include=\"X\"><Output TaskParameter=\"Include\" ItemName=\"PackageDownload\" /></CreateItem></Target></Project>".into(),
             "<Project Sdk=\"Microsoft.NET.Sdk\"><Target Name=\"T\"><CreateProperty Value=\"x\"><Output TaskParameter=\"Value\" PropertyName=\"RestoreSources\" /></CreateProperty></Target></Project>".into(),
@@ -2620,7 +2673,7 @@ mod tests {
         fs::create_dir(&project).unwrap();
         fs::write(
             project.join("replacement.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><Import Project=\"evil.targets\" /></Project>",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><UsingTask TaskName=\"Evil\" /></Project>",
         )
         .unwrap();
         fs::write(
@@ -2630,11 +2683,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            find_project(&root).unwrap(),
-            PathBuf::from("original.csproj")
+            solution::discover(&root).unwrap().members,
+            [PathBuf::from("original.csproj")]
         );
-        let csproj = preflight(&root, SDK_VERSION).unwrap().csproj;
-        assert_eq!(csproj, root.path().join("original.csproj"));
+        let members = preflight(&root, SDK_VERSION).unwrap().layout.members;
+        assert_eq!(members, [PathBuf::from("original.csproj")]);
         // The replacement at the old path is what a path read would see.
         assert!(preflight(&ProjectRoot::open(&project).unwrap(), SDK_VERSION).is_err());
     }

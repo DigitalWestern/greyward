@@ -14,8 +14,8 @@ use crate::kernel::platform::Platform;
 use crate::kernel::resolve::{DoorKind, ResolutionDoor};
 use crate::kernel::sandbox;
 use crate::kernel::toolchain::input::{InputRow, Sources};
-use crate::kernel::toolchain::Request;
 use crate::kernel::toolchain::{Catalog, Selected};
+use crate::kernel::toolchain::{Request, Version, VersionRequest};
 use crate::kernel::ui;
 use crate::tailors::elixir;
 use crate::tailors::{
@@ -157,10 +157,10 @@ impl Tailor for Elixir {
         toolchain: &Selected,
         door: &mut ResolutionDoor<'_>,
     ) -> io::Result<()> {
-        if elixir::require_lock(project).is_ok() {
-            return Ok(());
-        }
         let beam = elixir::realize_runtime(&ctx.store, &ctx.activity, ctx.platform, toolchain)?;
+        if elixir::require_lock(project).is_ok() {
+            return elixir::relock_if_stale(door, project, &beam, toolchain);
+        }
         elixir::generate_lock(door, project, &beam, toolchain)
     }
 
@@ -346,6 +346,14 @@ impl Tailor for Elixir {
                 detail: string(&package["app"]),
             });
         }
+        for dep in plan["git"].as_array().unwrap_or(&empty) {
+            let rev = string(&dep["rev"]);
+            out.packages.push(PackageRow {
+                name: string(&dep["app"]),
+                version: rev.chars().take(12).collect(),
+                detail: format!("git {}", string(&dep["url"])),
+            });
+        }
         out
     }
 
@@ -396,6 +404,24 @@ impl Tailor for Elixir {
             );
             out.push(c);
         }
+        // A git dependency is not Hex's package: the purl names the
+        // repository and commit it is (`vcs_url`, per the purl spec), and
+        // its version is that commit.
+        if let Some(git) = plan.get("git").filter(|git| !git.is_null()) {
+            let git: Vec<elixir::GitDep> = serde_json::from_value(git.clone())
+                .map_err(|e| crate::kernel::cyclonedx::err(format!("{eco} closure: git: {e}")))?;
+            for dep in git {
+                let purl = format!(
+                    "pkg:hex/{}@{}?vcs_url={}",
+                    purl_encode(&dep.app),
+                    purl_encode(&dep.rev),
+                    purl_encode(&format!("git+{}@{}", dep.url, dep.rev))
+                );
+                let mut c = component(&dep.app, &dep.rev, purl, eco);
+                push_property(&mut c, "greyward:git:commit", &dep.rev);
+                out.push(c);
+            }
+        }
         let beam_version = format!(
             "otp-{}-elixir-{}",
             version_of(eco, plan, "otp_version")?,
@@ -434,23 +460,136 @@ fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
 }
 
 /// The selection request [`toolchain_rows`] state.
+///
+/// asdf and mise accept a `v` before either version (`elixir v1.19.4`) and
+/// an Elixir build tag naming the OTP major it was compiled for
+/// (`1.19.4-otp-27`). The tag constrains the OTP major: with no `erlang`
+/// line it selects the newest OTP of that major, and an `erlang` line on
+/// another major is refused, since no build pairs the two.
 fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
-    use crate::kernel::toolchain::resolve::{exact_or_prefix, parse_version, value};
+    use crate::kernel::toolchain::resolve::{exact_or_prefix, parse_version, value, UPDATE_HINT};
+    let erlang = value(rows, ".tool-versions", "erlang")
+        .map(|text| parse_version(".tool-versions erlang", strip_v(text)))
+        .transpose()?;
+    let elixir = value(rows, ".tool-versions", "elixir")
+        .map(parse_elixir_tool_version)
+        .transpose()?;
+    let otp_major = elixir.as_ref().and_then(|(_, major)| major.clone());
     let mut request = Request::newest();
-    if let Some(text) = value(rows, ".tool-versions", "erlang") {
-        request = request.with(
-            "otp",
-            exact_or_prefix(parse_version(".tool-versions erlang", text)?),
-        );
+    match (erlang, otp_major) {
+        (Some(erlang), Some(major)) if erlang.parts().first() != major.parts().first() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    ".tool-versions: elixir is built for OTP {major} (-otp-{major}) but \
+                     erlang asks for {erlang}; make the two agree, then {UPDATE_HINT}"
+                ),
+            ));
+        }
+        (Some(erlang), _) => request = request.with("otp", exact_or_prefix(erlang)),
+        (None, Some(major)) => request = request.with("otp", VersionRequest::Prefix(major)),
+        (None, None) => {}
     }
-    if let Some(text) = value(rows, ".tool-versions", "elixir") {
-        // `1.17.0-otp-27` states the Elixir build's OTP pairing, not a
-        // fourth version component.
-        let text = text.split("-otp-").next().unwrap_or(text);
-        request = request.with(
-            "elixir",
-            exact_or_prefix(parse_version(".tool-versions elixir", text)?),
-        );
+    if let Some((elixir, _)) = elixir {
+        request = request.with("elixir", exact_or_prefix(elixir));
     }
     Ok(request)
+}
+
+/// asdf's and mise's optional `v` before a version number.
+fn strip_v(text: &str) -> &str {
+    text.strip_prefix('v')
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(text)
+}
+
+/// An Elixir `.tool-versions` value (`1.19.4`, `v1.19.4`, `1.19.4-otp-27`,
+/// `1.19-otp-28`): the Elixir version, and the OTP major its build tag
+/// names. The tag is one number, as in Elixir's release asset names.
+fn parse_elixir_tool_version(text: &str) -> io::Result<(Version, Option<Version>)> {
+    use crate::kernel::toolchain::resolve::parse_version;
+    let stripped = strip_v(text);
+    let Some((version, tag)) = stripped.split_once("-otp-") else {
+        return Ok((parse_version(".tool-versions elixir", stripped)?, None));
+    };
+    let major = parse_version(".tool-versions elixir OTP tag", tag)?;
+    if major.parts().len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                ".tool-versions elixir: {text:?}: the -otp- tag names an OTP major (`-otp-27`), \
+                 not {tag:?}; run `ward update --toolchain`"
+            ),
+        ));
+    }
+    Ok((
+        parse_version(".tool-versions elixir", version)?,
+        Some(major),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(erlang: Option<&str>, elixir: Option<&str>) -> Vec<InputRow> {
+        let row = |field: &str, value: Option<&str>| InputRow {
+            path: PathBuf::from(".tool-versions"),
+            field: field.into(),
+            value: value.map(str::to_string),
+            absent: value.is_none(),
+            sha256: Some("0".repeat(64)),
+        };
+        vec![row("erlang", erlang), row("elixir", elixir)]
+    }
+
+    fn request(erlang: Option<&str>, elixir: Option<&str>) -> io::Result<String> {
+        toolchain_request(&rows(erlang, elixir)).map(|request| request.to_string())
+    }
+
+    #[test]
+    fn a_v_prefix_is_accepted_on_either_line() {
+        assert_eq!(
+            request(Some("v27.3.4"), Some("v1.19.4")).unwrap(),
+            request(Some("27.3.4"), Some("1.19.4")).unwrap()
+        );
+        assert!(request(None, Some("vx1.19")).is_err());
+        assert!(request(None, Some("v")).is_err());
+    }
+
+    #[test]
+    fn an_otp_tag_constrains_the_otp_major() {
+        let tagged = toolchain_request(&rows(None, Some("1.19.4-otp-27"))).unwrap();
+        let otp = &tagged
+            .components
+            .iter()
+            .find(|(c, _)| c == "otp")
+            .unwrap()
+            .1;
+        assert_eq!(*otp, VersionRequest::Prefix(Version::parse("27").unwrap()));
+        assert!(otp.matches(&Version::parse("27.3.4.1").unwrap()));
+        assert!(!otp.matches(&Version::parse("28.0").unwrap()));
+        assert_eq!(
+            request(None, Some("v1.19.4-otp-27")).unwrap(),
+            tagged.to_string()
+        );
+        // An erlang line on the same major is the narrower request.
+        let both = request(Some("27.3.4"), Some("1.19.4-otp-27")).unwrap();
+        assert_eq!(both, request(Some("27.3.4"), Some("1.19.4")).unwrap());
+    }
+
+    #[test]
+    fn an_otp_tag_on_another_major_than_erlang_is_refused() {
+        let why = request(Some("28.1"), Some("1.19.4-otp-27"))
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("OTP 27") && why.contains("28.1"), "{why}");
+    }
+
+    #[test]
+    fn a_malformed_otp_tag_is_refused() {
+        assert!(request(None, Some("1.19.4-otp-")).is_err());
+        assert!(request(None, Some("1.19.4-otp-27.1")).is_err());
+        assert!(request(None, Some("1.19.4-otp-x")).is_err());
+    }
 }

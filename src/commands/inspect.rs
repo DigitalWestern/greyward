@@ -365,7 +365,7 @@ fn resolution_changes(
                     "malformed resolution record: {field} names {path:?}"
                 ));
             }
-            if !record::is_sha256_hex(digest) {
+            if !record::is_entry_digest(digest) {
                 return Err(format!(
                     "malformed resolution record: {field} digest for {path} is not a sha256"
                 ));
@@ -377,14 +377,8 @@ fn resolution_changes(
     named.extend(digests("inputs")?);
     let mut changed = BTreeSet::new();
     for (path, digest) in &named {
-        let current = if project.is_input_file(Path::new(path)) {
-            project
-                .read_input(Path::new(path))
-                .map_err(|error| format!("read {path}: {error}"))?
-                .map(|bytes| record::sha256_hex(&bytes))
-        } else {
-            None
-        };
+        let current = record::current_digest(project, Path::new(path), digest)
+            .map_err(|error| format!("read {path}: {error}"))?;
         if current.as_deref() != Some(digest.as_str()) {
             changed.insert(path.clone());
         }
@@ -398,7 +392,8 @@ fn resolution_changes(
     if let Some(files) = files {
         let mut listed = files.outputs;
         listed.extend(files.inputs);
-        let present = record::file_digests(project, &listed).map_err(|error| error.to_string())?;
+        let present =
+            record::digests_like(project, &listed, &named).map_err(|error| error.to_string())?;
         for path in present.into_keys() {
             if !named.contains_key(&path) {
                 changed.insert(path);

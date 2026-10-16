@@ -291,7 +291,7 @@ fn read_basis(object: &serde_json::Map<String, Value>, ecosystem: &str) -> io::R
     })?;
     if let Some((path, _)) = digests.iter().find(|(path, digest)| {
         record::record_path(Path::new(path)).as_deref() != Some(path.as_str())
-            || !record::is_sha256_hex(digest)
+            || !record::is_entry_digest(digest)
     }) {
         return Err(refuse(&format!(
             "has a `{BASIS_FIELD}` entry for {path:?} that is not a record path and a sha256"
@@ -314,7 +314,7 @@ fn check_basis(
 ) -> io::Result<()> {
     let mut listed = files.outputs.clone();
     listed.extend(files.inputs.iter().cloned());
-    let current = record::file_digests(project, &listed)?;
+    let current = record::digests_like(project, &listed, basis)?;
     let changed = differing(basis, &current);
     if changed.is_empty() {
         return Ok(());

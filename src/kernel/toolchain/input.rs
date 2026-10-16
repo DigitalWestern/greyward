@@ -109,6 +109,9 @@ fn json_document(bytes: &[u8], name: &str) -> io::Result<serde_json::Value> {
             format!("{name} is not valid UTF-8"),
         )
     })?;
+    // A byte-order mark is not JSON, but every reader of these files (the
+    // .NET host, npm) skips it.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     serde_json::from_str(text).map_err(|error| malformed_file(name, &error.to_string()))
 }
 

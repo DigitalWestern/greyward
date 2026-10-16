@@ -430,6 +430,33 @@ beside a channel, components, targets or a profile, and so does the lock's
 reader. `ward fmt` runs the tree's own `rustfmt`, so the import is also the
 formatter object.
 
+A nightly channel is the other toolchain the same hook answers for
+(`provider/rust_nightly.rs`): the cargo tailor's reader tries `path` first,
+then a `nightly` or `nightly-YYYY-MM-DD` channel, and leaves everything
+else to the catalog. A dated nightly fetches
+`dist/<date>/channel-rust-nightly.toml` and its `.asc` from
+static.rust-lang.org through the source policy, checks the detached
+signature against the Rust release key built into the binary from
+`tools/keys/rust-release-signing-key.asc` (`kernel/openpgp.rs`: v4 RSA
+keys and signatures over SHA-256 or SHA-512, issuer matched by key ID or
+fingerprint, verified with ring; only the keys the keyring certifies to
+sign count, as for gpgv: the primary key by its verified self-signature's
+key flags, a subkey by its verified binding with the sign flag and the
+subkey's own back-signature, so the key's encryption-only subkey never
+signs), requires the manifest's own `date` to
+be the asked-for one, and builds a bundle from its rows: rustc, rust-std
+and cargo for every platform, rustfmt only when every platform has it,
+and the manifest pinned by its sha256 as a stable release's is. The
+release key is `rust-nightly-<date>`, the rows' build is
+`nightly-<date>`, and the rustc version is the release the nightly leads
+up to (`1.100.0` for `1.100.0-nightly`), since versions are dotted
+numbers; rustfmt's is `nightly`, which names its archive's root directory.
+Plain `nightly` reads the date from the undated manifest and locks that
+day's. Nothing else changes: the lock's rows realize, provision
+components from the pinned manifest and identify objects exactly as a
+catalog release's do, so the signature is checked once, when the lock is
+written.
+
 **go** (`tailors/go/`, `kernel/dirhash.rs`). go.sum is an authentication ledger, not
 a lock graph, so the closure is computed by the store Go toolchain itself
 (`go mod tidy -diff`, then `go mod download -json all`), and Greyward
@@ -511,11 +538,47 @@ the pinned NuGet installs from that feed in locked mode, verifying every
 contentHash. The SDK is the extractor and part of the object identity. Builds
 are the strictest boundary: `ward run` refuses build-capable verbs
 (MSBuild executes arbitrary code and belongs only in the sandbox), and every
-`ward build` runs a fresh offline locked restore into scratch. `global.json`
-must be an exact pin with `rollForward = "disable"`. A missing lock and
+`ward build` runs a fresh offline locked restore into scratch. `global.json`'s
+`sdk.version` and `sdk.rollForward` are read as the range the .NET host
+reads (`dotnet/rollforward.rs`); the toolchain lock records the one catalog
+SDK selected inside it, and every sync checks that SDK is still in the
+range. Without a `global.json` version, the newest `netN.0` target
+framework of the members asks for SDK N.0.100 or later (`dotnet/tailor.rs`
+`target_row`). A missing lock and
 `ward attest` run restore confined through the resolution door
 (`dotnet/door.rs`), with a `nuget.config` whose one source is the
 session's NuGet mirror (`dotnet/registry.rs`).
+
+A project is one SDK-style project file at the root, or a solution
+(`dotnet/solution.rs`). With a `.sln` or `.slnx` at the root (several:
+the one listing the most projects), its members are the projects it
+lists, each with its own `packages.lock.json` beside it. Restore and build
+run over a solution Greyward generates in scratch, listing only the
+members, with `SolutionDir` and its siblings set to the real root so the
+project's own MSBuild files see the paths they expect. A listed project
+restore cannot read on Linux or offline is skipped and recorded as a
+`requirement-skipped` exception, not refused: a C++ or `packages.config`
+project, one that needs an MSBuild SDK fetched from NuGet
+(`Microsoft.Build.Traversal`, `Aspire.AppHost.Sdk`), or one outside the
+checkout. A Windows-targeting project (`net8.0-windows`, WPF, Windows
+Forms) stays a member and restores with `EnableWindowsTargeting`; `ward
+build` leaves it out, naming it, because its build needs a Windows
+targeting pack that restore fetches beside the lock and no lock pins. The
+solution is refused only when no member is left. `Directory.Build.props`, `Directory.Build.targets` and
+`Directory.Packages.props` (Central Package Management) are resolution
+inputs, scanned like project files. The packages object is the union of
+every member's lock; realization verifies it by restoring verifier
+projects that pin each lock's packages under the framework that lock
+restored them for. A solution builds in MSBuild's artifacts mode, every
+project's obj and bin under one scratch `artifacts/`, and `artifacts/bin`
+is published. Output properties (`OutputPath`, `OutDir`,
+`BaseOutputPath`, `PublishDir`) are accepted when they stay in the
+checkout, and a targets file Greyward passes as
+`CustomBeforeMicrosoftCommonTargets` moves every project's output to
+scratch anyway: `Microsoft.Common.CurrentVersion.targets` imports it after
+the project and the SDK's default output paths, before `OutDir` and
+`TargetDir` are derived. Properties that move restore (`RestoreSources`,
+`BaseIntermediateOutputPath` and the like) stay refused.
 
 ## Resolution doors
 
@@ -543,7 +606,7 @@ The census, by door kind:
 | Python (uv) | confined | confined | confined | confined |
 | Ruby (Bundler) | confined | confined | confined | confined |
 | Elixir (mix) | `update` confined, `add`/`remove` refused | confined | confined | confined |
-| .NET | refused | confined | none (reads the lock) | confined |
+| .NET | refused | confined (a solution: one restore of every member) | none (reads the locks) | confined |
 
 `ward x` resolves a registry tool into `~/.greyward/x` through a door of its
 own kind, confined the same way.
@@ -708,18 +771,27 @@ project with no pin gets, so what is available and what is the default
 are separate facts: adding a newer release never moves the default. The
 files are written only by `python3 tools/catalog.py [eco ...]`, which reads
 each upstream's release listing (go.dev's JSON, Node's signed
-`SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby,
-erlef and `greyward-toolchains` OTP builds with Hex and rebar3 from
-`builds.hex.pm`, .NET release metadata, and every stable Rust release from
-1.70.0 in static.rust-lang.org's channel manifests, each signature checked
-with `gpgv` before its rows are read), verifies every row against a
+`SHASUMS256.txt`, python-build-standalone's `SHA256SUMS`, portable-ruby
+from Homebrew's GitHub releases and from its ghcr.io registry (the image
+index names each platform's bottle digest, which must be the manifest's
+one layer), erlef and `greyward-toolchains` OTP builds with Hex and rebar3 from
+`builds.hex.pm`, .NET release metadata for every channel, and every stable
+Rust release from 1.49.0 in static.rust-lang.org's channel manifests, each
+signature checked with `gpgv` before its rows are read), takes every patch
+release that has a build for both platforms, verifies every row against a
 second published checksum where one exists, and reports each release it
 skips because a supported platform has no build. It is append-only: rows
 already shipped are re-verified against the choices they record and must be
 identical, an upstream re-publish becomes a new release with a higher
 `revision` beside the old one, and the default moves only with
 `--set-default <release>`. `--check` rewrites nothing and
-fails if the file would change. On a pull request that changes a catalog,
+fails if the file would change; `--drift` does the same with a GitHub
+Actions error annotation per catalog, and the weekly `catalog-drift`
+workflow runs it, so a release upstream publishes is noticed without
+waiting for someone to regenerate. An upstream that does not answer after
+the retries fails the run: it is never read as a release to leave out
+(a checksum disagreement, a bottle failing the recipe), which would let
+the job report no drift over an outage. On a pull request that changes a catalog,
 heavy.yml's `catalog` job runs `--against <base commit>`: it fails on any
 release the base ships that the pull request removes or changes, and
 verifies every checked-in row, the added ones included, against upstream
@@ -749,16 +821,19 @@ or `=` partial is its whole line (`24` is `>=24,<25`, only three
 components are exact), a zero-bearing X-range keeps every stated
 component (`24.0.x` is `>=24.0,<24.1`), and `>`, `<=`, `^`, `~` and
 hyphen ranges bound the stated line (`<=22` is `<23`, `1.2 - 2.3` is
-`>=1.2,<2.4`). The Node catalog holds every release of the LTS lines
-Node's release schedule lists as active, so an exact `.node-version` on
-one of them selects it. `SourcePolicy` is the typed endpoint policy every toolchain
+`>=1.2,<2.4`). The Node catalog holds every Node release from 16.0.0,
+the first with an arm64 macOS build, so an exact `.node-version` selects
+it. `SourcePolicy` is the typed endpoint policy every toolchain
 download checks (shipped `https://` defaults per publisher, credential references only,
 never a secret, and not part of lock validity; the defaults are data the
 kernel owns, so a new tailor's publisher is added there). A toolchain row's
 URL must fall under one of its `provider`'s endpoints before the cache is
 consulted, and a network fetch follows redirects itself, at most ten and
 `https://` only, authorizing each `Location` before requesting it; a row or
-hop off the policy fails with the URL and publisher named. No credential is
+hop off the policy fails with the URL and publisher named. An endpoint may
+name a public anonymous-pull token (ghcr.io's `Bearer QQ==`, which Homebrew's
+`brew` sends too), sent on a hop that endpoint covers and never on a
+redirect target. No credential is
 sent yet; the policy for them is decided (#72) and builds under #404 and #405. Package-registry downloads do not pass through it. A
 closure written before the lock existed records no `toolchain`, so it
 plays no part in selection: the next sync selects from the catalog as it
@@ -1255,6 +1330,7 @@ and build inputs tailors share, so no tailor reaches into another):
     gitsrc.rs       git sources realized by commit
     policy.rs       permissive/strict exception policy and the [signing] trust chain
     error.rs        failure classes (refused, stale, unsupported, network) and their exit statuses
+    openpgp.rs      detached OpenPGP signature check (v4 RSA) against a pinned keyring
     signing.rs      Ed25519 closure signing: key files, canonical bytes, verify
     gc/             store garbage collection: read.rs snapshot, plan.rs
                     validate + plan, sweep.rs execute, drop.rs --drop-object,
@@ -1283,7 +1359,8 @@ and build inputs tailors share, so no tailor reaches into another):
                     rust.catalog.toml, toolchain files), rust_channel.rs and
                     rust_extras.rs (components, targets and profiles from
                     the channel manifest), rust_path.rs (a local toolchain
-                    directory), crates.rs (Cargo.lock
+                    directory), rust_nightly.rs (a nightly from its signed
+                    channel manifest), crates.rs (Cargo.lock
                     vendoring; sdists with Rust extensions too),
                     crates_index.rs (crates.io's sparse index as a
                     resolution-proxy route) and cargo_door.rs (the store

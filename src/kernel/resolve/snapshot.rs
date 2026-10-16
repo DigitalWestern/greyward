@@ -29,11 +29,12 @@
 //! `.git/hooks`, or a change under `.greyward`, fails the door naming the paths.
 
 use super::confine::FileId;
+use super::inputs::{link_end, LinkEnd, LinkRules};
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::store::{self, Store};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -87,6 +88,18 @@ impl PathGlob {
             .collect();
         (1..=components.len()).any(|end| match_parts(&self.parts, &components[..end]))
     }
+
+    /// Does the pattern name `relative` itself (not only an ancestor)?
+    pub fn matches_exactly(&self, relative: &Path) -> bool {
+        let components: Vec<&[u8]> = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.as_bytes()),
+                _ => None,
+            })
+            .collect();
+        !components.is_empty() && match_parts(&self.parts, &components)
+    }
 }
 
 fn match_parts(parts: &[String], components: &[&[u8]]) -> bool {
@@ -134,6 +147,19 @@ pub enum EntryState {
 }
 
 impl EntryState {
+    /// How a resolution record names this entry: a regular file by the
+    /// sha256 of its bytes, a symlink by `record::symlink_digest` of its
+    /// target text, anything else not at all.
+    pub fn digest(&self) -> Option<String> {
+        match self {
+            EntryState::File { sha256, .. } => Some(hex::encode(sha256)),
+            EntryState::Symlink { target } => Some(super::record::symlink_digest(
+                std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str()),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             EntryState::File { .. } => "regular file",
@@ -200,6 +226,20 @@ pub struct Snapshot {
     scratch: PathBuf,
     exclude: Vec<PathGlob>,
     baseline: BTreeMap<PathBuf, EntryState>,
+    /// Links [`Snapshot::settle_links`] took back out of the stage, as the
+    /// baseline had them: still inputs the record names, never seen by the
+    /// tool.
+    withheld: BTreeMap<PathBuf, EntryState>,
+}
+
+/// A symlink [`Snapshot::settle_links`] left out of the stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WithheldLink {
+    /// Relative to the lock root.
+    pub path: PathBuf,
+    pub target: OsString,
+    /// Why it was left out ([`LinkEnd::why`]).
+    pub why: String,
 }
 
 impl Drop for Snapshot {
@@ -227,6 +267,7 @@ impl Snapshot {
             stage,
             exclude: spec.exclude.to_vec(),
             baseline: BTreeMap::new(),
+            withheld: BTreeMap::new(),
         };
         fs::DirBuilder::new()
             .mode(0o700)
@@ -281,6 +322,135 @@ impl Snapshot {
         self.baseline.get(real)
     }
 
+    /// The pre-run entry of a real path the run had as an input: in the
+    /// stage, or withheld from it by [`Snapshot::settle_links`].
+    pub fn input_state(&self, real: &Path) -> Option<&EntryState> {
+        self.baseline.get(real).or_else(|| self.withheld.get(real))
+    }
+
+    /// Resolve a project path against the captured baseline, including
+    /// links in intermediate directories. No live file is read: the result
+    /// is the exact file generation the tool received in its snapshot.
+    /// Absolute or escaping links, dangling paths and loops have no result.
+    pub fn followed(&self, real: &Path) -> Option<&EntryState> {
+        const MAX_HOPS: usize = 40;
+        let root = &self.lock_root().real;
+        let mut at = root.clone();
+        let mut pending: VecDeque<OsString> = real
+            .strip_prefix(root)
+            .ok()?
+            .components()
+            .map(|part| part.as_os_str().to_os_string())
+            .collect();
+        let mut hops = 0;
+        while let Some(part) = pending.pop_front() {
+            if part == "." {
+                continue;
+            }
+            if part == ".." {
+                if at == *root || !at.pop() {
+                    return None;
+                }
+                continue;
+            }
+            at.push(part);
+            match self.baseline.get(&at)? {
+                EntryState::Symlink { target } => {
+                    hops += 1;
+                    if hops > MAX_HOPS {
+                        return None;
+                    }
+                    at.pop();
+                    for component in Path::new(target)
+                        .components()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        match component {
+                            Component::RootDir | Component::Prefix(_) => return None,
+                            _ => pending.push_front(component.as_os_str().to_os_string()),
+                        }
+                    }
+                }
+                EntryState::Dir { .. } => {}
+                _ if !pending.is_empty() => return None,
+                _ => {}
+            }
+        }
+        self.baseline.get(&at)
+    }
+
+    /// Judge every symlink in the lock root's finished copy where it lands
+    /// in that copy, and take out each the tool must not follow, before
+    /// the tool runs. Ward's own environment links into the store
+    /// ([`LinkRules::is_projection`]) are dropped: they are no input. A
+    /// link that leads out of the copy, or through an entry the copy leaves
+    /// out (an excluded path, a dropped projection), is withheld: the
+    /// record still names it by its target text ([`Snapshot::input_state`],
+    /// [`Snapshot::project_file_digests`]), and the caller decides whether
+    /// the run may go ahead without it. Every link is judged before any is
+    /// taken out, so a link through a withheld one is judged by where the
+    /// withheld one led.
+    pub(super) fn settle_links(&mut self, rules: &LinkRules) -> io::Result<Vec<WithheldLink>> {
+        let real_root = self.lock_root().real.clone();
+        let staged_root = self.lock_root().staged.clone();
+        let links: Vec<(PathBuf, PathBuf, OsString)> = self
+            .baseline
+            .iter()
+            .filter_map(|(real, state)| match state {
+                EntryState::Symlink { target } => Some((
+                    real.clone(),
+                    real.strip_prefix(&real_root).ok()?.to_path_buf(),
+                    target.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        let projections: BTreeSet<PathBuf> = links
+            .iter()
+            .filter(|(_, relative, target)| rules.is_projection(relative, Path::new(target)))
+            .map(|(_, relative, _)| relative.clone())
+            .collect();
+        let mut judged = Vec::new();
+        {
+            let tree = ProjectRoot::open(&staged_root)?;
+            let exclude = &self.exclude;
+            let skipped = |path: &Path| {
+                exclude.iter().any(|glob| glob.matches(path))
+                    || projections
+                        .iter()
+                        .any(|projection| path.starts_with(projection))
+            };
+            for (real, relative, target) in &links {
+                if projections.contains(relative) {
+                    continue;
+                }
+                let end = link_end(&tree, relative, Path::new(target), &skipped)?;
+                if end != LinkEnd::Inside {
+                    judged.push((real.clone(), relative.clone(), target.clone(), end));
+                }
+            }
+        }
+        for relative in &projections {
+            fs::remove_file(staged_root.join(relative))?;
+            self.baseline.remove(&real_root.join(relative));
+        }
+        let mut withheld = Vec::new();
+        for (real, relative, target, end) in judged {
+            fs::remove_file(staged_root.join(&relative))?;
+            if let Some(state) = self.baseline.remove(&real) {
+                self.withheld.insert(real, state);
+            }
+            withheld.push(WithheldLink {
+                path: relative,
+                target,
+                why: end.why(),
+            });
+        }
+        Ok(withheld)
+    }
+
     /// Executable manifests get canonical permissions and no empty project
     /// directories. Their only variable project state is the covered file
     /// names and bytes. Change the private stage and its comparison baseline,
@@ -319,25 +489,19 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Every regular project file in the immutable pre-run snapshot.
+    /// Every regular project file and symlink in the immutable pre-run
+    /// snapshot, withheld links included, by record digest
+    /// ([`EntryState::digest`]).
     pub(super) fn project_file_digests(&self) -> io::Result<BTreeMap<String, String>> {
-        self.baseline
+        Ok(self
+            .baseline
             .iter()
+            .chain(&self.withheld)
             .filter_map(|(path, state)| {
                 let relative = path.strip_prefix(&self.lock_root().real).ok()?;
-                match state {
-                    EntryState::File { sha256, .. } => Some(Ok((
-                        relative.to_string_lossy().into_owned(),
-                        hex::encode(sha256),
-                    ))),
-                    EntryState::Symlink { .. } => Some(Err(io::Error::other(format!(
-                        "{} is a symlink in the staged resolution inputs; nothing was published",
-                        relative.display()
-                    )))),
-                    _ => None,
-                }
+                Some((relative.to_string_lossy().into_owned(), state.digest()?))
             })
-            .collect()
+            .collect())
     }
 
     /// Walk the stage again and compare it with the baseline by content.

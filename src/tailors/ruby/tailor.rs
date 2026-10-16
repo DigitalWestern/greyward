@@ -376,6 +376,19 @@ impl Tailor for Ruby {
             "ruby",
             &version_of(eco, plan, "ruby_version")?,
         )?);
+        // The Bundler the lock was written with, when ward provisioned it:
+        // a rubygems.org gem installed into the gems object.
+        if let Some(bundler) = plan.get("bundler").filter(|value| !value.is_null()) {
+            let version = required(eco, bundler, "version")?;
+            let mut c = component(
+                super::bundler::NAME,
+                &version,
+                format!("pkg:gem/bundler@{}", purl_encode(&version)),
+                eco,
+            );
+            push_hash(&mut c, "SHA-256", &required(eco, bundler, "sha256")?);
+            out.push(c);
+        }
         Ok(())
     }
 

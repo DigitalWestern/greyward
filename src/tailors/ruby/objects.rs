@@ -27,8 +27,19 @@ pub static KINDS: &[ObjectKind] = &[
             // A git checkout installed into the object (`sources`); only a
             // plan with a git gem writes one, so other ids are unchanged.
             "git:",
+            // The Bundler the lock was written with, when ward provisioned
+            // one newer than the Ruby's own (`bundler`).
+            "bundler",
         ],
         live_contract: Some(ruby_gems_contract),
+    },
+    // One Bundler release, installed by one store Ruby (`bundler`).
+    ObjectKind {
+        kind: "ruby-bundler",
+        schema: Some("ruby-bundler/1"),
+        live_required: &["schema", "gem_sha256", "installer"],
+        live_optional: &[],
+        live_contract: None,
     },
 ];
 

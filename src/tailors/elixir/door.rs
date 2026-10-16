@@ -3,7 +3,9 @@
 //! with no route at all for the helper's lock parse.
 
 use super::{beam_path, forced_env, registry, ENV_REMOVE, ENV_REMOVE_PREFIXES};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::resolve::door::{ConfinedSpec, Publish, ReceiptProducer, Wire, Wiring};
+use crate::kernel::resolve::inputs::{self, LinkRules, Walk, WalkSpec};
 use crate::kernel::resolve::snapshot::PathGlob;
 use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::toolchain::Selected;
@@ -24,6 +26,30 @@ pub(crate) const OUTPUTS: [&str; 2] = ["mix.exs", "mix.lock"];
 /// copied into the snapshot, never diffed. A confined mix fetches into the
 /// run's scratch (`MIX_DEPS_PATH`) and builds nothing.
 pub(super) const EXCLUDE: [&str; 4] = ["deps", "_build", ".git", ".greyward"];
+
+/// What mix cannot resolve without: every app's manifest and lock, the
+/// configuration a mix.exs imports, and the version file. A link among
+/// them that leads out of the project is refused, never withheld.
+const REQUIRED: [&str; 4] = ["**/mix.exs", "**/mix.lock", "config/**", ".tool-versions"];
+
+/// How the walk and the snapshot treat the project's symlinks
+/// (`tailors::resolution_links`).
+pub(super) fn links() -> io::Result<LinkRules> {
+    crate::tailors::resolution_links(&REQUIRED)
+}
+
+/// Every project entry a mix.exs could read, by digest
+/// (`kernel::resolve::inputs::walk`).
+pub(super) fn walk(project: &ProjectRoot) -> io::Result<Walk> {
+    inputs::walk(
+        project,
+        &WalkSpec {
+            excludes: &EXCLUDE,
+            outputs: &OUTPUTS,
+            links: &links()?,
+        },
+    )
+}
 
 /// Stands for the run's scratch directory in an argument: the helper and
 /// any file the run is handed are written there.
@@ -56,6 +82,11 @@ pub(crate) struct MixRun<'a> {
     /// Files written into the scratch directory before the run, relative
     /// to it.
     pub files: Vec<(PathBuf, Vec<u8>)>,
+    /// Git dependency checkouts: `deps/<app>` links into `reads`, the
+    /// checkout object, so mix finds each one at its lock and fetches none.
+    pub links: Vec<(PathBuf, PathBuf)>,
+    /// Further store objects the run reads (the git checkout object).
+    pub reads: Vec<PathBuf>,
     pub publish: MixPublish<'a>,
 }
 
@@ -107,6 +138,8 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     confined.expected_inputs = run.inputs.cloned().unwrap_or_default();
     confined.complete_inputs = true;
     confined.store_reads = vec![run.beam_obj.to_path_buf()];
+    confined.store_reads.extend(run.reads.iter().cloned());
+    confined.links = Some(links()?);
     confined.exclude = EXCLUDE
         .iter()
         .map(|pattern| PathGlob::new(pattern))
@@ -118,6 +151,7 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
     };
     let online = run.online;
     let files = std::mem::take(&mut run.files);
+    let links = std::mem::take(&mut run.links);
     confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
         let at = |sub: &str| OsString::from(wire.scratch.join(sub));
         let mut env: Vec<(OsString, OsString)> = vec![
@@ -143,6 +177,7 @@ fn mix_confined<'a>(run: &mut MixRun<'a>) -> io::Result<ConfinedSpec<'a>> {
             args,
             env,
             files,
+            links,
             ..Wiring::default()
         })
     }));
@@ -226,6 +261,8 @@ mod tests {
             online,
             inputs: None,
             files: Vec::new(),
+            links: Vec::new(),
+            reads: Vec::new(),
             publish: MixPublish::Detached,
         }
     }

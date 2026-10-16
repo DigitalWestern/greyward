@@ -450,9 +450,10 @@ jobs:
     steps:
       # git first, so checkout clones rather than downloading an archive.
       # The image is minimal: tar and the decompressors ward and the cache
-      # action call are not in it.
+      # action call are not in it. The mixed Elixir/.NET case also needs
+      # .NET's host ICU library.
       - name: Install the compiler, the sandbox and the host tools
-        run: dnf install -y gcc git tar gzip xz bzip2 unzip zstd findutils util-linux jq bubblewrap rustup
+        run: dnf install -y gcc git tar gzip xz bzip2 unzip zstd findutils util-linux jq bubblewrap rustup libicu
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # rust-toolchain.toml names the toolchain; cargo installs it on
       # first use.

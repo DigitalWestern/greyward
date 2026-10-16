@@ -1768,7 +1768,7 @@ ledger. "Runs code" is what the tool executes besides itself.
 | `tailors/elixir/mod.rs` `plan_elixir` | `mix deps.get`, `mix deps.get --check-locked` | yes | mix.exs eval (git deps' too) | missing-lock / planner |
 | `tailors/elixir/mod.rs` lock helper | `elixir` AST parse of `mix.lock` | no | no (never evaluates) | planner (no routes) |
 | `tailors/elixir/edit.rs` `edit_manifest` | `mix deps.update` | yes | mix.exs eval | edit |
-| `tailors/dotnet/mod.rs` `plan_dotnet` | `dotnet restore --use-lock-file` | yes | MSBuild eval | missing-lock |
+| `tailors/dotnet/mod.rs` `plan_dotnet` | `dotnet restore --use-lock-file` of the one project, or of a generated solution of every restorable member of the root `.sln`/`.slnx` (one run, one lock per member) | yes | MSBuild eval | missing-lock |
 
 Not doors: Greyward's own downloads (`kernel::fetch`, `kernel::gitsrc`, the
 `Tailor::registry_exists` check `ward add` makes) are Greyward code with Greyward

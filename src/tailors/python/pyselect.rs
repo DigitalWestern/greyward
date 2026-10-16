@@ -685,34 +685,34 @@ mod tests {
     fn specifier_selection_table_covers_pep440_and_poetry() {
         let cases = [
             ("*", "3.12.14"),
-            ("3.11", "3.11.16"),
-            ("3.11.*", "3.11.16"),
-            ("==3.11.*", "3.11.16"),
+            ("3.11", "3.11.17"),
+            ("3.11.*", "3.11.17"),
+            ("==3.11.*", "3.11.17"),
             ("!=3.9.*", "3.12.14"),
             (">=3.10,<3.13", "3.12.14"),
-            (">=3.9 <3.12", "3.11.16"),
-            ("<3.12", "3.11.16"),
+            (">=3.9 <3.12", "3.11.17"),
+            ("<3.12", "3.11.17"),
             ("<4", "3.12.14"),
-            (">=3.13", "3.14.7"),
-            ("==3.10.*", "3.10.21"),
+            (">=3.13", "3.15.0"),
+            ("==3.10.*", "3.10.22"),
             (">3.11", "3.12.14"),
             (">3.12", "3.12.14"),
             ("==3.12", "3.12.0"),
             (">=3.8.0", "3.12.14"),
             ("~=3.10", "3.12.14"),
-            ("~=3.10.2", "3.10.21"),
+            ("~=3.10.2", "3.10.22"),
             ("^3.9", "3.12.14"),
             ("^3.9.2", "3.12.14"),
-            ("~3.9", "error: no pinned CPython satisfies"),
-            ("~3.9.1", "error: no pinned CPython satisfies"),
+            ("~3.7", "error: no pinned CPython satisfies"),
+            ("~3.7.1", "error: no pinned CPython satisfies"),
             (">=3.10, !=3.11.*", "3.12.14"),
-            ("<3.11 || >=3.14", "3.14.7"),
+            ("<3.11 || >=3.14", "3.15.0"),
             ("==3.10.0", "error: no pinned CPython satisfies"),
             ("<=3.10.21", "3.10.21"),
-            (">=3.14.0", "3.14.7"),
+            (">=3.14.0", "3.15.0"),
             ("!=3.14.*", "3.12.14"),
             (">=3.12.14", "3.12.14"),
-            (">3.14", "3.14.7"),
+            (">3.14", "3.15.0"),
             ("^0.4.1", "error: no pinned CPython satisfies"),
             ("~3.12", "3.12.14"),
             ("===3.11.16", "3.11.16"),
@@ -849,7 +849,7 @@ mod tests {
         };
         let selection =
             select_python_with_inputs(Platform::X86_64UnknownLinuxGnu, &inputs).unwrap();
-        assert_eq!(selection.pin.version, "3.10.21");
+        assert_eq!(selection.pin.version, "3.10.22");
         assert!(selection
             .warnings
             .iter()
@@ -878,7 +878,7 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains(request), "{message}");
             assert!(message.contains(".python-version"), "{message}");
-            for pinned in ["3.12.14", "3.13.15", "3.10.21", "3.11.16", "3.14.7"] {
+            for pinned in ["3.12.15", "3.13.16", "3.10.22", "3.11.17", "3.14.8"] {
                 assert!(message.contains(pinned), "{message}");
             }
             assert!(

@@ -2,7 +2,9 @@
 //! `run`, `ls`, `status`, and `sbom` do for a NuGet-locked project.
 
 use crate::comforter;
-use crate::comforter::status::{standard_state, string, State};
+use crate::comforter::status::{
+    object_liveness_state, recorded_inputs_state, standard_state, string, State,
+};
 use crate::kernel::context::Context;
 use crate::kernel::cyclonedx::{
     component, list, purl_encode, push_property, required, toolchain_component, version_of,
@@ -43,6 +45,8 @@ fn realize_and_project(
         Some(checked) => checked,
         None => dotnet::preflight(project, toolchain.version("dotnet-sdk")?)?,
     };
+    // A solution's skipped projects are this closure's exceptions.
+    checked.record_skips()?;
     let sdk = dotnet::realize_runtime(store, activity, platform, toolchain)?;
     let (plan, lock_sha256) = dotnet::plan_dotnet(project, toolchain, &checked)?;
     // The resolution files this plan was built from, so the resolution
@@ -57,6 +61,7 @@ fn realize_and_project(
         &packages,
         &plan,
         &lock_sha256,
+        &checked.lock_inputs(),
         basis,
         toolchain,
         attribution,
@@ -307,6 +312,16 @@ impl Tailor for Dotnet {
         _ecosystem: &str,
         body: &Value,
     ) -> io::Result<State> {
+        // A solution's closure records each member lock.
+        if body["inputs"]
+            .as_array()
+            .is_some_and(|inputs| !inputs.is_empty())
+        {
+            if let Some(state) = object_liveness_state(body, &["sdk_object", "packages_object"]) {
+                return Ok(state);
+            }
+            return recorded_inputs_state(project, body);
+        }
         standard_state(
             project,
             body,
@@ -370,7 +385,7 @@ fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
     use crate::kernel::toolchain::input::{
         checked_row_for, read_global_json, read_global_json_roll_forward,
     };
-    Ok(vec![
+    let mut rows = vec![
         checked_row_for(root, "global.json", "sdk.version", read_global_json)?,
         checked_row_for(
             root,
@@ -378,27 +393,107 @@ fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
             "sdk.rollForward",
             read_global_json_roll_forward,
         )?,
-    ])
+    ];
+    rows.extend(target_row(root)?);
+    Ok(rows)
 }
 
-/// The selection request [`toolchain_rows`] state.
-fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
-    use crate::kernel::toolchain::invalid;
-    use crate::kernel::toolchain::resolve::{parse_version, value};
-    use crate::kernel::toolchain::VersionRequest;
-    let mut request = Request::newest();
-    if let Some(text) = value(rows, "global.json", "sdk.version") {
-        if value(rows, "global.json", "sdk.rollForward") != Some("disable") {
-            return Err(invalid(
-                "global.json sdk.rollForward must be \"disable\" for an exact toolchain lock",
-            ));
+/// The field of the row naming the layout's newest target framework.
+const TARGET_FIELD: &str = "TargetFramework.newest";
+
+/// The newest `netN.0` the layout targets
+/// ([`dotnet::targets::newest_target_major`]), as one row on the root
+/// solution (or the single project). Written only when that framework is
+/// newer than the catalog default SDK builds: the default already serves
+/// every older one, so a project that synced before this row existed keeps
+/// its toolchain lock fresh, and only a project the default cannot build
+/// (which could not sync before) records one. A layout ward cannot read
+/// (no project, several without a solution) has no row: sync refuses it
+/// with its own message.
+fn target_row(root: &ProjectRoot) -> io::Result<Option<InputRow>> {
+    let Ok(layout) = dotnet::solution::discover(root) else {
+        return Ok(None);
+    };
+    let targets = dotnet::targets::newest_target_major(root, &layout)?;
+    // A global.json constraint chooses the SDK. Otherwise an unresolved
+    // conditional declaration above the default cannot silently demand a
+    // framework that is inactive in this project.
+    let global = root.read_file(Path::new("global.json"))?;
+    let global_selects = global
+        .as_deref()
+        .map(crate::kernel::toolchain::input::read_global_json)
+        .transpose()?
+        .flatten()
+        .is_some_and(|version| {
+            super::rollforward::sdk_request(Some(&version), None)
+                .ok()
+                .flatten()
+                .is_some()
+        });
+    if let Some((major, file)) = targets.unsure {
+        if !global_selects && default_sdk_major().is_none_or(|default| major > default) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: target framework net{major}.0 depends on an unevaluated MSBuild condition; choose the SDK with global.json or use an unconditional effective target framework", file.display())));
         }
-        request = request.with(
-            "dotnet-sdk",
-            VersionRequest::Exact(parse_version("global.json sdk.version", text)?),
-        );
     }
-    Ok(request)
+    let Some(major) = targets.newest else {
+        return Ok(None);
+    };
+    if default_sdk_major().is_some_and(|default| major <= default) {
+        return Ok(None);
+    }
+    let path = match &layout.solution {
+        Some(solution) => solution.clone(),
+        None => layout.members[0].clone(),
+    };
+    let bytes = root.read_file(&path)?.unwrap_or_default();
+    Ok(Some(InputRow {
+        path,
+        field: TARGET_FIELD.to_string(),
+        value: Some(format!("net{major}.0")),
+        absent: false,
+        sha256: Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes))),
+    }))
+}
+
+/// The major of the shipped catalog's default SDK.
+fn default_sdk_major() -> Option<u64> {
+    let catalog = dotnet::toolchain_catalog().ok()?;
+    let bundle = catalog.default_release()?;
+    let sdk = bundle
+        .components
+        .iter()
+        .find(|component| component.name == "dotnet-sdk")?;
+    sdk.version.split('.').next()?.parse().ok()
+}
+
+/// The selection request [`toolchain_rows`] state: `sdk.version` and
+/// `sdk.rollForward` as one range, read the way the .NET host reads them
+/// (`super::rollforward`). When they state none, the newest target
+/// framework does: `netN.0` needs SDK N.0.100 or later.
+fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
+    use crate::kernel::toolchain::resolve::{value, UPDATE_HINT};
+    let invalid =
+        |error: io::Error| crate::kernel::toolchain::invalid(format!("{error}; {UPDATE_HINT}"));
+    let request = super::rollforward::sdk_request(
+        value(rows, "global.json", "sdk.version"),
+        value(rows, "global.json", "sdk.rollForward"),
+    )
+    .map_err(invalid)?;
+    let request = match request {
+        Some(request) => Some(request),
+        None => rows
+            .iter()
+            .find(|row| row.field == TARGET_FIELD)
+            .and_then(|row| row.value.as_deref())
+            .and_then(|value| value.strip_prefix("net")?.strip_suffix(".0")?.parse().ok())
+            .map(super::rollforward::target_request)
+            .transpose()
+            .map_err(invalid)?,
+    };
+    Ok(match request {
+        Some(request) => Request::newest().with("dotnet-sdk", request),
+        None => Request::newest(),
+    })
 }
 
 #[cfg(test)]
@@ -466,5 +561,76 @@ mod tests {
             )
             .unwrap_err();
         assert!(!error.to_string().contains("must run sandboxed"), "{error}");
+    }
+
+    #[test]
+    fn inactive_targets_do_not_request_unavailable_sdks() {
+        let temp = TempDir::named("dotnet-inactive-sdk");
+        std::fs::write(temp.0.join("Directory.Build.props"), "<Project><PropertyGroup><TargetFramework>net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
+        std::fs::write(temp.0.join("app.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><TargetFramework Condition=\"false\">net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
+        let root = ProjectRoot::open(&temp.0).unwrap();
+        assert!(!toolchain_rows(&root)
+            .unwrap()
+            .iter()
+            .any(|row| row.field == TARGET_FIELD));
+        std::fs::write(temp.0.join("app.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net9.0</TargetFramework><TargetFramework Condition=\"'$(Optional)' == 'true'\">net11.0</TargetFramework></PropertyGroup></Project>").unwrap();
+        let why = toolchain_rows(&root).unwrap_err().to_string();
+        assert!(why.contains("unevaluated MSBuild condition"), "{why}");
+        for prefix in ["", "\u{feff}"] {
+            std::fs::write(
+                temp.0.join("global.json"),
+                format!(
+                    "{prefix}{}",
+                    r#"{"sdk":{"version":"9.0.317","rollForward":"disable"}}"#
+                ),
+            )
+            .unwrap();
+            toolchain_rows(&root).unwrap();
+        }
+    }
+
+    /// Without a global.json version, the newest target framework picks
+    /// the SDK line; a global.json version overrides it.
+    #[test]
+    fn target_framework_requests_its_sdk_without_global_json() {
+        let temp = TempDir::named("dotnet-target-sdk");
+        std::fs::write(
+            temp.0.join("app.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+             <TargetFrameworks>net8.0;net10.0</TargetFrameworks></PropertyGroup></Project>",
+        )
+        .unwrap();
+        let root = ProjectRoot::open(&temp.0).unwrap();
+        let rows = toolchain_rows(&root).unwrap();
+        let row = rows.iter().find(|row| row.field == TARGET_FIELD).unwrap();
+        assert_eq!(row.path, PathBuf::from("app.csproj"));
+        assert_eq!(row.value.as_deref(), Some("net10.0"));
+        let target = Request::newest().with(
+            "dotnet-sdk",
+            super::super::rollforward::target_request(10).unwrap(),
+        );
+        assert_eq!(toolchain_request(&rows).unwrap(), target);
+
+        std::fs::write(
+            temp.0.join("global.json"),
+            r#"{"sdk":{"version":"9.0.300"}}"#,
+        )
+        .unwrap();
+        let rows = toolchain_rows(&root).unwrap();
+        assert_ne!(toolchain_request(&rows).unwrap(), target);
+
+        // No target newer than the default SDK builds: no row (a lock
+        // minted before the row existed stays fresh), and the default is
+        // asked for.
+        std::fs::remove_file(temp.0.join("global.json")).unwrap();
+        std::fs::write(
+            temp.0.join("app.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+             <TargetFrameworks>netstandard2.0;net9.0</TargetFrameworks></PropertyGroup></Project>",
+        )
+        .unwrap();
+        let rows = toolchain_rows(&root).unwrap();
+        assert!(rows.iter().all(|row| row.field != TARGET_FIELD));
+        assert_eq!(toolchain_request(&rows).unwrap(), Request::newest());
     }
 }

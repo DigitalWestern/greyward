@@ -1543,3 +1543,318 @@ fn ruby_path_and_git_sources_sync_and_run() {
         "{stderr}"
     );
 }
+
+/// A project with no gems whose lock names `bundled_with`, and the lock's
+/// CHECKSUMS entry for that Bundler when `checksum` is given.
+fn bundled_with_project(project: &Path, bundled_with: &str, pins: Option<(&str, &str)>) {
+    std::fs::create_dir_all(project).unwrap();
+    let Some((bundler_sha, gem_sha)) = pins else {
+        std::fs::write(project.join("Gemfile"), "source \"https://rubygems.org\"\n").unwrap();
+        std::fs::write(
+            project.join("Gemfile.lock"),
+            format!(
+                "GEM\n  remote: https://rubygems.org/\n  specs:\n\n\
+                 PLATFORMS\n  ruby\n\nDEPENDENCIES\n\nBUNDLED WITH\n   {bundled_with}\n"
+            ),
+        )
+        .unwrap();
+        return;
+    };
+    // One gem, pinned by the lock's CHECKSUMS section beside the Bundler.
+    std::fs::write(
+        project.join("Gemfile"),
+        "source \"https://rubygems.org\"\n\ngem \"wardtiny\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("Gemfile.lock"),
+        format!(
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n    wardtiny (1.0.0)\n\n\
+             PLATFORMS\n  ruby\n\nDEPENDENCIES\n  wardtiny\n\n\
+             CHECKSUMS\n  bundler ({bundled_with}) sha256={bundler_sha}\n  \
+             wardtiny (1.0.0) sha256={gem_sha}\n\n\
+             BUNDLED WITH\n   {bundled_with}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// A one-file pure-Ruby gem, `wardtiny-1.0.0.gem`, built in `dir`.
+fn tiny_gem(ruby: &Path, dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(
+        dir.join("lib/wardtiny.rb"),
+        "module Wardtiny\n  SAID = \"from-tiny\"\nend\n",
+    )
+    .unwrap();
+    let script = r#"require "rubygems/package"
+spec = Gem::Specification.new do |s|
+  s.name = "wardtiny"
+  s.version = "1.0.0"
+  s.summary = "A gem made for a test"
+  s.authors = ["ward"]
+  s.license = "MIT"
+  s.files = ["lib/wardtiny.rb"]
+end
+puts Gem::Package.build(spec)
+"#;
+    pinned_ruby(ruby, dir, script, "build the tiny gem");
+    dir.join("wardtiny-1.0.0.gem")
+}
+
+/// Build `bundler-<version>.gem` in `dir` from the store Ruby's own
+/// Bundler with only its version changed: a Bundler release newer than the
+/// one the Ruby ships, made locally so the test needs no live RubyGems.
+fn bumped_bundler_gem(ruby: &Path, dir: &Path, version: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let script = format!(
+        r#"require "fileutils"
+require "rubygems/package"
+shipped = Gem::Specification.find_by_name("bundler")
+lib = RbConfig::CONFIG["rubylibdir"]
+FileUtils.mkdir_p("lib")
+FileUtils.cp(File.join(lib, "bundler.rb"), "lib")
+FileUtils.cp_r(File.join(lib, "bundler"), "lib")
+FileUtils.cp_r(File.join(shipped.full_gem_path, "exe"), ".")
+# The store's files are read-only, and so are their copies.
+FileUtils.chmod_R("u+w", %w[lib exe])
+file = "lib/bundler/version.rb"
+File.write(file, File.read(file).sub(/VERSION = "[^"]+"/, 'VERSION = "{version}"'))
+spec = Gem::Specification.new do |s|
+  s.name = "bundler"
+  s.version = "{version}"
+  s.summary = "Bundler, version-bumped for a test"
+  s.authors = ["ward"]
+  s.license = "MIT"
+  s.files = Dir["lib/**/*", "exe/*"]
+  s.bindir = "exe"
+  s.executables = %w[bundle bundler]
+  s.required_ruby_version = ">= 3.1.0"
+end
+puts Gem::Package.build(spec)
+"#
+    );
+    pinned_ruby(ruby, dir, &script, "build the bumped bundler gem");
+    let gem = dir.join(format!("bundler-{version}.gem"));
+    assert!(gem.is_file(), "{}", gem.display());
+    gem
+}
+
+/// A lock written by a Bundler newer than the store Ruby's is planned and
+/// installed with that exact Bundler: ward provisions the release the lock
+/// names, checked against the lock's CHECKSUMS entry, as its own object,
+/// and `bundle` in the project is that release. A lock no newer than the
+/// shipped Bundler provisions nothing. The newer release is built from the
+/// shipped one and seeded into the verified cache, so the sync that uses
+/// it runs with the network cut.
+#[test]
+#[ignore]
+fn ruby_lock_bundled_with_a_newer_bundler_syncs_with_it() {
+    let temp = TempDir::new("ruby-e2e-bundler");
+    let store = temp.0.join("store");
+
+    // A lock no newer than the Ruby's own Bundler: nothing provisioned.
+    let older = temp.0.join("older");
+    bundled_with_project(&older, "2.6.9", None);
+    assert_ok(
+        ward(&older, &temp.0, &["sync"]),
+        "sync with the shipped bundler",
+    );
+    let closure: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(older.join(".greyward/closures/ruby.json")).unwrap())
+            .unwrap();
+    assert!(
+        closure["body"]["plan"].get("bundler").is_none(),
+        "{closure}"
+    );
+    assert!(find_object(&store, "ruby-bundler").is_none());
+
+    let version = "2.99.0";
+    let (ruby, _) = find_object(&store, "ruby").expect("ruby object published");
+    let gem = bumped_bundler_gem(&ruby, &temp.0.join("bundler-src"), version);
+    let opened = greyward::kernel::store::Store::open_at(&store).unwrap();
+    let activity = opened
+        .activity(greyward::kernel::activity::ActivityMode::Shared)
+        .unwrap();
+    let (sha256, _) = greyward::kernel::fetch::cache_insert(&opened, &activity, &gem).unwrap();
+    let tiny = tiny_gem(&ruby, &temp.0.join("tiny-src"));
+    let (tiny_sha, _) = greyward::kernel::fetch::cache_insert(&opened, &activity, &tiny).unwrap();
+    drop(activity);
+
+    let newer = temp.0.join("newer");
+    bundled_with_project(&newer, version, Some((&sha256, &tiny_sha)));
+    // Under the policy, the ordinary gem's checksum is insufficient:
+    // Bundler's artifact needs its own pin. Follow the documented repair
+    // by adding its verified SHA-256 under CHECKSUMS, without a Gemfile
+    // dependency on Bundler.
+    let lock = std::fs::read_to_string(newer.join("Gemfile.lock")).unwrap();
+    let bundler_entry = format!("  bundler ({version}) sha256={sha256}\n");
+    std::fs::write(newer.join("Gemfile.lock"), lock.replace(&bundler_entry, "")).unwrap();
+    std::fs::create_dir_all(newer.join(".greyward")).unwrap();
+    std::fs::write(
+        newer.join(".greyward/policy.toml"),
+        "deny = [\"unpinned-digest\"]\n",
+    )
+    .unwrap();
+    let denied = ward_offline(&newer, &temp.0, &["sync"]);
+    let error = String::from_utf8_lossy(&denied.stderr);
+    assert_eq!(denied.status.code(), Some(3), "{error}");
+    assert!(error.contains("bundler-2.99.0"), "{error}");
+    assert!(error.contains("verified gem SHA-256"), "{error}");
+    std::fs::write(newer.join("Gemfile.lock"), lock).unwrap();
+    let out = ward_offline(&newer, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "sync failed: {stderr}");
+    let closure: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(newer.join(".greyward/closures/ruby.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        closure["body"]["plan"]["bundler"],
+        serde_json::json!({"version": version, "sha256": sha256}),
+        "{closure}"
+    );
+    // The gem's digest is the lock's CHECKSUMS entry, read by that Bundler.
+    let gems = closure["body"]["plan"]["gems"].as_array().unwrap();
+    assert_eq!(gems.len(), 1, "{closure}");
+    assert_eq!(gems[0]["sha256"], serde_json::json!(tiny_sha), "{closure}");
+    let (bundler_obj, meta) = find_object(&store, "ruby-bundler").expect("bundler object");
+    assert_immutable_tree(&bundler_obj);
+    let inputs = &meta["identity"]["inputs"];
+    assert_eq!(inputs["gem_sha256"], serde_json::json!(sha256), "{meta}");
+    assert_eq!(
+        meta["identity"]["version"],
+        serde_json::json!(version),
+        "{meta}"
+    );
+    // The older project's gems object is in the store too: read this one's.
+    let gems_id = closure["body"]["gems_object"]["id"].as_str().unwrap();
+    let gems_meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(store.join("meta").join(format!("{gems_id}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        gems_meta["identity"]["inputs"]["bundler"]
+            .as_str()
+            .is_some_and(|input| input.contains(&sha256)),
+        "{gems_meta}"
+    );
+
+    let shown = assert_ok(
+        ward_offline(&newer, &temp.0, &["run", "bundle", "-v"]),
+        "bundle -v in the project",
+    );
+    assert!(shown.contains(version), "{shown}");
+    let said = assert_ok(
+        ward_offline(
+            &newer,
+            &temp.0,
+            &[
+                "run",
+                "bundle",
+                "exec",
+                "ruby",
+                "-e",
+                "require 'wardtiny'; puts Wardtiny::SAID",
+            ],
+        ),
+        "bundle exec with the locked Bundler",
+    );
+    assert!(said.contains("from-tiny"), "{said}");
+}
+
+/// A project with no lock whose gemspec lists its files with `git ls-files`
+/// (as most do) resolves: Bundler evaluates the gemspec in ward's copy of
+/// the project, which has no git data, so ward indexes the copy for the run
+/// and removes the index after it. The gemspec refuses an empty list, so a
+/// run without the index fails. Nothing of the index reaches the project.
+#[test]
+#[ignore]
+fn ruby_lock_generation_answers_a_gemspecs_git_ls_files() {
+    let temp = TempDir::new("ruby-e2e-indexed");
+    let project = temp.0.join("app");
+    write_tree(
+        &project,
+        &[
+            (
+                "Gemfile",
+                "source \"https://rubygems.org\"\n\ngemspec\ngem \"rake\", \"13.4.2\"\n",
+            ),
+            (
+                "app.gemspec",
+                r#"Gem::Specification.new do |s|
+  s.name = "app"
+  s.version = "1.0.0"
+  s.summary = "A project whose gemspec asks git for its files"
+  s.authors = ["ward"]
+  s.files = `git ls-files -z`.split("\x0")
+  raise "git ls-files listed nothing" unless s.files.include?("lib/app.rb")
+end
+"#,
+            ),
+            ("lib/app.rb", "module App; end\n"),
+        ],
+    );
+    let out = ward(&project, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "sync failed: {stderr}");
+    assert!(!stderr.contains("not a git repository"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    assert!(lock.contains("    app (1.0.0)"), "{lock}");
+    assert!(!project.join(".git").exists());
+    let removed = ward(&project, &temp.0, &["remove", "rake"]);
+    let stderr = String::from_utf8_lossy(&removed.stderr);
+    assert!(removed.status.success(), "remove failed: {stderr}");
+    assert!(!stderr.contains("not a git repository"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    assert!(!lock.contains("rake"), "{lock}");
+    assert!(lock.contains("    app (1.0.0)"), "{lock}");
+    assert!(!project.join(".git").exists());
+}
+
+/// A missing lock makes Bundler itself clone the Git dependency through
+/// the confined resolver. The proxy records that fetch and enforces the
+/// policy before serving it, then ward installs the locked checkout.
+#[test]
+#[ignore]
+fn ruby_missing_lock_resolves_a_git_source_through_the_proxy() {
+    let temp = TempDir::new("ruby-e2e-git-lock");
+    let project = temp.0.join("app");
+    let revision = "0fdacef47aa9a4140e472b0ce302a2dd09423a75";
+    let remote = "https://github.com/ruby/rake.git";
+    std::fs::create_dir_all(project.join(".greyward")).unwrap();
+    std::fs::write(
+        project.join("Gemfile"),
+        format!(
+            "source \"https://rubygems.org\"\ngem \"rake\", git: \"{remote}\", ref: \"{revision}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".greyward/policy.toml"),
+        "deny = [\"git-dependency\"]\n",
+    )
+    .unwrap();
+    let denied = ward(&project, &temp.0, &["sync"]);
+    let error = String::from_utf8_lossy(&denied.stderr);
+    assert!(!denied.status.success(), "{error}");
+    assert!(error.contains("git-dependency"), "{error}");
+    assert!(!project.join("Gemfile.lock").exists());
+    std::fs::remove_file(project.join(".greyward/policy.toml")).unwrap();
+
+    let out = ward(&project, &temp.0, &["sync"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "sync failed: {stderr}");
+    assert!(stderr.contains("git-dependency"), "{stderr}");
+    let lock = std::fs::read_to_string(project.join("Gemfile.lock")).unwrap();
+    assert!(lock.contains(&format!("  revision: {revision}")), "{lock}");
+    assert!(lock.contains("    rake (13.3.0)"), "{lock}");
+    let said = assert_ok(
+        ward(
+            &project,
+            &temp.0,
+            &["run", "bundle", "exec", "rake", "--version"],
+        ),
+        "the Git dependency's executable",
+    );
+    assert!(said.contains("rake, version 13.3.0"), "{said}");
+}

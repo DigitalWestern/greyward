@@ -250,6 +250,7 @@ impl Keyring {
 
     /// The upper-case hex v4 fingerprints of every signing key, primary
     /// first.
+    #[cfg(test)]
     pub fn fingerprints(&self) -> Vec<String> {
         self.keys
             .iter()

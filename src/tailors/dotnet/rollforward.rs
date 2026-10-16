@@ -27,9 +27,75 @@
 //! the catalog holds releases only, so its range starts at the release.
 //! `allowPrerelease` is not read: the catalog has no prerelease SDKs.
 
-use super::err;
+use super::{err, read_input_text, regular_file_if_present};
+use crate::kernel::fsroot::ProjectRoot;
 use crate::kernel::toolchain::select::{Op, Specifier, Version, VersionRequest};
 use std::io;
+use std::path::Path;
+
+/// global.json gate: the SELECTED SDK must be one the .NET host would
+/// accept under the file's `sdk.version` and `sdk.rollForward`
+/// (`rollforward::sdk_request`, the same reading that selected it), and
+/// nothing may redirect SDK discovery. Comparing against the shipped
+/// constant would let a catalog refresh start failing locked projects. The
+/// project is read through the held descriptor.
+pub fn check_global_json(project: &ProjectRoot, sdk_version: &str) -> io::Result<()> {
+    let rel = Path::new("global.json");
+    if !regular_file_if_present(project, rel, "global.json")? {
+        return Ok(());
+    }
+    let text = read_input_text(project, rel)?;
+    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| err(format!("global.json: {e}")))?;
+    reject_global_redirects(&v, "global.json")?;
+    // A global.json with no sdk object states nothing about the SDK.
+    let Some(sdk) = v.get("sdk") else {
+        return Ok(());
+    };
+    let sdk = sdk
+        .as_object()
+        .ok_or_else(|| err("global.json sdk must be an object"))?;
+    let field = |name: &str| -> io::Result<Option<&str>> {
+        match sdk.get(name) {
+            None => Ok(None),
+            Some(serde_json::Value::String(text)) => Ok(Some(text.as_str())),
+            Some(_) => Err(err(format!("global.json sdk.{name} must be a string"))),
+        }
+    };
+    let Some(request) = sdk_request(field("version")?, field("rollForward")?)? else {
+        return Ok(());
+    };
+    let selected = crate::kernel::toolchain::Version::parse(sdk_version)?;
+    if !request.matches(&selected) {
+        return Err(err(format!(
+            "global.json admits SDK {request}; locked: {sdk_version}; \
+             run `ward update --toolchain dotnet`"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_global_redirects(value: &serde_json::Value, path: &str) -> io::Result<()> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if key == "paths" || key == "msbuild-sdks" {
+                    return Err(err(format!(
+                        "{path}: {key} is not supported (SDK redirection)"
+                    )));
+                }
+                reject_global_redirects(value, path)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                reject_global_redirects(value, path)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 /// The policies `sdk.rollForward` may name.
 const POLICIES: &[&str] = &[

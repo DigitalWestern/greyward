@@ -426,28 +426,7 @@ pub(super) fn run(
             forbidden: &key_ids,
         },
     )?;
-    if confined.complete_inputs {
-        snapshot.normalize_executable_inputs()?;
-    }
-    if let Some(rules) = &confined.links {
-        let withheld = snapshot.settle_links(rules)?;
-        if !withheld.is_empty() {
-            snapshot.normalize_executable_inputs()?;
-        }
-        let facts = withheld_facts(&confined, rules, &policy, &withheld)?;
-        confined.facts.extend(facts);
-    }
-    check_planning_inputs(
-        &snapshot,
-        &confined.expected_inputs,
-        confined.links.is_some(),
-    )?;
-    if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
-        return Err(io::Error::other(
-            "project files changed while planning executable-manifest resolution; \
-             nothing was published; run `ward` again",
-        ));
-    }
+    prepare_snapshot(&mut snapshot, &mut confined, &policy)?;
     let mut ran = run_tool(door, &spec, &mut confined, &policy, &snapshot, &forced_args)?;
     let status = exit_status(ran.outcome.status);
     if let Some(failure) = ran.session.facts.failure() {
@@ -522,6 +501,38 @@ pub(super) fn run(
         )?,
     }
     Ok(report(status, ran.outcome, Some(objects)))
+}
+
+/// Settle the copied inputs before comparing them with the generation
+/// that planning validated. Withheld links retain their policy facts.
+fn prepare_snapshot(
+    snapshot: &mut Snapshot,
+    confined: &mut ConfinedSpec<'_>,
+    policy: &Policy,
+) -> io::Result<()> {
+    if confined.complete_inputs {
+        snapshot.normalize_executable_inputs()?;
+    }
+    if let Some(rules) = &confined.links {
+        let withheld = snapshot.settle_links(rules)?;
+        if !withheld.is_empty() {
+            snapshot.normalize_executable_inputs()?;
+        }
+        let facts = withheld_facts(confined, rules, policy, &withheld)?;
+        confined.facts.extend(facts);
+    }
+    check_planning_inputs(
+        snapshot,
+        &confined.expected_inputs,
+        confined.links.is_some(),
+    )?;
+    if confined.complete_inputs && snapshot.project_file_digests()? != confined.expected_inputs {
+        return Err(io::Error::other(
+            "project files changed while planning executable-manifest resolution; \
+             nothing was published; run `ward` again",
+        ));
+    }
+    Ok(())
 }
 
 /// The `outward-symlink` exception for each link [`Snapshot::settle_links`]

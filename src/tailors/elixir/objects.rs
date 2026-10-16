@@ -25,10 +25,32 @@ pub static KINDS: &[ObjectKind] = &[
         kind: "hex-deps",
         schema: Some("hex-deps/1"),
         live_required: &["schema", "beam"],
-        live_optional: &["dep:"],
+        live_optional: &["dep:", "git:"],
         live_contract: Some(hex_deps_contract),
     },
+    ObjectKind {
+        kind: super::git::KIND,
+        schema: Some(super::git::SCHEMA),
+        live_required: &["schema"],
+        live_optional: &["git:"],
+        live_contract: Some(git_deps_contract),
+    },
 ];
+
+fn git_deps_contract(identity: &Identity) -> Result<(), String> {
+    let deps = identity
+        .inputs
+        .keys()
+        .filter(|key| key.starts_with("git:"))
+        .count();
+    if deps == 0 || identity.version != deps.to_string() {
+        return Err(format!(
+            "Git dependency count/version relation: version {:?} does not match {deps} git: inputs",
+            identity.version
+        ));
+    }
+    Ok(())
+}
 
 fn beam_contract(identity: &Identity) -> Result<(), String> {
     let platform = platform_of(identity)?.ok_or_else(|| {

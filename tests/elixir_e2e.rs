@@ -19,7 +19,7 @@ mod common;
 
 use common::{
     assert_frozen_never_writes_the_lock, assert_ok, assert_private_run_home, copy_tree, fixture,
-    temp_entries, ward, ward_offline, TempDir,
+    home_store, temp_entries, ward, ward_offline, TempDir,
 };
 
 const DARWIN_FINGERPRINT: &str = "c35290f692496d51";
@@ -93,6 +93,9 @@ fn elixir_sync_sandboxed_build_and_run() {
     // Realize the composite BEAM object; everything below uses only its
     // committed path (read from the closure ward wrote).
     assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
+    // Keep this runtime case under the Fedora-routed test: Ubuntu cannot
+    // run the shipped OTP build. The mixed project reuses this warm store.
+    assert_mixed_dotnet_links(&temp);
     // The child's HOME is the project's private run home, and every
     // directory the forced environment names exists before it starts.
     let run_home =
@@ -282,4 +285,152 @@ fn elixir_sync_sandboxed_build_and_run() {
         .cloned()
         .collect();
     assert!(left.is_empty(), "runs left {left:?} under the temp root");
+    assert_git_dependency_survives_gc_for_an_offline_frozen_sync();
+}
+
+/// A mix.lock git dependency outlives `ward gc` while the project uses it:
+/// the deps object holds the checkout object, which holds the git source,
+/// so a frozen sync with the repository gone and no network finds all of
+/// it in the store.
+fn assert_git_dependency_survives_gc_for_an_offline_frozen_sync() {
+    let temp = TempDir::new("elixir-git-gc");
+    let repo = temp.0.join("lib");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join("mix.exs"),
+        "defmodule Lib.MixProject do\n  use Mix.Project\n  \
+         def project, do: [app: :lib, version: \"0.1.0\"]\nend\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+    let rev = git(&["rev-parse", "HEAD"]);
+    let url = format!("file://{}", repo.canonicalize().unwrap().display());
+
+    let project = temp.0.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("mix.exs"),
+        format!(
+            "defmodule Demo.MixProject do\n  use Mix.Project\n  \
+             def project, do: [app: :demo, version: \"0.1.0\", deps: [{{:lib, git: {url:?}}}]]\n\
+             end\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("mix.lock"),
+        format!("%{{\n  \"lib\": {{:git, {url:?}, {rev:?}, []}},\n}}\n"),
+    )
+    .unwrap();
+    assert_ok(ward(&project, &temp.0, &["sync"]), "sync");
+    let deps = PathBuf::from(
+        closure_body(&project)["deps_object"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(
+        std::fs::read_to_string(deps.join("lib/.git/HEAD"))
+            .unwrap()
+            .trim(),
+        rev
+    );
+
+    // Collection keeps whatever was touched in the last ten minutes; age
+    // every object past that so only reachability keeps one.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 60);
+    let store = home_store(&project, &temp.0);
+    for entry in std::fs::read_dir(store.join("objects")).unwrap() {
+        std::fs::File::open(entry.unwrap().path())
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    assert_ok(ward(&project, &temp.0, &["gc", "--keep-days", "0"]), "gc");
+    remove_tree(&repo);
+    assert_ok(
+        ward_offline(&project, &temp.0, &["--frozen"]),
+        "frozen sync after gc, the repository gone",
+    );
+}
+
+fn assert_mixed_dotnet_links(temp: &TempDir) {
+    let project = temp.0.join("mixed-dotnet-links");
+    std::fs::create_dir_all(&project).unwrap();
+    // Restore must run, so the receipt records the omitted link.
+    for file in ["proj.csproj", "Program.cs"] {
+        std::fs::copy(
+            common::fixture("dotnet-hello").join(file),
+            project.join(file),
+        )
+        .unwrap();
+    }
+    std::fs::write(project.join("mix.exs"), "defmodule Mixed.MixProject do\n  use Mix.Project\n  def project, do: [app: :mixed, version: \"0.1.0\", deps: []]\nend\n").unwrap();
+    std::fs::write(project.join("mix.lock"), "%{}\n").unwrap();
+    std::fs::create_dir_all(project.join("data")).unwrap();
+    std::fs::write(project.join("data/value.txt"), "included").unwrap();
+    std::os::unix::fs::symlink("data", project.join("node_modules")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/env", project.join("CLAUDE.md")).unwrap();
+    assert_ok(
+        ward(&project, &temp.0, &["sync"]),
+        "Elixir and .NET sync with symlinks",
+    );
+    assert_ok(
+        ward(&project, &temp.0, &["sync"]),
+        "Elixir and .NET unchanged sync",
+    );
+    for ecosystem in ["elixir", "dotnet"] {
+        let closure: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(project.join(format!(".greyward/closures/{ecosystem}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            closure["body"]["resolution_basis"]["node_modules"]
+                .as_str()
+                .unwrap()
+                .starts_with("symlink:"),
+            "{closure}"
+        );
+        assert!(
+            closure["body"]["resolution_basis"]
+                .get("data/value.txt")
+                .is_some(),
+            "{closure}"
+        );
+        // .NET can plan an existing lock without executing MSBuild.
+        // Its missing-lock restore's receipt is where omission was recorded.
+        let evidence = if ecosystem == "dotnet" {
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(project.join(".greyward/resolution/dotnet.json")).unwrap(),
+            )
+            .unwrap()
+        } else {
+            closure["body"].clone()
+        };
+        assert!(
+            evidence["exceptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|exception| exception["kind"] == "outward-symlink"
+                    && exception["subject"] == "CLAUDE.md"),
+            "{closure}"
+        );
+    }
 }

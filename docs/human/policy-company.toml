@@ -221,6 +221,19 @@ deny = [
 #                                    that are fine. A company that would
 #                                    rather review each one may add this
 #                                    kind to the list above.
+#   outward-symlink                  a project whose manifest is code (a
+#                                    Gemfile, a mix.exs, a csproj) holds a
+#                                    symlink out of the project (a test
+#                                    fixture pointing at /etc/passwd, a
+#                                    CLAUDE.md linked from elsewhere), so the
+#                                    resolver ran without it: the link was
+#                                    left out of its copy of the project and
+#                                    the receipt names it by its target. A
+#                                    manifest, lock or configuration file
+#                                    that is such a link is refused anyway.
+#                                    A company that wants every such link
+#                                    removed first may add this kind to the
+#                                    list above.
 
 # Closure signing. With a [signing] table in the machine policy, `ward audit`
 # accepts only records signed by a key it lists; a project or --policy copy

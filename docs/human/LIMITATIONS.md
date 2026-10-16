@@ -336,9 +336,17 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   download with the digest in the catalog embedded in the binary, so that digest is as
   trustworthy as the Greyward release that ships it. When the catalogs are generated,
   `tools/catalog.py` checks the signature of each Rust release's channel manifest (not yet of
-  `channel-rust-stable.toml`, which names the newest) and of Node's `SHASUMS256.txt`; every
+  `channel-rust-stable.toml`, which names the newest) and of Node's `SHASUMS256.txt`. A Rust
+  nightly is not in a catalog: ward itself checks its dated channel manifest's signature,
+  against the same Rust release key built into the binary, once, when it writes the lock;
+  from then on the lock's digests are the pin, as for a catalog row. Every
   other source is **TOFU** (trust on first use: a checksum taken when the
-  row was pinned, with no signature behind it), one row each in the sections below. What each
+  row was pinned, with no signature behind it), one row each in the sections below.
+- **A new upstream release is not usable until a Greyward release ships it.** The catalogs
+  take every patch release each upstream publishes for both platforms, but only as of the
+  last `tools/catalog.py` run. The weekly `catalog-drift` workflow fails when upstream has
+  published one the catalogs lack; until a refreshed catalog ships, a project pinning it is
+  refused by name. Rust nightlies are the exception (below). What each
   upstream publishes is in `docs/agent/DESIGNS.md` §2 "PR 0 evidence"; checking it is WP3.
 - **The conda-forge native libraries are TOFU.** `src/kernel/provider/nativelibs.rs` pins
   their sha256 from conda-forge's repodata, taken once. ward checks nothing signed for them,
@@ -347,6 +355,26 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
   csproj are code, and Go's, Cargo's, Node's, Python's (uv), Ruby's (Bundler), Elixir's
   (mix) and .NET's (restore) resolvers all run confined, reaching their registry only
   through Greyward's proxy.
+- **Executable manifests bind every visible project file.** A Gemfile, a mix.exs and a
+  csproj can read any file, so Ruby, Elixir and .NET resolution copy the whole project
+  into the sandbox and the receipt names every regular file and symlink in it. Left
+  out: `.git`, `.greyward`, each tool's explicit state exclusions (`vendor/bundle`,
+  `.bundle`, `deps`, `_build`, `obj`, `bin`), and ward's environment symlinks into its
+  configured store (`node_modules` and `.venv` at any depth). Ordinary directories and
+  unrelated inward links at those names remain inputs. Inward relative links retain
+  their position in the copy. The receipt binds their target text as
+  `symlink:<sha256>`, and separately covers their in-project targets. Link text is
+  captured during input discovery, and the completed copy is checked again before
+  project code runs. A link that is absolute, climbs out of the project, loops, or
+  passes through an excluded entry is removed from the copy and recorded under an
+  `outward-symlink` policy exception naming its path. A required manifest, lock or
+  configuration link is refused instead. Unused outward fixtures therefore allow
+  resolution to proceed. Manifest code that needs an omitted fixture fails or sees
+  it as absent. Arbitrary executable code's required data files cannot be inferred.
+  Denying `outward-symlink` refuses such projects before the tool runs. Python's,
+  Node's, Cargo's and Go's inputs are explicit lists. A listed symlink to a file
+  binds the contents read through it, including intermediate links, so changing the
+  target's contents invalidates the receipt even if the target is not listed itself.
 - **Every tar archive is unpacked through the pre-materialization extractor**
   (`src/kernel/archive.rs`, #236). It reads every entry from the
   archive's own headers (ustar names and the POSIX prefix field, PAX `path`/`linkpath`/`size`,
@@ -491,9 +519,10 @@ unported (a pin-table row plus a wheel-tag band each, not a port).
 
 ## Python
 
-Selection covers every patch of each maintained CPython minor that python-build-standalone
-  published a checksummed build of for both platforms. A few patches never got one (3.10.0,
-  3.10.1, 3.10.10, 3.11.0, 3.11.2; `tools/catalog.py python` reports them) and are refused. A
+Selection covers every CPython patch, end-of-life minors included, that python-build-standalone
+  published a checksummed build of for both platforms: 3.8.12 and up. Patches with no such
+  build (3.8 before 3.8.12, 3.9 before 3.9.10, 3.10.0, 3.10.1, 3.10.10, 3.11.0, 3.11.2;
+  `tools/catalog.py python` reports them) are refused. A
   two-part `.python-version` picks the default (3.12.14) on its minor, else the newest pinned
   patch; a three-part request must match a pin exactly.
 - **python-build-standalone builds are TOFU.** Their digests come from the release's
@@ -827,7 +856,7 @@ Selection covers every patch of each maintained CPython minor that python-build-
   100,000 entries and 2 GiB per crate; one that would leave the checkout, loop into a
   directory that contains it, or expand past that cap is refused, and a dangling one is
   left out. A crate found more than four directories below the repository root is not
-  found. **Fail-closed rows**: alternative registries; beta/nightly channels. Loud.
+  found. **Fail-closed rows**: alternative registries; the beta channel. Loud.
   Cross `targets` get their standard library from the release's signed channel manifest,
   but Greyward provides no linker or C sysroot for them, so a crate that links for another
   platform still needs one on the machine. A custom toolchain works as a local directory
@@ -849,6 +878,20 @@ Selection covers every patch of each maintained CPython minor that python-build-
   `ward update --toolchain rust`. As in rustup, a path cannot be combined with a channel,
   components, targets or a profile. A symlink in the tree is resolved against the tree
   itself, through any links it passes, and a tree with one that leads outside is refused.
+- **The catalog holds every stable Rust from 1.49.0** (the first with an
+  aarch64-apple-darwin build), **but ward drives cargo 1.68 or newer only.** ward reaches
+  crates.io through the sparse index and passes settings with `cargo --config`, which cargo
+  1.68 and 1.63 introduced. An older pin is selected and locked, then fails when cargo runs.
+- **A nightly is resolved when the lock is written, not shipped.**
+  `channel = "nightly-YYYY-MM-DD"` fetches that day's channel manifest from
+  static.rust-lang.org, checks its signature against the Rust release key, and locks its
+  rustc, rust-std, cargo and rustfmt rows (rustfmt only when every platform has it) and the
+  manifest's sha256. Plain `nightly` takes the newest nightly at that moment and keeps it
+  until `ward update --toolchain rust`, where rustup would move every day. Locking needs
+  network; using the lock does not refetch or recheck the manifest. A nightly rustc's
+  version is recorded as the release it leads up to (`1.100.0` for `1.100.0-nightly`) with
+  the date in the release key. A host-suffixed channel (`nightly-2026-09-01-x86_64-...`) and
+  `beta` are refused.
 - **No `profile` in rust-toolchain means rustc, cargo and the host std** (rustup's
   `minimal`), not rustup's configured default; ask for `profile = "default"` to get
   clippy, rustfmt and the docs. **No channel means the catalog's default release**
@@ -867,8 +910,10 @@ Selection covers every patch of each maintained CPython minor that python-build-
   the `.sha256` on dl.google.com, neither signed. A `.asc` signature by Google's Linux
   packaging key sits beside every archive, which ward does not check yet; go.dev does not
   document it, and the JSON that lists releases is unsigned.
-- **Only the Go lines go.dev lists as supported are realizable** (every release of each). An
-  unmatched `go.mod` selection fails before store or network access. A non-default
+- **Every stable Go release from 1.16.1 on is realizable**, end-of-life lines included. The
+  first release of 1.16 to 1.20 (`go1.16` to `go1.20`, named without a patch number) is not
+  pinned, so an exact `toolchain go1.20` is refused; `go 1.20` alone is a minimum and is
+  satisfied. An unmatched `go.mod` selection fails before store or network access. A non-default
   `toolchain` directive is exact; `go` alone is a minimum that takes the default (1.27.0) when
   it satisfies, else the newest release, where go itself would take the lowest.
   **Fail-closed rows**: go.work workspaces (including ancestor detection);
@@ -897,8 +942,17 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 - **portable-ruby, and the Bundler inside it, are TOFU.** Homebrew publishes no checksum file,
   signature or attestation for the bottles; the digest is the bottle hashed at pin time,
-  compared with GitHub's own asset digest. Nothing can be checked later. The default
-  (3.4.6) is a release Homebrew marked prerelease and reverted in brew.
+  compared with GitHub's own asset digest (a GitHub release) or with the digest Homebrew's
+  image manifest names (its container registry, ghcr.io, where newer builds are published
+  only). Nothing can be checked later. The default (3.4.6) is a release Homebrew marked
+  prerelease and reverted in brew.
+- **Registry bottles are fetched with a public token.** ghcr.io refuses an anonymous pull
+  without `Authorization: Bearer QQ==`, the token Homebrew's own `brew` sends. It is not a
+  credential. ward sends it to ghcr.io's portable-ruby blob path only, never to the
+  pkg-containers.githubusercontent.com host the registry redirects to.
+- **Only versions Homebrew built are available.** Ruby 3.4.9 has no portable build in either
+  place Homebrew publishes one, so a project pinning it is refused. So are 2.3.3, 2.3.7 and
+  2.6.3, which have no arm64 macOS build.
 - **Path and git gems.** A `PATH` gem (a Gemfile's `gemspec`, or `path:`) must sit
   inside the project: one outside it, or reached through a symlink that leads out, is
   refused, naming the gem and the path. Bundler loads it from the project at run time, so
@@ -922,8 +976,31 @@ Selection covers every patch of each maintained CPython minor that python-build-
   exec` (`ward run bundle exec <exe>`); RubyGems alone does not know the gem.
 - **Sources other than rubygems.org, path and git fail closed.** So do gems whose
   installers need network or absent host libraries (mysql2/rmagick-class) — no
-  declared-artifacts mechanism for gems yet. A lock `BUNDLED WITH` a Bundler newer than the
-  store's (2.6.9) is refused. **Default/bundled-gem preactivation edge**: a
+  declared-artifacts mechanism for gems yet. psych needs libyaml's headers, which ward's
+  native library set does not carry, so a lock naming psych fails on a host without them.
+- **A newer Bundler is provisioned only from the lock.** A lock `BUNDLED WITH` a Bundler
+  newer than the store Ruby's (2.6.9) gets that exact release from rubygems.org, checked
+  against the lock's CHECKSUMS entry for it, or else rubygems.org's API digest (recorded as
+  `unpinned-digest`, as for any gem). It is its own store object, planned, installed and
+  run with; no other version is ever picked. A lock no newer keeps the shipped Bundler. A
+  project with no lock is resolved by the shipped Bundler, which writes its own version.
+  `bundle lock --add-checksums` does not normally pin Bundler itself: add its verified
+  gem SHA-256 to the lock's CHECKSUMS section as described in
+  [Ruby Bundler pinning](CLI.md), and restore it if Bundler rewrites it away.
+- **Git sources while the lock is written.** `bundle lock` (and `ward add`/`update`/
+  `remove`) reaches git only for the hosts the Gemfile's git options name (`git:`, a
+  `git "..." do` block, `git_source`, and the `github:`, `gitlab:`, `gist:` and `bitbucket:`
+  shorthands), tokenized without evaluating it. Comments and unrelated strings are skipped.
+  Only git smart-HTTP fetches are served there, on 443 or the exact HTTPS port the literal
+  remote names. Each records `git-dependency` in the receipt. A remote whose host is built
+  by interpolation or a variable, or named in a file `eval_gemfile` loads, is not read.
+  Bundler's clone of it is refused, naming the host, unless another declaration names
+  that host. Interpolation in a path after a literal host is supported. This is a limited
+  scan of Ruby tokens, so some other valid Ruby spellings fail closed too.
+  A gemspec's `git ls-files` sees a throwaway index of the project copy
+  (`git add -A`, so `.gitignore` applies), removed after the run: a file the project's
+  `.gitignore` drops but its repository tracks is missing from that list.
+- **Default/bundled-gem preactivation edge**: a
   locked json/psych/openssl older than the toolchain's default can Gem::LoadError if something
   activates the default before Bundler setup. Untested matrix; potentially silent.
 - **`bundle exec` compatibility is unproven**: env-based GEM_HOME activation works for
@@ -931,8 +1008,8 @@ Selection covers every patch of each maintained CPython minor that python-build-
   Rails-class app.
 - **System /etc/gemrc is still read** (GEMRC=/dev/null blocks only the user file).
   **Portable-ruby is a Homebrew-internal artifact**: relocation is probed to work but is not a
-  contract, and its builds trail ruby-lang: the newest 3.4 build (3.4.6, the default) lacks
-  the 3.4.10 security fixes in bundled gems, and Ruby 4.0 has no build at all. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
+  contract, and its builds trail ruby-lang: the newest 3.4 build is 3.4.8 and the default is
+  3.4.6, so both lack the 3.4.10 security fixes in bundled gems. **CHECKSUMS-section locks fail closed if bundler's checksum registry API
   drifts**; new bundler formats need code updates. A lock without a CHECKSUMS section is
   verified against rubygems.org's API digests on first use and records `unpinned-digest` per
   gem, so `--strict`, or a policy that denies the kind, needs `bundle lock --add-checksums`.
@@ -950,8 +1027,25 @@ Selection covers every patch of each maintained CPython minor that python-build-
   non-sandboxed build step in the kernel. **OTP cache hits skip the runtime probe**: the OTP
   object was built on Fedora 44 (glibc 2.43 floor, OpenSSL 3.x); a store copied to an
   incompatible host fails only at execution time. Loud, but late.
-- **Fail-closed rows**: git deps; non-hexpm repos; legacy mix.lock entry shapes (3/6/7-field —
-  "refresh the lock"). **Umbrella projects are untested**. **Only OTP releases with a Linux build in
+- **Fail-closed rows**: non-hexpm repos; legacy mix.lock entry shapes (3/6/7-field —
+  "refresh the lock"); git deps whose lock entry has no full 40-character commit.
+- **Git deps are fetched by ward, not mix.** Each `{:git, url, rev, opts}` lock entry is
+  fetched at its locked commit by the kernel's git code (recorded as `git-dependency`, plus
+  `host-git-transport` for non-https URLs) and checked out with a synthetic `.git` (HEAD and
+  origin only, no history), which is what mix's own lock check reads. `sparse:` and `subdir:`
+  get the whole tree, and must be relative paths without `..`; submodules are always checked
+  out. Confined mix runs see the checkout read-only and never reach the git host, so
+  **changing a git dep's ref in mix.exs, or a project with git deps and no mix.lock, needs a
+  lock written by `mix deps.get` outside ward**: inside, mix cannot fetch the new ref and ward
+  reports "mix could not check". **`ward update` refuses git deps**: naming one, or an
+  untargeted `ward update` (mix's `--all`) on a lock that has any, is refused with the
+  `mix deps.update` command to run outside ward. An update naming only Hex deps works.
+- **A stale mix.lock is re-locked by `ward` (sync's prepare step)**, confined, with the disagreement
+  recorded as `lock-disagreement`; `--frozen` and the planner refuse it instead. Mix's
+  archive check is off (`--no-archives-check`): a project naming `archives:` (nerves) is
+  checked without the archive installed.
+- **`.tool-versions` accepts asdf's spellings**: `elixir v1.19.4` and `1.19.4-otp-27`; the
+  `-otp-NN` suffix constrains the OTP major. **Umbrella projects are untested**. **Only OTP releases with a Linux build in
   `greyward-toolchains` are realizable** (OTP 29.0.5 today, with each Elixir 1.20 patch); erlef
   publishes the Darwin builds for many more. **No rebar3 build for OTP 29 exists
   yet**: the pinned otp-28 escript runs on the 29 VM — a version-skew impurity until upstream
@@ -965,14 +1059,56 @@ Selection covers every patch of each maintained CPython minor that python-build-
 
 ## .NET
 
-- **Only an exact `global.json` selects the SDK.** `sdk.rollForward` must be `"disable"`;
-  there is no second source and no roll-forward, so a mismatch is a hard error rather than a
-  quiet upgrade.
-- **Strictest v0 boundary of any tailor** (all loud): one SDK-style .csproj only — no .sln, no
-  ProjectReference lock entries, no Central Package Management, no
-  packages.config/PackageDownload, no workloads, no custom MSBuild SDKs, nuget.org only.
-  Ancestor SDK inputs (global.json, Directory.Packages.props, Directory.Build.rsp,
-  packages.config) fail closed.
+- **`global.json` is the first SDK source, read as the .NET host reads it.** `sdk.version`
+  with `sdk.rollForward` is a range (`disable` exact; `patch`/`latestPatch` or no policy the
+  same feature band; `feature`/`latestFeature` the same minor; `minor`/`latestMinor` the
+  same major; `major`/`latestMajor` anything newer). Greyward locks the catalog default when
+  the range admits it, otherwise the newest catalog SDK inside it, and writes that exact SDK
+  to `greyward-toolchain.toml`. The non-`latest` policies would make the host prefer the
+  lowest band installed on that machine; Greyward does not imitate a per-machine choice, the
+  range is the contract. `allowPrerelease` is not read and the catalog holds release SDKs
+  only, so a project whose range admits only a preview SDK (11.0 today) is refused at
+  toolchain selection. A `version` the host cannot parse (`9.0.*`) is ignored, as the host
+  ignores it. `sdk.paths` and `msbuild-sdks` (SDK redirection) are refused. Without a
+  `global.json` version, the newest `netN.0` the members (or a `Directory.Build.props`
+  above them) target, when it is newer than the catalog default SDK builds, asks for SDK
+  N.0.100 or later (the newest catalog SDK), since an SDK cannot build a newer framework
+  than its own. The lock records it as a `TargetFramework.newest` row on the root solution
+  (or project), so retargeting stales the toolchain lock. A project the default builds
+  records no row, so its lock is unchanged. When a later catalog default catches up with a
+  project's target, its row goes away and the toolchain lock goes stale once (`ward update
+  --toolchain dotnet`). Literal declarations use property order, the nearest
+  Directory.Build.props chain, and constant-false conditions. Project-state conditions
+  demanding a newer SDK than the effective target and catalog default are refused unless
+  global.json chooses the SDK. A target set through a property (`$(Tfm)`) or ordinary
+  custom imports is not evaluated. This is a conservative supported subset of MSBuild.
+  Every SDK from 6.0.100 is pinned, out-of-support channels included, except 7.0.113,
+  7.0.310 and 7.0.403, whose archive checksums disagree with the release metadata.
+- **Strictest boundary of any tailor** (all loud): one SDK-style project at the root, or the
+  root solution's (.sln/.slnx) members, plus their literal in-tree ProjectReference graph,
+  each with its own packages.lock.json. Projects without a local SDK declaration stay in
+  the member set because imports may supply SDKs or dependencies. Dynamic reference paths
+  and reference declarations outside member files are refused. A referenced project cannot
+  be skipped, and a retained build member cannot reference a skipped Windows member.
+  A listed project restore cannot read (C++, packages.config, an MSBuild SDK fetched from
+  NuGet such as Microsoft.Build.Traversal or Aspire, a path outside the checkout) is skipped
+  with a `requirement-skipped` exception; the solution is refused only when no member is
+  left. Two members in one directory are refused (their locks would collide), and
+  `ward build` refuses two members with one file name (their artifacts directories would
+  collide). Windows-targeting members (`net8.0-windows`, WPF, Windows Forms) sync, but
+  `ward build` leaves them out: their targeting pack is fetched beside the lock, not pinned
+  by it. No PackageDownload, no UsingTask, no workloads, nuget.org only. Every visible
+  MSBuild document receives these restrictions, including ordinary imports with arbitrary
+  filenames and UTF-16/32 XML. This whole-tree scan can refuse unused or skipped project
+  content too. Shared-project entries are omitted without an exception because they are
+  compiled through their importing projects. Ancestor SDK inputs
+  (global.json, Directory.Packages.props, Directory.Build.rsp, packages.config) fail closed.
+  Output properties (OutputPath, OutDir, BaseOutputPath, PublishDir) must stay inside the
+  checkout. The output hook redirects declarations in SDK-style projects and
+  Directory.Build.props without explicit imports. Output declarations in other imported
+  files, in targets, or in files with explicit imports are refused because they may run
+  after the hook. Task-created output properties are refused too. A
+  `CustomBeforeMicrosoftCommonTargets` the project sets is replaced during `ward build`.
 - **Build-capable dotnet verbs are refused at `ward run`**; everything compiling goes
   through `ward build dotnet`, which covers build only (no test/publish verbs). The guard
   is advisory — `sh -c` can bypass it. Missing-lock restore runs in the resolution

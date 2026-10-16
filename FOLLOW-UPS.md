@@ -47,6 +47,8 @@ None open.
 
 ## Open work, each its own pull request
 
+- **#798: repair the published v0.2.0 Linux release signature.** Its archive was replaced without a matching signature. Publish a reviewed, signed patch release or restore the original authenticated archive. The Action demo currently fails before running project code.
+
 - **#655: hand-hashed Python adoption.** Test the documented conversion to a compiled lock and signed receipt, then consider an explicit adoption command.
 
 - **#634: safe uv configuration.** Preserve a reviewed scalar allowlist from the signed resolution snapshot while keeping mandatory interpreter, keyring, download and index restrictions.

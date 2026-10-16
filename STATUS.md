@@ -1,6 +1,6 @@
 # STATUS — where Greyward is, and what is next
 
-Updated 2026-10-14.
+Updated 2026-10-15.
 
 ## What Greyward is
 
@@ -11,6 +11,13 @@ Nix's model without Nix's interface. Seven ecosystems built: Python, npm,
 Cargo, Go, Ruby, Elixir, .NET.
 
 ## Where we are
+
+The first compatibility pass (#770) covers Ruby path/Git sources and exact
+Bundler versions, Go proxy downloads, Cargo Git workspaces, wider toolchain
+catalogs and Rust nightlies, project input links, .NET solutions and SDK
+ranges, and Elixir lock/Git dependencies. Remaining gaps are recorded in
+FOLLOW-UPS.md. The real-project counts below remain the measured baseline.
+The complete pinned sample has not been re-measured after these fixes.
 
 | Area | State |
 |---|---|

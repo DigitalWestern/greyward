@@ -17,7 +17,7 @@ modules): Node ~11.7k, Python ~10.0k, Elixir ~2.7k, Go ~2.2k, Ruby ~2.0k,
 .NET ~1.9k, Cargo ~1.8k. The first estimates
 (~500-1000 lines each) were about 10x low for the two proven tailors:
 real projects needed lock importers, native builds and sandboxed scripts. pnpm v9/v6 and Yarn classic lockfile importers shipped
-2026-09-06 (`src/tailors/node/lock_import/`). Current version: Greyward 0.2.0.
+2026-09-06 (`src/tailors/node/lock_import/`). Current version: Greyward 0.2.1.
 
 ## The model
 

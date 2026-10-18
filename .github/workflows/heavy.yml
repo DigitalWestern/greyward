@@ -30,14 +30,6 @@
 # private and a nightly run of this length would use most of the Actions
 # minutes a free plan includes; change `cron` to `"0 6 * * *"` for nightly.
 #
-# Elixir is the one ecosystem the ubuntu runner cannot prove: the only
-# Linux OTP in src/tailors/elixir/catalog.toml needs glibc 2.43 (Fedora 44)
-# and ubuntu-22.04 has 2.35 (docs/human/LIMITATIONS.md "Unpinned host build
-# inputs"), so the `e2e` job skips its end-to-end test by name, the
-# `acceptance` job skips its step (GREYWARD_ACCEPT_SKIP_ELIXIR), and the
-# `elixir` job runs that test in a Fedora 44 container. An OTP built on an older baseline, which would end
-# the split, is #300.
-#
 # The last green run's date goes in STATUS.md by hand ("Last green heavy
 # run"); that date is when the end-to-end claims there were last true.
 name: heavy
@@ -262,12 +254,7 @@ jobs:
           case "$SHARD" in
             node) files=$SHARD_NODE ;;
             rust) files=$SHARD_RUST ;;
-            python)
-              files=$SHARD_PYTHON; extra=(--lib --bins)
-              # Store OTP needs Fedora's glibc. Its library door tests run
-              # below in the Fedora job with the integration suite.
-              skip=(--skip tailors::elixir::resolve::tests)
-              ;;
+            python) files=$SHARD_PYTHON; extra=(--lib --bins) ;;
             other)
               files=
               named=" $SHARD_NODE $SHARD_RUST $SHARD_PYTHON "
@@ -275,8 +262,6 @@ jobs:
                 name=$(basename "$path" .rs)
                 if [[ "$named" != *" $name "* ]]; then files="$files $name"; fi
               done
-              # See the header: no Linux OTP runs on this glibc.
-              skip=(--skip elixir_sync_sandboxed_build_and_run)
               ;;
             *) echo "::error::unknown shard $SHARD"; exit 1 ;;
           esac
@@ -286,7 +271,7 @@ jobs:
           # Two tests at a time within each suite: the suites keep their
           # scratch stores, HOMEs and registries per test, and env changes
           # behind locks, and a full local run at 2 passed (#465).
-          cargo test --locked --no-fail-fast "${args[@]}" -- --ignored --test-threads=2 ${skip[@]+"${skip[@]}"}
+          cargo test --locked --no-fail-fast "${args[@]}" -- --ignored --test-threads=2
       # The runner disk is about 14 GB; the stores and target/ use most of
       # it. This shows how close a run came.
       - name: Disk after the run
@@ -312,8 +297,6 @@ jobs:
     timeout-minutes: 60
     env:
       GREYWARD_SANDBOX_TESTS: required
-      # See the header: no Linux OTP runs on this glibc.
-      GREYWARD_ACCEPT_SKIP_ELIXIR: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the Linux sandbox and the host headers the suite needs
@@ -380,8 +363,6 @@ jobs:
           echo "TMPDIR=$RUNNER_TEMP/ward/tmp" >> "$GITHUB_ENV"
           echo "GREYWARD_STORE=$RUNNER_TEMP/ward/store" >> "$GITHUB_ENV"
       # Every picked file runs even after one fails, like --no-fail-fast.
-      # Elixir is skipped by name here for the reason in the header; the
-      # `elixir` job runs it when tests/elixir_e2e.rs is among the files.
       - name: Ignored tests of the edited files
         if: steps.pick.outputs.picked != ''
         env:
@@ -391,64 +372,10 @@ jobs:
           failed=""
           for name in $PICKED; do
             echo "::group::cargo test --test $name -- --ignored"
-            cargo test --locked --test "$name" -- --ignored --test-threads=2 \
-              --skip elixir_sync_sandboxed_build_and_run || failed="$failed $name"
+            cargo test --locked --test "$name" -- --ignored --test-threads=2 || failed="$failed $name"
             echo "::endgroup::"
           done
           if [ -n "$failed" ]; then
             echo "::error::ignored tests failed in:$failed"
             exit 1
           fi
-
-  # The Elixir end-to-end test, on the one baseline its OTP runs on (see
-  # the header). It runs whenever `e2e` does, and when a PR edits the test
-  # itself. `--privileged` is what lets bubblewrap make its namespaces
-  # inside the container.
-  elixir:
-    needs: gate
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.gate.outputs.run == 'yes' || contains(format(' {0} ', needs.gate.outputs.tests), ' elixir_e2e ')) }}
-    concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('heavy-elixir-pr-{0}', github.event.pull_request.number) || 'heavy-elixir' }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-22.04
-    container:
-      image: fedora:44
-      options: --privileged
-    timeout-minutes: 90
-    steps:
-      # git first, so checkout clones rather than downloading an archive.
-      # The image is minimal: tar and the decompressors ward and the cache
-      # action call are not in it.
-      - name: Install the compiler, the sandbox and the host tools
-        run: dnf install -y gcc git tar gzip xz bzip2 unzip zstd findutils util-linux jq bubblewrap rustup
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # rust-toolchain.toml names the toolchain; cargo installs it on
-      # first use.
-      - name: Install rustup
-        run: |
-          rustup-init -y --default-toolchain none
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --locked
-      # A container job's steps run as root, and root can write into a
-      # read-only store object, which the test asserts nobody can. So root
-      # builds, and the test binary runs as an ordinary user with a home
-      # and a scratch directory of its own.
-      - name: Elixir end-to-end test, as an ordinary user
-        run: |
-          set -euo pipefail
-          exe=$(cargo test --locked --test elixir_e2e --no-run --message-format=json \
-            | jq -r 'select(.executable != null and .target.name == "elixir_e2e") | .executable')
-          test -x "$exe"
-          libexe=$(cargo test --locked --lib --no-run --message-format=json \
-            | jq -r 'select(.executable != null and (.target.kind | index("lib"))) | .executable')
-          test -x "$libexe"
-          useradd --create-home tester
-          scratch="$RUNNER_TEMP/ward-elixir"
-          mkdir -p "$scratch"
-          chown tester: "$scratch"
-          runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
-            GREYWARD_SANDBOX_TESTS=required "$exe" --ignored --test-threads=1
-          runuser -u tester -- env HOME=/home/tester TMPDIR="$scratch" \
-            GREYWARD_SANDBOX_TESTS=required "$libexe" tailors::elixir::resolve::tests \
-            --ignored --test-threads=2

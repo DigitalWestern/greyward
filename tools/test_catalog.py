@@ -248,19 +248,13 @@ class Elixir(Base):
         super().setUp()
         net = self.net
         darwin = b"otp darwin"
-        linux = b"otp linux"
         self.zip = b"elixir zip"
-        ltag = f"otp-{self.OTP}-{LINUX}-fedora44"
-        lname = f"OTP-{self.OTP}-{LINUX}-fedora44.tar.gz"
         github_releases(net, catalog.ERLEF, [{
             "tag_name": f"OTP-{self.OTP}", "prerelease": False,
             "assets": [asset("otp-aarch64-apple-darwin.tar.gz", darwin)],
         }])
-        github_releases(net, catalog.GREYWARD_TOOLCHAINS, [{
-            "tag_name": ltag, "prerelease": False, "assets": [asset(lname, linux)],
-        }])
-        net.bodies[f"https://github.com/{catalog.GREYWARD_TOOLCHAINS}/releases/download/{ltag}/{lname}.sha256"] = (
-            f"{sha256(linux)}  {lname}\n")
+        self.linux_releases = []
+        self.linux_build("fedora44")
         github_releases(net, catalog.ELIXIR, [{
             "tag_name": f"v{self.ELIXIR}", "prerelease": False, "draft": False,
             "assets": [asset("elixir-otp-29.zip", self.zip)],
@@ -272,6 +266,21 @@ class Elixir(Base):
         self.rebar_csv = []
         self.install("hex", "2.5.1", "1.20.0", "29")
         self.install("rebar3", "3.25.1", "1.18.4", "28")
+
+    def linux_build(self, label, otp=None):
+        """Publish a Linux OTP build in greyward-toolchains; its tag."""
+        otp = otp or self.OTP
+        body = f"otp linux {otp} {label}".encode()
+        tag = f"otp-{otp}-{LINUX}-{label}"
+        name = f"OTP-{otp}-{LINUX}-{label}.tar.gz"
+        self.linux_releases.append({"tag_name": tag, "prerelease": False, "assets": [asset(name, body)]})
+        github_releases(self.net, catalog.GREYWARD_TOOLCHAINS, self.linux_releases)
+        self.net.bodies[f"https://github.com/{catalog.GREYWARD_TOOLCHAINS}/releases/download/{tag}/{name}.sha256"] = (
+            f"{sha256(body)}  {name}\n")
+        return tag
+
+    def linux_otp(self, rel):
+        return next(a for a in rel["artifacts"] if a["component"] == "otp" and a["platform"] == LINUX)
 
     def install(self, tool, version, elixir_dir, otp):
         suffix = ".ez" if tool == "hex" else ""
@@ -318,6 +327,83 @@ class Elixir(Base):
         self.install("hex", "2.7.0", "1.20.0", "29")
         third, report = self.generate(list(again.values()))
         self.assertEqual(third[f"{key}-r3"]["revision"], 3)
+
+    def test_linux_builds_rank_by_their_declared_glibc_floor(self):
+        rank = catalog.linux_otp_rank
+        labels = ["fedora44", "glibc2.43", "glibc2.35", "glibc2.9", "alpine", "glibc3.0"]
+        self.assertEqual(sorted(labels, key=rank),
+                         ["glibc2.9", "glibc2.35", "glibc2.43", "glibc3.0", "alpine", "fedora44"])
+        # Only the whole `glibc<major>.<minor>` form declares a floor.
+        self.assertEqual(rank("glibc2.35.1")[0], 1)
+        self.assertEqual(rank("glibc2")[0], 1)
+
+    def test_a_new_pair_takes_the_build_with_the_lowest_declared_floor(self):
+        for order in (["glibc2.43", "glibc2.35"], ["glibc2.35", "glibc2.43"]):
+            with self.subTest(order=order):
+                self.linux_releases.clear()
+                self.linux_build("fedora44")
+                for label in order:
+                    self.linux_build(label)
+                out, _ = self.generate([])
+                row = self.linux_otp(out[f"beam-otp{self.OTP}-elixir{self.ELIXIR}"])
+                self.assertEqual(row["build"], f"otp-{self.OTP}-{LINUX}-glibc2.35")
+                self.assertTrue(row["url"].endswith(f"/OTP-{self.OTP}-{LINUX}-glibc2.35.tar.gz"))
+                self.assertEqual(row["recipe"], "otp-install-cross-minimal/1")
+
+    def test_builds_without_a_declared_floor_break_ties_by_label(self):
+        self.linux_build("alpine")
+        out, _ = self.generate([])
+        row = self.linux_otp(out[f"beam-otp{self.OTP}-elixir{self.ELIXIR}"])
+        self.assertEqual(row["build"], f"otp-{self.OTP}-{LINUX}-alpine")
+
+    def test_a_lower_glibc_floor_is_a_new_revision_and_the_shipped_pair_is_kept(self):
+        existing = self.shipped()
+        tag = self.linux_build("glibc2.35")
+        out, report = self.generate(existing)
+        key = f"beam-otp{self.OTP}-elixir{self.ELIXIR}"
+        # The shipped pair still verifies, against the build it records.
+        self.assertEqual(out[key], existing[0])
+        self.assertEqual(self.linux_otp(out[key])["build"], f"otp-{self.OTP}-{LINUX}-fedora44")
+        revision = out[f"{key}-r2"]
+        self.assertEqual(revision["revision"], 2)
+        self.assertEqual(self.linux_otp(revision)["build"], tag)
+        self.assertEqual(self.linux_otp(revision)["digest"],
+                         "sha256:" + sha256(f"otp linux {self.OTP} glibc2.35".encode()))
+        # Nothing else about the pair moved.
+        self.assertEqual(revision["components"], existing[0]["components"])
+        def others(rel):
+            return sorted(tuple(sorted(a.items())) for a in rel["artifacts"] if a != self.linux_otp(rel))
+        self.assertEqual(others(revision), others(existing[0]))
+        self.assertEqual(report.republished,
+                         [(f"{key}-r2", "greyward-toolchains publishes a preferred Linux OTP build")])
+        # The next run keeps both and adds nothing.
+        again, report = self.generate(written("elixir", self.scratch.name, list(out.values())))
+        self.assertEqual(sorted(again), sorted(out))
+        self.assertEqual(report.added, [])
+
+    def test_a_build_without_a_declared_floor_does_not_displace_one_with(self):
+        existing = self.shipped()
+        self.linux_build("glibc2.35")
+        out, _ = self.generate(existing)
+        self.linux_build("aaa")
+        again, report = self.generate(list(out.values()))
+        self.assertEqual(sorted(again), sorted(out))
+        self.assertEqual(report.added, [])
+
+    def test_a_recorded_linux_build_upstream_withdrew_is_an_error(self):
+        existing = self.shipped()
+        self.linux_releases.clear()
+        self.linux_build("glibc2.35")
+        with self.assertRaisesRegex(catalog.Failure, "no longer publishes otp-29.0.5-x86_64-unknown-linux-gnu-fedora44"):
+            self.generate(existing)
+
+    def test_a_dotted_label_on_a_draft_or_prerelease_is_not_a_build(self):
+        self.linux_build("glibc2.35")
+        self.linux_releases[-1]["prerelease"] = True
+        github_releases(self.net, catalog.GREYWARD_TOOLCHAINS, self.linux_releases)
+        out, _ = self.generate([])
+        row = self.linux_otp(out[f"beam-otp{self.OTP}-elixir{self.ELIXIR}"])
+        self.assertEqual(row["build"], f"otp-{self.OTP}-{LINUX}-fedora44")
 
     def test_a_recorded_install_upstream_withdrew_is_an_error(self):
         existing = self.shipped()

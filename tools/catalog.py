@@ -849,6 +849,15 @@ def generate_ruby(existing, report):
 # the Hex and rebar3 it records, and when builds.hex.pm later publishes a
 # newer eligible one, that is a new revision of the pair
 # (`beam-otp29.0.5-elixir1.20.4-r2`, `revision = 2`), never an edit.
+#
+# greyward-toolchains may publish several Linux builds of one OTP version,
+# tagged `otp-<version>-x86_64-unknown-linux-gnu-<label>`. A label of the
+# form `glibc<major>.<minor>` declares the oldest glibc the build runs on.
+# A new pair takes the build with the lowest declared floor, which runs on
+# the most hosts; a label that declares none ranks after every one that
+# does, and the label breaks ties. A shipped pair is verified against the
+# Linux build it records, and when a better build appears that pair gets a
+# new revision too, the same way a newer Hex does.
 
 ERLEF = "erlef/otp_builds"
 GREYWARD_TOOLCHAINS = "DigitalWestern/greyward-toolchains"
@@ -872,6 +881,21 @@ def mix_pick(csv_text, elixir, otp_major):
     return None
 
 
+def linux_otp_rank(label):
+    """How a Linux OTP build ranks among the builds of one OTP version,
+    lowest first: a declared glibc floor (`glibc2.35`) by that floor, then
+    every label that declares none; the label breaks ties."""
+    m = re.fullmatch(r"glibc(\d+)\.(\d+)", label)
+    if m:
+        return (0, (int(m.group(1)), int(m.group(2))), label)
+    return (1, (), label)
+
+
+def preferred_linux_otp(builds):
+    """The build a new pair takes from `{label: (tag, name, digest)}`."""
+    return builds[min(builds, key=linux_otp_rank)]
+
+
 def generate_elixir(existing, report):
     darwin = {}
     for r in github_releases(ERLEF):
@@ -882,8 +906,8 @@ def generate_elixir(existing, report):
                 darwin[m.group(1)] = (r["tag_name"], d)
     linux = {}
     for r in github_releases(GREYWARD_TOOLCHAINS):
-        m = re.fullmatch(r"otp-(\d+(?:\.\d+)+)-x86_64-unknown-linux-gnu-(\w+)", r["tag_name"])
-        if not m:
+        m = re.fullmatch(r"otp-(\d+(?:\.\d+)+)-x86_64-unknown-linux-gnu-([\w.]+)", r["tag_name"])
+        if not m or r.get("prerelease") or r.get("draft"):
             continue
         name = f"OTP-{m.group(1)}-x86_64-unknown-linux-gnu-{m.group(2)}.tar.gz"
         digests = asset_digests(r)
@@ -892,7 +916,7 @@ def generate_elixir(existing, report):
         side = fetch_text(f"https://github.com/{GREYWARD_TOOLCHAINS}/releases/download/{r['tag_name']}/{name}.sha256").split()[0]
         digest = "sha256:" + side
         check_github_digest(report, f"greyward-toolchains {name}", digests[name], digest, "its .sha256")
-        linux[m.group(1)] = (r["tag_name"], name, digest)
+        linux.setdefault(m.group(1), {})[m.group(2)] = (r["tag_name"], name, digest)
     otps = sorted(set(darwin) & set(linux), key=version_key)
     majors_supported = sorted({int(v.split(".")[0]) for v in darwin}, reverse=True)[:3]
     no_linux = [v for v in darwin if v not in linux and int(v.split(".")[0]) in majors_supported]
@@ -941,8 +965,19 @@ def generate_elixir(existing, report):
                 return tuple(fields[:4])
         raise Failure(f"elixir: {rel['key']}: builds.hex.pm no longer lists {url}")
 
-    def bundle(otp, elixir, hex_pick=None, rebar_pick=None, key=None, revision=None):
-        """The pair's release; Hex and rebar3 are Mix's choice unless given."""
+    def recorded_linux(rel):
+        """The Linux OTP build a shipped pair records, as greyward-toolchains
+        publishes it today."""
+        otp = pair(rel)[0]
+        tag = next(a["build"] for a in rel["artifacts"] if a["component"] == "otp" and a["platform"] == LINUX)
+        for build in linux.get(otp, {}).values():
+            if build[0] == tag:
+                return build
+        raise Failure(f"elixir: {rel['key']}: greyward-toolchains no longer publishes {tag}")
+
+    def bundle(otp, elixir, hex_pick=None, rebar_pick=None, key=None, revision=None, linux_build=None):
+        """The pair's release; Hex and rebar3 are Mix's choice, and the Linux
+        OTP the preferred build, unless given."""
         major = otp.split(".")[0]
         z = zip_row(elixir, major)
         hex_pick = hex_pick or mix_pick(hex_csv, elixir, major)
@@ -952,7 +987,7 @@ def generate_elixir(existing, report):
         hexr = installs_row(hex_csv, "hex", hex_pick)
         rebar = installs_row(rebar_csv, "rebar3", rebar_pick)
         dtag, ddigest = darwin[otp]
-        ltag, lname, ldigest = linux[otp]
+        ltag, lname, ldigest = linux_build or preferred_linux_otp(linux[otp])
         rows = [
             row(DARWIN, "otp", "erlef-otp-builds", dtag, "beam-toolchain/1",
                 f"https://github.com/{ERLEF}/releases/download/{dtag}/otp-aarch64-apple-darwin.tar.gz", ddigest),
@@ -976,7 +1011,11 @@ def generate_elixir(existing, report):
         return versions["otp"], versions["elixir"]
 
     def tools(rel):
-        return sorted({(a["component"], a["url"]) for a in rel["artifacts"] if a["component"] in ("hex", "rebar3")})
+        """What a later revision of one pair can change: its Hex, its rebar3
+        and its Linux OTP build."""
+        return sorted({(a["component"], a["url"]) for a in rel["artifacts"]
+                       if a["component"] in ("hex", "rebar3")
+                       or (a["component"] == "otp" and a["platform"] == LINUX)})
 
     out = {}
     for rel in existing:
@@ -984,7 +1023,7 @@ def generate_elixir(existing, report):
         if otp not in darwin or otp not in linux or elixir not in elixirs:
             raise Failure(f"elixir: {rel['key']}: an upstream no longer publishes OTP {otp} or Elixir {elixir}")
         fresh = bundle(otp, elixir, recorded_pick(hex_csv, "hex", rel), recorded_pick(rebar_csv, "rebar3", rel),
-                       rel["key"], rel.get("revision"))
+                       rel["key"], rel.get("revision"), recorded_linux(rel))
         check_row("elixir", rel["key"], rel, fresh)
         out[rel["key"]] = rel
     for otp in otps:
@@ -1001,7 +1040,14 @@ def generate_elixir(existing, report):
                 revision = next_revision(shipped)
                 key = f"{key}-r{revision}"
                 out[key] = bundle(otp, elixir, key=key, revision=revision)
-                report.republish(key, "builds.hex.pm publishes a newer Hex or rebar3 Mix would install")
+                newest = max(shipped, key=lambda r: r.get("revision") or 1)
+                changed = {c for c, _ in set(tools(fresh)) ^ set(tools(newest))}
+                why = []
+                if changed & {"hex", "rebar3"}:
+                    why.append("builds.hex.pm publishes a newer Hex or rebar3 Mix would install")
+                if "otp" in changed:
+                    why.append("greyward-toolchains publishes a preferred Linux OTP build")
+                report.republish(key, "; ".join(why))
                 continue
             fresh = bundle(otp, elixir)
             if fresh is None:

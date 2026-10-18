@@ -1314,7 +1314,9 @@ mod tests {
 
     /// Each ecosystem's shipped default and its bundle id, as they were
     /// before the catalogs became generated data and grew: a newer release
-    /// in a catalog must never move them (#187).
+    /// in a catalog must never move them (#187). Only `tools/catalog.py
+    /// --set-default` moves one, on purpose: Elixir's moved to revision 2
+    /// of the same pair, whose Linux OTP runs on glibc 2.35 (#300).
     const SHIPPED_DEFAULTS: &[(&str, &str, &str)] = &[
         (
             "python",
@@ -1343,8 +1345,8 @@ mod tests {
         ),
         (
             "elixir",
-            "beam-otp29.0.5-elixir1.20.4",
-            "sha256:e05f0fa36f649bb6f33c3335ff2c30d3951e672154be89adb230bf81a88c27d8",
+            "beam-otp29.0.5-elixir1.20.4-r2",
+            "sha256:7692629b5bb6f5fe890e92b0f38490196952fc56ad99fb81801ee8f531b5f886",
         ),
         (
             "dotnet",

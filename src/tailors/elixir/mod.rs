@@ -1713,14 +1713,16 @@ mod tests {
             darwin.digest.hex(),
             "24b9e00da2b9ad25b1f182e2efd73ff316e46ec4b143c0cc3c69dbd27d5a594d"
         );
+        // The glibc 2.35 build, which runs on Ubuntu 22.04 (#300). The
+        // Fedora 44 build it replaced stays shipped as revision 1.
         let linux = otp_pin(LINUX).unwrap();
         assert_eq!(
             linux.url,
-            "https://github.com/DigitalWestern/greyward-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-fedora44/OTP-29.0.5-x86_64-unknown-linux-gnu-fedora44.tar.gz"
+            "https://github.com/DigitalWestern/greyward-toolchains/releases/download/otp-29.0.5-x86_64-unknown-linux-gnu-glibc2.35/OTP-29.0.5-x86_64-unknown-linux-gnu-glibc2.35.tar.gz"
         );
         assert_eq!(
             linux.digest.hex(),
-            "18ae1abc8fd39306c502e9a7fd6885df3125f56d783cb577057ec29ad17d01c4"
+            "d239e572d78e6ab9c4adcf3526c6ead8ce514beb9b40aa611190d4903728ebed"
         );
         // Platform-neutral artifacts: the same row on both platforms, and
         // the goldens above.

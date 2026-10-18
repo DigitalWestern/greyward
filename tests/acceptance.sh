@@ -228,17 +228,11 @@ OUT=$(cd "$WORK/rb" && "$GREYWARD" run sh -c "$WHICH --version")
 case "$OUT" in *13.*) ok "store binstub executes ($OUT)";; *) bad "store binstub: $OUT";; esac
 
 echo "== 10g. elixir: hex deps + sandboxed mix compile (rebar3 dep)"
-# The Linux OTP needs glibc 2.43; a host below that (ubuntu-22.04 in
-# .github/workflows/heavy.yml) sets GREYWARD_ACCEPT_SKIP_ELIXIR=1 and skips it.
-if [ "${GREYWARD_ACCEPT_SKIP_ELIXIR:-}" = 1 ]; then
-  echo "  skip: elixir (GREYWARD_ACCEPT_SKIP_ELIXIR=1; the Linux OTP needs glibc 2.43)"
-else
 cp -R "$FIXTURES/elixir-hello" "$WORK/ex"
 (cd "$WORK/ex" && "$GREYWARD" sync)
 (cd "$WORK/ex" && "$GREYWARD" build)
 OUT=$(cd "$WORK/ex" && "$GREYWARD" run mix run -e 'IO.puts(ExReal.hello())')
 case "$OUT" in *'{"beam":"ok"}'*) ok "elixir build + run ($OUT)";; *) bad "elixir output: $OUT";; esac
-fi
 
 echo "== 10h. dotnet: locked nuget packages + sandboxed two-phase build"
 cp -R "$FIXTURES/dotnet-hello" "$WORK/dn"

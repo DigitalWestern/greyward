@@ -671,14 +671,17 @@ class Go(Base):
             ],
         }
 
-    def test_supported_stable_releases_enter_with_go_devs_digests(self):
+    def test_every_stable_release_enters_with_go_devs_digests(self):
+        # A line go.dev no longer lists as supported still enters: a
+        # project pinned to its last patch gets exactly that patch.
         self.publish("1.25.9", supported=False)
         self.publish("1.26.3")
         self.publish("1.27rc1", stable=False)
         self.publish("1.26.4", stable=False)  # go.dev's own flag, even on a x.y.z version
         out, report = self.generate([])
-        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3")})
-        self.assertEqual((report.added, report.skipped), (["go-1.26.3"], []))
+        self.assertEqual(out, {"go-1.26.3": self.expected("1.26.3"),
+                               "go-1.25.9": self.expected("1.25.9")})
+        self.assertEqual((report.added, report.skipped), (["go-1.26.3", "go-1.25.9"], []))
         self.assertEqual(out["go-1.26.3"]["artifacts"][1]["url"],
                          "https://go.dev/dl/go1.26.3.linux-amd64.tar.gz")
 
@@ -955,12 +958,6 @@ class Node(Base):
         catalog.NODE_RELEASERS = os.path.join(self.scratch.name, "node-releasers.txt")
         with open(catalog.NODE_RELEASERS, "w") as f:
             f.write(f"# the test releaser\n{self.release_key}  # Test Node Releaser\n")
-        self.net.json(self.SCHEDULE, {
-            "v20": {"start": "2023-04-18", "end": "2026-04-30"},
-            "v22": {"start": "2024-04-24", "end": "2027-04-30"},
-            "v24": {"start": "2025-05-06", "end": "2028-04-30"},
-            "v26": {"start": "2026-10-20", "end": "2029-04-30"},
-        })
         self.index = []
 
     def tearDown(self):
@@ -990,13 +987,14 @@ class Node(Base):
             lines.append(f"{digest or sha256(name.encode())}  {name}")
         return ("\n".join(lines) + "\n").encode()
 
-    def publish(self, version, platforms=(DARWIN, LINUX), listed=True):
+    def publish(self, version, platforms=(DARWIN, LINUX), listed=True,
+                files=("osx-arm64-tar", "linux-x64", "src", "win-x64-exe")):
         base = f"https://nodejs.org/dist/v{version}/"
         body = self.shasums(version, platforms)
         self.net.bodies[base + "SHASUMS256.txt"] = body
         self.net.bodies[base + "SHASUMS256.txt.sig"] = self.sign(body)
         if listed:
-            self.index.insert(0, {"version": f"v{version}"})
+            self.index.insert(0, {"version": f"v{version}", "files": list(files)})
             self.net.json(self.INDEX, self.index)
 
     def generate(self, existing):
@@ -1020,26 +1018,30 @@ class Node(Base):
             ],
         }
 
-    def test_releases_of_lines_the_schedule_supports_enter_with_signed_digests(self):
-        self.publish("20.19.5")   # line ended
-        self.publish("22.20.0")
+    def test_every_release_with_both_tarballs_enters_with_signed_digests(self):
+        # Ended and current lines alike: a pin to an old patch must find it.
+        self.publish("18.17.1")
+        self.publish("20.19.5")
         self.publish("24.9.0")
-        self.publish("26.0.0")    # line not started
         out, report = self.generate([])
         self.assertEqual(out, {"node-24.9.0": self.expected("24.9.0"),
-                               "node-22.20.0": self.expected("22.20.0")})
-        self.assertEqual((report.added, report.skipped), (["node-24.9.0", "node-22.20.0"], []))
+                               "node-20.19.5": self.expected("20.19.5"),
+                               "node-18.17.1": self.expected("18.17.1")})
+        self.assertEqual((report.added, report.skipped),
+                         (["node-24.9.0", "node-20.19.5", "node-18.17.1"], []))
         self.assertEqual(out["node-24.9.0"]["artifacts"][1]["url"],
                          "https://nodejs.org/dist/v24.9.0/node-v24.9.0-linux-x64.tar.gz")
 
-    def test_shipped_releases_are_kept_even_after_their_line_ends(self):
+    def test_releases_index_json_lists_without_both_tarballs_are_skipped_unfetched(self):
+        self.publish("15.14.0", listed=False)
+        self.index.insert(0, {"version": "v15.14.0", "files": ["osx-x64-tar", "linux-x64"]})
         self.publish("24.9.0")
-        existing = self.shipped("24.9.0")
-        catalog.TODAY = datetime.date(2028, 6, 1)
-        self.publish("24.10.0")
-        out, report = self.generate(existing)
-        self.assertEqual(list(out.values()), existing)
-        self.assertEqual(report.added, [])
+        # Its SHASUMS256.txt is never read: a request for it would fail.
+        del self.net.bodies["https://nodejs.org/dist/v15.14.0/SHASUMS256.txt"]
+        out, report = self.generate([])
+        self.assertEqual(list(out), ["node-24.9.0"])
+        self.assertEqual(report.skipped, [("1 node releases (15.14.0 to 15.14.0)",
+                                           "index.json lists no darwin-arm64 or no linux-x64 tarball for them")])
 
     def test_a_new_release_enters_beside_the_shipped_one(self):
         self.publish("24.9.0")

@@ -393,14 +393,14 @@ def checksum_lines(source, text):
 
 # --------------------------------------------------------------------------
 # Go: go.dev's release JSON (sha256), cross-checked with dl.google.com's
-# per-file .sha256. Supported lines are the ones go.dev lists without
-# include=all.
+# per-file .sha256. Every stable release go.dev still lists is shipped,
+# whether or not its line is still supported: a project pinned to an old
+# patch must get exactly that patch. Releases without a darwin-arm64
+# archive (before 1.16) are skipped, as selection needs both platforms.
 
 
 def go_rows(report):
     everything = fetch_json("https://go.dev/dl/?mode=json&include=all")
-    supported = fetch_json("https://go.dev/dl/?mode=json")
-    lines = {".".join(r["version"][2:].split(".")[:2]) for r in supported}
     by_version = {}
     for r in everything:
         if not r.get("stable"):
@@ -417,7 +417,7 @@ def go_rows(report):
             elif (f["os"], f["arch"]) == ("linux", "amd64"):
                 files[LINUX] = f
         by_version[version] = files
-    return lines, by_version
+    return by_version
 
 
 def go_release(version, files):
@@ -437,7 +437,7 @@ def go_cross_check(rel):
 
 
 def generate_go(existing, report):
-    lines, by_version = go_rows(report)
+    by_version = go_rows(report)
     out = {}
     for rel in existing:
         version = rel["components"][0]["version"]
@@ -448,7 +448,7 @@ def generate_go(existing, report):
         out[rel["key"]] = rel
     for version, files in by_version.items():
         key = f"go-{version}"
-        if key in out or ".".join(version.split(".")[:2]) not in lines:
+        if key in out:
             continue
         missing = [p for p in PLATFORMS if p not in files]
         if missing:
@@ -464,8 +464,12 @@ def generate_go(existing, report):
 # Node: nodejs.org's index, and each release's SHASUMS256.txt, whose
 # detached signature is checked against the nodejs/release-keys keyring and
 # must chain to a releaser pinned in tools/keys/node-releasers.txt.
-# Supported lines are the ones the nodejs/Release schedule has started and
-# not yet ended.
+# Every release nodejs.org still serves both tarballs for is shipped,
+# whether or not its line is still supported: a project pinned to an old
+# patch (`.nvmrc` 18.17.1) must get exactly that patch. index.json's
+# `files` list says which builds a release has, so releases without a
+# darwin-arm64 tarball (before 16.0.0) are named and skipped without
+# fetching their SHASUMS256.txt.
 
 
 SCRATCH = None
@@ -528,6 +532,10 @@ def node_shasums(version, keyring, pins):
     return {name: digest for digest, name in checksum_lines(f"node {version}: SHASUMS256.txt", text.decode())}
 
 
+# The index.json `files` names of the two tarballs a release must have.
+NODE_FILES = {"osx-arm64-tar", "linux-x64"}
+
+
 def node_release(version, sums):
     rows = []
     for platform, slug in ((DARWIN, "darwin-arm64"), (LINUX, "linux-x64")):
@@ -541,13 +549,17 @@ def node_release(version, sums):
 
 def generate_node(existing, report):
     index = fetch_json("https://nodejs.org/dist/index.json")
-    schedule = fetch_json("https://raw.githubusercontent.com/nodejs/Release/main/schedule.json")
-    lines = {
-        line[1:]
-        for line, span in schedule.items()
-        if datetime.date.fromisoformat(span["start"]) <= TODAY < datetime.date.fromisoformat(span["end"])
-    }
-    wanted = [r["version"][1:] for r in index if r["version"][1:].split(".")[0] in lines]
+    wanted, unbuilt = [], []
+    for r in index:
+        version = r["version"][1:]
+        if NODE_FILES <= set(r.get("files", [])):
+            wanted.append(version)
+        else:
+            unbuilt.append(version)
+    if unbuilt:
+        unbuilt.sort(key=version_key)
+        report.skip(f"{len(unbuilt)} node releases ({unbuilt[0]} to {unbuilt[-1]})",
+                    "index.json lists no darwin-arm64 or no linux-x64 tarball for them")
     keyring, pins = node_keyring(), node_fingerprints()
     versions = sorted({rel["components"][0]["version"] for rel in existing} | set(wanted), key=version_key)
     sums = dict(zip(versions, parallel(lambda v: node_shasums(v, keyring, pins), versions)))

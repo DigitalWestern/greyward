@@ -44,11 +44,17 @@ pub(crate) fn resolution_outputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>>
     Ok(outputs)
 }
 
-/// `Tailor::resolution_inputs` for Python: [`INPUTS`] and every file a
-/// requirements file includes inside the project.
+/// `Tailor::resolution_inputs` for Python: [`INPUTS`], the project's uv
+/// configuration with every file under a local location it names
+/// (`uv_config::resolution_inputs`), and every file a requirements file
+/// includes inside the project.
 pub(crate) fn resolution_inputs(root: &ProjectRoot) -> io::Result<Vec<PathBuf>> {
     let mut inputs: Vec<PathBuf> = INPUTS.iter().map(PathBuf::from).collect();
-    for file in includes(root)?.inside {
+    // A file a uv door writes is an output, digested as one.
+    let configured = super::uv_config::resolution_inputs(root)?
+        .into_iter()
+        .filter(|file| !OUTPUTS.iter().any(|output| file == Path::new(output)));
+    for file in configured.chain(includes(root)?.inside) {
         if !inputs.contains(&file) {
             inputs.push(file);
         }

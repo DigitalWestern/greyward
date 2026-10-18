@@ -312,7 +312,10 @@ dependencies through the git row (GitHub's `raw.githubusercontent.com`
 metadata read at a commit is a git fetch too), and any other index or a
 direct URL as `unattested-index`. The default index is forced to PyPI on
 every invocation, so a project's `[[tool.uv.index]]` default never
-replaces it. Every run starts with `--no-build` (the probe): no
+replaces it. uv itself discovers no configuration (`--no-config`).
+Greyward reads the project's `uv.toml` or `[tool.uv]` from the snapshot,
+applies a per-key rule (`tailors/python/uv_config.rs`), and hands the
+result to uv as a settings file. Every run starts with `--no-build` (the probe): no
 third-party code runs in it. When uv refuses because something must be
 built or its metadata prepared, `resolution-build` permission is required
 before any backend runs, including the project's own. The permission also

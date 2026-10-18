@@ -1215,13 +1215,60 @@ PyPI wheel metadata sidecars are verified against the index's advertised
 digests before use. A missing digest records `weak-integrity`, which policy
 can deny. A mismatch always fails and is never cached.
 
-Python resolution runs uv with `--no-config`. Scalar uv settings from
-`uv.toml`, `[tool.uv]`, and `[tool.uv.pip]`, such as `resolution` and
-`prerelease`, currently use uv's defaults. Explicit dependency sources and
-indexes still apply through the proxy, with PyPI forced as the default.
-The door disables interpreter downloads and keyring programs and selects
-the store interpreter. Preserving safe resolver settings needs a reviewed
-allowlist so configuration cannot bypass these controls.
+Python resolution honors the project's uv settings. Greyward reads them
+from the resolver's snapshot of the project and hands them to uv as a
+generated settings file, so uv reads the same bytes the signed record
+digests. The file is the lock root's `uv.toml` when it has one, and
+otherwise the `[tool.uv]` table (with `[tool.uv.pip]`) of its
+`pyproject.toml`. As in uv, a `uv.toml` replaces `[tool.uv]` settings
+entirely, and nothing is merged. A workspace member's own files are
+ignored, as uv ignores them. Files above the project, the user's
+`~/.config/uv/uv.toml`, the system's, and `UV_CONFIG_FILE` never apply.
+`uv.toml` is a resolution input in the record. Editing it needs a fresh
+resolution or `ward attest`, as editing a manifest does.
+
+Every setting uv 0.12.7 accepts has one rule:
+
+- **Honored as written:** resolver and build settings such as
+  `resolution`, `prerelease`, `fork-strategy`, `exclude-newer`,
+  `index-strategy`, `no-index`, `no-build`, `no-binary`,
+  `config-settings`, `no-build-isolation`, `extra-build-dependencies`,
+  `extra-build-variables`, `dependency-metadata`, `override-dependencies`,
+  `constraint-dependencies`, and `[pip]` options such as `strict` and
+  `annotation-style`. The lock records the settings uv writes into it, so
+  a lock made by plain uv with the same settings passes `ward attest`.
+- **Indexes and find-links:** an `https://` location is honored. The proxy
+  carries it, and an index other than PyPI is recorded as
+  `unattested-index`, which policy can deny. PyPI stays the default index
+  on every run. A local directory or `file:` URL must lie inside the
+  project. Its files become resolution inputs in the record. A location
+  outside the project, or one written with `~` or `${...}`, is refused by
+  name. The same rule covers a `file:` direct reference inside a
+  requirement setting.
+- **Set aside, with a note naming them:** settings Greyward fixes itself.
+  These are the interpreter (`python-preference`, `python-downloads`, the
+  install mirrors, and `[pip]` `python`, `system`, `target`, `prefix`,
+  `break-system-packages`), the keyring (`keyring-provider`), the network
+  (`http-proxy`, `https-proxy`, `no-proxy`, `native-tls`,
+  `system-certs`, `allow-insecure-host`), the cache (`cache-dir`,
+  `no-cache`), and the shape of a compiled lock (`[pip]`
+  `universal`, `python-version`, `python-platform`, `no-header`,
+  `generate-hashes`, `custom-compile-command`, `output-file`, `no-deps`,
+  `no-emit-package`, `no-strip-extras`, `no-strip-markers`, the
+  `emit-*` options that add lines to the lock, and the `extra`,
+  `all-extras`, `no-extra`, and `group` selections).
+- **Refused:** a key the pinned uv does not know (uv itself rejects it in
+  a `uv.toml` and ignores every `[tool.uv]` setting when it meets one),
+  and a project field such as `sources` or `workspace` written in a
+  `uv.toml`, which uv accepts only in `pyproject.toml`.
+
+Fields that describe the project itself (`[tool.uv.sources]`,
+`[tool.uv.workspace]`, dependency groups) stay in `pyproject.toml`, where
+uv reads them directly. The door still selects the store interpreter and
+disables interpreter downloads and keyring programs on the command line,
+which wins over any settings file. A lock root Greyward makes itself
+(an sdist's build requirements, a `ward x` environment) has no project
+settings.
 
 Python's is `uv lock --locked` for a `uv.lock`, and for a requirements
 lock the same `uv pip compile` Greyward ran to write it, which must leave it

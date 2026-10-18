@@ -74,6 +74,19 @@ pub struct Wire<'w> {
     /// when the door intercepts TLS: the file to name as the tool's trust
     /// root.
     pub ca_file: Option<&'w Path>,
+    /// The lock root's real path: where the tool sees the project.
+    pub lock_root: &'w Path,
+    snapshot: &'w Snapshot,
+}
+
+impl Wire<'_> {
+    /// A project file under the lock root, as the run's snapshot holds it
+    /// (`Snapshot::held_file`): a tool's own configuration, read from the
+    /// same bytes the tool reads and a receipt digests, never again from
+    /// the checkout by path.
+    pub fn held_file(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.snapshot.held_file(relative)
+    }
 }
 
 /// How a tool is pointed at its session.
@@ -561,6 +574,8 @@ fn invocation(
             args: &spec.args,
             forced_args,
             ca_file,
+            lock_root: &snapshot.lock_root().real,
+            snapshot,
         })?,
         None => Wiring {
             args: with_forced(&spec.args, forced_args),

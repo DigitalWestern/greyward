@@ -78,6 +78,7 @@ pub fn python_input_records(
     for extra in [
         ".python-version",
         "pyproject.toml",
+        python::uv_config::UV_TOML,
         "setup.cfg",
         "setup.py",
         "requirements.lock.txt",

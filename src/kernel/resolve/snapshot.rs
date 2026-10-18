@@ -39,7 +39,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
 /// A path pattern relative to a snapshot root: `/`-separated components,
@@ -316,6 +316,54 @@ impl Snapshot {
             }
         }
         Ok(())
+    }
+
+    /// The bytes of a regular file under the lock root as the baseline
+    /// recorded it, read from the stage before the tool runs: the same
+    /// bytes a receipt digests as that input. `None` when the baseline
+    /// holds no entry there. A symlink, or a path reached through one, is
+    /// refused (a receipt names regular files only), as is anything else
+    /// that is not a regular file, and stage bytes that no longer hash to
+    /// the baseline.
+    pub fn held_file(&self, relative: &Path) -> io::Result<Option<Vec<u8>>> {
+        check_relative(relative)?;
+        let root = &self.lock_root().real;
+        let refuse = |why: &str| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} in the resolution snapshot is {why}; keep it a regular file inside \
+                     the project",
+                    relative.display()
+                ),
+            )
+        };
+        let mut parent = PathBuf::new();
+        for component in relative.parent().into_iter().flat_map(Path::components) {
+            parent.push(component);
+            match self.baseline.get(&root.join(&parent)) {
+                Some(EntryState::Dir { .. }) => {}
+                None => return Ok(None),
+                Some(_) => return Err(refuse("reached through a symlink or a file")),
+            }
+        }
+        let sha256 = match self.baseline.get(&root.join(relative)) {
+            None => return Ok(None),
+            Some(EntryState::File { sha256, .. }) => *sha256,
+            Some(EntryState::Symlink { .. }) => return Err(refuse("a symlink")),
+            Some(_) => return Err(refuse("not a regular file")),
+        };
+        let staged = self.lock_root().staged.join(relative);
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&staged)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha256 {
+            return Err(refuse("changed since the snapshot was taken"));
+        }
+        Ok(Some(bytes))
     }
 
     /// Every regular project file in the immutable pre-run snapshot.
@@ -1068,6 +1116,30 @@ mod tests {
             PathBuf::from("package.json"),
             PathBuf::from("package-lock.json"),
         ]
+    }
+
+    /// A held file is read as the baseline recorded it: absent is `None`,
+    /// and a symlink, a path through one, a directory, or stage bytes that
+    /// no longer match are refused.
+    #[test]
+    fn held_files_are_regular_files_as_the_baseline_recorded_them() {
+        let temp = TempDir::named("snapshot-held-file");
+        let store = temp_store(&temp);
+        let root = project(&temp);
+        symlink("package.json", root.join("linked.json")).unwrap();
+        symlink("src", root.join("linked-src")).unwrap();
+        let snapshot = build(&store, &root, &[]);
+        assert_eq!(
+            snapshot.held_file(Path::new("src/main.rs")).unwrap(),
+            Some(b"fn main() {}\n".to_vec())
+        );
+        assert_eq!(snapshot.held_file(Path::new("absent.toml")).unwrap(), None);
+        assert_eq!(snapshot.held_file(Path::new("nope/x.toml")).unwrap(), None);
+        for refused in ["linked.json", "linked-src/main.rs", "src", "../x", "/abs"] {
+            assert!(snapshot.held_file(Path::new(refused)).is_err(), "{refused}");
+        }
+        fs::write(staged(&snapshot, "package.json"), b"[]\n").unwrap();
+        assert!(snapshot.held_file(Path::new("package.json")).is_err());
     }
 
     #[test]

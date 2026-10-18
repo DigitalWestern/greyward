@@ -15,7 +15,9 @@
 //! replaces PyPI; an extra index it names is still reached, through
 //! interception, and recorded as `unattested-index`. The forced row adds
 //! `--python <store python>`, `--no-config`, `--no-python-downloads`, and
-//! `--keyring-provider disabled`. uv's cache is a directory ward creates for
+//! `--keyring-provider disabled`. The project's own uv settings come back
+//! through `--config-file`, read from the snapshot under the rules of
+//! [`uv_config`]. uv's cache is a directory ward creates for
 //! one attempt and removes after it. An allowed retry has a fresh cache,
 //! so its ledger covers the metadata and artifacts it actually consumed.
 //!
@@ -29,6 +31,7 @@
 //! repeated without `--no-build`.
 
 use super::registry;
+use super::uv_config;
 use crate::kernel::activity::StoreActivity;
 use crate::kernel::platform::Platform;
 use crate::kernel::policy::{self, Policy};
@@ -40,9 +43,11 @@ use crate::kernel::resolve::{DelegateReport, DelegateSpec, ResolutionDoor};
 use crate::kernel::store::Store;
 use crate::kernel::toolchain::Selected;
 use crate::kernel::ui;
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Why uv runs isolated, for the missing-capability message.
 pub(crate) const WHY_UV: &str = "runs the build backends of source distributions it resolves, \
@@ -312,6 +317,14 @@ fn record_for(spec: &RecordSpec, args: &[OsString]) -> RecordSpec {
     }
 }
 
+/// What every attempt of one operation shares: the interpreter, and
+/// whether the set-aside settings were already named (the probe and the
+/// run after it read the same settings).
+struct Shared {
+    python: PathBuf,
+    noted: Rc<Cell<bool>>,
+}
+
 /// One confined uv invocation.
 struct Attempt<'r> {
     lock_root: &'r Path,
@@ -326,7 +339,7 @@ struct Attempt<'r> {
 /// proxy with TLS interception on the PyPI route.
 fn confined<'r>(
     uv: &'r Uv,
-    python: &'r Path,
+    shared: &'r Shared,
     cache: &Path,
     attempt: Attempt<'r>,
 ) -> io::Result<(DelegateSpec, ConfinedSpec<'r>)> {
@@ -342,7 +355,7 @@ fn confined<'r>(
         spec.capture();
     }
     let mut confined = ConfinedSpec::new("python", "uv", WHY_UV);
-    confined.forced.python = Some(python);
+    confined.forced.python = Some(&shared.python);
     confined.store_reads = vec![uv.obj.clone(), uv.runtime.clone()];
     confined.cache_roots = vec![cache.to_path_buf()];
     confined.exclude = EXCLUDE
@@ -358,21 +371,39 @@ fn confined<'r>(
     confined.cwd = attempt.cwd;
     confined.facts = attempt.facts;
     let cache = cache.to_path_buf();
-    confined.wire = Some(Box::new(move |wire: &Wire<'_>| wiring(wire, &cache)));
+    let noted = Rc::clone(&shared.noted);
+    confined.wire = Some(Box::new(move |wire: &Wire<'_>| {
+        wiring(wire, &cache, &noted)
+    }));
     confined.publish(attempt.publish);
     Ok((spec, confined))
 }
 
-/// The forced row before any `--`, the proxy environment, and the cache.
-fn wiring(wire: &Wire<'_>, cache: &Path) -> io::Result<Wiring> {
+/// The forced row before any `--`, the project's uv settings, the proxy
+/// environment, and the cache.
+fn wiring(wire: &Wire<'_>, cache: &Path, noted: &Cell<bool>) -> io::Result<Wiring> {
     let ca_file = wire.ca_file.ok_or_else(|| {
         io::Error::other("uv resolves only through TLS interception, which this run lacks")
     })?;
     let mut env = door::proxy_env(wire.address, ca_file);
     env.push(("UV_CACHE_DIR".into(), cache.as_os_str().to_os_string()));
+    let mut flags = wire.forced_args.to_vec();
+    let mut files = Vec::new();
+    let settings = uv_config::effective(|relative| wire.held_file(relative), wire.lock_root)?;
+    if settings.source.is_some() {
+        if let Some(note) = settings.note() {
+            if !noted.replace(true) {
+                ui::note(&note);
+            }
+        }
+        flags.push("--config-file".into());
+        flags.push(wire.scratch.join(uv_config::SCRATCH_FILE).into_os_string());
+        files.push((PathBuf::from(uv_config::SCRATCH_FILE), settings.render()?));
+    }
     Ok(Wiring {
-        args: with_flags(wire.args, wire.forced_args),
+        args: with_flags(wire.args, &flags),
         env,
+        files,
         ..Wiring::default()
     })
 }
@@ -382,17 +413,20 @@ fn wiring(wire: &Wire<'_>, cache: &Path) -> io::Result<Wiring> {
 /// caller words. A Detached run's ledger ids come back in the report.
 pub(crate) fn run_uv(door: &mut ResolutionDoor<'_>, run: UvRun<'_>) -> io::Result<DelegateReport> {
     let cache = UvCache::create(door.store(), door.lease())?;
-    let python = run.uv.python();
+    let shared = Shared {
+        python: run.uv.python(),
+        noted: Rc::new(Cell::new(false)),
+    };
     match run.builds {
-        Builds::Never => attempt(door, &run, &python, &cache, true, run.capture, Vec::new()),
-        Builds::Probe => probe_then_run(door, &run, &python, &cache),
+        Builds::Never => attempt(door, &run, &shared, &cache, true, run.capture, Vec::new()),
+        Builds::Probe => probe_then_run(door, &run, &shared, &cache),
     }
 }
 
 fn probe_then_run(
     door: &mut ResolutionDoor<'_>,
     run: &UvRun<'_>,
-    python: &Path,
+    shared: &Shared,
     cache: &UvCache,
 ) -> io::Result<DelegateReport> {
     // Metadata prepared before uv still contributed to this resolution.
@@ -408,7 +442,7 @@ fn probe_then_run(
             detail: fact.detail,
         })
         .collect();
-    let probe = attempt(door, run, python, cache, true, true, prepared.clone())?;
+    let probe = attempt(door, run, shared, cache, true, true, prepared.clone())?;
     if probe.status.success() {
         if !run.capture {
             let _ = ui::narration().write_all(&probe.stderr);
@@ -447,7 +481,7 @@ fn probe_then_run(
     attempt(
         door,
         run,
-        python,
+        shared,
         &retry_cache,
         false,
         run.capture,
@@ -459,7 +493,7 @@ fn probe_then_run(
 fn attempt(
     door: &mut ResolutionDoor<'_>,
     run: &UvRun<'_>,
-    python: &Path,
+    shared: &Shared,
     cache: &UvCache,
     no_build: bool,
     capture: bool,
@@ -479,7 +513,7 @@ fn attempt(
     };
     let (spec, mut confined) = confined(
         run.uv,
-        python,
+        shared,
         &cache.dir,
         Attempt {
             lock_root: run.lock_root,
@@ -1020,5 +1054,352 @@ echo '# resolved in a fresh cache' > requirements.lock.txt
             .collect();
         names.sort();
         assert_eq!(names, ["pyproject.toml", "spike"]);
+    }
+
+    /// A project-test uv that writes its command line and the settings
+    /// file it was given into the lock, so the door's wiring can be read.
+    fn echoing_uv(harness: &Harness) -> Uv {
+        use std::os::unix::fs::PermissionsExt;
+        let stage = || {
+            harness
+                .store
+                .stage_with_activity(&harness.activity)
+                .unwrap()
+        };
+        let uv = Uv {
+            obj: stage(),
+            runtime: stage(),
+            version: "test".into(),
+        };
+        fs::create_dir_all(uv.runtime.join("bin")).unwrap();
+        fs::write(
+            uv.binary(),
+            r#"#!/bin/sh
+config=/dev/null
+previous=
+for arg in "$@"; do
+    test "$previous" = --config-file && config=$arg
+    previous=$arg
+done
+{ echo "ARGS $*"; echo "CONFIG"; cat "$config"; } > requirements.lock.txt
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(uv.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+        uv
+    }
+
+    /// A requirements compile of `dir` through a door, with `uv`.
+    fn compile_run<'a>(
+        uv: &'a Uv,
+        dir: &'a Path,
+        record: Option<RecordSpec>,
+        slot: RecordSlot,
+        builds: Builds,
+    ) -> UvRun<'a> {
+        let held = ProjectRoot::open(dir).unwrap();
+        UvRun {
+            uv,
+            lock_root: dir,
+            cwd: None,
+            args: super::super::resolve::compile_args(
+                "requirements.in",
+                "requirements.lock.txt",
+                "3.12",
+            ),
+            index: Index::PipCompile,
+            outputs: super::super::resolve::resolution_outputs(&held).unwrap(),
+            target: UvTarget::Project { record, slot },
+            builds,
+            capture: true,
+            policy: Some(Policy::default()),
+        }
+    }
+
+    /// The project's uv.toml reaches uv through `--config-file`, read from
+    /// the snapshot: resolver and backend settings as written, a local
+    /// find-links made absolute, and the keyring program and interpreter it
+    /// names set aside while the forced row stays on the command line. The
+    /// record covers uv.toml and the find-links directory's files.
+    #[test]
+    fn project_uv_settings_reach_uv_from_the_snapshot_and_the_record() {
+        let _serial = policy::attribution_test_lock();
+        let Some(relay) = relay("uv-project-settings") else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        let harness = Harness::new("uv-project-settings");
+        let uv = echoing_uv(&harness);
+        let temp = TempDir::named("uv-settings-project");
+        let dir = temp.0.canonicalize().unwrap();
+        fs::create_dir_all(dir.join("wheels")).unwrap();
+        fs::write(dir.join("wheels/local-1.0-py3-none-any.whl"), b"wheel").unwrap();
+        fs::write(dir.join("requirements.in"), "six\n").unwrap();
+        fs::write(
+            dir.join("uv.toml"),
+            "resolution = \"lowest-direct\"\nkeyring-provider = \"subprocess\"\n\
+             find-links = [\"wheels\"]\n\
+             config-settings = { editable_mode = \"compat\" }\n\
+             [pip]\npython = \"/bin/false\"\nprerelease = \"allow\"\n",
+        )
+        .unwrap();
+        let held = ProjectRoot::open(&dir).unwrap();
+        let spec =
+            crate::tailors::record_spec(&super::super::tailor::Python, &held, uv.tool(), &["x"])
+                .unwrap();
+        let slot = RecordSlot::default();
+        let run = compile_run(&uv, &dir, Some(spec), slot.clone(), Builds::Never);
+        let (report, _) = through_door(&harness, DoorKind::MissingLock, run);
+        done();
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        let seen = fs::read_to_string(dir.join("requirements.lock.txt")).unwrap();
+        let (args, config) = seen.split_once("CONFIG").unwrap();
+        for forced in [
+            "--no-config",
+            "--keyring-provider disabled",
+            "--no-python-downloads",
+            "--index-url https://pypi.org/simple",
+            "--config-file ",
+        ] {
+            assert!(args.contains(forced), "{forced} not in {args}");
+        }
+        assert!(args.contains(&format!("--python {}", uv.python().display())));
+        let config: toml::Table = config.parse().unwrap();
+        assert_eq!(config["resolution"].as_str(), Some("lowest-direct"));
+        assert_eq!(
+            config["config-settings"]["editable_mode"].as_str(),
+            Some("compat")
+        );
+        assert_eq!(config["pip"]["prerelease"].as_str(), Some("allow"));
+        let wheels = dir.join("wheels");
+        assert_eq!(
+            config["find-links"][0].as_str(),
+            Some(wheels.to_str().unwrap())
+        );
+        assert!(!config.contains_key("keyring-provider"), "{config}");
+        assert!(!config["pip"].as_table().unwrap().contains_key("python"));
+        let (receipt, _) = slot.borrow_mut().take().unwrap();
+        assert!(
+            receipt.inputs.contains_key("uv.toml"),
+            "{:?}",
+            receipt.inputs
+        );
+        assert!(
+            receipt
+                .inputs
+                .contains_key("wheels/local-1.0-py3-none-any.whl"),
+            "{:?}",
+            receipt.inputs
+        );
+    }
+
+    /// A uv.toml that names a location outside the project is refused
+    /// before uv runs, and nothing is published.
+    #[test]
+    fn a_uv_setting_outside_the_project_is_refused() {
+        let _serial = policy::attribution_test_lock();
+        let Some(relay) = relay("uv-outside-setting") else {
+            return;
+        };
+        RELAY_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(relay));
+        let harness = Harness::new("uv-outside-setting");
+        let uv = echoing_uv(&harness);
+        let temp = TempDir::named("uv-outside-project");
+        let dir = temp.0.canonicalize().unwrap();
+        fs::write(dir.join("requirements.in"), "six\n").unwrap();
+        fs::write(dir.join("uv.toml"), "find-links = [\"../wheels\"]\n").unwrap();
+        let run = compile_run(&uv, &dir, None, Default::default(), Builds::Never);
+        let (report, _) = through_door(&harness, DoorKind::MissingLock, run);
+        done();
+        let error = report.unwrap_err().to_string();
+        assert!(error.contains("find-links"), "{error}");
+        assert!(error.contains("outside the project"), "{error}");
+        assert!(!dir.join("requirements.lock.txt").exists());
+    }
+
+    /// `uv lock` of `dir` (a uv project) through a door of `kind`; `locked`
+    /// adds `--locked` and requires the lock unchanged, as `ward attest`
+    /// does.
+    fn lock_project(
+        harness: &Harness,
+        uv: &Uv,
+        dir: &Path,
+        kind: DoorKind,
+        locked: bool,
+    ) -> io::Result<DelegateReport> {
+        let held = ProjectRoot::open(dir).unwrap();
+        let mut args = vec!["lock"];
+        if locked {
+            args.push("--locked");
+        }
+        let mut spec =
+            crate::tailors::record_spec(&super::super::tailor::Python, &held, uv.tool(), &args)
+                .unwrap();
+        spec.require_unchanged = locked;
+        let (report, _) = through_door(
+            harness,
+            kind,
+            UvRun {
+                uv,
+                lock_root: dir,
+                cwd: None,
+                args: args.iter().map(OsString::from).collect(),
+                index: Index::Project,
+                outputs: super::super::resolve::resolution_outputs(&held).unwrap(),
+                target: UvTarget::Project {
+                    record: Some(spec),
+                    slot: Default::default(),
+                },
+                builds: Builds::Probe,
+                capture: true,
+                policy: Some(Policy::default()),
+            },
+        );
+        report
+    }
+
+    /// `[tool.uv] resolution = "lowest-direct"` reaches the real uv: the
+    /// lock records it, so the lock check (`uv lock --locked`, what `ward
+    /// attest` runs) accepts the lock. Without the setting, which is what
+    /// `--no-config` alone gave uv, the same check refuses that lock. The
+    /// keyring program the project names is set aside.
+    #[test]
+    #[ignore = "realizes the store uv and CPython over the network"]
+    fn tool_uv_resolution_reaches_the_lock_and_its_check() {
+        let _serial = policy::attribution_test_lock();
+        let label = "tool_uv_resolution_reaches_the_lock_and_its_check";
+        let Some(harness) = uv_harness(label) else {
+            return;
+        };
+        let uv = store_uv(harness);
+        let temp = TempDir::named("uv-resolution-setting");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        let project = "[project]\nname = \"settings\"\nversion = \"0\"\n\
+                       requires-python = \">=3.12\"\ndependencies = []\n";
+        let configured = format!(
+            "{project}\n[tool.uv]\nresolution = \"lowest-direct\"\n\
+             keyring-provider = \"subprocess\"\n"
+        );
+        fs::write(dir.join("pyproject.toml"), &configured).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let report = lock_project(harness, &uv, &dir, DoorKind::Edit, false).unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        let lock = fs::read_to_string(dir.join("uv.lock")).unwrap();
+        assert!(
+            lock.contains("resolution-mode = \"lowest-direct\""),
+            "{lock}"
+        );
+        let report = lock_project(harness, &uv, &dir, DoorKind::Attest, true).unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        // Before: uv resolved with its defaults, and the check fails.
+        fs::write(dir.join("pyproject.toml"), project).unwrap();
+        let report = lock_project(harness, &uv, &dir, DoorKind::Attest, true);
+        assert!(
+            report
+                .as_ref()
+                .map_or(true, |report| !report.status.success()),
+            "the lock check accepted a lock made with other settings"
+        );
+        assert_eq!(fs::read_to_string(dir.join("uv.lock")).unwrap(), lock);
+        done();
+    }
+
+    /// A uv.toml naming a program as the interpreter and a keyring
+    /// program, and turning off the header Greyward's lock check reads:
+    /// the real uv compiles with the store interpreter, the program never
+    /// runs, and the lock keeps ward's header. The resolver setting beside
+    /// them is honored.
+    #[test]
+    #[ignore = "realizes the store uv and CPython over the network"]
+    fn hostile_uv_settings_do_not_reach_the_real_uv() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = policy::attribution_test_lock();
+        let label = "hostile_uv_settings_do_not_reach_the_real_uv";
+        let Some(harness) = uv_harness(label) else {
+            return;
+        };
+        let uv = store_uv(harness);
+        let temp = TempDir::named("uv-hostile-settings");
+        let dir = temp.0.join("project");
+        fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        fs::write(dir.join("requirements.in"), "six>=1.16.0,<1.17\n").unwrap();
+        let marker = dir.join("marker.sh");
+        fs::write(
+            &marker,
+            format!("#!/bin/sh\ntouch {}/fired\nexit 1\n", dir.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            dir.join("uv.toml"),
+            format!(
+                "keyring-provider = \"subprocess\"\nresolution = \"lowest-direct\"\n\
+                 [pip]\npython = \"{}\"\nno-header = true\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let run = compile_run(&uv, &dir, None, Default::default(), Builds::Probe);
+        let (report, _) = through_door(harness, DoorKind::MissingLock, run);
+        done();
+        let report = report.unwrap();
+        assert!(report.status.success(), "{}", stderr(&report));
+        assert!(!dir.join("fired").exists(), "the named interpreter ran");
+        let lock = fs::read_to_string(dir.join("requirements.lock.txt")).unwrap();
+        assert!(super::super::resolve::compiled_by_ward(&lock), "{lock}");
+        assert!(lock.contains("six==1.16.0"), "{lock}");
+    }
+
+    /// The settings tables name exactly the keys the pinned uv accepts, at
+    /// the top level and in `[pip]`: uv lists them when it refuses an
+    /// unknown key. A uv bump that adds a setting fails here until the new
+    /// key has a rule.
+    #[test]
+    #[ignore = "realizes the store uv and CPython over the network"]
+    fn the_tables_name_every_setting_the_pinned_uv_accepts() {
+        let label = "the_tables_name_every_setting_the_pinned_uv_accepts";
+        let Some(harness) = uv_harness(label) else {
+            return;
+        };
+        let uv = store_uv(harness);
+        done();
+        let temp = TempDir::named("uv-settings-list");
+        let accepted = |config: &str| -> Vec<String> {
+            let file = temp.0.join("probe.toml");
+            fs::write(&file, config).unwrap();
+            let output = std::process::Command::new(uv.binary())
+                .args([
+                    "pip",
+                    "compile",
+                    "--no-config",
+                    "--offline",
+                    "--config-file",
+                ])
+                .arg(&file)
+                .arg("-")
+                .env_clear()
+                .env("HOME", &temp.0)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&output.stderr).into_owned();
+            let list = text
+                .split_once("expected one of")
+                .unwrap_or_else(|| panic!("no field list in {text}"))
+                .1;
+            list.lines()
+                .next()
+                .unwrap_or_default()
+                .split(',')
+                .map(|item| item.trim().trim_matches('`').to_string())
+                .filter(|item| !item.is_empty())
+                .collect()
+        };
+        let (top, pip) = super::super::uv_config::rule_keys();
+        assert_eq!(accepted("not-a-uv-setting = 1\n"), top);
+        assert_eq!(accepted("[pip]\nnot-a-uv-setting = 1\n"), pip);
     }
 }

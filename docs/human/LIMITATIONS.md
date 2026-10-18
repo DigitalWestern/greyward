@@ -342,6 +342,12 @@ Selection covers every patch of each maintained CPython minor that python-build-
   policy can deny to refuse it. This also covers metadata preparation by
   the project's own backend because it can request third-party source builds.
   sdist build-requirement resolution never builds.
+- **uv settings Greyward fixes itself are set aside**: the project's `uv.toml` or
+  `[tool.uv]` is honored, but a setting that picks the interpreter, a keyring program, a
+  proxy, the trust roots, the cache, or the shape of a compiled lock (`[pip] universal`,
+  `python-platform`, `no-header`, `no-deps`, extras and groups) is not passed to uv, and a
+  note names it. A local index or find-links directory outside the project is refused. User
+  and system uv configuration never applies. The full rules are in CLI.md under `attest`.
 - **Lock markers are read as PEP 508 and `packaging` 25 read them, with these
   refusals.** Each is a marker Greyward will not guess at, so a lock that uses one fails
   to import, naming it:

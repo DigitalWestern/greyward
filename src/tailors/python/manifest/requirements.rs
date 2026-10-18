@@ -113,7 +113,7 @@ pub(super) fn requirements_directory_candidate(
         if is_project_file(project, &path)? {
             return Ok(Some(path));
         }
-        return Err(unreadable(
+        return Err(unreadable_text(
             &path,
             "greyward.toml [python].requirements points to a missing file",
         ));
@@ -180,7 +180,7 @@ fn walk_from(
     let path = canonical_project_path(project, path).map_err(|e| unreadable(path, e))?;
     let key = (path.clone(), constraints_only);
     if stack.contains(&key) {
-        return Err(unreadable(
+        return Err(unreadable_text(
             &path,
             format!(
                 "requirements include cycle: {}",
@@ -211,11 +211,11 @@ fn walk_from(
             continue;
         };
         let target = include.target.ok_or_else(|| {
-            unreadable(&path, "requirements include is missing its file argument")
+            unreadable_text(&path, "requirements include is missing its file argument")
         })?;
         let child = path.parent().unwrap_or(Path::new(".")).join(target.trim());
         if !is_project_file(project, &child)? {
-            return Err(unreadable(&child, "included requirements file is missing"));
+            return Err(unreadable_text(&child, "included requirements file is missing"));
         }
         walk_from(
             project,

@@ -17,11 +17,11 @@ pub(super) fn poetry_manifest(
         .and_then(toml::Value::as_table)
         .and_then(|tool| tool.get("poetry"))
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| unreadable(&dir.join("pyproject.toml"), "[tool.poetry] must be a table"))?;
+        .ok_or_else(|| unreadable_text(&dir.join("pyproject.toml"), "[tool.poetry] must be a table"))?;
     let empty_deps = toml::map::Map::new();
     let deps = match poetry.get("dependencies") {
         Some(value) => value.as_table().ok_or_else(|| {
-            unreadable(
+            unreadable_text(
                 &dir.join("pyproject.toml"),
                 "Poetry dependencies must be a table",
             )
@@ -36,7 +36,7 @@ pub(super) fn poetry_manifest(
     if let Some(sources) = poetry.get("source").and_then(toml::Value::as_array) {
         for source in sources {
             let Some(source) = source.as_table() else {
-                return Err(unreadable(
+                return Err(unreadable_text(
                     &dir.join("pyproject.toml"),
                     "Poetry source must be a table",
                 ));
@@ -69,7 +69,7 @@ pub(super) fn poetry_manifest(
             toml::Value::Table(_) => vec![value.clone()],
             toml::Value::Array(values) => values.clone(),
             _ => {
-                return Err(unreadable(
+                return Err(unreadable_text(
                     &dir.join("pyproject.toml"),
                     format!("Poetry dependency `{name}` must be a string, table, or array"),
                 ))

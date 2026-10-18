@@ -281,13 +281,23 @@ fn join_requirements(requirements: &[String], constraints: &[String]) -> String 
         + "\n"
 }
 
-fn unreadable(path: &Path, error: impl std::fmt::Display) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "cannot read {}: {error}; the manifest is broken, or this is a ward bug",
-            path.display()
-        ),
+/// `path` could not be read as a manifest, for a reason given as text.
+fn unreadable_text(path: &Path, why: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, unreadable_message(path, why))
+}
+
+/// `path` could not be read as a manifest because of `error`, which is
+/// kept: a build-tool download that failed on the network is still
+/// Network (exit 6), a refusal still Refused (#258).
+fn unreadable(path: &Path, error: io::Error) -> io::Error {
+    let message = unreadable_message(path, &error);
+    crate::kernel::error::reword_as(io::ErrorKind::InvalidData, message, error)
+}
+
+fn unreadable_message(path: &Path, why: impl std::fmt::Display) -> String {
+    format!(
+        "cannot read {}: {why}; the manifest is broken, or this is a ward bug",
+        path.display()
     )
 }
 

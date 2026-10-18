@@ -188,7 +188,7 @@ pub(super) fn dynamic_dependencies_manifest(
     cfg: &GreywardPythonConfig,
 ) -> io::Result<Manifest> {
     match setup_or_requirements_manifest(project, cfg) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(unreadable(
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(unreadable_text(
             &project.path().join("pyproject.toml"),
             "[project].dynamic includes dependencies but no setup.py or requirements directory was found",
         )),
@@ -319,14 +319,14 @@ pub(super) fn project_manifest(
         .unwrap_or_default();
     if let Some(dependencies) = project.get("dependencies") {
         let values = dependencies.as_array().ok_or_else(|| {
-            unreadable(
+            unreadable_text(
                 &dir.join("pyproject.toml"),
                 "project.dependencies must be an array",
             )
         })?;
         for value in values {
             let value = value.as_str().ok_or_else(|| {
-                unreadable(
+                unreadable_text(
                     &dir.join("pyproject.toml"),
                     "project.dependencies must contain strings",
                 )
@@ -336,7 +336,7 @@ pub(super) fn project_manifest(
     }
     if let Some(optional_value) = project.get("optional-dependencies") {
         let optional = optional_value.as_table().ok_or_else(|| {
-            unreadable(
+            unreadable_text(
                 &dir.join("pyproject.toml"),
                 "project.optional-dependencies must be a table",
             )
@@ -344,14 +344,14 @@ pub(super) fn project_manifest(
         for (extra, values) in optional {
             let active = cfg.extras.contains(&extra.to_ascii_lowercase());
             let values = values.as_array().ok_or_else(|| {
-                unreadable(
+                unreadable_text(
                     &dir.join("pyproject.toml"),
                     "optional-dependencies values must be arrays",
                 )
             })?;
             for value in values {
                 let value = value.as_str().ok_or_else(|| {
-                    unreadable(
+                    unreadable_text(
                         &dir.join("pyproject.toml"),
                         "optional dependency must be a string",
                     )

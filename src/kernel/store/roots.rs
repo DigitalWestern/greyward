@@ -75,6 +75,28 @@ impl Store {
         self.project_lock_canonical(project.path())
     }
 
+    /// Whether another descriptor holds `project`'s transaction lock right
+    /// now, asked without waiting: a fresh descriptor tries the lock and
+    /// lets go at once. The lock is an `flock`, owned per open descriptor,
+    /// so this reports a lock held by this very thread too. Test-only.
+    #[cfg(test)]
+    pub(crate) fn project_lock_contended(&self, project: &ProjectRoot) -> io::Result<bool> {
+        let path = self
+            .root
+            .join("root-locks")
+            .join(format!("{}.lock", root_key(project.path())));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(false),
+            Err(fs::TryLockError::WouldBlock) => Ok(true),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
     fn project_lock_canonical(&self, project_dir: &Path) -> io::Result<fs::File> {
         let locks = self.root.join("root-locks");
         ensure_directory_tree(&self.root, Path::new("root-locks"))?;

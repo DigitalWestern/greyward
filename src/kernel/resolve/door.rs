@@ -393,6 +393,8 @@ pub(super) fn run(
             &outputs,
         )?,
     }
+    #[cfg(test)]
+    door.pause(super::pause::PausePoint::Ran);
     Ok(report(status, ran.outcome, Some(objects)))
 }
 

@@ -270,22 +270,50 @@ fn native_reference_id(reference: &Option<serde_json::Value>) -> io::Result<Opti
         .transpose()
 }
 
-/// The per-project transaction lock held across durable root publication and
-/// the visible closure rename.
+/// The project's transaction lock, held across durable root publication,
+/// the projection switch and the visible closure rename. Every reference
+/// (the environment object, and its native libraries if any) must name a
+/// complete store object.
 ///
-/// The project's transaction lock, held across the projection switch and
-/// the closure write. Every reference must name a complete store object.
+/// Under the lock, the plan's resolution files are joined before anything
+/// is moved, rebuilt or relinked: a lock replaced since planning, or a
+/// receipt the policy refuses, fails the sync while the active
+/// `node_modules` and its forest are still exactly as they were. The
+/// closure writer joins again under the same lock.
 fn projection_project_lock(
     store: &Store,
+    activity: &StoreActivity,
     project: &ProjectRoot,
-    strict_refs: bool,
+    (env_obj, native_id): (&Path, Option<&str>),
+    basis: &crate::comforter::join::Digests,
+    attribution: &crate::kernel::policy::Attribution,
 ) -> io::Result<fs::File> {
-    if !strict_refs {
+    let valid_env = env_obj
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(crate::kernel::store::is_object_id);
+    let valid_native = native_id
+        .map(crate::kernel::store::is_object_id)
+        .unwrap_or(true);
+    if !(valid_env && valid_native) {
         return Err(err(
             "Node closure references must name complete store objects",
         ));
     }
-    store.project_lock_in(project)
+    let lock = crate::comforter::publication_lock(store, project, attribution)?;
+    let mut body = serde_json::json!({
+        crate::comforter::join::BASIS_FIELD: crate::comforter::join::basis_value(basis),
+    });
+    crate::comforter::join::join_for_closure(
+        project,
+        "node",
+        &mut body,
+        store,
+        activity,
+        None,
+        attribution,
+    )?;
+    Ok(lock)
 }
 
 /// Reserve a backup name for every real (npm-made) node_modules the new
@@ -885,15 +913,14 @@ pub fn project_node_env_recorded(
     let env_obj = env_obj.canonicalize()?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let native_id = native_reference_id(&native_reference)?;
-    let valid_env = env_obj
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(crate::kernel::store::is_object_id);
-    let valid_native = native_id
-        .map(crate::kernel::store::is_object_id)
-        .unwrap_or(true);
-    let strict_refs = valid_env && valid_native;
-    let project_lock = projection_project_lock(&store, project, strict_refs)?;
+    let project_lock = projection_project_lock(
+        &store,
+        activity,
+        project,
+        (&env_obj, native_id),
+        basis,
+        attribution,
+    )?;
     let home = store
         .root
         .parent()

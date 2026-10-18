@@ -197,7 +197,11 @@ pub fn trusted_keys(policy: &Policy) -> KeySet {
 /// Run the join for one closure about to be published. Removes any
 /// `resolution` field the producer set (the name belongs to the join), then,
 /// when the ecosystem declares resolution files, joins or records. `refs`
-/// is `None` only for the test-only legacy writer, which retains nothing.
+/// is `None` for the test-only legacy writer, which retains nothing, and
+/// for a producer's early check whose body is discarded: the closure
+/// writer joins that closure again, with its references.
+/// Every producer joins here, under the project lock, so a test's
+/// `Joining` pause point on `attribution` fires at the same stage for each.
 pub(crate) fn join_for_closure(
     project: &ProjectRoot,
     ecosystem: &str,
@@ -205,7 +209,12 @@ pub(crate) fn join_for_closure(
     store: &Store,
     activity: &StoreActivity,
     refs: Option<&mut ClosureRefs>,
+    attribution: &crate::kernel::policy::Attribution,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    attribution.pause(crate::kernel::resolve::pause::PausePoint::Joining);
+    #[cfg(not(test))]
+    let _ = attribution;
     let object = body
         .as_object_mut()
         .expect("the closure writer validated the body object");

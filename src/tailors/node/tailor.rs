@@ -302,12 +302,11 @@ impl Tailor for Node {
         // the lock: a lock swapped in while this sync realizes is not what
         // the closure was planned from, and the join refuses it.
         let Some(inputs::Planned { plan, basis }) =
-            inputs::load_npm_plan_with_basis(platform, project, selected)?
+            plan_sync(platform, project, selected, attribution)?
         else {
             inputs::require_lock(project)?;
             return Ok(false);
         };
-        node::freshness::check_lock_freshness(project, &plan)?;
         // package.json is read through the held descriptor; a lock-only
         // project has no "greyward" config to read.
         let config = match project.read_input_string(Path::new("package.json"))? {
@@ -572,6 +571,31 @@ impl Tailor for Node {
 /// The Node object this project's closure recorded. A closure written
 /// before the toolchain lock has no such reference: it names no bytes to
 /// resolve, so the run stops rather than silently picking today's default.
+/// The planning half of a sync: the plan and the resolution basis from one
+/// read of the lock, checked fresh against the manifests. Every input the
+/// plan read must still read the same when planning ends, so a lock
+/// replaced meanwhile is refused before anything is published.
+pub(crate) fn plan_sync(
+    platform: Platform,
+    project: &ProjectRoot,
+    selected: &Selected,
+    attribution: &crate::kernel::policy::Attribution,
+) -> io::Result<Option<inputs::Planned>> {
+    let observed = project.observing_inputs()?;
+    let Some(planned) = inputs::load_npm_plan_with_basis(platform, &observed, selected)? else {
+        return Ok(None);
+    };
+    #[cfg(test)]
+    attribution.pause(crate::kernel::resolve::pause::PausePoint::Captured);
+    #[cfg(not(test))]
+    let _ = attribution;
+    node::freshness::check_lock_freshness(&observed, &planned.plan)?;
+    observed.verify_observed_inputs()?;
+    #[cfg(test)]
+    attribution.pause(crate::kernel::resolve::pause::PausePoint::Planned);
+    Ok(Some(planned))
+}
+
 fn closure_runtime(
     store: &crate::kernel::store::Store,
     activity: &StoreActivity,
@@ -1294,3 +1318,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pipeline_tests.rs"]
+mod pipeline_tests;

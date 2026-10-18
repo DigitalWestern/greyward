@@ -21,20 +21,27 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PausePoint {
     /// The planner has read the resolution files and computed the basis it
-    /// will bind the plan to, and has run nothing yet.
+    /// will bind the plan to, and has not yet made its final checks of the
+    /// live project. A confined planner has run no door yet.
     Captured,
     /// A confined run has copied the project into its immutable stage and
     /// has not yet compared the stage with the consumed basis. A planner's
     /// detached run holds no project lock here.
     Staged,
+    /// A confined run succeeded: the stage matched the consumed basis, the
+    /// tool ran and its outputs were accepted. The planner has not yet
+    /// rechecked the live project, and no project lock is held.
+    Ran,
     /// The plan is complete and rechecked against the basis; nothing of it
     /// is published yet, and no project lock is held.
     Planned,
-    /// The producer is about to take the project lock to publish.
+    /// The producer is about to take the project lock to publish
+    /// (`comforter::publication_lock`, which every producer takes).
     Publishing,
-    /// The project lock is held and the resolution join has not run. A
-    /// producer that joins before switching its projection reaches this
-    /// twice: before that join, and again in the closure writer.
+    /// The project lock is held and the resolution join
+    /// (`join::join_for_closure`) is about to run. A producer that joins
+    /// before switching its projection reaches this twice: before that
+    /// join, and again in the closure writer.
     Joining,
     /// The closure is written and the project lock is still held.
     Published,

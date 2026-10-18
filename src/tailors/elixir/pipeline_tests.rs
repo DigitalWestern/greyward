@@ -56,7 +56,9 @@ fn standin(store: &Store, name: &str, fill: impl FnOnce(&Path)) -> String {
 impl Pipeline for ElixirPipeline {
     const ECOSYSTEM: &'static str = "elixir";
     const LOCK: &'static str = "mix.lock";
-    const LOCK_SHA_FIELD: &'static str = "mix_lock_sha256";
+    const LOCK_SHA_FIELD: Option<&'static str> = Some("mix_lock_sha256");
+    const CONFINED: bool = true;
+    const LINK: Option<(&'static str, &'static str)> = None;
     type Plan = ElixirPlan;
 
     fn tailor() -> &'static dyn crate::tailors::Tailor {
@@ -90,7 +92,7 @@ impl Pipeline for ElixirPipeline {
         ]
     }
 
-    fn objects(store: &Store) -> (String, String) {
+    fn objects(store: &Store) -> (String, [String; 2]) {
         let beam = standin(store, "beam", |dir| {
             use std::os::unix::fs::PermissionsExt;
             let bin = dir.join("elixir/bin");
@@ -104,7 +106,10 @@ impl Pipeline for ElixirPipeline {
             fs::create_dir_all(dir.join("jason")).unwrap();
             fs::write(dir.join("jason/mix.exs"), "").unwrap();
         });
-        (beam, deps)
+        // Both generations realize to one deps object, so a sync of
+        // either projects into the same forest: a stale sync that reached
+        // the forest would rebuild the active one.
+        (beam, [deps.clone(), deps])
     }
 
     fn plan(
@@ -147,7 +152,7 @@ impl Pipeline for ElixirPipeline {
         .map(|_| ())
     }
 
-    fn planned_lock(body: &Value) -> String {
+    fn planned(body: &Value) -> String {
         body["plan"]["deps"][0]["inner_sha256"]
             .as_str()
             .unwrap_or_default()
@@ -160,4 +165,4 @@ impl Pipeline for ElixirPipeline {
     }
 }
 
-crate::tailors::pipeline::pipeline_scenarios!(ElixirPipeline, "elixir");
+crate::tailors::pipeline::pipeline_scenarios!(ElixirPipeline, "elixir", confined);

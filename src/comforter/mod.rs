@@ -271,6 +271,23 @@ pub(crate) fn write_closure_with_project_lock(
     )
 }
 
+/// Take the project's transaction lock to publish a closure: the lock
+/// every producer holds from its first join through the visible closure
+/// rename, and every door's transaction holds while it writes the
+/// resolution files. Every closure producer takes it here, so a test's
+/// `Publishing` pause point fires at the same stage for each of them.
+pub(crate) fn publication_lock(
+    store: &Store,
+    project: &ProjectRoot,
+    attribution: &crate::kernel::policy::Attribution,
+) -> io::Result<fs::File> {
+    #[cfg(test)]
+    attribution.pause(crate::kernel::resolve::pause::PausePoint::Publishing);
+    #[cfg(not(test))]
+    let _ = attribution;
+    store.project_lock_in(project)
+}
+
 /// Persist the producer's complete root union before a project projection or
 /// user backup is switched. This is the first half of closure publication;
 /// `write_closure` repeats the union after the visible closure is written so
@@ -336,15 +353,11 @@ fn write_closure_inner(
     // holds the lock supplies it: a second `project_lock_in` from this
     // process would wait on it forever.
     let owned_project_lock = if supplied_project_lock.is_none() {
-        #[cfg(test)]
-        attribution.pause(crate::kernel::resolve::pause::PausePoint::Publishing);
-        Some(store.project_lock_in(project)?)
+        Some(publication_lock(store, project, attribution)?)
     } else {
         None
     };
     let project_lock = supplied_project_lock.or(owned_project_lock.as_ref());
-    #[cfg(test)]
-    attribution.pause(crate::kernel::resolve::pause::PausePoint::Joining);
     // The one place every project write passes through: prove the lock and
     // the toolchain source inputs still read the way this command resolved
     // them before anything of this sync becomes visible.
@@ -377,6 +390,7 @@ fn write_closure_inner(
         store,
         activity,
         Some(&mut refs),
+        attribution,
     )?;
 
     // Hold the project directory open and publish through it. Every

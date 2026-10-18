@@ -669,7 +669,7 @@ pub(super) fn project_env_inner(
     let store = store_from_object_path(env_obj)
         .ok_or_else(|| io::Error::other("environment object is not in a Greyward store"))?;
     let env_obj = env_obj.canonicalize()?;
-    let project_lock = store.project_lock_in(project)?;
+    let project_lock = crate::comforter::publication_lock(&store, project, attribution)?;
     let native_reference = crate::kernel::provider::nativelibs::env_reference(&env_obj)?;
     let backup = reserve_backup_real_dir_for_store(project, venv, &store)?;
     let mut refs = ClosureRefs::new();
@@ -742,6 +742,7 @@ pub(super) fn project_env_inner(
         &store,
         activity,
         Some(&mut refs),
+        attribution,
     )?;
     // Durable protection precedes both the user-data move and the visible
     // .venv switch. A failed later step therefore over-retains safely.

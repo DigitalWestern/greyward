@@ -26,9 +26,7 @@ pub fn project_elixir_env(
         .ok_or_else(|| err("BEAM object is not in a Greyward store"))?;
     let project_dir = project.path();
     let proj_dir = expected_projection(&store, project_dir, &deps_obj)?;
-    #[cfg(test)]
-    attribution.pause(crate::kernel::resolve::pause::PausePoint::Publishing);
-    let project_lock = store.project_lock_in(project)?;
+    let project_lock = crate::comforter::publication_lock(&store, project, attribution)?;
     store.ensure_namespace(Path::new("forests"))?;
     let mut refs = crate::comforter::ClosureRefs::new();
     refs.object_path(&store, activity, &beam_obj)?;
@@ -58,8 +56,6 @@ pub fn project_elixir_env(
     // Refuse stale inputs or denied receipts before a fresh sync mutates
     // the forest still referenced by the active closure. Keep this lock
     // through publication and its final recheck.
-    #[cfg(test)]
-    attribution.pause(crate::kernel::resolve::pause::PausePoint::Joining);
     crate::comforter::join::join_for_closure(
         project,
         "elixir",
@@ -67,6 +63,7 @@ pub fn project_elixir_env(
         &store,
         activity,
         Some(&mut refs),
+        attribution,
     )?;
     // Protect the dependency projection before cloning or publishing it.
     crate::comforter::persist_root_for_refs_with_project_lock(

@@ -165,13 +165,7 @@ impl Tailor for Python {
         // through one door on this sync's scope.
         let mut door =
             ResolutionDoor::open(store, activity, platform, DoorKind::Planner, attribution)?;
-        let observed = project.observing_inputs()?;
-        let (plan, selection, inputs) = inputs::read_plan(&observed, selected, &mut door)?;
-        // The resolution files this plan was built from, by digest, taken
-        // before realization so a lock another writer swaps in meanwhile
-        // is not the basis of a closure planned from the old one.
-        let basis = super::resolve::resolution_basis(&observed)?;
-        observed.verify_observed_inputs()?;
+        let (plan, selection, inputs, basis) = plan_sync(project, selected, &mut door)?;
         let runtime = python::realize_runtime(store, activity, platform, selected)?;
         // An sdist with a Rust extension builds on the Rust this project's
         // lock names when the project has one, not on the shipped pin.
@@ -330,6 +324,32 @@ impl Tailor for Python {
 
 /// The files this ecosystem's toolchain version is read from, in its own
 /// tools' precedence order ([`Tailor::toolchain_sources`]).
+/// The planning half of a sync: the plan, the interpreter selection, the
+/// input records, and the resolution files the plan was built from, by
+/// digest. The basis is taken before realization so a lock another writer
+/// swaps in meanwhile is not the basis of a closure planned from the old
+/// one, and every input the plan read must still read the same.
+pub(crate) fn plan_sync(
+    project: &ProjectRoot,
+    selected: &Selected,
+    door: &mut ResolutionDoor<'_>,
+) -> io::Result<(
+    crate::kernel::types::Plan,
+    super::pyselect::PythonSelection,
+    Vec<crate::comforter::InputRecord>,
+    crate::comforter::join::Digests,
+)> {
+    let observed = project.observing_inputs()?;
+    let (plan, selection, inputs) = inputs::read_plan(&observed, selected, door)?;
+    let basis = super::resolve::resolution_basis(&observed)?;
+    #[cfg(test)]
+    door.pause(crate::kernel::resolve::pause::PausePoint::Captured);
+    observed.verify_observed_inputs()?;
+    #[cfg(test)]
+    door.pause(crate::kernel::resolve::pause::PausePoint::Planned);
+    Ok((plan, selection, inputs, basis))
+}
+
 fn toolchain_rows(root: &ProjectRoot) -> io::Result<Vec<InputRow>> {
     use crate::kernel::toolchain::input::{
         checked_row_for, read_pyproject_poetry_python, read_pyproject_requires_python,
@@ -377,3 +397,7 @@ fn toolchain_request(rows: &[InputRow]) -> io::Result<Request> {
     }
     Ok(request)
 }
+
+#[cfg(test)]
+#[path = "pipeline_tests.rs"]
+mod pipeline_tests;

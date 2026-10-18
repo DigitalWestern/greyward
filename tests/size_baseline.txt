@@ -16,6 +16,6 @@ fn 158 src/kernel/provider/crates.rs::realize_vendor_inner
 fn 209 src/kernel/toolchain/lock.rs::validate
 fn 202 src/tailors/node/lock_import/mod.rs::build_plan_recording
 fn 161 src/tailors/node/lock_import/pnpm.rs::pnpm_nodes
-fn 161 src/tailors/node/project.rs::project_node_env_recorded
+fn 160 src/tailors/node/project.rs::project_node_env_recorded
 fn 159 src/tailors/python/edit.rs::edit_requirements
 fn 187 src/tailors/python/inputs.rs::read_plan

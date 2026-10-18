@@ -1,13 +1,15 @@
 //! A test-only bench that drives one tailor's real planner and closure
-//! publication end to end, with stand-in toolchain objects in place of the
-//! store Ruby or BEAM, and pause points (`kernel::resolve::pause`) where a
-//! concurrent writer acts at an exact stage.
+//! publication end to end, with stand-in store objects in place of the
+//! realized toolchain and environment, and pause points
+//! (`kernel::resolve::pause`) where a concurrent writer acts at an exact
+//! stage.
 //!
-//! Everything between the stand-in tool and the closure file is the code a
-//! sync runs: the planner reading the project through its held root, the
-//! confined door staging an immutable snapshot and checking it against the
-//! consumed basis, the resolution join under the project lock, and the
-//! closure writer. A concurrent writer is a resolution transaction (what a
+//! Everything between the stand-ins and the closure file is the code a
+//! sync runs: the planner reading the project through its held root (a
+//! confined planner's doors staging an immutable snapshot and checking it
+//! against the consumed basis), the planner's final checks of the live
+//! project, the publication lock, the resolution join, any projection
+//! switch, and the closure writer. A concurrent writer is a resolution transaction (what a
 //! door publishes) on a thread and store lease of its own, or a second
 //! complete sync. The scenarios are generic over [`Pipeline`]; each
 //! ecosystem implements it and instantiates them with
@@ -55,17 +57,29 @@ pub(crate) trait Pipeline: 'static {
     const ECOSYSTEM: &'static str;
     /// The lock file among the resolution outputs.
     const LOCK: &'static str;
-    /// The closure body field holding the planned lock's sha256.
-    const LOCK_SHA_FIELD: &'static str;
+    /// The closure body field holding the planned lock's sha256, when the
+    /// producer records one.
+    const LOCK_SHA_FIELD: Option<&'static str>;
+    /// Whether the planner runs the tool through confined doors, so a sync
+    /// reaches `Staged` and `Ran`. A planner that parses the lock itself
+    /// reaches neither.
+    const CONFINED: bool;
+    /// The link the producer switches in the project to publish its
+    /// environment (`.venv`, `node_modules`), if any, and the closure body
+    /// field naming the target it must point at.
+    const LINK: Option<(&'static str, &'static str)>;
     type Plan;
     fn tailor() -> &'static dyn Tailor;
     fn selected() -> Selected;
-    /// Every project file of `generation`: the resolution outputs and at
-    /// least one input the record must cover.
+    /// Every project file of `generation`: the resolution outputs and the
+    /// inputs the record must cover.
     fn files(generation: Gen) -> Vec<(&'static str, String)>;
     /// Publish the stand-in toolchain object and the stand-in environment
-    /// object (gems, deps) into `store`; their ids.
-    fn objects(store: &Store) -> (String, String);
+    /// objects (gems, deps, packages) into `store`; the toolchain's id and
+    /// the environment each generation realizes to. Two generations may
+    /// share one environment, as a lock change that moves no package
+    /// does; a producer must then keep the active one intact by itself.
+    fn objects(store: &Store) -> (String, [String; 2]);
     fn plan(
         door: &mut ResolutionDoor<'_>,
         project: &ProjectRoot,
@@ -85,10 +99,20 @@ pub(crate) trait Pipeline: 'static {
         ledgers: &[LedgerObjects],
         attribution: &mut Attribution,
     ) -> io::Result<()>;
-    /// The sha256 of the lock the stand-in planner read, as the plan in a
-    /// closure body carries it.
-    fn planned_lock(body: &Value) -> String;
-    /// The writable tree the producer projects into the store, if any.
+    /// What the plan in a closure body says it read: a lock digest the
+    /// stand-in planner reported, or a locked package version.
+    fn planned(body: &Value) -> String;
+    /// `planned` for a plan read from `generation`. By default the sha256
+    /// of its lock, which the confined stand-in planners report.
+    fn planned_as(generation: Gen) -> String {
+        Self::files(generation)
+            .into_iter()
+            .find(|(path, _)| *path == Self::LOCK)
+            .map(|(_, text)| record::sha256_hex(text.as_bytes()))
+            .unwrap()
+    }
+    /// The writable tree the producer projects into the store for `env`,
+    /// if any.
     fn forest(store: &Store, project: &Path, env: &Path) -> Option<PathBuf>;
 }
 
@@ -96,8 +120,13 @@ pub(crate) trait Pipeline: 'static {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Active {
     closure: Option<Vec<u8>>,
+    link: Option<PathBuf>,
     forest: Option<BTreeMap<PathBuf, Vec<u8>>>,
 }
+
+/// The file `Bench::seed` writes into the active forest. A sync that
+/// rebuilt or replaced the forest leaves it out.
+const MARKER: &str = "active-marker";
 
 /// The test's hold on process-wide state: the locks every closure-writing
 /// test takes, and the door's thread-local wiring. Dropping it resets the
@@ -123,7 +152,7 @@ pub(crate) struct Bench<P: Pipeline> {
     store: Store,
     activity: StoreActivity,
     runtime: PathBuf,
-    env: PathBuf,
+    envs: [PathBuf; 2],
     key: SigningKey,
     selected: Selected,
     _temp: TempDir,
@@ -131,8 +160,10 @@ pub(crate) struct Bench<P: Pipeline> {
     _pipeline: PhantomData<fn() -> P>,
 }
 
-/// How long a competing door gets to show it is not blocked.
-const BLOCKED_FOR: Duration = Duration::from_millis(300);
+/// How long a competing door may take to publish once the project lock is
+/// free before the test calls it hung. It decides no outcome: the lock is
+/// probed, not waited on.
+const HUNG_AFTER: Duration = Duration::from_secs(120);
 
 /// A door started by a hook: the receiver signals once it has published,
 /// and its thread returns how.
@@ -159,7 +190,7 @@ impl<P: Pipeline> Bench<P> {
         })));
         let (store_temp, store, activity) =
             crate::kernel::resolve::testing::scratch_store(&format!("{label}-store"));
-        let (runtime, env_object) = P::objects(&store);
+        let (runtime, envs) = P::objects(&store);
         let temp = TempDir::named(label);
         let dir = temp.0.join("project");
         fs::create_dir_all(&dir).unwrap();
@@ -171,7 +202,7 @@ impl<P: Pipeline> Bench<P> {
         let bench = Self {
             dir,
             runtime: store.object_path(&runtime),
-            env: store.object_path(&env_object),
+            envs: envs.map(|env| store.object_path(&env)),
             store,
             activity,
             key,
@@ -246,6 +277,28 @@ impl<P: Pipeline> Bench<P> {
             .find(|(path, _)| path == Path::new(P::LOCK))
             .map(|(_, bytes)| record::sha256_hex(&bytes))
             .unwrap()
+    }
+
+    /// The generation whose lock has this digest.
+    fn generation_of(lock_sha256: &str) -> Gen {
+        [Gen::A, Gen::B]
+            .into_iter()
+            .find(|generation| Self::lock_sha256(*generation) == lock_sha256)
+            .expect("a lock of neither generation")
+    }
+
+    /// The environment object a plan of `generation` realizes to.
+    fn env(&self, generation: Gen) -> &Path {
+        &self.envs[match generation {
+            Gen::A => 0,
+            Gen::B => 1,
+        }]
+    }
+
+    /// Whether the project lock is held right now, by anyone.
+    fn contended(&self) -> bool {
+        let project = ProjectRoot::open(&self.dir).unwrap();
+        self.store.project_lock_contended(&project).unwrap()
     }
 
     /// The signed receipt a door resolving `generation` would publish.
@@ -364,11 +417,14 @@ impl<P: Pipeline> Bench<P> {
         for objects in &ledgers {
             ledger::root(&self.store, &self.activity, &project, objects)?;
         }
+        // Realization: the environment of the generation the plan read.
+        let planned = basis.get(P::LOCK).expect("the basis names the lock");
+        let env = self.env(Self::generation_of(planned));
         P::publish(
             &self.activity,
             &project,
             &self.runtime,
-            &self.env,
+            env,
             &plan,
             &lock_sha256,
             &basis,
@@ -391,20 +447,35 @@ impl<P: Pipeline> Bench<P> {
         closure["body"].clone()
     }
 
-    /// The published environment: the closure, and the forest it names.
-    /// A marker is written into a forest the first time, so a forest a
-    /// rejected sync replaced cannot read the same.
+    /// The generation the published closure was planned from, if any.
+    fn published_generation(&self) -> Option<Gen> {
+        self.closure()?;
+        let basis: Digests = serde_json::from_value(self.body()[BASIS_FIELD].clone()).unwrap();
+        Some(Self::generation_of(basis.get(P::LOCK)?))
+    }
+
+    /// The forest of the published environment, if the producer has one.
+    fn active_forest(&self) -> Option<PathBuf> {
+        let generation = self.published_generation().unwrap_or(Gen::A);
+        P::forest(&self.store, &self.dir, self.env(generation))
+    }
+
+    /// Mark the published forest as built by the active environment, as a
+    /// compile into it would: a sync that rebuilds or replaces the forest
+    /// loses the mark. Done once, before the operation under test.
+    fn seed(&self) {
+        if let Some(forest) = self.active_forest() {
+            fs::write(forest.join(MARKER), "compiled by the active environment").unwrap();
+        }
+    }
+
+    /// The published environment as it is now: the closure, the link the
+    /// producer switched, and the forest. Only reads.
     fn active(&self) -> Active {
-        let forest = P::forest(&self.store, &self.dir, &self.env).map(|forest| {
-            let marker = forest.join("active-marker");
-            if !marker.exists() {
-                fs::write(&marker, "compiled by the active environment").unwrap();
-            }
-            tree(&forest)
-        });
         Active {
             closure: self.closure(),
-            forest,
+            link: P::LINK.and_then(|(link, _)| fs::read_link(self.dir.join(link)).ok()),
+            forest: self.active_forest().map(|forest| tree(&forest)),
         }
     }
 
@@ -421,8 +492,23 @@ impl<P: Pipeline> Bench<P> {
         let body = self.body();
         let basis: Digests = serde_json::from_value(body[BASIS_FIELD].clone()).unwrap();
         let lock = basis.get(P::LOCK).expect("the basis names the lock");
-        assert_eq!(body[P::LOCK_SHA_FIELD].as_str(), Some(lock.as_str()));
-        assert_eq!(&P::planned_lock(&body), lock, "the plan read another lock");
+        if let Some(field) = P::LOCK_SHA_FIELD {
+            assert_eq!(body[field].as_str(), Some(lock.as_str()));
+        }
+        let generation = Self::generation_of(lock);
+        assert_eq!(
+            P::planned(&body),
+            P::planned_as(generation),
+            "the plan read another lock"
+        );
+        if let Some((link, field)) = P::LINK {
+            let target = fs::read_link(self.dir.join(link)).ok();
+            assert_eq!(
+                target.as_deref().and_then(Path::to_str),
+                body[field].as_str(),
+                "{link} serves another environment than the closure names"
+            );
+        }
         if let Some(envelope) = body.get("resolution") {
             let mut named: Digests = serde_json::from_value(envelope["outputs"].clone()).unwrap();
             named.extend(serde_json::from_value::<Digests>(envelope["inputs"].clone()).unwrap());
@@ -442,10 +528,7 @@ impl<P: Pipeline> Bench<P> {
             body[BASIS_FIELD],
             join::basis_value(&self.basis(generation))
         );
-        assert_eq!(
-            body[P::LOCK_SHA_FIELD].as_str(),
-            Some(Self::lock_sha256(generation).as_str())
-        );
+        assert_eq!(self.published_generation(), Some(generation));
         match body.get("resolution") {
             Some(envelope) => {
                 assert!(joined, "an unexpected record was joined: {envelope}");
@@ -484,13 +567,30 @@ fn once(points: &PausePoints, point: PausePoint, hook: impl FnOnce() + Send + 's
     points.at(point, 1, hook);
 }
 
-/// A bench with generation A resolved, receipted and synced: the active
-/// environment every rejection must leave in place.
+/// Every point a sync of `P` passes, in order: `Staged` and `Ran` only
+/// when its planner runs confined doors.
+fn stages<P: Pipeline>() -> Vec<PausePoint> {
+    let mut stages = vec![PausePoint::Captured];
+    if P::CONFINED {
+        stages.extend([PausePoint::Staged, PausePoint::Ran]);
+    }
+    stages.extend([
+        PausePoint::Planned,
+        PausePoint::Publishing,
+        PausePoint::Joining,
+        PausePoint::Published,
+    ]);
+    stages
+}
+
+/// A bench with generation A resolved, receipted and synced, its forest
+/// marked: the active environment every rejection must leave in place.
 fn active_bench<P: Pipeline>(label: &str) -> Option<(Held, Arc<Bench<P>>)> {
     let (held, bench) = Bench::<P>::new(label)?;
     bench.commit(Gen::A);
     bench.sync(bench.strict(), None).unwrap();
     bench.assert_published(Gen::A, true);
+    bench.seed();
     Some((held, bench))
 }
 
@@ -516,24 +616,23 @@ pub(crate) fn publishes_a_closure_joined_to_its_plan<P: Pipeline>(label: &str) {
     bench.commit(Gen::A);
     let points = PausePoints::new();
     bench.sync(bench.strict(), Some(points.clone())).unwrap();
-    for point in [
-        PausePoint::Captured,
-        PausePoint::Staged,
-        PausePoint::Planned,
-        PausePoint::Publishing,
-        PausePoint::Joining,
-        PausePoint::Published,
-    ] {
+    for point in stages::<P>() {
         reached(&points, point);
+    }
+    if !P::CONFINED {
+        assert_eq!(points.hits(PausePoint::Staged), 0);
+        assert_eq!(points.hits(PausePoint::Ran), 0);
     }
     assert_eq!(points.hits(PausePoint::Published), 1);
     bench.assert_published(Gen::A, true);
 }
 
 /// A concurrent door publishes generation B after the planner captured A
-/// and before its confined run staged the project. The stage holds B, so
-/// the planner refuses, and the A environment stays. The next sync plans B.
-pub(crate) fn a_generation_replaced_before_staging_is_refused<P: Pipeline>(label: &str) {
+/// and before it finished: before a confined run staged the project, or
+/// while a lock-parsing planner checks what it read. The planner refuses
+/// before taking the publication lock, and the A environment stays. The
+/// next sync plans B.
+pub(crate) fn a_generation_replaced_after_capture_is_refused<P: Pipeline>(label: &str) {
     let Some((_held, bench)) = active_bench::<P>(label) else {
         return;
     };
@@ -542,6 +641,7 @@ pub(crate) fn a_generation_replaced_before_staging_is_refused<P: Pipeline>(label
     once(&points, PausePoint::Captured, bench.published_door(Gen::B));
     let result = bench.sync(bench.strict(), Some(points.clone()));
     reached(&points, PausePoint::Captured);
+    assert_eq!(points.hits(PausePoint::Planned), 0);
     assert_eq!(points.hits(PausePoint::Publishing), 0);
     assert_rejected(&bench, result, &before);
     bench.sync(bench.strict(), None).unwrap();
@@ -553,6 +653,7 @@ pub(crate) fn a_generation_replaced_before_staging_is_refused<P: Pipeline>(label
 /// stage is compared. The live files read as A again, but the run read B,
 /// so the plan is refused and the A environment stays.
 pub(crate) fn an_aba_replacement_inside_the_stage_is_refused<P: Pipeline>(label: &str) {
+    assert!(P::CONFINED, "only a confined planner stages the project");
     let Some((_held, bench)) = active_bench::<P>(label) else {
         return;
     };
@@ -568,6 +669,42 @@ pub(crate) fn an_aba_replacement_inside_the_stage_is_refused<P: Pipeline>(label:
     assert_eq!(bench.receipt_on_disk(), receipt);
     bench.sync(bench.strict(), None).unwrap();
     bench.assert_published(Gen::A, true);
+}
+
+/// A concurrent door publishes B after the planner's last confined run
+/// succeeded against A, and before the planner returns. Nothing the doors
+/// checked changed while they ran, so only the planner's own final checks
+/// of the live project (the lock, the observed inputs, the basis) stand
+/// between this plan and publication: it must refuse before taking the
+/// publication lock, and the A environment stays.
+pub(crate) fn a_generation_published_after_the_last_confined_run_is_refused<P: Pipeline>(
+    label: &str,
+) {
+    assert!(P::CONFINED, "only a confined planner runs doors");
+    let Some((_held, bench)) = active_bench::<P>(label) else {
+        return;
+    };
+    // How many confined runs a sync of the unchanged project makes now: a
+    // planner may skip a run whose result the store already recorded.
+    let measured = PausePoints::new();
+    bench.sync(bench.strict(), Some(measured.clone())).unwrap();
+    bench.seed();
+    let runs = measured.hits(PausePoint::Ran);
+    assert!(runs >= 1, "the planner ran no confined door");
+    let before = bench.active();
+    let points = PausePoints::new();
+    points.at(PausePoint::Ran, runs, bench.published_door(Gen::B));
+    let result = bench.sync(bench.strict(), Some(points.clone()));
+    assert_eq!(points.hits(PausePoint::Ran), runs);
+    assert_eq!(
+        points.hits(PausePoint::Planned),
+        0,
+        "the planner finished a plan of a replaced generation"
+    );
+    assert_eq!(points.hits(PausePoint::Publishing), 0);
+    assert_rejected(&bench, result, &before);
+    bench.sync(bench.strict(), None).unwrap();
+    bench.assert_published(Gen::B, true);
 }
 
 /// A concurrent door publishes B and its receipt after the plan of A is
@@ -627,6 +764,7 @@ pub(crate) fn a_stale_sync_never_overwrites_a_concurrent_closure<P: Pipeline>(la
         to_b();
         second.sync(second.strict(), None).unwrap();
         second.assert_published(Gen::B, true);
+        second.seed();
         *seen.lock().unwrap() = Some(second.active());
     });
     let result = bench.sync(bench.strict(), Some(points.clone()));
@@ -641,26 +779,30 @@ pub(crate) fn a_stale_sync_never_overwrites_a_concurrent_closure<P: Pipeline>(la
     bench.assert_published(Gen::B, true);
 }
 
-/// A concurrent door that starts while the sync holds the project lock
-/// for its join waits until the closure is published: the join, the
-/// closure and its root are never interleaved with another publication.
-/// The closure is A's, joined to A's receipt, though B lands right after.
+/// The join and the closure write run under the project lock, so a
+/// concurrent door publishing the resolution files cannot interleave with
+/// them. At every `Joining` and at `Published` the lock is probed without
+/// waiting and must be held. A door started at the first join has not
+/// published when the closure is, and publishes once the sync lets go.
 pub(crate) fn a_door_waits_for_the_join_and_the_closure<P: Pipeline>(label: &str) {
     let Some((_held, bench)) = active_bench::<P>(label) else {
         return;
     };
     let points = PausePoints::new();
     let started: Arc<Mutex<Option<CompetingDoor>>> = Arc::default();
-    let (start, check, door) = (started.clone(), started.clone(), bench.door(Gen::B));
-    once(&points, PausePoint::Joining, move || {
-        let door = door();
-        assert!(
-            door.0.recv_timeout(BLOCKED_FOR).is_err(),
-            "a door published while the join held the project lock"
-        );
-        *start.lock().unwrap() = Some(door);
+    let (probe, start, door) = (bench.clone(), started.clone(), bench.door(Gen::B));
+    points.on(PausePoint::Joining, move |_| {
+        assert!(probe.contended(), "the join ran without the project lock");
     });
+    once(&points, PausePoint::Joining, move || {
+        *start.lock().unwrap() = Some(door());
+    });
+    let (probe, check) = (bench.clone(), started.clone());
     points.on(PausePoint::Published, move |_| {
+        assert!(
+            probe.contended(),
+            "the closure was published without the project lock"
+        );
         let guard = check.lock().unwrap();
         let door = guard.as_ref().expect("the door started at the join");
         assert!(
@@ -672,7 +814,11 @@ pub(crate) fn a_door_waits_for_the_join_and_the_closure<P: Pipeline>(label: &str
     assert_eq!(points.hits(PausePoint::Published), 1);
     bench.assert_published(Gen::A, true);
     let door = started.lock().unwrap().take().unwrap();
+    door.0
+        .recv_timeout(HUNG_AFTER)
+        .expect("the door never published after the sync let go of the lock");
     door.1.join().unwrap().unwrap();
+    assert!(!bench.contended());
     assert_eq!(bench.receipt_on_disk(), Some(bench.receipt(Gen::B)));
     bench.assert_published(Gen::A, true);
     bench.sync(bench.strict(), None).unwrap();
@@ -681,8 +827,8 @@ pub(crate) fn a_door_waits_for_the_join_and_the_closure<P: Pipeline>(label: &str
 
 /// Strict and deny-list refusals of evidence: B written by hand, with A's
 /// receipt still committed, is unrecorded. Both policies refuse it, and the
-/// A closure, its receipt and its forest stay. The permissive policy then
-/// publishes B unjoined, recording the exception.
+/// A closure, its receipt and its environment stay. The permissive policy
+/// then publishes B unjoined, recording the exception.
 pub(crate) fn a_denied_unrecorded_generation_keeps_the_environment<P: Pipeline>(label: &str) {
     let Some((_held, bench)) = active_bench::<P>(label) else {
         return;
@@ -711,20 +857,9 @@ pub(crate) fn a_denied_unrecorded_generation_keeps_the_environment<P: Pipeline>(
 }
 
 /// One `#[test]` per scenario for the pipeline `$pipeline`, each with its
-/// own bench labelled from `$prefix`.
+/// own bench labelled from `$prefix`. `confined` adds the scenarios that
+/// act inside a confined planner run.
 macro_rules! pipeline_scenarios {
-    ($pipeline:ty, $prefix:literal) => {
-        $crate::tailors::pipeline::pipeline_scenarios!(@each $pipeline, $prefix,
-            publishes_a_closure_joined_to_its_plan,
-            a_generation_replaced_before_staging_is_refused,
-            an_aba_replacement_inside_the_stage_is_refused,
-            a_generation_published_after_planning_is_refused,
-            an_aba_replacement_after_planning_publishes_coherently,
-            a_stale_sync_never_overwrites_a_concurrent_closure,
-            a_door_waits_for_the_join_and_the_closure,
-            a_denied_unrecorded_generation_keeps_the_environment
-        );
-    };
     (@each $pipeline:ty, $prefix:literal, $($scenario:ident),+) => {
         $(
             #[test]
@@ -736,6 +871,24 @@ macro_rules! pipeline_scenarios {
                 ));
             }
         )+
+    };
+    ($pipeline:ty, $prefix:literal, confined) => {
+        $crate::tailors::pipeline::pipeline_scenarios!($pipeline, $prefix);
+        $crate::tailors::pipeline::pipeline_scenarios!(@each $pipeline, $prefix,
+            an_aba_replacement_inside_the_stage_is_refused,
+            a_generation_published_after_the_last_confined_run_is_refused
+        );
+    };
+    ($pipeline:ty, $prefix:literal) => {
+        $crate::tailors::pipeline::pipeline_scenarios!(@each $pipeline, $prefix,
+            publishes_a_closure_joined_to_its_plan,
+            a_generation_replaced_after_capture_is_refused,
+            a_generation_published_after_planning_is_refused,
+            an_aba_replacement_after_planning_publishes_coherently,
+            a_stale_sync_never_overwrites_a_concurrent_closure,
+            a_door_waits_for_the_join_and_the_closure,
+            a_denied_unrecorded_generation_keeps_the_environment
+        );
     };
 }
 

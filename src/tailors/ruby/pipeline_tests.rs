@@ -46,7 +46,9 @@ fn standin(store: &Store, name: &str, fill: impl FnOnce(&Path)) -> String {
 impl Pipeline for RubyPipeline {
     const ECOSYSTEM: &'static str = "ruby";
     const LOCK: &'static str = "Gemfile.lock";
-    const LOCK_SHA_FIELD: &'static str = "gemfile_lock_sha256";
+    const LOCK_SHA_FIELD: Option<&'static str> = Some("gemfile_lock_sha256");
+    const CONFINED: bool = true;
+    const LINK: Option<(&'static str, &'static str)> = None;
     type Plan = RubyPlan;
 
     fn tailor() -> &'static dyn crate::tailors::Tailor {
@@ -75,7 +77,7 @@ impl Pipeline for RubyPipeline {
         ]
     }
 
-    fn objects(store: &Store) -> (String, String) {
+    fn objects(store: &Store) -> (String, [String; 2]) {
         let ruby = standin(store, "ruby", |dir| {
             use std::os::unix::fs::PermissionsExt;
             fs::create_dir_all(dir.join("bin")).unwrap();
@@ -85,7 +87,8 @@ impl Pipeline for RubyPipeline {
         let gems = standin(store, "gems", |dir| {
             fs::create_dir_all(dir.join("gems")).unwrap();
         });
-        (ruby, gems)
+        // Both generations realize to one environment.
+        (ruby, [gems.clone(), gems])
     }
 
     fn plan(
@@ -123,7 +126,7 @@ impl Pipeline for RubyPipeline {
         )
     }
 
-    fn planned_lock(body: &Value) -> String {
+    fn planned(body: &Value) -> String {
         body["plan"]["bundler_version"]
             .as_str()
             .unwrap_or_default()
@@ -135,4 +138,4 @@ impl Pipeline for RubyPipeline {
     }
 }
 
-crate::tailors::pipeline::pipeline_scenarios!(RubyPipeline, "ruby");
+crate::tailors::pipeline::pipeline_scenarios!(RubyPipeline, "ruby", confined);

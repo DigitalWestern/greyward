@@ -972,11 +972,12 @@ fn layer_violations(
         let forbidden = match module.first().map(String::as_str) {
             Some("kernel") => matches!(target, "tailors" | "comforter" | "commands" | "cli"),
             Some("comforter") => matches!(target, "tailors" | "commands" | "cli"),
-            // A tailor's code names no other tailor: tailors::<other>::…
-            // The layer's own root (the registry) is no tailor.
+            // Only the registry (the `tailors` module itself) names a
+            // tailor: a tailor's code names no other tailor, and shared
+            // code beside the tailors (`tailors::edit`) names none.
             Some("tailors") => {
                 matches!(target, "commands" | "cli")
-                    || (tailor(module) && tailor(path) && module[1] != path[1])
+                    || (tailor(path) && module.len() >= 2 && module[1] != path[1])
             }
             // A command reaches a tailor through the trait and the
             // registry, never by its module: tailors::<name>::… (rule 3).
@@ -2229,6 +2230,27 @@ fn the_layering_scan_sees_every_spelling() {
             "kernel/fetch.rs",
             "use crate::kernel::store;\nuse crate::kernel as k;\n\
              fn f() { store::Store::open(); k::ui::say(); std::store::x(); }",
+            &[],
+        ),
+        // Only the registry names a tailor: shared code beside the tailors
+        // names none, through any spelling.
+        (
+            "tailors/mod.rs",
+            "pub mod python;\npub mod node;\nfn registry() { python::tailor::Python; node::tailor::Node; }",
+            &[],
+        ),
+        (
+            "tailors/edit.rs",
+            "use super::python;\nfn f() { python::venv::make(); crate::tailors::node::Lock::new(); }",
+            &[
+                "tailors/edit.rs:1: crate::tailors::python",
+                "tailors/edit.rs:2: crate::tailors::node::Lock::new",
+                "tailors/edit.rs:2: crate::tailors::python::venv::make",
+            ],
+        ),
+        (
+            "tailors/edit.rs",
+            "use crate::tailors::{Tailor, registry};\nfn f() { registry(); }",
             &[],
         ),
         // A binding of a binding, to the end; a cycle ends.
